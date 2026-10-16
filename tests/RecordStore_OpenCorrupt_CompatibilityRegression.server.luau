@@ -408,5 +408,45 @@ do
 	assert(record:Close() == "closed", "event-payload isolation record did not close")
 end
 
-print("[PASS] Corruption compatibility, persistence, direct-mutation capture, validator isolation, change-event diff, and Update/Reconcile sync fast-path and event payload isolation invariants.")
+RecordStore.Mock.reset()
+do
+	local record = RecordStore.Mock.new("RecordStore_CopyTraversalRedoRegression", "global", "validation-order", {
+		schema_version = 1,
+	})
+	local open_result, open_message = record:Open({ Stable = 1 })
+	assert(open_result == "created" or open_result == "loaded", open_message)
+
+	local cycle = {}
+	cycle.Self = cycle
+	local mixed = { [1] = cycle, Key = "text" }
+	local mixed_result, mixed_message = record:Update(function(_data)
+		return { Invalid = mixed }
+	end)
+	assert(mixed_result == "validation", "mixed-key Update data was not rejected")
+	assert(string.find(mixed_message or "", "mixed table keys", 1, true) ~= nil, "mixed-key validation precedence changed when a child was cyclic")
+	assert(record:Get().Stable == 1, "rejected mixed-key Update changed live data")
+
+	local unsupported = {}
+	local unsupported_key = {}
+	unsupported[unsupported_key] = cycle
+	unsupported.Valid = "text"
+	local unsupported_result, unsupported_message = record:Update(function(_data)
+		return { Invalid = unsupported }
+	end)
+	assert(unsupported_result == "validation", "unsupported table key was not rejected")
+	assert(string.find(unsupported_message or "", "unsupported table key", 1, true) ~= nil, "unsupported-key validation precedence changed when a child was cyclic")
+	assert(record:Get().Stable == 1, "rejected unsupported-key Update changed live data")
+
+	local sparse = { [1] = "first", [3] = "third" }
+	local sparse_result = record:Update(function(_data)
+		return { Sparse = sparse }
+	end)
+	assert(sparse_result == "validation", "sparse-array Update data was not rejected")
+	assert(record:Get().Stable == 1, "rejected sparse-array Update changed live data")
+	assert(record:Close() == "closed", "copy traversal redo record did not close")
+end
+
+RecordStore.Mock.reset()
+
+print("[PASS] Corruption compatibility, persistence, direct-mutation capture, validator isolation, change-event diff, and Update/Reconcile sync fast-path event payload isolation, and copy traversal validation-order invariants.")
 
