@@ -1,15 +1,19 @@
 $schema: https://raw.githubusercontent.com/CodSpeedHQ/codspeed/refs/heads/main/schemas/codspeed.schema.json
 
-options:
-  warmup-time: "1s"
-
+# RecordStore benchmarks, executed with Lune (standalone Luau runtime) through
+# bench/RobloxShim.luau, which provides the Roblox APIs used by RecordStore.Mock.
 benchmarks:
-  - name: "RecordStore pre-optimization Update Batch"
-    exec: lune run benchmarks/RecordStore.baseline.bench.luau
-    options:
-      max-time: "30s"
+  - name: "session lifecycle (create/update/save/close/reopen)"
+    exec: lune run bench/session_lifecycle.bench.luau
 
-  - name: "RecordStore optimized Update Batch"
-    exec: lune run benchmarks/RecordStore.optimized.bench.luau
-    options:
-      max-time: "30s"
+  - name: "large profile update and save"
+    exec: lune run bench/large_profile.bench.luau
+
+  - name: "legacy envelope migration and history recovery"
+    exec: lune run bench/legacy_migration.bench.luau
+
+  - name: "read and version history access"
+    exec: lune run bench/read_history.bench.luau
+
+  - name: "compatibility regression suite"
+    exec: lune run bench/run_regression_tests.luau
