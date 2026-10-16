@@ -39,7 +39,7 @@ type Leaderstat = {
 }
 
 type EternityNumAPI = {
-	short: (value: EternityNumValueFactory.Value) -> string,
+	short: (value: EternityNumValueFactory.Value, decimals: number?) -> string,
 }
 
 export type Dependencies = {
@@ -804,9 +804,13 @@ local function new(dependencies: Dependencies?): Controller
 		return eternity_num_api
 	end
 
-	local function format_eternity_num(value: EternityNumValueFactory.Value): string
+	local function format_eternity_num(
+		value: EternityNumValueFactory.Value,
+		options: NumberFormatterFactory.Options?
+	): string
 		local api = resolve_eternity_num_api()
-		local format_ok, formatted = pcall(api.short, value)
+		local decimals = if options == nil then nil else options.decimals
+		local format_ok, formatted = pcall(api.short, value, decimals)
 		if not format_ok then
 			error("EternityNum.short failed: " .. tostring(formatted), 2)
 		end
@@ -924,16 +928,14 @@ local function new(dependencies: Dependencies?): Controller
 					)
 					local display_value = new_string_value()
 					display_value.Name = definition.name
-					display_value.Value = format_eternity_num(eternity_value)
+					display_value.Value = format_eternity_num(eternity_value, format_options)
 					display_value.Changed:Connect(function()
 						local decode_ok, decoded = pcall(
 							eternity_num_value_factory.decode,
 							backing_value.Value
 						)
 					if decode_ok then
-						local expected = format_eternity_num(
-							decoded :: EternityNumValueFactory.Value
-						)
+						local expected = format_eternity_num(decoded :: EternityNumValueFactory.Value, format_options)
 						if display_value.Value ~= expected then
 							display_value.Value = expected
 						end
@@ -945,9 +947,7 @@ local function new(dependencies: Dependencies?): Controller
 							serialized_value
 						)
 					if decode_ok then
-						display_value.Value = format_eternity_num(
-							decoded :: EternityNumValueFactory.Value
-						)
+						display_value.Value = format_eternity_num(decoded :: EternityNumValueFactory.Value, format_options)
 					end
 					end)
 

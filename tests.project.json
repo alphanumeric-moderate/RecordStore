@@ -33,6 +33,9 @@
       },
       "EternityNumValueRegression": {
         "$path": "tests/EternityNumValueRegression.server.luau"
+      },
+      "RecordStoreEternityNumRegression": {
+        "$path": "tests/RecordStore_EternityNumRegression.server.luau"
       }
     }
   }

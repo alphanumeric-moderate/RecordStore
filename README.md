@@ -93,7 +93,7 @@ cash = define_data_field("EternityNumValue", { 1, 0, 10 }),
 define_leaderstat("cash", "Cash", { decimals = 2 }),
 ```
 
-Place the classic EternityNum ModuleScript in `ReplicatedStorage` as `EternityNum`. PlayerDataCore calls its `short(value)` function for leaderboard display. Alternatively, inject a compatible `EternityNum` module in `PlayerDataCore.new({ EternityNum = ... })`.
+Place the classic EternityNum ModuleScript in `ReplicatedStorage` as `EternityNum`. PlayerDataCore calls its `short(value, decimals?)` function for leaderboard display and passes the configured `decimals` option as the second argument. Alternatively, inject a compatible `EternityNum` module in `PlayerDataCore.new({ EternityNum = ... })`.
 
 The encoded StringValue backing instance is at `player.PlayerDataValues.cash`. On the server, use the helper module rather than writing the serialized string directly:
 

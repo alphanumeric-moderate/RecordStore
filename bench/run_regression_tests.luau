@@ -80,4 +80,5 @@ assert(not invalid_options_ok, "invalid decimal precision was accepted")
 
 Shim.run_script("tests/RecordStore_OpenCorrupt_CompatibilityRegression.server.luau")
 Shim.run_script("tests/RecordStore_NonFiniteNumbersRegression.server.luau")
+Shim.run_script("tests/RecordStore_EternityNumRegression.server.luau")
 Shim.close()
