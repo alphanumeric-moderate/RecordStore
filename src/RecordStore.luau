@@ -1,9 +1,4 @@
 --!strict
-
--- RecordStore compatibility fix for the observed legacy envelope.
--- Accepts the exact `format = "RecordStore"` marker for the generation/payload layout,
--- while retaining fail-closed handling for records with a legacy ownership lease.
--- Static checks and Studio regression playtest have not been performed in this environment.
 local DataStoreService = game:GetService("DataStoreService")
 local HttpService = game:GetService("HttpService")
 local MessagingService = game:GetService("MessagingService")
