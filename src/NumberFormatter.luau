@@ -145,7 +145,17 @@ function NumberFormatter.formatInteger(value: string, options: Options?): string
 	return format_scaled(scaled, SUFFIXES[index], sign, decimals, trim)
 end
 function NumberFormatter.formatScientific(sign_value: number, mantissa: number, exponent: string, options: Options?): string
-	if (sign_value ~= -1 and sign_value ~= 1) or not math.isfinite(mantissa) or mantissa <= 0 or type(exponent) ~= "string" or not string.match(exponent, "^[+-]?%d+$") then error("invalid scientific value", 2) end
+	if type(sign_value) ~= "number"
+		or (sign_value ~= -1 and sign_value ~= 1)
+		or type(mantissa) ~= "number"
+		or not math.isfinite(mantissa)
+		or mantissa < 1
+		or mantissa >= 10
+		or type(exponent) ~= "string"
+		or not string.match(exponent, "^[+-]?%d+$")
+	then
+		error("invalid scientific value", 2)
+	end
 	local decimals, trim = resolve_options(options)
 	local sign = sign_value < 0 and "-" or ""
 	local exp = tonumber(exponent)

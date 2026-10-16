@@ -759,6 +759,9 @@ local function normalize_user_ids(user_ids: { number }): ({ number }?, string?)
 end
 
 local function validate_metadata(metadata: Metadata, allow_reserved: boolean?): (boolean, string?)
+	if type(metadata) ~= "table" then
+		return false, "metadata must be a table"
+	end
 	for key, value in pairs(metadata) do
 		if type(key) ~= "string" or key == "" or #key > MAX_METADATA_KEY_LENGTH then
 			return false, "metadata keys must be non-empty strings of at most 50 characters"
@@ -1903,12 +1906,7 @@ local function get_string_field(value: unknown, key: string): unknown
 	if type(value) ~= "table" then
 		return nil
 	end
-	for child_key, child_value in value do
-		if type(child_key) == "string" and child_key == key then
-			return child_value
-		end
-	end
-	return nil
+	return rawget(value, key)
 end
 local function parse_envelope(raw: unknown): (Envelope?, string?, boolean)
 	if raw == nil then
@@ -6746,6 +6744,22 @@ local function normalize_options(options: Options): (Options?, string?)
 	local queue_max_messages = copied.queue_max_messages or DEFAULT_QUEUE_MAX_MESSAGES
 	local queue_max_bytes = copied.queue_max_bytes or DEFAULT_QUEUE_MAX_BYTES
 	local queue_max_attempts = copied.queue_max_attempts or DEFAULT_QUEUE_MAX_ATTEMPTS
+	if type(copied.messaging_enabled) ~= "boolean" then
+		return nil, "messaging_enabled must be a boolean"
+	end
+	if type(copied.takeover_enabled) ~= "boolean" then
+		return nil, "takeover_enabled must be a boolean"
+	end
+	if type(copied.durable_queue_enabled) ~= "boolean" then
+		return nil, "durable_queue_enabled must be a boolean"
+	end
+	if type(copied.message_topic_prefix) ~= "string" then
+		return nil, "message_topic_prefix must be a string of at most 72 characters"
+	end
+	local topic_prefix_length = utf8.len(copied.message_topic_prefix)
+	if topic_prefix_length == nil or topic_prefix_length > 72 then
+		return nil, "message_topic_prefix must be valid UTF-8 and at most 72 characters"
+	end
 	if type(copied.queue_store_name) ~= "string" or copied.queue_store_name == "" or #copied.queue_store_name > 50 then
 		return nil, "queue_store_name must be 1 to 50 characters"
 	end

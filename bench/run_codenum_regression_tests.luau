@@ -69,6 +69,13 @@ end
 
 assert(CodeNum.tryToNumber(CodeNum.new(math.huge)) == math.huge, "positive infinity conversion failed")
 assert(CodeNum.tryToNumber(CodeNum.new(-math.huge)) == -math.huge, "negative infinity conversion failed")
+local minimum_subnormal = tonumber("5e-324")
+local positive_subnormal = CodeNum.tryToNumber(CodeNum.scientific(5, "-324"))
+local negative_subnormal = CodeNum.tryToNumber(CodeNum.scientific(5, "-324", -1))
+assert(minimum_subnormal ~= nil and minimum_subnormal > 0, "runtime cannot represent a binary64 subnormal for this test")
+assert(positive_subnormal == minimum_subnormal, "5e-324 must convert to the minimum positive subnormal")
+assert(negative_subnormal == -minimum_subnormal, "-5e-324 must convert to the minimum negative subnormal")
+assert(CodeNum.tryToNumber(CodeNum.scientific(1, "-324")) == 0, "1e-324 should round to zero")
 assert(CodeNum.equals({}, 1) == false, "equals should reject invalid inputs without throwing")
 assert(not pcall(function() CodeNum.decode('{"schema":"CodeNum","version":999,"value":{}}') end),
     "future codec version was accepted")
@@ -78,5 +85,11 @@ local huge_digits = string.rep("9", 3000)
 local bounded_product = CodeNum.mul(CodeNum.integer(huge_digits), CodeNum.integer(huge_digits))
 assert(bounded_product.kind == "expression", "oversized quadratic multiplication was not preserved symbolically")
 assert(string.find(CodeNum.toString(bounded_product), "×", 1, true), "symbolic multiplication display failed")
+
+local nested_expression = CodeNum.boogolplex()
+for _ = 1, 160 do
+    nested_expression = CodeNum.add(nested_expression, CodeNum.ONE)
+end
+assert(not CodeNum.isInteger(nested_expression), "over-depth symbolic integer predicate should return unknown/false")
 
 print("[CodeNum] Luau regression tests passed")

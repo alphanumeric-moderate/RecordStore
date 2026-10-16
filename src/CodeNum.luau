@@ -343,7 +343,11 @@ end
 
 local knownPositive
 
-local function knownInteger(value)
+local function knownInteger(value, depth)
+    depth = depth or 0
+    if depth > MAX_CODEC_DEPTH then
+        return false
+    end
     if value.kind == KIND_FINITE then
         return value.value % 1 == 0
     elseif value.kind == KIND_INTEGER then
@@ -354,26 +358,31 @@ local function knownInteger(value)
         -- clears its binary denominator and gives an integer.
         return compareSignedText(value.exponent, "0") >= 0
     elseif value.kind == KIND_HYPER then
-        return knownInteger(value.base)
-            and knownInteger(value.arrows)
-            and knownInteger(value.height)
+        return knownInteger(value.base, depth + 1)
+            and knownInteger(value.arrows, depth + 1)
+            and knownInteger(value.height, depth + 1)
             and value.base.kind ~= KIND_SPECIAL
             and value.arrows.kind ~= KIND_SPECIAL
             and value.height.kind ~= KIND_SPECIAL
     elseif value.kind == KIND_EXPRESSION then
         if value.op == "add" or value.op == "sub" or value.op == "mul" then
-            return knownInteger(value.left) and knownInteger(value.right)
+            return knownInteger(value.left, depth + 1)
+                and knownInteger(value.right, depth + 1)
         elseif value.op == "pow" then
-            return knownInteger(value.left)
-                and knownInteger(value.right)
-                and knownPositive(value.left)
-                and knownPositive(value.right)
+            return knownInteger(value.left, depth + 1)
+                and knownInteger(value.right, depth + 1)
+                and knownPositive(value.left, depth + 1)
+                and knownPositive(value.right, depth + 1)
         end
     end
     return false
 end
 
-local function specialSign(value)
+local function specialSign(value, depth)
+    depth = depth or 0
+    if depth > MAX_CODEC_DEPTH then
+        return nil
+    end
     if value.kind == KIND_SPECIAL then
         if value.name == "+infinity" then return 1 end
         if value.name == "-infinity" then return -1 end
@@ -385,13 +394,17 @@ local function specialSign(value)
     elseif value.kind == KIND_HYPER then
         return 1
     elseif value.kind == KIND_EXPRESSION and value.op == "pow" then
-        if knownPositive(value.left) then return 1 end
+        if knownPositive(value.left, depth + 1) then return 1 end
     end
     return nil
 end
 
-knownPositive = function(value)
-    return specialSign(value) == 1
+knownPositive = function(value, depth)
+    depth = depth or 0
+    if depth > MAX_CODEC_DEPTH then
+        return false
+    end
+    return specialSign(value, depth + 1) == 1
 end
 
 local function knownAtLeastTwo(value)
@@ -474,7 +487,14 @@ local function nativeValue(value)
     elseif value.kind == KIND_INTEGER then
         return nativeInteger(value)
     elseif value.kind == KIND_SCIENTIFIC then
-        if compareSignedText(value.exponent, "-308") >= 0
+        -- 10^-324 underflows before multiplication on binary64 even though
+        -- some mantissas (for example 5e-324) round to a non-zero subnormal.
+        if value.exponent == "-324" then
+            local result = tonumber(string.format("%.17ge%s", value.mantissa, value.exponent))
+            if result ~= nil and isFiniteNumber(result) then
+                return value.sign * result
+            end
+        elseif compareSignedText(value.exponent, "-308") >= 0
             and compareSignedText(value.exponent, "308") <= 0
         then
             local result = value.sign * value.mantissa * math.pow(10, tonumber(value.exponent))
@@ -590,7 +610,11 @@ end
 
 local hyperAboveNativeRange
 
-hyperAboveNativeRange = function(value)
+hyperAboveNativeRange = function(value, depth)
+    depth = depth or 0
+    if depth > MAX_CODEC_DEPTH then
+        return false
+    end
     local base = nativeValue(value.base)
     local baseVsTwo = compareValueToSmallInteger(value.base, 2)
     local baseVsThree = compareValueToSmallInteger(value.base, 3)
@@ -613,7 +637,7 @@ hyperAboveNativeRange = function(value)
             if value.base.kind == KIND_SCIENTIFIC and compareSignedText(value.base.exponent, "154") > 0 then
                 return true
             end
-            if value.base.kind == KIND_HYPER and hyperAboveNativeRange(value.base) then return true end
+            if value.base.kind == KIND_HYPER and hyperAboveNativeRange(value.base, depth + 1) then return true end
         end
         if sameTree(value.base, value.height, 0) and baseVs144 and baseVs144 >= 0 then return true end
         if not base or base <= 1 then return false end
