@@ -1117,10 +1117,15 @@ local function restore_non_finite_numbers(
 	if count ~= maximum_index then
 		return nil, "non-finite number metadata must be a dense array"
 	end
+	if count == 0 then
+		return value, nil
+	end
 
-	local result: JsonValue? = copy_value(value)
+	-- parse_envelope has already copied stored data into a private table tree.
+	-- Restore in that tree rather than allocating another full deep copy.
+	local result: JsonValue? = value
 	if result == nil then
-		return nil, "stored data could not be copied before restoring non-finite numbers"
+		return nil, "stored data is missing before restoring non-finite numbers"
 	end
 
 	for index = 1, count do
