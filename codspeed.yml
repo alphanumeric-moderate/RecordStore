@@ -1,0 +1,9 @@
+$schema: https://raw.githubusercontent.com/CodSpeedHQ/codspeed/refs/heads/main/schemas/codspeed.schema.json
+
+options:
+  warmup-time: "1s"
+  max-time: "10s"
+
+benchmarks:
+  - name: "RecordStore Mock Update Batch"
+    exec: lune run benchmarks/RecordStore.bench.luau
