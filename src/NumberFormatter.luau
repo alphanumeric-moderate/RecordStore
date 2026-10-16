@@ -36,7 +36,7 @@ local SUFFIX_GROUPS = {
 	mult = {
 		"Mi", "Mc", "Na", "Pi", "Fm", "At", "Zp", "Yc",
 		"Xo", "Ve", "Me", "Due", "Tre", "Te", "Pt", "He",
-		"Hp", "Oct", "En", "Ic",
+		"Hp", "Octi", "En", "Ic",
 
 		"Mei", "Dui", "Tri", "Teti", "Pti", "Hei",
 		"Oci", "Eni", "Tra", "TeC", "MTc", "DTc", "TrTc",
