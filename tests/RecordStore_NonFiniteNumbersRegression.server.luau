@@ -51,6 +51,11 @@ local update_result, update_message = record:Update(function(current)
 end)
 assert_opened(update_result, update_message, "success")
 
+-- Direct public Data mutation must preserve non-finite values too.
+record.Data.direct_positive_infinity = math.huge
+record.Data.direct_negative_infinity = -math.huge
+record.Data.direct_nan = 0 / 0
+
 local close_result, close_message = record:Close()
 assert_opened(close_result, close_message, "closed")
 
@@ -61,6 +66,9 @@ assert(type(raw.data) == "table", "serialized data is missing")
 assert(type(raw.non_finite_numbers) == "table" and #raw.non_finite_numbers >= 6, "non-finite sidecar markers were not written")
 assert(raw.data.positive == 0 and raw.data.negative == 0 and raw.data.not_a_number == 0, "serialized placeholders must be JSON-safe")
 assert(raw.data.zero == 0 and raw.data.nested.array[4] == 0, "ordinary zeros must remain ordinary zeros")
+assert(raw.data.direct_positive_infinity == 0, "direct positive infinity placeholder is not JSON-safe")
+assert(raw.data.direct_negative_infinity == 0, "direct negative infinity placeholder is not JSON-safe")
+assert(raw.data.direct_nan == 0, "direct NaN placeholder is not JSON-safe")
 assert(raw.data.nested.ordinary.non_finite_numbers == initial.nested.ordinary.non_finite_numbers, "user data was modified by sidecar storage")
 
 local reload_result, reload_message = record:Open(initial)
@@ -72,6 +80,9 @@ assert(math.isnan(reloaded.not_a_number), "NaN failed the persistence round trip
 assert(reloaded.updated_to_positive_infinity == math.huge, "updated positive infinity failed the persistence round trip")
 assert(reloaded.updated_to_negative_infinity == -math.huge, "updated negative infinity failed the persistence round trip")
 assert(math.isnan(reloaded.updated_to_nan), "updated NaN failed the persistence round trip")
+assert(reloaded.direct_positive_infinity == math.huge, "direct positive infinity failed the persistence round trip")
+assert(reloaded.direct_negative_infinity == -math.huge, "direct negative infinity failed the persistence round trip")
+assert(math.isnan(reloaded.direct_nan), "direct NaN failed the persistence round trip")
 assert(math.isnan(reloaded.nested.array[3]), "nested NaN failed the persistence round trip")
 local second_close_result, second_close_message = record:Close()
 assert_opened(second_close_result, second_close_message, "closed")
