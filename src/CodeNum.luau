@@ -32,6 +32,8 @@ local MAX_DISPLAY_DEPTH = 48
 local MAX_DISPLAY_NODES = 2048
 local LIMB_BASE = 10000000
 local LIMB_WIDTH = 7
+-- Bound quadratic limb multiplication; larger products stay symbolic.
+local MAX_EXACT_MULTIPLICATION_DIGITS = 4096
 local LOG10_MAX_DOUBLE = 308.25471555991675
 
 local ZERO
@@ -853,6 +855,9 @@ local function multiply(left, right)
     if leftInteger and rightInteger then
         local leftSign, leftDigits = normalizeSignedInteger(integerText(leftInteger))
         local rightSign, rightDigits = normalizeSignedInteger(integerText(rightInteger))
+        if #leftDigits + #rightDigits > MAX_EXACT_MULTIPLICATION_DIGITS then
+            return expression("mul", left, right)
+        end
         return integerNode(leftSign * rightSign, multiplyUnsigned(leftDigits, rightDigits))
     end
 
