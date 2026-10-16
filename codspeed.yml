@@ -20,3 +20,6 @@ benchmarks:
 
   - name: "CodeNum arithmetic and codec round-trips"
     exec: lune run bench/codenum.bench.luau
+
+  - name: "CodeNumValue format and normalization"
+    exec: lune run bench/codenumvalue.bench.luau
