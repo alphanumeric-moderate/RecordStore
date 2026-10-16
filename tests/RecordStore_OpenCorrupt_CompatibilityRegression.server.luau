@@ -190,4 +190,51 @@ do
 end
 
 RecordStore.Mock.reset()
-print("[PASS] Legacy envelope migration, generation-zero normalization, generation-zero history recovery, string-marker previous-envelope compatibility, and fail-closed legacy lease handling.")
+
+do
+	local store_name = "RecordStore_UpdateSaveReopenRegression"
+	local scope = "global"
+	local key = "updated-kills-reopen-test"
+	local record = RecordStore.Mock.new(store_name, scope, key, { schema_version = 1 })
+	local open_result, open_message = record:Open({ Kills = 100 })
+	assert(open_result == "created" or open_result == "loaded", ("initial open failed: %s: %s"):format(open_result, open_message or "no message"))
+	local update_result, update_message = record:Update(function(data)
+		assert(type(data) == "table", "update data is not a table")
+		return { Kills = 250 }
+	end)
+	assert(update_result == "success", ("Kills update failed: %s: %s"):format(update_result, update_message or "no message"))
+	local save_result, save_message = record:Save()
+	assert(save_result == "saved", ("save failed: %s: %s"):format(save_result, save_message or "no message"))
+	local close_result, close_message = record:Close()
+	assert(close_result == "closed", ("close failed: %s: %s"):format(close_result, close_message or "no message"))
+	local reopen_result, reopen_message = record:Open({ Kills = 0 })
+	assert(reopen_result == "loaded", ("reopen failed: %s: %s"):format(reopen_result, reopen_message or "no message"))
+	local data = record:Get()
+	assert(type(data) == "table" and data.Kills == 250, "updated Kills value did not survive save, close, and reopen")
+	local final_close_result, final_close_message = record:Close()
+	assert(final_close_result == "closed", ("final close failed: %s: %s"):format(final_close_result, final_close_message or "no message"))
+end
+
+RecordStore.Mock.reset()
+do
+	local store_name = "RecordStore_CloseExternalMutationRegression"
+	local scope = "global"
+	local key = "direct-data-close-test"
+	local record = RecordStore.Mock.new(store_name, scope, key, { schema_version = 1 })
+	local open_result, open_message = record:Open({ Kills = 100 })
+	assert(open_result == "created" or open_result == "loaded", ("initial direct-mutation open failed: %s: %s"):format(open_result, open_message or "no message"))
+	assert(type(record.Data) == "table", "public Data table is unavailable")
+	record.Data.Kills = 300
+	local close_result, close_message = record:Close()
+	assert(close_result == "closed", ("close did not capture direct Data mutation: %s: %s"):format(close_result, close_message or "no message"))
+	local reopen_result, reopen_message = record:Open({ Kills = 0 })
+	assert(reopen_result == "loaded", ("direct-mutation reopen failed: %s: %s"):format(reopen_result, reopen_message or "no message"))
+	local data = record:Get()
+	assert(type(data) == "table" and data.Kills == 300, "direct Data mutation made before close did not survive reopen")
+	local final_close_result, final_close_message = record:Close()
+	assert(final_close_result == "closed", ("final direct-mutation close failed: %s: %s"):format(final_close_result, final_close_message or "no message"))
+end
+
+RecordStore.Mock.reset()
+print("[PASS] Corruption compatibility and recovery, updated Kills save/reopen, and direct Data mutation capture at close.")
+
