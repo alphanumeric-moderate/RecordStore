@@ -934,6 +934,7 @@ copy_value = function(value: unknown): JsonValue?
 		if type(current) ~= "table" then
 			error("value contains an unsupported type")
 		end
+
 		local table_value = current :: table
 		if active_tables[table_value] then
 			error("value contains a cyclic table")
@@ -941,62 +942,65 @@ copy_value = function(value: unknown): JsonValue?
 		active_tables[table_value] = true
 		local has_string_key = false
 		local has_number_key = false
-		for key in current do
+		local result_dictionary: { [string]: JsonValue }? = nil
+		local result_array: { JsonValue }? = nil
+
+		for key, child in current do
 			local key_type = type(key)
 			if key_type == "string" then
-				has_string_key = true
-			elseif key_type == "number" then
-				has_number_key = true
-			else
-				active_tables[table_value] = nil
-				error("value contains an unsupported table key")
-			end
-		end
-		if has_string_key and has_number_key then
-			active_tables[table_value] = nil
-			error("value contains mixed table keys")
-		end
-		if has_string_key then
-			local result: { [string]: JsonValue } = {}
-			for key, child in current do
-				if type(key) ~= "string" then
+				if has_number_key then
 					active_tables[table_value] = nil
-					error("value contains an invalid dictionary key")
+					error("value contains mixed table keys")
 				end
-				local dictionary_key = key
+				has_string_key = true
+				local dictionary_key = key :: string
 				local copied = clone(child, depth + 1)
 				if copied == nil then
 					active_tables[table_value] = nil
 					error("value contains an invalid nil child")
 				end
-				result[dictionary_key] = copied
+				if result_dictionary == nil then
+					result_dictionary = {}
+				end
+				result_dictionary[dictionary_key] = copied
+			elseif key_type == "number" then
+				if has_string_key then
+					active_tables[table_value] = nil
+					error("value contains mixed table keys")
+				end
+				has_number_key = true
+				local numeric_key = key :: number
+				if not math.isfinite(numeric_key)
+					or math.floor(numeric_key) ~= numeric_key
+					or numeric_key < 1
+				then
+					active_tables[table_value] = nil
+					error("value contains an invalid array index")
+				end
+				local copied = clone(child, depth + 1)
+				if copied == nil then
+					active_tables[table_value] = nil
+					error("value contains an invalid nil child")
+				end
+				if result_array == nil then
+					result_array = {}
+				end
+				result_array[numeric_key] = copied
+			else
+				active_tables[table_value] = nil
+				error("value contains an unsupported table key")
 			end
-			active_tables[table_value] = nil
-			return result
 		end
-		local result: { JsonValue } = {}
-		for key, child in current do
-			if type(key) ~= "number" then
-				active_tables[table_value] = nil
-				error("value contains an invalid array key")
-			end
-			local numeric_key = key
-			if not math.isfinite(numeric_key)
-				or math.floor(numeric_key) ~= numeric_key
-				or numeric_key < 1
-			then
-				active_tables[table_value] = nil
-				error("value contains an invalid array index")
-			end
-			local copied = clone(child, depth + 1)
-			if copied == nil then
-				active_tables[table_value] = nil
-				error("value contains an invalid nil child")
-			end
-			result[numeric_key] = copied
-		end
+
 		active_tables[table_value] = nil
-		return result
+		if has_string_key then
+			return result_dictionary
+		end
+		if result_array ~= nil then
+			return result_array
+		end
+		local empty_result: { JsonValue } = {}
+		return empty_result
 	end
 	return clone(value, 1)
 end
