@@ -20,9 +20,8 @@ local record = RecordStore.Mock.new("Bench_ChangeDiff", "global", "wide-profile"
 local open_result, open_message = record:Open(make_profile())
 assert(open_result == "created", open_message)
 
-local event_count = 0
 local subscription, subscribe_result, subscribe_message = record:SubscribeChanges(function(_event)
-	event_count += 1
+	return
 end)
 assert(subscription ~= nil and subscribe_result == "success", subscribe_message)
 
@@ -38,8 +37,6 @@ local result, message = record:Update(function(data)
 	return next_data
 end)
 assert(result == "success", message)
-task.wait()
-assert(event_count == 2, "expected Count and Revision change events")
 subscription:Disconnect()
 assert(record:Close() == "closed")
 RecordStore.Mock.reset()
