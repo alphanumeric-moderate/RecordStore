@@ -1,0 +1,43 @@
+name: CodSpeed Change Diff
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  LUNE_VERSION: "0.11.0"
+
+jobs:
+  change-diff:
+    if: github.event.pull_request.head.ref == 'perf/change-diff-linear-lookup-2026-10-16'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Lune
+        run: |
+          curl -fsSL -o lune.zip "https://github.com/lune-org/lune/releases/download/v${LUNE_VERSION}/lune-${LUNE_VERSION}-linux-x86_64.zip"
+          mkdir -p "$HOME/.local/bin"
+          unzip -o lune.zip -d "$HOME/.local/bin"
+          chmod +x "$HOME/.local/bin/lune"
+          rm lune.zip
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Prepare base source for paired benchmark
+        run: |
+          base_ref="$(git merge-base HEAD "origin/$GITHUB_BASE_REF")"
+          git show "$base_ref:src/RecordStore.luau" > src/RecordStore.preoptimization.luau
+
+      - name: Check the regression suite passes
+        run: lune run bench/run_regression_tests.luau
+
+      - name: Run paired change diff benchmarks
+        uses: CodSpeedHQ/action@v5
+        with:
+          mode: simulation
+          config: codspeed-change-diff.yml
