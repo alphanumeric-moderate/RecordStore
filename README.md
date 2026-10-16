@@ -4,24 +4,6 @@
 
 RecordStore is a server-side Roblox Luau persistence module.
 
-## Repository layout
-
-```text
-RecordStore/
-├── src/
-│   └── RecordStore.luau
-├── tests/
-│   └── RecordStore_OpenCorrupt_CompatibilityRegression.server.luau
-├── bench/
-│   ├── RobloxShim.luau
-│   └── *.bench.luau
-├── codspeed.yml
-├── docs/
-│   └── compatibility.md
-├── default.project.json
-├── tests.project.json
-└── README.md
-```
 
 ## Install in Roblox Studio
 
