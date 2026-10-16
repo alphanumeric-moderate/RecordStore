@@ -1,6 +1,6 @@
 # RecordStore
 
-RecordStore is a server-side Roblox Luau persistence module. This repository contains the V6 compatibility-fix source and a mock-backed regression script for legacy-envelope recovery.
+RecordStore is a server-side Roblox Luau persistence module.
 
 ## Repository layout
 
@@ -43,11 +43,3 @@ rojo build tests.project.json -o RecordStore-CompatibilityTests.rbxlx
 ```
 
 Open the test place in Roblox Studio and run a server playtest. The test Script uses `RecordStore.Mock`; it does not read or write live DataStore records.
-
-## V6 compatibility fix
-
-The source includes adapters for historical RecordStore envelope shapes, generation-zero normalization/recovery, and fail-closed handling for legacy records whose ownership lease cannot be verified. See [Compatibility notes](docs/compatibility.md).
-
-## Verification status
-
-The regression cases are included but require Roblox Studio to execute. A successful file copy or Rojo build is not proof that persistence behavior has passed a live Studio test. Preserve a backup before applying this module to a live experience, and test against a dedicated test DataStore name first.
