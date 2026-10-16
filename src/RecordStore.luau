@@ -939,14 +939,18 @@ copy_value = function(value: unknown): JsonValue?
 			error("value contains a cyclic table")
 		end
 		active_tables[table_value] = true
+
 		local has_string_key = false
 		local has_number_key = false
+		local keys: { string | number } = {}
 		for key in current do
 			local key_type = type(key)
 			if key_type == "string" then
 				has_string_key = true
+				keys[#keys + 1] = key
 			elseif key_type == "number" then
 				has_number_key = true
+				keys[#keys + 1] = key
 			else
 				active_tables[table_value] = nil
 				error("value contains an unsupported table key")
@@ -956,44 +960,44 @@ copy_value = function(value: unknown): JsonValue?
 			active_tables[table_value] = nil
 			error("value contains mixed table keys")
 		end
+
 		if has_string_key then
 			local result: { [string]: JsonValue } = {}
-			for key, child in current do
+			for _, key in keys do
 				if type(key) ~= "string" then
 					active_tables[table_value] = nil
 					error("value contains an invalid dictionary key")
 				end
-				local dictionary_key = key
-				local copied = clone(child, depth + 1)
+				local copied = clone(table_value[key], depth + 1)
 				if copied == nil then
 					active_tables[table_value] = nil
 					error("value contains an invalid nil child")
 				end
-				result[dictionary_key] = copied
+				result[key] = copied
 			end
 			active_tables[table_value] = nil
 			return result
 		end
+
 		local result: { JsonValue } = {}
-		for key, child in current do
+		for _, key in keys do
 			if type(key) ~= "number" then
 				active_tables[table_value] = nil
 				error("value contains an invalid array key")
 			end
-			local numeric_key = key
-			if not math.isfinite(numeric_key)
-				or math.floor(numeric_key) ~= numeric_key
-				or numeric_key < 1
+			if not math.isfinite(key)
+				or math.floor(key) ~= key
+				or key < 1
 			then
 				active_tables[table_value] = nil
 				error("value contains an invalid array index")
 			end
-			local copied = clone(child, depth + 1)
+			local copied = clone(table_value[key], depth + 1)
 			if copied == nil then
 				active_tables[table_value] = nil
 				error("value contains an invalid nil child")
 			end
-			result[numeric_key] = copied
+			result[key] = copied
 		end
 		active_tables[table_value] = nil
 		return result
