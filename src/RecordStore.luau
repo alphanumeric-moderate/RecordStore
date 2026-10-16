@@ -1172,23 +1172,14 @@ type DiffKey = {
 }
 
 local function sorted_child_keys(old_value: JsonValue?, new_value: JsonValue?): { DiffKey }
-	local string_keys: { [string]: boolean } = {}
-	local numeric_keys: { [number]: boolean } = {}
+	local seen_keys: { [string | number]: boolean } = {}
 	local result: { DiffKey } = {}
 	local function add_key(key: string | number)
-		if type(key) == "number" then
-			if not numeric_keys[key] then
-				numeric_keys[key] = true
-				result[#result + 1] = {
-					Key = key,
-					PathSegment = "[" .. tostring(key) .. "]",
-				}
-			end
-		elseif type(key) == "string" and not string_keys[key] then
-			string_keys[key] = true
+		if not seen_keys[key] then
+			seen_keys[key] = true
 			result[#result + 1] = {
 				Key = key,
-				PathSegment = key,
+				PathSegment = if type(key) == "number" then "[" .. tostring(key) .. "]" else key,
 			}
 		end
 	end
@@ -1211,7 +1202,6 @@ local function sorted_child_keys(old_value: JsonValue?, new_value: JsonValue?): 
 	end)
 	return result
 end
-
 
 local function append_change_event(events: { ChangeEvent }, path: { string }, old_value: JsonValue?, new_value: JsonValue?, operation_id: string, sequence: number, kind: string): boolean
 	if #events >= CHANGE_OBSERVER_CAPACITY then
