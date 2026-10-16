@@ -62,16 +62,16 @@ Use the formatter directly when you only need display text:
 local NumberFormatter = require(game:GetService("ServerScriptService"):WaitForChild("NumberFormatter"))
 
 print(NumberFormatter.format(1_250)) -- 1.25K
-print(NumberFormatter.format(1_000_000_000_000)) -- 1U
+print(NumberFormatter.format(1_000_000_000_000)) -- 1T
 ```
 
-The default `PlayerDataCore` configuration abbreviates `Kills` using `define_leaderstat("kills", "Kills", { decimals = 2 })`. Large values display as `1K`, `1.25M`, `1B`, `1U`, and so on. Other numeric leaderstats can opt in by passing `{ decimals = 2 }` as the third argument to `define_leaderstat` in `src/PlayerDataCore.luau`.
+The default `PlayerDataCore` configuration abbreviates `Kills` using `define_leaderstat("kills", "Kills", { decimals = 2 })`. Large values display as `1K`, `1.25M`, `1B`, `1T`, `1Qa`, and so on. Other numeric leaderstats can opt in by passing `{ decimals = 2 }` as the third argument to `define_leaderstat` in `src/PlayerDataCore.luau`.
 
 A formatted leaderboard entry is a display-only `StringValue`. Its numeric backing value is placed at `player.PlayerDataValues.kills`, and that backing value remains the value persisted by PlayerDataCore. Gameplay scripts must update `player.PlayerDataValues.kills.Value` instead of `player.leaderstats.Kills.Value`, because the leaderboard entry contains text. The `PlayerDataValues` folder name is reserved by this feature.
 
 To opt out for a particular entry, omit the third argument, for example `define_leaderstat("kills", "Kills")`.
 
-The default Rojo project maps the four ModuleScripts, but does **not** include the example server Script. To build the project with the example Script included:
+The default Rojo project maps the server-side ModuleScripts and `ReplicatedStorage.CodeNum`, but does **not** include the example server Script. To build the project with the example Script included:
 
 ```sh
 rojo build examples.project.json -o RecordStore-PlayerDataExample.rbxlx
@@ -83,7 +83,7 @@ The included `PlayerDataCore` example uses the store name `PlayerData_Test1`. Ch
 
 PlayerDataCore's optional `CodeNumValue` field stores values in your CodeNum module's canonical `encode` / `decode` JSON format (format version 2 in the supplied module). Exact decimal integers, scientific values, special values, hyperoperations, unevaluated expressions, and unary calls are serialized without coercion to native numbers.
 
-Place your CodeNum 0.2.0-preview.1 ModuleScript in `ReplicatedStorage` as `CodeNum`. It must expose `encode(value)`, `decode(serialized)`, and `toString(value)`. The CodeNum module is supplied by your project rather than copied into RecordStore.
+The repository includes CodeNum 0.2.0-preview.1 at `src/CodeNum.luau`. Both `default.project.json` and `tests.project.json` map it to `ReplicatedStorage.CodeNum`, so the Rojo projects no longer require a separate CodeNum ModuleScript. The public codec API is `encode(value)`, `decode(serialized)`, and `toString(value)`.
 
 Configure a field and optional leaderboard entry in `src/PlayerDataCore.luau`:
 
@@ -108,11 +108,11 @@ local current = CodeNumValue.get(cash)
 CodeNumValue.set(cash, CodeNum.add(current, CodeNum.integer("100")))
 ```
 
-RecordStore persists CodeNum's serialized JSON string, not a metatable-backed node or an EternityNum triplet. The StringValue transport is limited to 200,000 characters. Exact integers and scientific nodes use NumberFormatter's custom suffix sequence; hyperoperations/expressions fall back to `CodeNum.toString()` because their decimal magnitude may not be provable.
+RecordStore persists CodeNum's serialized JSON string, not a metatable-backed node or an EternityNum triplet. The StringValue transport uses a conservative 199,999-byte payload limit. Exact integers and scientific nodes use NumberFormatter's custom suffix sequence; hyperoperations/expressions fall back to `CodeNum.toString()` because their decimal magnitude may not be provable. Exact integer multiplication is capped at a 4,096-digit combined operand budget; larger products stay symbolic to avoid unbounded quadratic work.
 
 ### Number formatting
 
-The sequence is `K, M, B`, followed by your `first`, `second`, `third`, and `mult` suffix groups. Exact CodeNum integer/scientific values use this sequence without converting the entire value to binary64. Once the suffix table runs out, values display in scientific notation.
+The 202-entry sequence is `K, M, B, T`, followed by the `first`, `second`, `third`, and `mult` suffix groups. For example, `1e12` formats as `1T`, `1e15` as `1Qa`, and `1e36` as `1Ud`. Exact CodeNum integer/scientific values use this sequence without converting the entire value to binary64. Once the suffix table runs out, values display in scientific notation.
 
 ## Rojo
 

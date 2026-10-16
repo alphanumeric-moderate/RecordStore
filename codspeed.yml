@@ -17,3 +17,6 @@ benchmarks:
 
   - name: "compatibility regression suite"
     exec: lune run bench/run_compatibility_regression_tests.luau
+
+  - name: "CodeNum arithmetic and codec round-trips"
+    exec: lune run bench/codenum.bench.luau
