@@ -71,7 +71,7 @@ A formatted leaderboard entry is a display-only `StringValue`. Its numeric backi
 
 To opt out for a particular entry, omit the third argument, for example `define_leaderstat("kills", "Kills")`.
 
-The default Rojo project maps the four ModuleScripts, but does **not** include the example server Script. To build the project with the example Script included:
+The default Rojo project maps the server-side ModuleScripts and `ReplicatedStorage.CodeNum`, but does **not** include the example server Script. To build the project with the example Script included:
 
 ```sh
 rojo build examples.project.json -o RecordStore-PlayerDataExample.rbxlx
@@ -108,7 +108,7 @@ local current = CodeNumValue.get(cash)
 CodeNumValue.set(cash, CodeNum.add(current, CodeNum.integer("100")))
 ```
 
-RecordStore persists CodeNum's serialized JSON string, not a metatable-backed node or an EternityNum triplet. The StringValue transport uses a conservative 199,999-byte payload limit. Exact integers and scientific nodes use NumberFormatter's custom suffix sequence; hyperoperations/expressions fall back to `CodeNum.toString()` because their decimal magnitude may not be provable.
+RecordStore persists CodeNum's serialized JSON string, not a metatable-backed node or an EternityNum triplet. The StringValue transport uses a conservative 199,999-byte payload limit. Exact integers and scientific nodes use NumberFormatter's custom suffix sequence; hyperoperations/expressions fall back to `CodeNum.toString()` because their decimal magnitude may not be provable. Exact integer multiplication is capped at a 4,096-digit combined operand budget; larger products stay symbolic to avoid unbounded quadratic work.
 
 ### Number formatting
 
