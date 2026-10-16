@@ -1,4 +1,5 @@
 --!strict
+--!optimize 2
 local DataStoreService = game:GetService("DataStoreService")
 local HttpService = game:GetService("HttpService")
 local MessagingService = game:GetService("MessagingService")
