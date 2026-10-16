@@ -124,7 +124,7 @@ local function normalize_integer_infinity(
 	rounding: IntegerInfinityRounding
 ): number
 	if math.isnan(value) then
-		return 0
+		return value
 	end
 
 	if math.isinf(value) then
