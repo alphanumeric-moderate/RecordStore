@@ -1271,11 +1271,11 @@ local function diff_change_events(events: { ChangeEvent }, old_value: JsonValue?
 end
 
 local function enqueue_change_observation(state: InternalState, old_value: unknown, new_value: unknown, operation_id: string, kind: string)
-	local old_json = copy_value(old_value)
-	local new_json = copy_value(new_value)
 	if next(state.change_observers) == nil then
 		return
 	end
+	local old_json = copy_value(old_value)
+	local new_json = copy_value(new_value)
 	local events: { ChangeEvent } = {}
 	local complete = diff_change_events(
 		events,
@@ -2004,6 +2004,9 @@ end
 local function update_local_from_envelope(state: InternalState, envelope: Envelope, info: BackendInfo?)
 	state.data = copy_value(envelope.data)
 	state.public_data_source = copy_value(state.data)
+	if state.public_record ~= nil then
+		state.public_record.Data = state.data
+	end
 	state.generation = envelope.fencing_generation
 	state.revision = envelope.revision
 	state.created_at = envelope.created_at
@@ -3923,8 +3926,7 @@ track_external_data_mutation = function(state: InternalState)
 		return
 	end
 	local candidate_copy = copied_or_error
-	local validation_copy = copy_value(candidate_copy)
-	local valid, validation_message = validate_value(validation_copy, state.options.validator)
+	local valid, validation_message = validate_value(candidate_copy, state.options.validator)
 	if not valid then
 		state.data = copy_value(state.public_data_source)
 		if public_record_table ~= nil then
@@ -3934,7 +3936,7 @@ track_external_data_mutation = function(state: InternalState)
 		observe(state, "external_data_mutation", "validation", validation_message or "direct Data mutation failed validation")
 		return
 	end
-	local old_data = copy_value(state.public_data_source)
+	local old_data = state.public_data_source
 	state.data = candidate
 	local current_data = copy_value(state.data)
 	if current_data == nil then
@@ -3967,7 +3969,6 @@ local function sync_public(record: Record)
 
 	track_external_data_mutation(state)
 	record.Data = state.data
-	state.public_data_source = copy_value(state.data)
 	record.State = state.state
 	record.Key = state.key
 	record.Generation = state.generation
@@ -4144,7 +4145,7 @@ local function set_user_ids(self: Record, user_ids: { number }): (ResultCode, st
 	if normalized == nil then
 		return "validation", message
 	end
-	local old_user_ids = clone_user_ids(state.user_ids)
+	local old_user_ids = state.user_ids
 	state.user_ids = normalized
 	state.change_sequence += 1
 	local operation_id = HttpService:GenerateGUID(false)
@@ -4217,7 +4218,7 @@ local function set_metadata(self: Record, metadata: Metadata): (ResultCode, stri
 	if not valid then
 		return "validation", message
 	end
-	local old_metadata = clone_metadata(state.metadata)
+	local old_metadata = state.metadata
 	state.metadata = copied
 	state.change_sequence += 1
 	local operation_id = HttpService:GenerateGUID(false)
@@ -4274,7 +4275,7 @@ local function update_metadata(self: Record, callback: (Metadata) -> Metadata): 
 	if not valid then
 		return "validation", message
 	end
-	local old_metadata = clone_metadata(state.metadata)
+	local old_metadata = state.metadata
 	state.metadata = copied
 	state.change_sequence += 1
 	local operation_id = HttpService:GenerateGUID(false)
@@ -4324,7 +4325,7 @@ local function update(self: Record, callback: (JsonValue?) -> JsonValue?): (Resu
 	if type(callback) ~= "function" then
 		return "invalid", "update callback must be a function"
 	end
-	local old_data = copy_value(state.data)
+	local old_data = state.data
 	local working = copy_value(state.data)
 	local next_value: JsonValue? = nil
 	local callback_error: string? = nil
@@ -4363,6 +4364,7 @@ local function update(self: Record, callback: (JsonValue?) -> JsonValue?): (Resu
 	end
 	state.data = copied
 	state.public_data_source = copy_value(state.data)
+	self.Data = state.data
 	state.change_sequence += 1
 	local operation_id = HttpService:GenerateGUID(false)
 	state.current_operation_id = operation_id
@@ -4390,7 +4392,7 @@ local function reconcile(self: Record, template: JsonValue): (ResultCode, string
 		state.save_requested = true
 		return "busy", "record is already saving"
 	end
-	local old_data = copy_value(state.data)
+	local old_data = state.data
 	local copied = copy_value(state.data)
 	if copied == nil then
 		return "validation", "record data is missing"
@@ -4480,6 +4482,7 @@ local function reconcile(self: Record, template: JsonValue): (ResultCode, string
 	end
 	state.data = next_value
 	state.public_data_source = copy_value(state.data)
+	self.Data = state.data
 	if changed == true then
 		state.change_sequence += 1
 		local operation_id = HttpService:GenerateGUID(false)
@@ -5935,6 +5938,7 @@ close_internal = function(state: InternalState, shutdown: boolean): (ResultCode,
 	local generation = state.generation
 	local expected_revision = state.revision
 	local target_revision = expected_revision + 1
+	track_external_data_mutation(state)
 	local snapshot = copy_value(state.data)
 	local valid, validation_error = validate_value(snapshot, state.options.validator)
 	if not valid then
