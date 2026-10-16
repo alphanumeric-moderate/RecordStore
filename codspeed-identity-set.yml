@@ -1,0 +1,14 @@
+$schema: https://raw.githubusercontent.com/CodSpeedHQ/codspeed/refs/heads/main/schemas/codspeed.schema.json
+
+benchmarks:
+  - name: "wide nested profile baseline"
+    exec: lune run bench/identity_set_baseline.bench.luau
+
+  - name: "wide nested profile optimized"
+    exec: lune run bench/identity_set_optimized.bench.luau
+
+  - name: "wide profile change diff baseline"
+    exec: lune run bench/identity_set_diff_baseline.bench.luau
+
+  - name: "wide profile change diff optimized"
+    exec: lune run bench/identity_set_diff_optimized.bench.luau

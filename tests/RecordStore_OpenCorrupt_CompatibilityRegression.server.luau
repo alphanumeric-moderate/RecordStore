@@ -327,5 +327,33 @@ end
 
 RecordStore.Mock.reset()
 
+RecordStore.Mock.reset()
+do
+	local record = RecordStore.Mock.new("RecordStore_IdentitySetCopyRegression", "global", "cycle-and-shared-table", { schema_version = 1 })
+	local open_result, open_message = record:Open({ Value = 1 })
+	assert(open_result == "created" or open_result == "loaded", open_message)
+
+	local cycle = {}
+	cycle.Self = cycle
+	local invalid_result = record:Update(function(_data)
+		return cycle
+	end)
+	assert(invalid_result == "validation", "cyclic Update result was not rejected")
+	local unchanged = record:Get() :: { [string]: RecordStore.JsonValue }
+	assert(unchanged["Value"] == 1, "rejected cyclic Update changed live data")
+
+	local shared = { Value = 7 }
+	local shared_result, shared_message = record:Update(function(_data)
+		return { First = shared, Second = shared }
+	end)
+	assert(shared_result == "success", shared_message)
+	local copied = record:Get() :: { [string]: RecordStore.JsonValue }
+	local first = copied["First"] :: { [string]: RecordStore.JsonValue }
+	local second = copied["Second"] :: { [string]: RecordStore.JsonValue }
+	assert(first["Value"] == 7 and second["Value"] == 7, "shared non-cyclic subtable was not copied correctly")
+	assert(first ~= second, "shared input subtree must be detached into independent copies")
+	assert(record:Close() == "closed", "identity-set regression record did not close")
+end
+
 print("[PASS] Corruption compatibility, persistence, direct-mutation capture, validator isolation, change-event diff, and Update/Reconcile sync fast-path invariants.")
 
