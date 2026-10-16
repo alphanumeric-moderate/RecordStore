@@ -1,7 +1,8 @@
 --!strict
 
 -- IntegerInfinityValue
--- A NumberValue that normalizes assignments to integers while preserving infinities.
+-- A NumberValue that normalizes finite assignments to integers while preserving
+-- positive infinity, negative infinity, and NaN.
 
 local IntegerInfinityValue = {}
 
@@ -25,7 +26,7 @@ end
 
 local function normalize(value: number, rounding: Rounding): number
 	if math.isnan(value) then
-		return 0
+		return value
 	end
 
 	if math.isinf(value) then
@@ -89,8 +90,10 @@ function IntegerInfinityValue.new(
 
 		local resolved = normalize(current, rounding)
 		local negative_zero = current == 0 and 1 / current == -math.huge
+		local unchanged = current == resolved
+			or (math.isnan(current) and math.isnan(resolved))
 
-		if current == resolved and not negative_zero then
+		if unchanged and not negative_zero then
 			return
 		end
 
