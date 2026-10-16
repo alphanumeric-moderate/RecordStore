@@ -87,6 +87,9 @@ end
 
 local function normalize_and_decode(value: unknown): (string, Value)
     if type(value) == "string" then
+        if #value > MAX_SERIALIZED_LENGTH then
+            error("CodeNum input string exceeds the safe StringValue limit of 199999 bytes", 2)
+        end
         local ok, decoded = try_decode_serialized(value)
         if ok and decoded ~= nil then
             return checked_encode(decoded)
