@@ -109,8 +109,8 @@ local CONFIG = {
 		enabled = true,
 		name = "leaderstats",
 		values = {
-			-- Pass { decimals = 2 } as the third argument to abbreviate a numeric stat.
-			define_leaderstat("kills", "Kills"),
+			-- Kills is display-formatted by default. Update PlayerDataValues.kills.Value in gameplay code.
+			define_leaderstat("kills", "Kills", { decimals = 2 }),
 			define_leaderstat("equipped", "Equipped"),
 		},
 	},
