@@ -88,7 +88,8 @@ local CONFIG = {
 	budget_wait = 2,
 
 	data = {
-		kills = define_data_field("IntValue", 0),
+		-- NumberValue-backed integer semantics allow +/-infinity and NaN.
+		kills = define_data_field("IntegerInfinityValue", 0, "nearest"),
 		equipped = define_data_field("StringValue", "Default"),
 		admin = define_data_field("BoolValue", false),
 
@@ -148,6 +149,10 @@ local function normalize_integer_infinity(
 	return if result == 0 then 0 else result
 end
 
+local function numeric_values_equal(left: number, right: number): boolean
+	return left == right or (math.isnan(left) and math.isnan(right))
+end
+
 local function field_value_is_valid(field: DataField, value: Scalar?): boolean
 	if field.class_name == "IntValue" then
 		return type(value) == "number"
@@ -161,8 +166,7 @@ local function field_value_is_valid(field: DataField, value: Scalar?): boolean
 		return type(value) == "boolean"
 	elseif field.class_name == "IntegerInfinityValue" then
 		return type(value) == "number"
-			and not math.isnan(value)
-			and (math.isinf(value) or math.floor(value) == value)
+			and (math.isnan(value) or math.isinf(value) or math.floor(value) == value)
 	end
 
 	return false
@@ -189,7 +193,7 @@ local function decode_stored_field_value(
 			field.rounding or "nearest"
 		)
 		local negative_zero = value == 0 and 1 / value == -math.huge
-		return normalized, normalized ~= value or negative_zero or math.isnan(value)
+		return normalized, not numeric_values_equal(normalized, value) or negative_zero
 	end
 
 	if field_value_is_valid(field, value) then
