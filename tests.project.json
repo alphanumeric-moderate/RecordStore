@@ -1,0 +1,15 @@
+{
+  "name": "RecordStore-CompatibilityTests",
+  "tree": {
+    "$className": "DataModel",
+    "ServerScriptService": {
+      "$className": "ServerScriptService",
+      "RecordStore": {
+        "$path": "src/RecordStore.luau"
+      },
+      "RecordStoreCompatibilityRegression": {
+        "$path": "tests/RecordStore_OpenCorrupt_CompatibilityRegression.server.luau"
+      }
+    }
+  }
+}
