@@ -1449,6 +1449,6 @@ CodeNum.ONE = ONE
 CodeNum.TWO = TWO
 CodeNum.TEN = TEN
 
-MT.__metatable = MT
+-- Freezing MT protects the methods without blocking table.freeze on CodeNum nodes.
 table.freeze(MT)
 return table.freeze(CodeNum)
