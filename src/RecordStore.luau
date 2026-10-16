@@ -759,6 +759,9 @@ local function normalize_user_ids(user_ids: { number }): ({ number }?, string?)
 end
 
 local function validate_metadata(metadata: Metadata, allow_reserved: boolean?): (boolean, string?)
+	if type(metadata) ~= "table" then
+		return false, "metadata must be a table"
+	end
 	for key, value in pairs(metadata) do
 		if type(key) ~= "string" or key == "" or #key > MAX_METADATA_KEY_LENGTH then
 			return false, "metadata keys must be non-empty strings of at most 50 characters"
