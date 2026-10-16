@@ -1,0 +1,8 @@
+$schema: https://raw.githubusercontent.com/CodSpeedHQ/codspeed/refs/heads/main/schemas/codspeed.schema.json
+
+benchmarks:
+  - name: "Large profile validation identity baseline"
+    exec: lune run bench/validation_identity_baseline.bench.luau
+
+  - name: "Large profile validation identity optimized"
+    exec: lune run bench/large_profile.bench.luau
