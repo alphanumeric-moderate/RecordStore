@@ -1261,7 +1261,8 @@ local function encode_backend_update_value(value: unknown): unknown
 		return value
 	end
 	local candidate = value :: { [string]: unknown }
-	if candidate.schema_version ~= nil
+	if candidate.implementation_version ~= nil
+		and candidate.schema_version ~= nil
 		and candidate.revision ~= nil
 		and candidate.fencing_generation ~= nil
 		and candidate.created_at ~= nil
