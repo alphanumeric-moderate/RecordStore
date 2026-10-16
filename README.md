@@ -61,6 +61,20 @@ Use the included `examples/PlayerData.server.luau` Script (mapped as `PlayerData
 `examples.project.json`) to start the controller and shut it down safely. Gameplay Scripts require the
 same ModuleScript, so they share one controller and persistence queue.
 
+When building with default.project.json, add one Script under ServerScriptService to initialize it:
+
+```lua
+local PlayerData = require(script.Parent:WaitForChild("PlayerData"))
+PlayerData:Start()
+
+game:BindToClose(function()
+	PlayerData:Shutdown()
+end)
+```
+
+Use exactly one initializer. The example project already includes this Script as PlayerDataInitializer;
+do not add a second initializer when using that project.
+
 ```lua
 local ServerScriptService = game:GetService("ServerScriptService")
 local PlayerData = require(ServerScriptService:WaitForChild("PlayerData"))
