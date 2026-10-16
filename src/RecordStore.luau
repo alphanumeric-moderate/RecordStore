@@ -782,7 +782,7 @@ local function validate_value_shape(value: unknown, max_depth: number?, max_node
 	local node_limit = max_nodes or 100000
 	local string_limit = max_string_length or 4_000_000
 	local node_count = 0
-	local active_tables: { [string]: boolean } = {}
+	local active_tables: { [table]: boolean } = {}
 
 	local function visit(current: unknown, depth: number): (boolean, string?)
 		node_count += 1
@@ -813,23 +813,22 @@ local function validate_value_shape(value: unknown, max_depth: number?, max_node
 		if type(current) ~= "table" then
 			return false, "value contains an unsupported type: " .. type(current)
 		end
-		local table_value = current
-		local identity = tostring(table_value)
-		if active_tables[identity] then
+		local table_value = current :: table
+		if active_tables[table_value] then
 			return false, "value contains a cyclic table"
 		end
-		active_tables[identity] = true
+		active_tables[table_value] = true
 		local string_keys = 0
 		local numeric_keys = 0
 		local max_numeric_key = 0
 		for key, child in table_value do
 			if type(key) ~= "string" and type(key) ~= "number" then
-				active_tables[identity] = nil
+				active_tables[table_value] = nil
 				return false, "value contains an unsupported table key type"
 			end
 			if type(key) == "number" then
 				if not math.isfinite(key) or math.floor(key) ~= key or key < 1 then
-					active_tables[identity] = nil
+					active_tables[table_value] = nil
 					return false, "numeric table keys must be positive integers"
 				end
 				numeric_keys += 1
@@ -841,19 +840,19 @@ local function validate_value_shape(value: unknown, max_depth: number?, max_node
 			end
 			local child_ok, child_message = visit(child, depth + 1)
 			if not child_ok then
-				active_tables[identity] = nil
+				active_tables[table_value] = nil
 				return false, child_message
 			end
 		end
 		if string_keys > 0 and numeric_keys > 0 then
-			active_tables[identity] = nil
+			active_tables[table_value] = nil
 			return false, "tables cannot mix string and numeric keys"
 		end
 		if numeric_keys > 0 and max_numeric_key ~= numeric_keys then
-			active_tables[identity] = nil
+			active_tables[table_value] = nil
 			return false, "numeric-keyed tables must be dense arrays"
 		end
-		active_tables[identity] = nil
+		active_tables[table_value] = nil
 		return true, nil
 	end
 
