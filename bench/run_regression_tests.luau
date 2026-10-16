@@ -9,6 +9,7 @@ for _, path in {
 	"src/PlayerDataCore.luau",
 	"src/IntegerInfinityValue.luau",
 	"src/NumberFormatter.luau",
+	"src/CodeNum.luau",
 	"src/CodeNumValue.luau",
 	"examples/PlayerData.server.luau",
 	"tests/IntegerInfinityValueRegression.server.luau",
@@ -42,9 +43,9 @@ assert(NumberFormatter.format(1250) == "1.25K", "decimal abbreviation failed")
 assert(NumberFormatter.format(999_999) == "999.99K", "near-million formatting changed")
 assert(NumberFormatter.format(1_000_000) == "1M", "million abbreviation failed")
 assert(NumberFormatter.format(1_000_000_000) == "1B", "billion abbreviation failed")
-assert(NumberFormatter.format(1_000_000_000_000) == "1U", "custom suffix rollover failed")
+assert(NumberFormatter.format(1_000_000_000_000) == "1T", "custom suffix rollover failed")
 assert(NumberFormatter.format(-1_500_000_000) == "-1.5B", "negative number formatting failed")
-assert(NumberFormatter.format(1_000_000_000_000_000) == "1D", "custom suffix abbreviation failed")
+assert(NumberFormatter.format(1_000_000_000_000_000) == "1Qa", "custom suffix abbreviation failed")
 assert(NumberFormatter.format(math.huge) == "∞", "infinity formatting failed")
 assert(NumberFormatter.format(-math.huge) == "-∞", "negative infinity formatting failed")
 assert(NumberFormatter.format(0 / 0) == "NaN", "NaN formatting failed")
@@ -57,8 +58,8 @@ assert(
 	NumberFormatter.format(1_200_000, { decimals = 3 }) == "1.2M",
 	"trailing zero trimming failed"
 )
-assert(NumberFormatter.format(1e36) == "1No", "custom suffix sequence failed")
-assert(NumberFormatter.formatInteger("123456789012345678901234567890123456789") == "123.45No", "exact integer suffix failed")
+assert(NumberFormatter.format(1e36) == "1Ud", "custom suffix sequence failed")
+assert(NumberFormatter.formatInteger("123456789012345678901234567890123456789") == "123.45Ud", "exact integer suffix failed")
 assert(NumberFormatter.formatScientific(1, 1.25, "12") == "1.25U", "scientific suffix failed")
 assert(#NumberFormatter.getSuffixes() == 132, "suffix sequence length changed")
 local invalid_options_ok = pcall(function()
