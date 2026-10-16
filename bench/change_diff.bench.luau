@@ -2,7 +2,7 @@
 local Shim = require("./RobloxShim")
 local RecordStore = Shim.load()
 
-local WIDTH = 1500
+local WIDTH = 750
 
 local function make_profile()
 	local wide = table.create(WIDTH)
@@ -29,7 +29,7 @@ assert(subscription ~= nil and subscribe_result == "success", subscribe_message)
 local result, message = record:Update(function(data)
 	local next_data = table.clone(data)
 	local next_wide = table.clone(data.Wide)
-	local key = "item-0750"
+	local key = "item-0375"
 	local item = table.clone(next_wide[key])
 	item.Count += 1
 	next_wide[key] = item
