@@ -38,5 +38,5 @@ jobs:
       - name: Run the benchmarks
         uses: CodSpeedHQ/action@v5
         with:
-          mode: simulation
+          mode: simulation,walltime
           # Benchmarks are defined in codspeed.yml
