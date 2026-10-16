@@ -13,6 +13,9 @@
       "NumberFormatter": {
         "$path": "src/NumberFormatter.luau"
       },
+      "EternityNumValue": {
+        "$path": "src/EternityNumValue.luau"
+      },
       "PlayerDataCore": {
         "$path": "src/PlayerDataCore.luau"
       },
@@ -27,6 +30,12 @@
       },
       "NumberFormatterRegression": {
         "$path": "tests/NumberFormatterRegression.server.luau"
+      },
+      "EternityNumValueRegression": {
+        "$path": "tests/EternityNumValueRegression.server.luau"
+      },
+      "RecordStoreEternityNumRegression": {
+        "$path": "tests/RecordStore_EternityNumRegression.server.luau"
       }
     }
   }
