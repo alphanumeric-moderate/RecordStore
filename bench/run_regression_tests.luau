@@ -60,7 +60,7 @@ assert(
 )
 assert(NumberFormatter.format(1e36) == "1Ud", "custom suffix sequence failed")
 assert(NumberFormatter.formatInteger("123456789012345678901234567890123456789") == "123.45Ud", "exact integer suffix failed")
-assert(NumberFormatter.formatScientific(1, 1.25, "12") == "1.25U", "scientific suffix failed")
+assert(NumberFormatter.formatScientific(1, 1.25, "12") == "1.25T", "scientific suffix failed")
 assert(#NumberFormatter.getSuffixes() == 202, "suffix sequence length changed")
 local invalid_options_ok = pcall(function()
 	NumberFormatter.format(1, { decimals = 7 })
