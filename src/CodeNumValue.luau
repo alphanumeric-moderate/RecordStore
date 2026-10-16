@@ -127,8 +127,23 @@ function CodeNumValue.decode(serialized: string): Value
     return decoded :: Value
 end
 
+local function decode_for_format(value: unknown): Value
+    if type(value) == "string" then
+        if #value > MAX_SERIALIZED_LENGTH then
+            error("CodeNum input string exceeds the safe StringValue limit of 199999 bytes", 2)
+        end
+        local ok, decoded = try_decode_serialized(value)
+        if ok and decoded ~= nil then
+            return decoded
+        end
+    end
+    local _serialized, decoded = checked_encode(value)
+    return decoded
+end
+
 function CodeNumValue.format(value: unknown, options: NumberFormatterFactory.Options?): string
-    local _serialized, decoded = normalize_and_decode(value)
+    -- Formatting only needs a decoded node; don't re-encode an already-valid payload.
+    local decoded = decode_for_format(value)
     local api = resolve_api()
     local node = decoded :: { [string]: unknown }
 
