@@ -782,7 +782,7 @@ local function validate_value_shape(value: unknown, max_depth: number?, max_node
 	local node_limit = max_nodes or 100000
 	local string_limit = max_string_length or 4_000_000
 	local node_count = 0
-	local active_tables: { [string]: boolean } = {}
+	local active_tables: { [table]: boolean } = {}
 
 	local function visit(current: unknown, depth: number): (boolean, string?)
 		node_count += 1
@@ -813,23 +813,22 @@ local function validate_value_shape(value: unknown, max_depth: number?, max_node
 		if type(current) ~= "table" then
 			return false, "value contains an unsupported type: " .. type(current)
 		end
-		local table_value = current
-		local identity = tostring(table_value)
-		if active_tables[identity] then
+		local table_value = current :: table
+		if active_tables[table_value] then
 			return false, "value contains a cyclic table"
 		end
-		active_tables[identity] = true
+		active_tables[table_value] = true
 		local string_keys = 0
 		local numeric_keys = 0
 		local max_numeric_key = 0
 		for key, child in table_value do
 			if type(key) ~= "string" and type(key) ~= "number" then
-				active_tables[identity] = nil
+				active_tables[table_value] = nil
 				return false, "value contains an unsupported table key type"
 			end
 			if type(key) == "number" then
 				if not math.isfinite(key) or math.floor(key) ~= key or key < 1 then
-					active_tables[identity] = nil
+					active_tables[table_value] = nil
 					return false, "numeric table keys must be positive integers"
 				end
 				numeric_keys += 1
@@ -841,19 +840,19 @@ local function validate_value_shape(value: unknown, max_depth: number?, max_node
 			end
 			local child_ok, child_message = visit(child, depth + 1)
 			if not child_ok then
-				active_tables[identity] = nil
+				active_tables[table_value] = nil
 				return false, child_message
 			end
 		end
 		if string_keys > 0 and numeric_keys > 0 then
-			active_tables[identity] = nil
+			active_tables[table_value] = nil
 			return false, "tables cannot mix string and numeric keys"
 		end
 		if numeric_keys > 0 and max_numeric_key ~= numeric_keys then
-			active_tables[identity] = nil
+			active_tables[table_value] = nil
 			return false, "numeric-keyed tables must be dense arrays"
 		end
-		active_tables[identity] = nil
+		active_tables[table_value] = nil
 		return true, nil
 	end
 
@@ -908,7 +907,7 @@ copy_value = function(value: unknown): JsonValue?
 		return nil
 	end
 
-	local seen: { unknown } = {}
+	local active_tables: { [table]: boolean } = {}
 
 	local function clone(current: unknown, depth: number): JsonValue?
 		if current == nil then
@@ -935,12 +934,11 @@ copy_value = function(value: unknown): JsonValue?
 		if type(current) ~= "table" then
 			error("value contains an unsupported type")
 		end
-		for _, previous in ipairs(seen) do
-			if previous == current then
-				error("value contains a cyclic table")
-			end
+		local table_value = current :: table
+		if active_tables[table_value] then
+			error("value contains a cyclic table")
 		end
-		seen[#seen + 1] = current
+		active_tables[table_value] = true
 		local has_string_key = false
 		local has_number_key = false
 		for key in current do
@@ -950,36 +948,36 @@ copy_value = function(value: unknown): JsonValue?
 			elseif key_type == "number" then
 				has_number_key = true
 			else
-				seen[#seen] = nil
+				active_tables[table_value] = nil
 				error("value contains an unsupported table key")
 			end
 		end
 		if has_string_key and has_number_key then
-			seen[#seen] = nil
+			active_tables[table_value] = nil
 			error("value contains mixed table keys")
 		end
 		if has_string_key then
 			local result: { [string]: JsonValue } = {}
 			for key, child in current do
 				if type(key) ~= "string" then
-					seen[#seen] = nil
+					active_tables[table_value] = nil
 					error("value contains an invalid dictionary key")
 				end
 				local dictionary_key = key
 				local copied = clone(child, depth + 1)
 				if copied == nil then
-					seen[#seen] = nil
+					active_tables[table_value] = nil
 					error("value contains an invalid nil child")
 				end
 				result[dictionary_key] = copied
 			end
-			seen[#seen] = nil
+			active_tables[table_value] = nil
 			return result
 		end
 		local result: { JsonValue } = {}
 		for key, child in current do
 			if type(key) ~= "number" then
-				seen[#seen] = nil
+				active_tables[table_value] = nil
 				error("value contains an invalid array key")
 			end
 			local numeric_key = key
@@ -987,17 +985,17 @@ copy_value = function(value: unknown): JsonValue?
 				or math.floor(numeric_key) ~= numeric_key
 				or numeric_key < 1
 			then
-				seen[#seen] = nil
+				active_tables[table_value] = nil
 				error("value contains an invalid array index")
 			end
 			local copied = clone(child, depth + 1)
 			if copied == nil then
-				seen[#seen] = nil
+				active_tables[table_value] = nil
 				error("value contains an invalid nil child")
 			end
 			result[numeric_key] = copied
 		end
-		seen[#seen] = nil
+		active_tables[table_value] = nil
 		return result
 	end
 	return clone(value, 1)
@@ -1174,25 +1172,24 @@ type DiffKey = {
 }
 
 local function sorted_child_keys(old_value: JsonValue?, new_value: JsonValue?): { DiffKey }
-	local keys: { [string]: DiffKey } = {}
+	local string_keys: { [string]: boolean } = {}
+	local numeric_keys: { [number]: boolean } = {}
 	local result: { DiffKey } = {}
 	local function add_key(key: string | number)
 		if type(key) == "number" then
-			local identity = "n:" .. tostring(key)
-			if keys[identity] == nil then
-				keys[identity] = {
+			if not numeric_keys[key] then
+				numeric_keys[key] = true
+				result[#result + 1] = {
 					Key = key,
 					PathSegment = "[" .. tostring(key) .. "]",
 				}
 			end
-		elseif type(key) == "string" then
-			local identity = "s:" .. key
-			if keys[identity] == nil then
-				keys[identity] = {
-					Key = key,
-					PathSegment = key,
-				}
-			end
+		elseif type(key) == "string" and not string_keys[key] then
+			string_keys[key] = true
+			result[#result + 1] = {
+				Key = key,
+				PathSegment = key,
+			}
 		end
 	end
 	if old_value ~= nil and type(old_value) == "table" then
@@ -1208,9 +1205,6 @@ local function sorted_child_keys(old_value: JsonValue?, new_value: JsonValue?): 
 				add_key(key)
 			end
 		end
-	end
-	for _, entry in pairs(keys) do
-		result[#result + 1] = entry
 	end
 	table.sort(result, function(left: DiffKey, right: DiffKey): boolean
 		return left.PathSegment < right.PathSegment
