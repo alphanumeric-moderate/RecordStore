@@ -49,7 +49,7 @@ assert(math.isnan(record:Get().not_a_number))
 The repository also includes:
 
 - `src/PlayerDataCore.luau`: a configurable player session, leaderstats, persistence, retry, and shutdown controller.
-- `src/IntegerInfinityValue.luau`: a `NumberValue` factory that rounds finite values to integers while preserving positive and negative infinity. It normalizes NaN to `0`; use an ordinary `NumberValue` if a field needs to retain NaN.
+- `src/IntegerInfinityValue.luau`: a `NumberValue` factory that rounds finite values to integers while preserving positive infinity, negative infinity, and NaN. The default `kills` field uses this type so non-finite values are not silently replaced with zero.
 - `examples/PlayerData.server.luau`: a standard Script that starts the controller and shuts it down from `BindToClose`.
 
 The default Rojo project maps the three ModuleScripts, but does **not** include the example server Script. To build the project with the example Script included:
