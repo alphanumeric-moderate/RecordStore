@@ -33,7 +33,9 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Check the regression suite passes
-        run: lune run bench/run_regression_tests.luau
+        run: |
+          lune run bench/run_regression_tests.luau
+          lune run bench/run_codenum_regression_tests.luau
 
       - name: Run the benchmarks
         uses: CodSpeedHQ/action@v5
