@@ -9,6 +9,9 @@
       },
       "RecordStoreCompatibilityRegression": {
         "$path": "tests/RecordStore_OpenCorrupt_CompatibilityRegression.server.luau"
+      },
+      "RecordStoreNonFiniteNumbersRegression": {
+        "$path": "tests/RecordStore_NonFiniteNumbersRegression.server.luau"
       }
     }
   }
