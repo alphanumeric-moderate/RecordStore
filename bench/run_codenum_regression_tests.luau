@@ -59,7 +59,12 @@ for _, value in {
 } do
     local encoded = CodeNum.encode(value)
     local decoded = CodeNum.decode(encoded)
-    assert(CodeNum.equals(value, decoded), "encode/decode round-trip failed for " .. CodeNum.toString(value))
+    if value.kind == "special" and value.name == "nan" then
+        assert(decoded.kind == "special" and decoded.name == "nan", "NaN codec round-trip failed")
+        assert(not CodeNum.equals(value, decoded), "NaN must remain unordered")
+    else
+        assert(CodeNum.equals(value, decoded), "encode/decode round-trip failed for " .. CodeNum.toString(value))
+    end
 end
 
 assert(CodeNum.tryToNumber(CodeNum.new(math.huge)) == math.huge, "positive infinity conversion failed")
