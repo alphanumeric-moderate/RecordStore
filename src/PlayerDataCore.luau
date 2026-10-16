@@ -658,7 +658,9 @@ local function new(dependencies: Dependencies?): Controller
 					for key, value in pairs(batch) do
 						data[key] = value
 					end
-					return encode_player_data(data, integer_infinity_value_factory, code_num_value_factory)
+					-- normalize_player_data and queue_value_change already canonicalize
+					-- every configured field; encoding again would re-parse CodeNum JSON.
+					return data
 				end)
 			end)
 
@@ -1160,7 +1162,8 @@ local function new(dependencies: Dependencies?): Controller
 				update_attempts = attempt
 				local update_call_ok, returned_result, returned_message = pcall(function()
 					return record:Update(function()
-						return encode_player_data(normalized, integer_infinity_value_factory, code_num_value_factory)
+						-- normalized already contains the canonical persisted representation.
+				return normalized
 					end)
 				end)
 				if update_call_ok then
