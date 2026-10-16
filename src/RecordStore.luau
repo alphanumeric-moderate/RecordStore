@@ -1118,9 +1118,6 @@ local function is_retryable_result(result: ResultCode, operation: string?): bool
 		return true
 	end
 
-	-- These results can clear while a session is being acquired, but are
-	-- terminal for other operations unless their caller has operation-specific
-	-- knowledge that makes a retry safe.
 	return operation == "open" and (result == "locked" or result == "conflict")
 end
 
@@ -1568,7 +1565,6 @@ local function backend_update(backend: Backend, transform: UpdateTransform, dead
 			if not ok then
 				return nil, nil, "unknown", tostring(new_value)
 			end
-			-- Model time passing between UpdateAsync transform replays and response verification.
 			mock_test_clock_offset += replay_advance
 		end
 		if new_value == nil then
@@ -1644,15 +1640,6 @@ local function parse_envelope(raw: unknown): (Envelope?, string?, boolean)
 	if type(raw) ~= "table" then
 		return nil, "legacy payload", false
 	end
-
-	-- Compatibility for the immediately preceding RecordStore envelope shape.
-	-- That shape used `generation`, `payload`, and `last_operation_id` while
-	-- retaining `implementation_version`, `schema_version`, and `revision`.
-	-- The affected stored record shown by diagnostics has this exact shape.
-	-- Only migrate it automatically when no legacy `lease` field is present:
-	-- this version cannot safely translate an old ownership lease because the
-	-- old layout has no current session token. A record with a lease fails
-	-- closed instead of accidentally bypassing session ownership.
 	local stored_implementation_version = get_string_field(raw, "implementation_version")
 	local stored_fencing_generation = get_string_field(raw, "fencing_generation")
 	local legacy_generation = get_string_field(raw, "generation")
@@ -1669,8 +1656,6 @@ local function parse_envelope(raw: unknown): (Envelope?, string?, boolean)
 		and legacy_operation_id ~= nil
 	then
 		if legacy_format ~= "RecordStore" then
-			-- `format` is the envelope marker for this layout, not a numeric version.
-			-- Accept only the marker observed in the durable record; unknown markers fail closed.
 			local format_detail = string.gsub(tostring(legacy_format), "%c", " ")
 			format_detail = string.sub(format_detail, 1, 80)
 			return nil, ("unsupported legacy RecordStore format: expected string RecordStore, got type=%s value=%s"):format(
@@ -1764,11 +1749,6 @@ local function parse_envelope(raw: unknown): (Envelope?, string?, boolean)
 	local raw_tombstone = get_string_field(raw, "tombstone")
 	local raw_session = get_string_field(raw, "session")
 	if implementation_version == nil then
-		-- Backward compatibility for RecordStore_Reconstruction_v2/v3.
-		-- Those versions persisted { __recordStore, format, revision, fence,
-		-- commitId, deleted, version, data }, not the current envelope shape.
-		-- Without this adapter, revision is mistaken for a malformed current
-		-- envelope and Open returns RS-OPEN-CORRUPT for otherwise valid records.
 		local legacy_marker = get_string_field(raw, "__recordStore")
 		if legacy_marker == "RecordStore" then
 			local legacy_format = get_string_field(raw, "format")
@@ -1800,9 +1780,6 @@ local function parse_envelope(raw: unknown): (Envelope?, string?, boolean)
 				if raw_data ~= nil then
 					return nil, "deleted legacy RecordStore envelope unexpectedly contains data", false
 				end
-				-- The old string fence has no numeric-generation equivalent.
-				-- Treat it as a separate legacy epoch; an intentional recreation
-				-- will advance from generation 1 to generation 2.
 				return {
 					implementation_version = IMPLEMENTATION_VERSION,
 					schema_version = legacy_schema_version,
@@ -1860,8 +1837,6 @@ local function parse_envelope(raw: unknown): (Envelope?, string?, boolean)
 	if type(revision) ~= "number" or not math.isfinite(revision) or math.floor(revision) ~= revision or revision < 0 then
 		return nil, "invalid revision", false
 	end
-	-- Keep this diagnostic strict: never infer a generation from missing or malformed fields.
-	-- Report only field types and envelope key names, not player-data values.
 	if type(fencing_generation) ~= "number" then
 		local key_names: { string } = {}
 		for child_key in raw do
@@ -1886,8 +1861,6 @@ local function parse_envelope(raw: unknown): (Envelope?, string?, boolean)
 	if math.floor(fencing_generation) ~= fencing_generation then
 		return nil, "invalid fencing generation: number is not an integer", false
 	end
-	-- Generation zero is valid only for an inactive, non-tombstoned baseline.
-	-- Open advances this baseline to generation 1 before claiming the session.
 	if fencing_generation < 0 then
 		return nil, "invalid fencing generation: number is negative", false
 	end
@@ -3932,12 +3905,21 @@ track_external_data_mutation = function(state: InternalState)
 		return copy_value(candidate)
 	end)
 	if not copied_ok or copied_or_error == nil then
+		local rejection_reason = if not copied_ok
+			then string.gsub(tostring(copied_or_error), "%c", " ")
+			else "Data was set to nil"
+		rejection_reason = string.sub(rejection_reason, 1, 180)
 		state.data = copy_value(state.public_data_source)
 		if public_record_table ~= nil then
 			public_record_table.Data = state.data
 		end
 		state.public_data_source = copy_value(state.data)
-		observe(state, "external_data_mutation", "validation", "direct Data mutation produced an invalid value and was discarded")
+		observe(
+			state,
+			"external_data_mutation",
+			"validation",
+			"direct Data mutation produced an invalid value and was discarded: " .. rejection_reason
+		)
 		return
 	end
 	local candidate_copy = copied_or_error
@@ -5697,7 +5679,7 @@ local function open_internal(state: InternalState, default_data: JsonValue?, rec
 	end
 	if confirmed ~= nil then
 		if recovery_applied and recovery_candidate ~= nil then
-			warn(("[RecordStore][CorruptionRecovery] store=%s scope=%s key=%s reason=%s sourceVersion=%s replacedVersion=%s revision=%d; prior corrupt data remains in DataStore version history"):format(
+			warn(("[RecordStore][CorruptionRecovery] status=recovered store=%s scope=%s key=%s reason=%s sourceVersion=%s replacedVersion=%s revision=%d; corrupt version preserved in DataStore version history"):format(
 				state.name,
 				state.scope,
 				state.key,
