@@ -4,4 +4,5 @@
 local Shim = require("./RobloxShim")
 
 Shim.run_script("tests/RecordStore_OpenCorrupt_CompatibilityRegression.server.luau")
+Shim.run_script("tests/RecordStore_NonFiniteNumbersRegression.server.luau")
 Shim.close()
