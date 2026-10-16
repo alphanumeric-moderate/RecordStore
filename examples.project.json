@@ -1,0 +1,21 @@
+{
+  "name": "RecordStore-PlayerDataExample",
+  "tree": {
+    "$className": "DataModel",
+    "ServerScriptService": {
+      "$className": "ServerScriptService",
+      "RecordStore": {
+        "$path": "src/RecordStore.luau"
+      },
+      "PlayerDataCore": {
+        "$path": "src/PlayerDataCore.luau"
+      },
+      "IntegerInfinityValue": {
+        "$path": "src/IntegerInfinityValue.luau"
+      },
+      "PlayerData": {
+        "$path": "examples/PlayerData.server.luau"
+      }
+    }
+  }
+}

@@ -290,6 +290,17 @@ type Envelope = {
 	write_id: string,
 }
 
+type NonFiniteNumberKind = "nan" | "positive_infinity" | "negative_infinity"
+
+type NonFinitePathSegment =
+	{ kind: "string", key: string }
+	| { kind: "number", key: number }
+
+type NonFiniteNumberMarker = {
+	path: { NonFinitePathSegment },
+	kind: NonFiniteNumberKind,
+}
+
 type BackendInfo = {
 	Version: string?,
 	CreatedTime: number,
@@ -482,7 +493,7 @@ export type Record = {
 	Stats: (self: Record) -> { [string]: number | string? },
 }
 
-local IMPLEMENTATION_VERSION = 1
+local IMPLEMENTATION_VERSION = 2
 local QUEUE_IMPLEMENTATION_VERSION = 3
 local DEFAULT_AUTOSAVE_INTERVAL = 300
 local DEFAULT_LEASE_DURATION = 180
@@ -777,7 +788,7 @@ local function validate_metadata(metadata: Metadata, allow_reserved: boolean?): 
 	return true, nil
 end
 
-local function validate_value_shape(value: unknown, max_depth: number?, max_nodes: number?, max_string_length: number?): (boolean, string?)
+local function validate_value_shape(value: unknown, max_depth: number?, max_nodes: number?, max_string_length: number?, allow_non_finite_numbers: boolean?): (boolean, string?)
 	local depth_limit = max_depth or 64
 	local node_limit = max_nodes or 100000
 	local string_limit = max_string_length or 4_000_000
@@ -796,7 +807,7 @@ local function validate_value_shape(value: unknown, max_depth: number?, max_node
 			return true, nil
 		end
 		if type(current) == "number" then
-			if not math.isfinite(current) then
+			if not math.isfinite(current) and allow_non_finite_numbers ~= true then
 				return false, "value contains a non-finite number"
 			end
 			return true, nil
@@ -920,9 +931,6 @@ copy_value = function(value: unknown): JsonValue?
 			return current
 		end
 		if type(current) == "number" then
-			if not math.isfinite(current) then
-				error("value contains a non-finite number")
-			end
 			return current
 		end
 		if type(current) == "string" then
@@ -1004,6 +1012,273 @@ copy_value = function(value: unknown): JsonValue?
 	end
 	return clone(value, 1)
 end
+local function encode_non_finite_numbers(
+	value: JsonValue
+): (JsonValue, { NonFiniteNumberMarker })
+	local markers: { NonFiniteNumberMarker } = {}
+	local path: { NonFinitePathSegment } = {}
+
+	local function encode(current: JsonValue, depth: number): (JsonValue, boolean)
+		if depth > 64 then
+			error("value exceeds the maximum nesting depth")
+		end
+
+		if type(current) == "number" then
+			if math.isfinite(current) then
+				return current, false
+			end
+
+			local kind: NonFiniteNumberKind
+			if math.isnan(current) then
+				kind = "nan"
+			elseif current > 0 then
+				kind = "positive_infinity"
+			else
+				kind = "negative_infinity"
+			end
+
+			markers[#markers + 1] = {
+				path = table.clone(path),
+				kind = kind,
+			}
+			return 0, true
+		end
+
+		if typeof(current) == "buffer" or type(current) ~= "table" then
+			return current, false
+		end
+
+		local source = current :: { [string | number]: JsonValue }
+		local dictionary: boolean? = nil
+		local result: { [string | number]: JsonValue }? = nil
+
+		for key, child in source do
+			local key_type = type(key)
+			if key_type ~= "string" and key_type ~= "number" then
+				error("value contains an unsupported table key")
+			end
+
+			local is_dictionary_key = key_type == "string"
+			if dictionary == nil then
+				dictionary = is_dictionary_key
+			elseif dictionary ~= is_dictionary_key then
+				error("value contains mixed table keys")
+			end
+
+			path[#path + 1] = if is_dictionary_key
+				then { kind = "string", key = key :: string }
+				else { kind = "number", key = key :: number }
+			local encoded_child, child_changed = encode(child, depth + 1)
+			path[#path] = nil
+
+			if child_changed then
+				if result == nil then
+					result = table.clone(source)
+				end
+				result[key] = encoded_child
+			end
+		end
+
+		if result == nil then
+			return current, false
+		end
+		return result, true
+	end
+
+	local encoded, _changed = encode(value, 1)
+	return encoded, markers
+end
+
+local function restore_non_finite_numbers(
+	value: JsonValue?,
+	raw_markers: unknown
+): (JsonValue?, string?)
+	if raw_markers == nil then
+		return value, nil
+	end
+	if value == nil or type(raw_markers) ~= "table" then
+		return nil, "non-finite number metadata is invalid"
+	end
+
+	local markers = raw_markers :: { [number]: unknown }
+	local count = 0
+	local maximum_index = 0
+	for index in markers do
+		if type(index) ~= "number"
+			or not math.isfinite(index)
+			or math.floor(index) ~= index
+			or index < 1
+		then
+			return nil, "non-finite number metadata must be a dense array"
+		end
+		count += 1
+		maximum_index = math.max(maximum_index, index)
+	end
+	if count ~= maximum_index then
+		return nil, "non-finite number metadata must be a dense array"
+	end
+	if count == 0 then
+		return value, nil
+	end
+
+	-- parse_envelope has already copied stored data into a private table tree.
+	-- Restore in that tree rather than allocating another full deep copy.
+	local result: JsonValue? = value
+	if result == nil then
+		return nil, "stored data is missing before restoring non-finite numbers"
+	end
+
+	for index = 1, count do
+		local raw_marker = markers[index]
+		if type(raw_marker) ~= "table" then
+			return nil, "non-finite number marker is invalid"
+		end
+		local marker = raw_marker :: { [string]: unknown }
+		local kind = marker.kind
+		local raw_path = marker.path
+		if kind ~= "nan" and kind ~= "positive_infinity" and kind ~= "negative_infinity" then
+			return nil, "non-finite number marker kind is invalid"
+		end
+		if type(raw_path) ~= "table" then
+			return nil, "non-finite number marker path is invalid"
+		end
+
+		local path = raw_path :: { [number]: unknown }
+		local path_count = 0
+		local path_maximum = 0
+		for path_index in path do
+			if type(path_index) ~= "number"
+				or not math.isfinite(path_index)
+				or math.floor(path_index) ~= path_index
+				or path_index < 1
+			then
+				return nil, "non-finite number marker path must be a dense array"
+			end
+			path_count += 1
+			path_maximum = math.max(path_maximum, path_index)
+		end
+		if path_count ~= path_maximum or path_count > 64 then
+			return nil, "non-finite number marker path is invalid"
+		end
+
+		local replacement: number
+		if kind == "nan" then
+			replacement = 0 / 0
+		elseif kind == "positive_infinity" then
+			replacement = math.huge
+		else
+			replacement = -math.huge
+		end
+
+		if path_count == 0 then
+			if type(result) ~= "number" or result ~= 0 then
+				return nil, "non-finite number marker does not match its stored placeholder"
+			end
+			result = replacement
+			continue
+		end
+
+		local parent: JsonValue = result
+		for path_index = 1, path_count do
+			local raw_segment = path[path_index]
+			if type(raw_segment) ~= "table" or type(parent) ~= "table" then
+				return nil, "non-finite number marker path does not match stored data"
+			end
+			local segment = raw_segment :: { [string]: unknown }
+			local segment_kind = segment.kind
+			local key = segment.key
+			local is_last = path_index == path_count
+			local child: JsonValue?
+
+			if segment_kind == "string" and type(key) == "string" then
+				local dictionary = parent :: { [string]: JsonValue }
+				child = dictionary[key]
+				if child == nil then
+					return nil, "non-finite number marker references a missing field"
+				end
+				if is_last then
+					if type(child) ~= "number" or child ~= 0 then
+						return nil, "non-finite number marker does not match its stored placeholder"
+					end
+					dictionary[key] = replacement
+				else
+					parent = child
+				end
+			elseif segment_kind == "number"
+				and type(key) == "number"
+				and math.isfinite(key)
+				and math.floor(key) == key
+				and key >= 1
+			then
+				local array = parent :: { [number]: JsonValue }
+				child = array[key]
+				if child == nil then
+					return nil, "non-finite number marker references a missing array item"
+				end
+				if is_last then
+					if type(child) ~= "number" or child ~= 0 then
+						return nil, "non-finite number marker does not match its stored placeholder"
+					end
+					array[key] = replacement
+				else
+					parent = child
+				end
+			else
+				return nil, "non-finite number marker path segment is invalid"
+			end
+		end
+	end
+
+	return result, nil
+end
+
+local function encode_envelope_for_storage(envelope: Envelope): JsonValue
+	local stored: { [string]: JsonValue } = {
+		implementation_version = envelope.implementation_version,
+		schema_version = envelope.schema_version,
+		revision = envelope.revision,
+		fencing_generation = envelope.fencing_generation,
+		created_at = envelope.created_at,
+		updated_at = envelope.updated_at,
+		write_id = envelope.write_id,
+		non_finite_numbers = {},
+	}
+
+	if envelope.data ~= nil then
+		local encoded_data, markers = encode_non_finite_numbers(envelope.data)
+		stored.data = encoded_data
+		stored.non_finite_numbers = markers :: JsonValue
+	end
+	if envelope.user_ids ~= nil then
+		stored.user_ids = copy_value(envelope.user_ids) :: JsonValue
+	end
+	if envelope.tombstone ~= nil then
+		stored.tombstone = copy_value(envelope.tombstone) :: JsonValue
+	end
+	if envelope.session ~= nil then
+		stored.session = copy_value(envelope.session) :: JsonValue
+	end
+	return stored
+end
+
+local function encode_backend_update_value(value: unknown): unknown
+	if type(value) ~= "table" then
+		return value
+	end
+	local candidate = value :: { [string]: unknown }
+	if candidate.implementation_version ~= nil
+		and candidate.schema_version ~= nil
+		and candidate.revision ~= nil
+		and candidate.fencing_generation ~= nil
+		and candidate.created_at ~= nil
+		and candidate.updated_at ~= nil
+		and candidate.write_id ~= nil
+	then
+		return encode_envelope_for_storage(value :: Envelope)
+	end
+	return value
+end
+
 local function validate_serialized_size(value: unknown): (boolean, string?)
 	local shape_ok, shape_message = validate_value_shape(value)
 	if not shape_ok then
@@ -1025,9 +1300,28 @@ local function validate_value(value: JsonValue?, validator: Validator?): (boolea
 	if value == nil then
 		return false, "record data cannot be nil"
 	end
-	local serialized_valid, serialized_message = validate_serialized_size(value)
-	if not serialized_valid then
-		return false, serialized_message
+	local shape_ok, shape_message = validate_value_shape(value, nil, nil, nil, true)
+	if not shape_ok then
+		return false, shape_message
+	end
+	local safe_value_ok, safe_value = pcall(function()
+		local encoded_value = encode_non_finite_numbers(value)
+		return encoded_value
+	end)
+	if not safe_value_ok then
+		return false, "value could not be encoded for JSON persistence"
+	end
+
+	-- The original value's shape was already validated. The encoded copy only
+	-- replaces non-finite numbers with zero, so avoid a second full tree walk.
+	local encoded_ok, serialized = pcall(function()
+		return HttpService:JSONEncode(safe_value)
+	end)
+	if not encoded_ok or type(serialized) ~= "string" then
+		return false, "value is not JSON-encodable"
+	end
+	if #serialized > MAX_DATASTORE_BYTES then
+		return false, ("serialized value exceeds the %d byte DataStore limit"):format(MAX_DATASTORE_BYTES)
 	end
 	if validator ~= nil then
 		local completed, accepted, message = run_validator(validator, value)
@@ -1232,7 +1526,12 @@ local function get_table_child(value: JsonValue?, key: string | number): JsonVal
 end
 
 local function diff_change_events(events: { ChangeEvent }, old_value: JsonValue?, new_value: JsonValue?, path: { string }, operation_id: string, sequence: number, kind: string): boolean
-	if old_value == new_value then
+	if old_value == new_value
+		or (type(old_value) == "number"
+			and type(new_value) == "number"
+			and math.isnan(old_value)
+			and math.isnan(new_value))
+	then
 		return true
 	end
 	if type(old_value) == "table" and type(new_value) == "table" then
@@ -1562,7 +1861,8 @@ local function backend_update(backend: Backend, transform: UpdateTransform, dead
 		if not metadata_ok then
 			return nil, nil, "validation", metadata_error
 		end
-		local value = copy_value(new_value)
+		local stored_new_value = encode_backend_update_value(new_value)
+		local value = copy_value(stored_new_value)
 		if value == nil then
 			return nil, nil, "validation", "updated value is invalid"
 		end
@@ -1595,7 +1895,7 @@ local function backend_update(backend: Backend, transform: UpdateTransform, dead
 		return store:UpdateAsync(backend.key, function(raw, key_info)
 			local info = backend_info_from_key_info(key_info)
 			local new_value, user_ids, metadata = transform(raw, info)
-			return new_value, user_ids, metadata
+			return encode_backend_update_value(new_value), user_ids, metadata
 		end)
 	end)
 	release_slot()
@@ -1718,6 +2018,7 @@ local function parse_envelope(raw: unknown): (Envelope?, string?, boolean)
 	local updated_at = get_string_field(raw, "updated_at")
 	local write_id = get_string_field(raw, "write_id")
 	local raw_data = get_string_field(raw, "data")
+	local raw_non_finite_numbers = get_string_field(raw, "non_finite_numbers")
 	local data: JsonValue? = nil
 
 	if raw_data ~= nil then
@@ -1809,6 +2110,9 @@ local function parse_envelope(raw: unknown): (Envelope?, string?, boolean)
 	end
 	if implementation_version > IMPLEMENTATION_VERSION then
 		return nil, "future implementation version", false
+	end
+	if implementation_version >= 2 and raw_non_finite_numbers == nil then
+		return nil, "version 2 envelope is missing non-finite number metadata", false
 	end
 	if implementation_version < 1 then
 		return nil, "unsupported implementation version", false
@@ -1939,6 +2243,21 @@ local function parse_envelope(raw: unknown): (Envelope?, string?, boolean)
 	if session ~= nil and session.generation ~= fencing_generation then
 		return nil, "session generation does not match fencing generation", false
 	end
+	local restored_data = data
+	if raw_non_finite_numbers ~= nil then
+		if data == nil then
+			if type(raw_non_finite_numbers) ~= "table" or next(raw_non_finite_numbers) ~= nil then
+				return nil, "tombstoned envelope has invalid non-finite number metadata", false
+			end
+		else
+			local decoded, decode_error = restore_non_finite_numbers(data, raw_non_finite_numbers)
+			if decoded == nil then
+				return nil, decode_error or "invalid non-finite number metadata", false
+			end
+			restored_data = decoded
+		end
+	end
+
 	return {
 		implementation_version = IMPLEMENTATION_VERSION,
 		schema_version = schema_version,
@@ -1946,7 +2265,7 @@ local function parse_envelope(raw: unknown): (Envelope?, string?, boolean)
 		fencing_generation = fencing_generation,
 		created_at = created_at,
 		updated_at = updated_at,
-		data = data,
+		data = restored_data,
 		user_ids = ids,
 		tombstone = tombstone,
 		session = session,
@@ -2072,7 +2391,7 @@ local function snapshot_from_envelope(key: string, envelope: Envelope, info: Bac
 end
 
 local function validate_envelope(envelope: Envelope): (boolean, string?)
-	return validate_serialized_size(envelope)
+	return validate_serialized_size(encode_envelope_for_storage(envelope))
 end
 
 local function decode_legacy_read(raw: unknown, decoder: LegacyDecoder?): (Envelope?, string?)
@@ -3838,6 +4157,13 @@ local function data_values_equal(left: JsonValue?, right: JsonValue?, depth: num
 		return false
 	end
 	if left == right then
+		return true
+	end
+	if type(left) == "number"
+		and type(right) == "number"
+		and math.isnan(left)
+		and math.isnan(right)
+	then
 		return true
 	end
 	if left == nil or right == nil then

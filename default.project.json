@@ -6,6 +6,12 @@
       "$className": "ServerScriptService",
       "RecordStore": {
         "$path": "src/RecordStore.luau"
+      },
+      "PlayerDataCore": {
+        "$path": "src/PlayerDataCore.luau"
+      },
+      "IntegerInfinityValue": {
+        "$path": "src/IntegerInfinityValue.luau"
       }
     }
   }

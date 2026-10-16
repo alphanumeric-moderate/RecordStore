@@ -7,8 +7,20 @@
       "RecordStore": {
         "$path": "src/RecordStore.luau"
       },
+      "IntegerInfinityValue": {
+        "$path": "src/IntegerInfinityValue.luau"
+      },
+      "PlayerDataCore": {
+        "$path": "src/PlayerDataCore.luau"
+      },
       "RecordStoreCompatibilityRegression": {
         "$path": "tests/RecordStore_OpenCorrupt_CompatibilityRegression.server.luau"
+      },
+      "RecordStoreNonFiniteNumbersRegression": {
+        "$path": "tests/RecordStore_NonFiniteNumbersRegression.server.luau"
+      },
+      "IntegerInfinityValueRegression": {
+        "$path": "tests/IntegerInfinityValueRegression.server.luau"
       }
     }
   }
