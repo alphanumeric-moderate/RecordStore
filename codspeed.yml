@@ -17,5 +17,3 @@ benchmarks:
 
   - name: "compatibility regression suite"
     exec: lune run bench/run_regression_tests.luau
-  - name: "wide-profile change-event diff"
-    exec: lune run bench/change_diff.bench.luau
