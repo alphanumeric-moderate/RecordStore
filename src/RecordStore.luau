@@ -1018,14 +1018,14 @@ local function encode_non_finite_numbers(
 	local markers: { NonFiniteNumberMarker } = {}
 	local path: { NonFinitePathSegment } = {}
 
-	local function encode(current: JsonValue, depth: number): JsonValue
+	local function encode(current: JsonValue, depth: number): (JsonValue, boolean)
 		if depth > 64 then
 			error("value exceeds the maximum nesting depth")
 		end
 
 		if type(current) == "number" then
 			if math.isfinite(current) then
-				return current
+				return current, false
 			end
 
 			local kind: NonFiniteNumberKind
@@ -1041,52 +1041,52 @@ local function encode_non_finite_numbers(
 				path = table.clone(path),
 				kind = kind,
 			}
-			return 0
+			return 0, true
 		end
 
-		if typeof(current) == "buffer" then
-			return buffer.fromstring(buffer.tostring(current))
-		end
-
-		if type(current) ~= "table" then
-			return current
+		if typeof(current) == "buffer" or type(current) ~= "table" then
+			return current, false
 		end
 
 		local source = current :: { [string | number]: JsonValue }
-		local dictionary = false
-		for key in source do
-			if type(key) == "string" then
-				dictionary = true
-				break
-			end
-		end
+		local dictionary: boolean? = nil
+		local result: { [string | number]: JsonValue }? = nil
 
-		if dictionary then
-			local result: { [string]: JsonValue } = {}
-			for key, child in source do
-				if type(key) ~= "string" then
-					error("value contains mixed table keys")
-				end
-				path[#path + 1] = { kind = "string", key = key }
-				result[key] = encode(child, depth + 1)
-				path[#path] = nil
-			end
-			return result
-		end
-
-		local result: { [number]: JsonValue } = {}
 		for key, child in source do
-			if type(key) ~= "number" then
+			local key_type = type(key)
+			if key_type ~= "string" and key_type ~= "number" then
 				error("value contains an unsupported table key")
 			end
-			path[#path + 1] = { kind = "number", key = key }
-			result[key] = encode(child, depth + 1)
+
+			local is_dictionary_key = key_type == "string"
+			if dictionary == nil then
+				dictionary = is_dictionary_key
+			elseif dictionary ~= is_dictionary_key then
+				error("value contains mixed table keys")
+			end
+
+			path[#path + 1] = if is_dictionary_key
+				then { kind = "string", key = key :: string }
+				else { kind = "number", key = key :: number }
+			local encoded_child, child_changed = encode(child, depth + 1)
 			path[#path] = nil
+
+			if child_changed then
+				if result == nil then
+					result = table.clone(source)
+				end
+				result[key] = encoded_child
+			end
 		end
-		return result
+
+		if result == nil then
+			return current, false
+		end
+		return result, true
 	end
 
-	return encode(value, 1), markers
+	local encoded, _changed = encode(value, 1)
+	return encoded, markers
 end
 
 local function restore_non_finite_numbers(
@@ -1305,9 +1305,17 @@ local function validate_value(value: JsonValue?, validator: Validator?): (boolea
 	if not safe_value_ok then
 		return false, "value could not be encoded for JSON persistence"
 	end
-	local serialized_valid, serialized_message = validate_serialized_size(safe_value)
-	if not serialized_valid then
-		return false, serialized_message
+
+	-- The original value's shape was already validated. The encoded copy only
+	-- replaces non-finite numbers with zero, so avoid a second full tree walk.
+	local encoded_ok, serialized = pcall(function()
+		return HttpService:JSONEncode(safe_value)
+	end)
+	if not encoded_ok or type(serialized) ~= "string" then
+		return false, "value is not JSON-encodable"
+	end
+	if #serialized > MAX_DATASTORE_BYTES then
+		return false, ("serialized value exceeds the %d byte DataStore limit"):format(MAX_DATASTORE_BYTES)
 	end
 	if validator ~= nil then
 		local completed, accepted, message = run_validator(validator, value)
