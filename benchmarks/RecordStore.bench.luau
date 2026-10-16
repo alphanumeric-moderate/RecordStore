@@ -72,9 +72,8 @@ globals.task = {
 	end,
 }
 
-local variant = process.args[1] or "optimized"
-assert(variant == "baseline" or variant == "optimized", "variant must be baseline or optimized")
-local module_path = if variant == "baseline" then "./RecordStore.preoptimization" else "../src/RecordStore"
+local variant = "optimized"
+local module_path = "../src/RecordStore"
 local RecordStore = require(module_path)
 local iterations = 3000
 local inventory = {}
