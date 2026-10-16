@@ -1,0 +1,8 @@
+$schema: https://raw.githubusercontent.com/CodSpeedHQ/codspeed/refs/heads/main/schemas/codspeed.schema.json
+
+benchmarks:
+  - name: "Reconcile nested profile baseline"
+    exec: lune run bench/reconcile_baseline.bench.luau
+
+  - name: "Reconcile nested profile optimized"
+    exec: lune run bench/reconcile.bench.luau

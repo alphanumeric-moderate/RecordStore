@@ -4414,18 +4414,16 @@ local function reconcile(self: Record, template: JsonValue): (ResultCode, string
 			return target, false
 		end
 		if type(key) == "string" then
-			local result: { [string]: JsonValue } = {}
-			for child_key, child_value in target do
+			for child_key in target do
 				if type(child_key) ~= "string" then
 					return target, false
 				end
-				result[child_key] = child_value
 			end
-			result[key] = value
-			return result, true
+			local target_table = target :: { [string]: JsonValue }
+			target_table[key] = value
+			return target, true
 		end
-		local result: { JsonValue } = {}
-		for child_key, child_value in target do
+		for child_key in target do
 			if type(child_key) ~= "number"
 				or not math.isfinite(child_key)
 				or math.floor(child_key) ~= child_key
@@ -4433,20 +4431,17 @@ local function reconcile(self: Record, template: JsonValue): (ResultCode, string
 			then
 				return target, false
 			end
-			result[child_key] = child_value
 		end
-		result[key] = value
-		return result, true
+		local target_table = target :: { [number]: JsonValue }
+		target_table[key] = value
+		return target, true
 	end
 
 	local function reconcile_value(target: JsonValue, target_template: JsonValue): (JsonValue, boolean)
 		if type(target) ~= "table" or type(target_template) ~= "table" then
 			return target, false
 		end
-		local result = copy_value(target)
-		if result == nil or type(result) ~= "table" then
-			return target, false
-		end
+		local result = target
 		local changed = false
 		for key, template_child in target_template do
 			if type(key) ~= "string" and type(key) ~= "number" then
@@ -4460,13 +4455,9 @@ local function reconcile(self: Record, template: JsonValue): (ResultCode, string
 					changed = true
 				end
 			elseif type(current) == "table" and type(template_child) == "table" then
-				local nested, nested_changed = reconcile_value(current, template_child)
-				local updated, updated_ok = set_table_child(result, key, nested)
-				if updated_ok then
-					result = updated
-					if nested_changed then
-						changed = true
-					end
+				local _, nested_changed = reconcile_value(current, template_child)
+				if nested_changed then
+					changed = true
 				end
 			end
 		end
