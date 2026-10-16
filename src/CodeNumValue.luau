@@ -2,6 +2,7 @@
 --!optimize 2
 -- CodeNumValue: StringValue transport for CodeNum's native, versioned JSON codec.
 
+local HttpService = game:GetService("HttpService")
 local NumberFormatterFactory = require(script.Parent.NumberFormatter)
 
 local CodeNumValue = {}
@@ -68,7 +69,7 @@ local function try_decode_serialized(value: unknown): (boolean, Value?)
     return true, decoded :: Value
 end
 
-local function checked_encode(value: unknown): (string, Value)
+local function checked_encode(value: unknown): string
     local api = resolve_api()
     local serialized = api.encode(value)
     if type(serialized) ~= "string" then
@@ -78,24 +79,11 @@ local function checked_encode(value: unknown): (string, Value)
         error("serialized CodeNum exceeds the safe StringValue limit of 199999 bytes", 2)
     end
 
-    local ok, decoded = try_decode_serialized(serialized)
-    if not ok or decoded == nil then
+    local ok = try_decode_serialized(serialized)
+    if not ok then
         error("CodeNum.encode returned a payload rejected by CodeNum.decode", 2)
     end
-    return serialized, decoded
-end
-
-local function normalize_and_decode(value: unknown): (string, Value)
-    if type(value) == "string" then
-        if #value > MAX_SERIALIZED_LENGTH then
-            error("CodeNum input string exceeds the safe StringValue limit of 199999 bytes", 2)
-        end
-        local ok, decoded = try_decode_serialized(value)
-        if ok and decoded ~= nil then
-            return checked_encode(decoded)
-        end
-    end
-    return checked_encode(value)
+    return serialized
 end
 
 function CodeNumValue.is_serialized(value: unknown): boolean
@@ -104,8 +92,13 @@ function CodeNumValue.is_serialized(value: unknown): boolean
 end
 
 function CodeNumValue.normalize(value: unknown): string
-    local serialized = normalize_and_decode(value)
-    return serialized
+    if type(value) == "string" then
+        local ok, decoded = try_decode_serialized(value)
+        if ok then
+            return checked_encode(decoded)
+        end
+    end
+    return checked_encode(value)
 end
 
 function CodeNumValue.is_value(value: unknown): boolean
@@ -127,25 +120,23 @@ function CodeNumValue.decode(serialized: string): Value
     return decoded :: Value
 end
 
-local function decode_for_format(value: unknown): Value
-    if type(value) == "string" then
-        if #value > MAX_SERIALIZED_LENGTH then
-            error("CodeNum input string exceeds the safe StringValue limit of 199999 bytes", 2)
-        end
-        local ok, decoded = try_decode_serialized(value)
-        if ok and decoded ~= nil then
-            return decoded
-        end
-    end
-    local _serialized, decoded = checked_encode(value)
-    return decoded
-end
-
 function CodeNumValue.format(value: unknown, options: NumberFormatterFactory.Options?): string
-    -- Formatting only needs a decoded node; don't re-encode an already-valid payload.
-    local decoded = decode_for_format(value)
+    local serialized = CodeNumValue.normalize(value)
     local api = resolve_api()
-    local node = decoded :: { [string]: unknown }
+    local decoded = api.decode(serialized)
+
+    local json_ok, raw_envelope = pcall(function()
+        return HttpService:JSONDecode(serialized)
+    end)
+    if not json_ok or type(raw_envelope) ~= "table" then
+        return api.toString(decoded)
+    end
+
+    local envelope = raw_envelope :: { [string]: unknown }
+    if type(envelope.value) ~= "table" then
+        return api.toString(decoded)
+    end
+    local node = envelope.value :: { [string]: unknown }
 
     if node.kind == "finite" and type(node.value) == "number" then
         return NumberFormatterFactory.format(node.value, options)

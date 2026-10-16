@@ -135,21 +135,16 @@ end
 
 local function normalize_integer_infinity(
 	value: number,
-	rounding: IntegerInfinityRounding,
-	factory: typeof(IntegerInfinityValueFactory)?
+	rounding: IntegerInfinityRounding
 ): number
-	return (factory or IntegerInfinityValueFactory).normalize(value, rounding)
+	return IntegerInfinityValueFactory.normalize(value, rounding)
 end
 
 local function numeric_values_equal(left: number, right: number): boolean
 	return left == right or (math.isnan(left) and math.isnan(right))
 end
 
-local function field_value_is_valid(
-	field: DataField,
-	value: DataValue?,
-	code_num_factory: typeof(CodeNumValueFactory)?
-): boolean
+local function field_value_is_valid(field: DataField, value: DataValue?): boolean
 	if field.class_name == "IntValue" then
 		return type(value) == "number" and math.isfinite(value) and math.floor(value) == value
 	elseif field.class_name == "NumberValue" then
@@ -161,40 +156,29 @@ local function field_value_is_valid(
 	elseif field.class_name == "IntegerInfinityValue" then
 		return type(value) == "number" and (math.isnan(value) or math.isinf(value) or math.floor(value) == value)
 	elseif field.class_name == "CodeNumValue" then
-		return (code_num_factory or CodeNumValueFactory).is_value(value)
+		return CodeNumValueFactory.is_value(value)
 	end
 	return false
 end
 
-local function encode_field_value(
-	field: DataField,
-	value: DataValue,
-	integer_infinity_factory: typeof(IntegerInfinityValueFactory)?,
-	code_num_factory: typeof(CodeNumValueFactory)?
-): DataValue
+local function encode_field_value(field: DataField, value: DataValue): DataValue
 	if field.class_name == "IntegerInfinityValue" and type(value) == "number" then
-		return normalize_integer_infinity(value, field.rounding or "nearest", integer_infinity_factory)
+		return normalize_integer_infinity(value, field.rounding or "nearest")
 	elseif field.class_name == "CodeNumValue" then
-		return (code_num_factory or CodeNumValueFactory).normalize(value)
+		return CodeNumValueFactory.normalize(value)
 	end
 	return value
 end
 
-local function decode_stored_field_value(
-	field: DataField,
-	value: DataValue?,
-	integer_infinity_factory: typeof(IntegerInfinityValueFactory)?,
-	code_num_factory: typeof(CodeNumValueFactory)?
-): (DataValue?, boolean)
+local function decode_stored_field_value(field: DataField, value: DataValue?): (DataValue?, boolean)
 	if field.class_name == "CodeNumValue" then
-		local factory = code_num_factory or CodeNumValueFactory
-		if type(value) ~= "string" or not factory.is_serialized(value) then return nil, false end
-		local normalized = factory.normalize(value)
+		if type(value) ~= "string" or not CodeNumValueFactory.is_serialized(value) then return nil, false end
+		local normalized = CodeNumValueFactory.normalize(value)
 		return normalized, normalized ~= value
 	end
 	if field.class_name == "IntegerInfinityValue" then
 		if type(value) ~= "number" then return nil, false end
-		local normalized = normalize_integer_infinity(value, field.rounding or "nearest", integer_infinity_factory)
+		local normalized = normalize_integer_infinity(value, field.rounding or "nearest")
 		local negative_zero = value == 0 and 1 / value == -math.huge
 		return normalized, not numeric_values_equal(normalized, value) or negative_zero
 	end
@@ -202,36 +186,26 @@ local function decode_stored_field_value(
 	return nil, false
 end
 
-local function normalize_runtime_field_value(
-	field: DataField,
-	value: DataValue?,
-	integer_infinity_factory: typeof(IntegerInfinityValueFactory)?,
-	code_num_factory: typeof(CodeNumValueFactory)?
-): DataValue?
+local function normalize_runtime_field_value(field: DataField, value: DataValue?): DataValue?
 	if field.class_name == "CodeNumValue" then
-		local factory = code_num_factory or CodeNumValueFactory
-		if type(value) ~= "string" or not factory.is_serialized(value) then return nil end
-		return factory.normalize(value)
+		if type(value) ~= "string" or not CodeNumValueFactory.is_serialized(value) then return nil end
+		return CodeNumValueFactory.normalize(value)
 	end
 	if field.class_name == "IntegerInfinityValue" then
 		if type(value) ~= "number" then return nil end
-		return normalize_integer_infinity(value, field.rounding or "nearest", integer_infinity_factory)
+		return normalize_integer_infinity(value, field.rounding or "nearest")
 	end
 	if field_value_is_valid(field, value) then return value end
 	return nil
 end
 
-local function encode_player_data(
-	data: PlayerData,
-	integer_infinity_factory: typeof(IntegerInfinityValueFactory)?,
-	code_num_factory: typeof(CodeNumValueFactory)?
-): PlayerData
+local function encode_player_data(data: PlayerData): PlayerData
 	local result: PlayerData = table.clone(data)
 
 	for key, field in pairs(CONFIG.data) do
 		local value = result[key]
 		if value ~= nil then
-			result[key] = encode_field_value(field, value, integer_infinity_factory, code_num_factory)
+			result[key] = encode_field_value(field, value)
 		end
 	end
 
@@ -331,10 +305,7 @@ local function resolve_key(player: Player): string
 	return CONFIG.key_prefix .. tostring(player.UserId)
 end
 
-local function validate_player_data(
-	value: RecordStore.JsonValue,
-	code_num_factory: typeof(CodeNumValueFactory)?
-): (boolean, string?)
+local function validate_player_data(value: RecordStore.JsonValue): (boolean, string?)
 	if type(value) ~= "table" then return false, "player data must be an object" end
 	for key, item in value do
 		if type(key) ~= "string" then return false, "player data keys must be strings" end
@@ -344,7 +315,7 @@ local function validate_player_data(
 		end
 		local field = CONFIG.data[key]
 		if field ~= nil and field.class_name == "CodeNumValue" then
-			if item_type ~= "string" or not (code_num_factory or CodeNumValueFactory).is_serialized(item) then
+			if item_type ~= "string" or not CodeNumValueFactory.is_serialized(item) then
 				return false, ("player data.%s must contain a valid serialized CodeNum value"):format(key)
 			end
 		end
@@ -352,11 +323,7 @@ local function validate_player_data(
 	return true, nil
 end
 
-local function normalize_player_data(
-	value: RecordStore.JsonValue?,
-	integer_infinity_factory: typeof(IntegerInfinityValueFactory)?,
-	code_num_factory: typeof(CodeNumValueFactory)?
-): (PlayerData?, boolean)
+local function normalize_player_data(value: RecordStore.JsonValue?): (PlayerData?, boolean)
 	if type(value) ~= "table" then return nil, false end
 	local result: PlayerData = {}
 	local changed = false
@@ -368,14 +335,9 @@ local function normalize_player_data(
 		else return nil, false end
 	end
 	for key, field in pairs(CONFIG.data) do
-		local normalized_value, value_changed = decode_stored_field_value(
-			field,
-			result[key],
-			integer_infinity_factory,
-			code_num_factory
-		)
+		local normalized_value, value_changed = decode_stored_field_value(field, result[key])
 		if normalized_value == nil then
-			result[key] = encode_field_value(field, field.default, integer_infinity_factory, code_num_factory)
+			result[key] = encode_field_value(field, field.default)
 			changed = true
 		else
 			result[key] = normalized_value
@@ -651,16 +613,14 @@ local function new(dependencies: Dependencies?): Controller
 			table.clear(pending)
 			local call_ok, result, message = pcall(function()
 				return record:Update(function(current)
-					local data = normalize_player_data(current, integer_infinity_value_factory, code_num_value_factory)
+					local data = normalize_player_data(current)
 					if data == nil then
 						return nil
 					end
 					for key, value in pairs(batch) do
 						data[key] = value
 					end
-					-- normalize_player_data and queue_value_change already canonicalize
-					-- every configured field; encoding again would re-parse CodeNum JSON.
-					return data
+					return encode_player_data(data)
 				end)
 			end)
 
@@ -719,7 +679,7 @@ local function new(dependencies: Dependencies?): Controller
 			return
 		end
 
-		local normalized_value = normalize_runtime_field_value(field, value, integer_infinity_value_factory, code_num_value_factory)
+		local normalized_value = normalize_runtime_field_value(field, value)
 		if normalized_value == nil then
 			warn("[PlayerData]", record.Key, "rejected an invalid value change", key)
 			return
@@ -808,12 +768,12 @@ local function new(dependencies: Dependencies?): Controller
 			end
 
 			local stored_value = data[definition.key]
-			if not field_value_is_valid(field, stored_value, code_num_value_factory) then
+			if not field_value_is_valid(field, stored_value) then
 				continue
 			end
 
 			if field.class_name == "CodeNumValue" then
-				if type(stored_value) ~= "string" or not code_num_value_factory.is_serialized(stored_value) then continue end
+				if type(stored_value) ~= "string" or not CodeNumValueFactory.is_serialized(stored_value) then continue end
 				local value_folder = player_data_values
 				if value_folder == nil then error("CodeNum leaderstats require the PlayerDataValues folder") end
 				local backing_value = create_codenum_backing_value(player, record, definition.key, stored_value)
@@ -825,7 +785,7 @@ local function new(dependencies: Dependencies?): Controller
 					if ok and display_value.Value ~= expected then display_value.Value = expected end
 				end)
 				backing_value.Changed:Connect(function(serialized_value: string)
-					if code_num_value_factory.is_serialized(serialized_value) then
+					if CodeNumValueFactory.is_serialized(serialized_value) then
 						display_value.Value = code_num_value_factory.format(serialized_value, definition.number_format)
 					end
 				end)
@@ -980,7 +940,7 @@ local function new(dependencies: Dependencies?): Controller
 			for key, field in pairs(CONFIG.data) do
 				if field.class_name == "CodeNumValue" and not displayed_codenum_keys[key] then
 					local stored_value = data[key]
-					if type(stored_value) == "string" and code_num_value_factory.is_serialized(stored_value) then
+					if type(stored_value) == "string" and CodeNumValueFactory.is_serialized(stored_value) then
 						local backing_value = create_codenum_backing_value(
 							player,
 							record,
@@ -1030,9 +990,7 @@ local function new(dependencies: Dependencies?): Controller
 				shutdown_attempts = CONFIG.shutdown_attempts,
 				budget_wait = CONFIG.budget_wait,
 				user_ids = { player.UserId },
-				validator = function(value: RecordStore.JsonValue): (boolean, string?)
-					return validate_player_data(value, code_num_value_factory)
-				end,
+				validator = validate_player_data,
 				on_event = function(event, key, result, message)
 					if should_warn_result(result) then
 						warn("[RecordStore]", event, key, result, message or "")
@@ -1128,13 +1086,7 @@ local function new(dependencies: Dependencies?): Controller
 			return
 		end
 
-		local normalize_call_ok, normalized_or_error, changed_or_nil = pcall(function()
-			return normalize_player_data(record:Get(), integer_infinity_value_factory, code_num_value_factory)
-		end)
-		local normalized: PlayerData? = if normalize_call_ok then normalized_or_error :: PlayerData? else nil
-		local changed = normalize_call_ok and changed_or_nil == true
-		local normalization_error = if normalize_call_ok then nil else tostring(normalized_or_error)
-
+		local normalized, changed = normalize_player_data(record:Get())
 		if normalized == nil then
 			local should_kick = not shutting_down and not cancelled_loading[player] and player.Parent == players
 			loading[player] = nil
@@ -1145,7 +1097,7 @@ local function new(dependencies: Dependencies?): Controller
 					"normalize",
 					"validation",
 					1,
-					normalization_error or "loaded value does not match the configured PlayerData schema",
+					"loaded value does not match the configured PlayerData schema",
 					record
 				)
 				set_load_status(player, "Failed")
@@ -1168,8 +1120,7 @@ local function new(dependencies: Dependencies?): Controller
 				update_attempts = attempt
 				local update_call_ok, returned_result, returned_message = pcall(function()
 					return record:Update(function()
-						-- normalized already contains the canonical persisted representation.
-				return normalized
+						return encode_player_data(normalized)
 					end)
 				end)
 				if update_call_ok then
@@ -1249,8 +1200,7 @@ local function new(dependencies: Dependencies?): Controller
 
 	local function remove_player(player: Player, shared_deadline: number?)
 		if removing[player] then
-			local duplicate_deadline = shared_deadline or (os.clock() + CONFIG.operation_deadline)
-			while removing[player] and os.clock() < duplicate_deadline do
+			while removing[player] do
 				scheduler.wait(0.05)
 			end
 			return
