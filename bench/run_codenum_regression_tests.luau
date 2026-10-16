@@ -69,6 +69,13 @@ end
 
 assert(CodeNum.tryToNumber(CodeNum.new(math.huge)) == math.huge, "positive infinity conversion failed")
 assert(CodeNum.tryToNumber(CodeNum.new(-math.huge)) == -math.huge, "negative infinity conversion failed")
+local minimum_subnormal = tonumber("5e-324")
+local positive_subnormal = CodeNum.tryToNumber(CodeNum.scientific(5, "-324"))
+local negative_subnormal = CodeNum.tryToNumber(CodeNum.scientific(5, "-324", -1))
+assert(minimum_subnormal ~= nil and minimum_subnormal > 0, "runtime cannot represent a binary64 subnormal for this test")
+assert(positive_subnormal == minimum_subnormal, "5e-324 must convert to the minimum positive subnormal")
+assert(negative_subnormal == -minimum_subnormal, "-5e-324 must convert to the minimum negative subnormal")
+assert(CodeNum.tryToNumber(CodeNum.scientific(1, "-324")) == 0, "1e-324 should round to zero")
 assert(CodeNum.equals({}, 1) == false, "equals should reject invalid inputs without throwing")
 assert(not pcall(function() CodeNum.decode('{"schema":"CodeNum","version":999,"value":{}}') end),
     "future codec version was accepted")
