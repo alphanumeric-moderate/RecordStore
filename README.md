@@ -51,7 +51,7 @@ The repository also includes:
 - `src/PlayerDataCore.luau`: a configurable player session, leaderstats, persistence, retry, and shutdown controller.
 - `src/IntegerInfinityValue.luau`: a `NumberValue` factory that rounds finite values to integers while preserving positive infinity, negative infinity, and NaN. The default `kills` field uses this type so non-finite values are not silently replaced with zero.
 - `src/NumberFormatter.luau`: a display formatter for native Luau numbers. Formatting never changes stored values.
-- `src/EternityNumValue.luau`: a JSON-safe adapter for the classic FoundForces EternityNum three-number tuple. It persists the triplet as a regular array and provides `get`/`set` helpers for a replicated StringValue backing instance.
+- `src/CodeNumValue.luau`: an adapter for your CodeNum module. It persists CodeNum's own versioned `encode`/`decode` JSON format and provides `get`/`set` helpers for a replicated StringValue backing instance.
 - `examples/PlayerData.server.luau`: a standard Script that starts the controller and shuts it down from `BindToClose`.
 
 ### Number formatting
@@ -62,10 +62,10 @@ Use the formatter directly when you only need display text:
 local NumberFormatter = require(game:GetService("ServerScriptService"):WaitForChild("NumberFormatter"))
 
 print(NumberFormatter.format(1_250)) -- 1.25K
-print(NumberFormatter.format(1_000_000_000_000)) -- 1T
+print(NumberFormatter.format(1_000_000_000_000)) -- 1U
 ```
 
-The default `PlayerDataCore` configuration abbreviates `Kills` using `define_leaderstat("kills", "Kills", { decimals = 2 })`. Large values display as `1K`, `1.25M`, `1B`, `1T`, and so on. Other numeric leaderstats can opt in by passing `{ decimals = 2 }` as the third argument to `define_leaderstat` in `src/PlayerDataCore.luau`.
+The default `PlayerDataCore` configuration abbreviates `Kills` using `define_leaderstat("kills", "Kills", { decimals = 2 })`. Large values display as `1K`, `1.25M`, `1B`, `1U`, and so on. Other numeric leaderstats can opt in by passing `{ decimals = 2 }` as the third argument to `define_leaderstat` in `src/PlayerDataCore.luau`.
 
 A formatted leaderboard entry is a display-only `StringValue`. Its numeric backing value is placed at `player.PlayerDataValues.kills`, and that backing value remains the value persisted by PlayerDataCore. Gameplay scripts must update `player.PlayerDataValues.kills.Value` instead of `player.leaderstats.Kills.Value`, because the leaderboard entry contains text. The `PlayerDataValues` folder name is reserved by this feature.
 
@@ -79,36 +79,40 @@ rojo build examples.project.json -o RecordStore-PlayerDataExample.rbxlx
 
 The included `PlayerDataCore` example uses the store name `PlayerData_Test1`. Change `CONFIG.store_name` in `src/PlayerDataCore.luau` before using it for a live production dataset. Review the config's keys, defaults, schema version, and leaderboard values before publishing.
 
-### EternityNum support
+### CodeNum support
 
-PlayerDataCore's optional `EternityNumValue` field supports the classic FoundForces EternityNum representation, a three-number array `{ sign, layer, magnitude }`. RecordStore persists the tuple as a regular JSON-safe array instead of attempting to convert the enormous value to a native Luau number.
+PlayerDataCore's optional `CodeNumValue` field stores values in your CodeNum module's canonical `encode` / `decode` JSON format (format version 2 in the supplied module). Exact decimal integers, scientific values, special values, hyperoperations, unevaluated expressions, and unary calls are serialized without coercion to native numbers.
 
-Configure a field and a formatted leaderboard entry in `src/PlayerDataCore.luau`:
+Place your CodeNum 0.2.0-preview.1 ModuleScript in `ReplicatedStorage` as `CodeNum`. It must expose `encode(value)`, `decode(serialized)`, and `toString(value)`. The CodeNum module is supplied by your project rather than copied into RecordStore.
+
+Configure a field and optional leaderboard entry in `src/PlayerDataCore.luau`:
 
 ```lua
 -- In CONFIG.data:
-cash = define_data_field("EternityNumValue", { 1, 0, 10 }),
+cash = define_data_field("CodeNumValue", 0),
 
 -- In CONFIG.leaderstats.values:
 define_leaderstat("cash", "Cash", { decimals = 2 }),
 ```
 
-Place the classic EternityNum ModuleScript in `ReplicatedStorage` as `EternityNum`. PlayerDataCore calls its `short(value, decimals?)` function for leaderboard display and passes the configured `decimals` option as the second argument. Alternatively, inject a compatible `EternityNum` module in `PlayerDataCore.new({ EternityNum = ... })`.
-
-The encoded StringValue backing instance is at `player.PlayerDataValues.cash`. On the server, use the helper module rather than writing the serialized string directly:
+The leaderboard uses a display-only `StringValue`; its serialized backing value is `player.PlayerDataValues.cash`. Update it on the server:
 
 ```lua
 local ServerScriptService = game:GetService("ServerScriptService")
-local EternityNumValue = require(ServerScriptService:WaitForChild("EternityNumValue"))
-local EternityNum = require(game:GetService("ReplicatedStorage"):WaitForChild("EternityNum"))
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local CodeNumValue = require(ServerScriptService:WaitForChild("CodeNumValue"))
+local CodeNum = require(ReplicatedStorage:WaitForChild("CodeNum"))
 
 local cash = player.PlayerDataValues:WaitForChild("cash")
-local current = EternityNumValue.get(cash)
-local increased = EternityNum.add(current, EternityNum.convert(100))
-EternityNumValue.set(cash, increased)
+local current = CodeNumValue.get(cash)
+CodeNumValue.set(cash, CodeNum.add(current, CodeNum.integer("100")))
 ```
 
-This adapter targets the classic three-number EternityNum representation. EternityNum2 or other forks with a different tuple format must be verified separately. Live PlayerDataCore integration still needs a Roblox Studio playtest.
+RecordStore persists CodeNum's serialized JSON string, not a metatable-backed node or an EternityNum triplet. The StringValue transport is limited to 200,000 characters. Exact integers and scientific nodes use NumberFormatter's custom suffix sequence; hyperoperations/expressions fall back to `CodeNum.toString()` because their decimal magnitude may not be provable.
+
+### Number formatting
+
+The sequence is `K, M, B`, followed by your `first`, `second`, `third`, and `mult` suffix groups. Exact CodeNum integer/scientific values use this sequence without converting the entire value to binary64. Once the suffix table runs out, values display in scientific notation.
 
 ## Rojo
 

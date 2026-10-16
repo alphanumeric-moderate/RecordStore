@@ -9,7 +9,7 @@ for _, path in {
 	"src/PlayerDataCore.luau",
 	"src/IntegerInfinityValue.luau",
 	"src/NumberFormatter.luau",
-	"src/EternityNumValue.luau",
+	"src/CodeNumValue.luau",
 	"examples/PlayerData.server.luau",
 	"tests/IntegerInfinityValueRegression.server.luau",
 	"tests/NumberFormatterRegression.server.luau",
@@ -32,21 +32,6 @@ assert(math.isnan(IntegerInfinityValue.normalize(0 / 0, "nearest")), "NaN was no
 assert(IntegerInfinityValue.normalize(17.4, "nearest") == 17, "finite rounding changed")
 assert(IntegerInfinityValue.normalize(-17.6, "nearest") == -18, "negative finite rounding changed")
 
-local eternity_num_value_chunk = luau.load(fs.readFile("src/EternityNumValue.luau"), {
-	debugName = "EternityNumValue",
-	environment = Shim.environment,
-})
-local EternityNumValue = eternity_num_value_chunk()
-local eternity_value = { 1, 1, 11 }
-assert(EternityNumValue.is_valid(eternity_value), "valid EternityNum triplet rejected")
-assert(
-	EternityNumValue.equals(EternityNumValue.decode(EternityNumValue.encode(eternity_value)), eternity_value),
-	"EternityNum JSON round-trip changed the value"
-)
-assert(not EternityNumValue.is_valid({ 1, 0, math.huge }), "non-finite component was accepted")
-assert(not EternityNumValue.is_valid({ 2, 0, 10 }), "invalid sign was accepted")
-assert(not EternityNumValue.is_valid({ 1, -1, 10 }), "negative layer was accepted")
-
 local number_formatter_chunk = luau.load(fs.readFile("src/NumberFormatter.luau"), {
 	debugName = "NumberFormatter",
 })
@@ -57,9 +42,9 @@ assert(NumberFormatter.format(1250) == "1.25K", "decimal abbreviation failed")
 assert(NumberFormatter.format(999_999) == "999.99K", "near-million formatting changed")
 assert(NumberFormatter.format(1_000_000) == "1M", "million abbreviation failed")
 assert(NumberFormatter.format(1_000_000_000) == "1B", "billion abbreviation failed")
-assert(NumberFormatter.format(1_000_000_000_000) == "1T", "trillion rollover failed")
+assert(NumberFormatter.format(1_000_000_000_000) == "1U", "custom suffix rollover failed")
 assert(NumberFormatter.format(-1_500_000_000) == "-1.5B", "negative number formatting failed")
-assert(NumberFormatter.format(1_000_000_000_000_000) == "1Qa", "quadrillion abbreviation failed")
+assert(NumberFormatter.format(1_000_000_000_000_000) == "1D", "custom suffix abbreviation failed")
 assert(NumberFormatter.format(math.huge) == "∞", "infinity formatting failed")
 assert(NumberFormatter.format(-math.huge) == "-∞", "negative infinity formatting failed")
 assert(NumberFormatter.format(0 / 0) == "NaN", "NaN formatting failed")
@@ -72,7 +57,10 @@ assert(
 	NumberFormatter.format(1_200_000, { decimals = 3 }) == "1.2M",
 	"trailing zero trimming failed"
 )
-assert(NumberFormatter.format(1e36) == "1.00e+36", "large-number scientific fallback failed")
+assert(NumberFormatter.format(1e36) == "1No", "custom suffix sequence failed")
+assert(NumberFormatter.formatInteger("123456789012345678901234567890123456789") == "123.45No", "exact integer suffix failed")
+assert(NumberFormatter.formatScientific(1, 1.25, "12") == "1.25U", "scientific suffix failed")
+assert(#NumberFormatter.getSuffixes() == 132, "suffix sequence length changed")
 local invalid_options_ok = pcall(function()
 	NumberFormatter.format(1, { decimals = 7 })
 end)
@@ -80,5 +68,5 @@ assert(not invalid_options_ok, "invalid decimal precision was accepted")
 
 Shim.run_script("tests/RecordStore_OpenCorrupt_CompatibilityRegression.server.luau")
 Shim.run_script("tests/RecordStore_NonFiniteNumbersRegression.server.luau")
-Shim.run_script("tests/RecordStore_EternityNumRegression.server.luau")
+Shim.run_script("tests/RecordStore_CodeNumRegression.server.luau")
 Shim.close()

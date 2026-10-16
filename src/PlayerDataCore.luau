@@ -4,15 +4,14 @@
 -- RecordStore persists non-finite numbers using its versioned envelope encoding.
 
 local Players = game:GetService("Players")
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local RecordStore = require(script.Parent.RecordStore)
 local IntegerInfinityValueFactory = require(script.Parent.IntegerInfinityValue)
 local NumberFormatterFactory = require(script.Parent.NumberFormatter)
-local EternityNumValueFactory = require(script.Parent.EternityNumValue)
+local CodeNumValueFactory = require(script.Parent.CodeNumValue)
 
 type Scalar = string | number | boolean
-type DataValue = Scalar | EternityNumValueFactory.Value
+type DataValue = Scalar
 type PlayerData = {
 	[string]: DataValue,
 }
@@ -24,7 +23,7 @@ type ValueClass =
 	| "StringValue"
 	| "BoolValue"
 	| "IntegerInfinityValue"
-	| "EternityNumValue"
+	| "CodeNumValue"
 
 type DataField = {
 	class_name: ValueClass,
@@ -38,17 +37,12 @@ type Leaderstat = {
 	number_format: NumberFormatterFactory.Options?,
 }
 
-type EternityNumAPI = {
-	short: (value: EternityNumValueFactory.Value, decimals: number?) -> string,
-}
-
 export type Dependencies = {
 	Players: typeof(Players)?,
 	RecordStore: typeof(RecordStore)?,
 	IntegerInfinityValue: typeof(IntegerInfinityValueFactory)?,
 	NumberFormatter: typeof(NumberFormatterFactory)?,
-	EternityNumValue: typeof(EternityNumValueFactory)?,
-	EternityNum: EternityNumAPI?,
+	CodeNumValue: typeof(CodeNumValueFactory)?,
 	new_instance: ((string) -> Instance)?,
 	task: typeof(task)?,
 }
@@ -113,7 +107,7 @@ local CONFIG = {
 
 		-- Examples:
 		-- balance = define_data_field("IntegerInfinityValue", 0, "nearest"),
-		-- cash = define_data_field("EternityNumValue", { 1, 0, 10 }),
+		-- cash = define_data_field("CodeNumValue", 0),
 	},
 
 	leaderstats = {
@@ -152,9 +146,7 @@ end
 
 local function field_value_is_valid(field: DataField, value: DataValue?): boolean
 	if field.class_name == "IntValue" then
-		return type(value) == "number"
-			and math.isfinite(value)
-			and math.floor(value) == value
+		return type(value) == "number" and math.isfinite(value) and math.floor(value) == value
 	elseif field.class_name == "NumberValue" then
 		return type(value) == "number"
 	elseif field.class_name == "StringValue" then
@@ -162,81 +154,48 @@ local function field_value_is_valid(field: DataField, value: DataValue?): boolea
 	elseif field.class_name == "BoolValue" then
 		return type(value) == "boolean"
 	elseif field.class_name == "IntegerInfinityValue" then
-		return type(value) == "number"
-			and (math.isnan(value) or math.isinf(value) or math.floor(value) == value)
-	elseif field.class_name == "EternityNumValue" then
-		return EternityNumValueFactory.is_valid(value)
+		return type(value) == "number" and (math.isnan(value) or math.isinf(value) or math.floor(value) == value)
+	elseif field.class_name == "CodeNumValue" then
+		return CodeNumValueFactory.is_value(value)
 	end
-
 	return false
 end
 
 local function encode_field_value(field: DataField, value: DataValue): DataValue
 	if field.class_name == "IntegerInfinityValue" and type(value) == "number" then
 		return normalize_integer_infinity(value, field.rounding or "nearest")
-	elseif field.class_name == "EternityNumValue" then
-		return EternityNumValueFactory.normalize(value)
+	elseif field.class_name == "CodeNumValue" then
+		return CodeNumValueFactory.normalize(value)
 	end
 	return value
 end
 
-local function decode_stored_field_value(
-	field: DataField,
-	value: DataValue?
-): (DataValue?, boolean)
-	if field.class_name == "EternityNumValue" then
-		if not EternityNumValueFactory.is_valid(value) then
-			return nil, false
-		end
-		return EternityNumValueFactory.normalize(value), false
+local function decode_stored_field_value(field: DataField, value: DataValue?): (DataValue?, boolean)
+	if field.class_name == "CodeNumValue" then
+		if type(value) ~= "string" or not CodeNumValueFactory.is_serialized(value) then return nil, false end
+		local normalized = CodeNumValueFactory.normalize(value)
+		return normalized, normalized ~= value
 	end
-
 	if field.class_name == "IntegerInfinityValue" then
-		if type(value) ~= "number" then
-			return nil, false
-		end
-
-		local normalized = normalize_integer_infinity(
-			value,
-			field.rounding or "nearest"
-		)
+		if type(value) ~= "number" then return nil, false end
+		local normalized = normalize_integer_infinity(value, field.rounding or "nearest")
 		local negative_zero = value == 0 and 1 / value == -math.huge
 		return normalized, not numeric_values_equal(normalized, value) or negative_zero
 	end
-
-	if field_value_is_valid(field, value) then
-		return value, false
-	end
-
+	if field_value_is_valid(field, value) then return value, false end
 	return nil, false
 end
 
-local function normalize_runtime_field_value(
-	field: DataField,
-	value: DataValue?
-): DataValue?
-	if field.class_name == "EternityNumValue" then
-		if not EternityNumValueFactory.is_valid(value) then
-			return nil
-		end
-		return EternityNumValueFactory.normalize(value)
+local function normalize_runtime_field_value(field: DataField, value: DataValue?): DataValue?
+	if field.class_name == "CodeNumValue" then
+		if type(value) ~= "string" or not CodeNumValueFactory.is_serialized(value) then return nil end
+		return CodeNumValueFactory.normalize(value)
 	end
-
 	if field.class_name == "IntegerInfinityValue" then
-		if type(value) ~= "number" then
-			return nil
-		end
-
-		return normalize_integer_infinity(
-			value,
-			field.rounding or "nearest"
-		)
+		if type(value) ~= "number" then return nil end
+		return normalize_integer_infinity(value, field.rounding or "nearest")
 	end
-
-	if field_value_is_valid(field, value) then
-		return value
-	end
-
+	if field_value_is_valid(field, value) then return value end
 	return nil
 end
 
@@ -289,13 +248,6 @@ for _, leaderstat in ipairs(CONFIG.leaderstats.values) do
 	if field == nil then
 		error(("leaderstats value %q refers to missing data field"):format(leaderstat.key))
 	end
-	if field.class_name == "EternityNumValue" and leaderstat.number_format == nil then
-		error(
-			("leaderstats value %q uses EternityNumValue and must enable formatted display"):format(
-				leaderstat.name
-			)
-		)
-	end
 	if leaderstat.name == "" then
 		error(("leaderstats value %q must have a non-empty name"):format(leaderstat.key))
 	end
@@ -313,6 +265,7 @@ for _, leaderstat in ipairs(CONFIG.leaderstats.values) do
 		if field.class_name ~= "IntValue"
 			and field.class_name ~= "NumberValue"
 			and field.class_name ~= "IntegerInfinityValue"
+			and field.class_name ~= "CodeNumValue"
 		then
 			error(
 				("leaderstats value %q requests number formatting but is not numeric"):format(
@@ -353,77 +306,44 @@ local function resolve_key(player: Player): string
 end
 
 local function validate_player_data(value: RecordStore.JsonValue): (boolean, string?)
-	if type(value) ~= "table" then
-		return false, "player data must be an object"
-	end
-
+	if type(value) ~= "table" then return false, "player data must be an object" end
 	for key, item in value do
-		if type(key) ~= "string" then
-			return false, "player data keys must be strings"
-		end
-
+		if type(key) ~= "string" then return false, "player data keys must be strings" end
 		local item_type = type(item)
-		if item_type == "table" then
-			local field = CONFIG.data[key]
-			if field == nil
-				or field.class_name ~= "EternityNumValue"
-				or not EternityNumValueFactory.is_valid(item)
-			then
-				return false, ("player data.%s must be a configured EternityNumValue triplet"):format(key)
-			end
-		elseif item_type ~= "string" and item_type ~= "number" and item_type ~= "boolean" then
+		if item_type ~= "string" and item_type ~= "number" and item_type ~= "boolean" then
 			return false, ("player data.%s has an unsupported type"):format(key)
 		end
+		local field = CONFIG.data[key]
+		if field ~= nil and field.class_name == "CodeNumValue" then
+			if item_type ~= "string" or not CodeNumValueFactory.is_serialized(item) then
+				return false, ("player data.%s must contain a valid serialized CodeNum value"):format(key)
+			end
+		end
 	end
-
 	return true, nil
 end
 
 local function normalize_player_data(value: RecordStore.JsonValue?): (PlayerData?, boolean)
-	if type(value) ~= "table" then
-		return nil, false
-	end
-
+	if type(value) ~= "table" then return nil, false end
 	local result: PlayerData = {}
 	local changed = false
-
 	for key, item in value do
-		if type(key) ~= "string" then
-			return nil, false
-		end
-
+		if type(key) ~= "string" then return nil, false end
 		local item_type = type(item)
-		if item_type == "number" then
-			result[key] = item
-		elseif item_type == "string" or item_type == "boolean" then
-			result[key] = item
-		elseif item_type == "table" then
-			local field = CONFIG.data[key]
-			if field == nil
-				or field.class_name ~= "EternityNumValue"
-				or not EternityNumValueFactory.is_valid(item)
-			then
-				return nil, false
-			end
-			result[key] = EternityNumValueFactory.normalize(item)
-		else
-			return nil, false
-		end
+		if item_type == "number" then result[key] = item
+		elseif item_type == "string" or item_type == "boolean" then result[key] = item
+		else return nil, false end
 	end
-
 	for key, field in pairs(CONFIG.data) do
 		local normalized_value, value_changed = decode_stored_field_value(field, result[key])
 		if normalized_value == nil then
-			result[key] = field.default
+			result[key] = encode_field_value(field, field.default)
 			changed = true
 		else
 			result[key] = normalized_value
-			if value_changed then
-				changed = true
-			end
+			if value_changed then changed = true end
 		end
 	end
-
 	return result, changed
 end
 
@@ -451,12 +371,11 @@ local function new(dependencies: Dependencies?): Controller
 	local record_store = injected.RecordStore or RecordStore
 	local integer_infinity_value_factory = injected.IntegerInfinityValue or IntegerInfinityValueFactory
 	local number_formatter = injected.NumberFormatter or NumberFormatterFactory
-	local eternity_num_value_factory = injected.EternityNumValue or EternityNumValueFactory
-	local eternity_num_api: EternityNumAPI? = injected.EternityNum
-	local uses_eternity_num_values = false
+	local code_num_value_factory = injected.CodeNumValue or CodeNumValueFactory
+	local uses_codenum_values = false
 	for _, field in pairs(CONFIG.data) do
-		if field.class_name == "EternityNumValue" then
-			uses_eternity_num_values = true
+		if field.class_name == "CodeNumValue" then
+			uses_codenum_values = true
 			break
 		end
 	end
@@ -776,87 +695,33 @@ local function new(dependencies: Dependencies?): Controller
 	end
 
 
-	local function resolve_eternity_num_api(): EternityNumAPI
-		if eternity_num_api ~= nil then
-			return eternity_num_api
-		end
-
-		local module_script = ReplicatedStorage:FindFirstChild("EternityNum")
-		if module_script == nil or not module_script:IsA("ModuleScript") then
-			error(
-				'PlayerDataCore requires an EternityNum ModuleScript in ReplicatedStorage named "EternityNum", '
-					.. 'or the EternityNum dependency must be injected',
-				2
-			)
-		end
-
-		local require_ok, loaded_module = pcall(require, module_script)
-		if not require_ok then
-			error("failed to require EternityNum: " .. tostring(loaded_module), 2)
-		end
-		if type(loaded_module) ~= "table"
-			or type((loaded_module :: { [string]: unknown }).short) ~= "function"
-		then
-			error('EternityNum module must expose a short(value) function', 2)
-		end
-
-		eternity_num_api = loaded_module :: EternityNumAPI
-		return eternity_num_api
-	end
-
-	local function format_eternity_num(
-		value: EternityNumValueFactory.Value,
-		options: NumberFormatterFactory.Options?
-	): string
-		local api = resolve_eternity_num_api()
-		local decimals = if options == nil then nil else options.decimals
-		local format_ok, formatted = pcall(api.short, value, decimals)
-		if not format_ok then
-			error("EternityNum.short failed: " .. tostring(formatted), 2)
-		end
-		return tostring(formatted)
-	end
-
-	local function create_eternity_num_backing_value(
+	local function create_codenum_backing_value(
 		player: Player,
 		record: PlayerRecord,
 		key: string,
-		initial_value: EternityNumValueFactory.Value
+		initial_value: string
 	): StringValue
-		local backing_value = eternity_num_value_factory.new(key, initial_value)
-		local last_valid_value = eternity_num_value_factory.normalize(initial_value)
+		local backing_value = code_num_value_factory.new(key, initial_value)
+		local last_valid_serialized = code_num_value_factory.normalize(initial_value)
 		local restoring = false
-
 		backing_value.Changed:Connect(function(serialized_value: string)
-			if restoring then
-				return
-			end
-
-			local decode_ok, decoded_or_error = pcall(
-				eternity_num_value_factory.decode,
-				serialized_value
-			)
-			if not decode_ok then
+			if restoring then return end
+			if not code_num_value_factory.is_serialized(serialized_value) then
 				restoring = true
-				backing_value.Value = eternity_num_value_factory.encode(last_valid_value)
+				backing_value.Value = last_valid_serialized
 				restoring = false
-				warn(
-					"[PlayerData]",
-					player.Name,
-					"rejected invalid EternityNum value for",
-					key,
-					tostring(decoded_or_error)
-				)
+				warn("[PlayerData]", player.Name, "rejected invalid CodeNum value for", key)
 				return
 			end
-
-			local decoded_value = decoded_or_error :: EternityNumValueFactory.Value
-			last_valid_value = decoded_value
-			if record.State == "active" then
-				queue_value_change(record, key, decoded_value)
+			local normalized = code_num_value_factory.normalize(serialized_value)
+			if normalized ~= serialized_value then
+				restoring = true
+				backing_value.Value = normalized
+				restoring = false
 			end
+			last_valid_serialized = normalized
+			if record.State == "active" then queue_value_change(record, key, normalized) end
 		end)
-
 		return backing_value
 	end
 
@@ -870,7 +735,7 @@ local function new(dependencies: Dependencies?): Controller
 			existing:Destroy()
 		end
 
-		local has_player_data_values = uses_eternity_num_values
+		local has_player_data_values = uses_codenum_values
 		for _, definition in ipairs(CONFIG.leaderstats.values) do
 			if definition.number_format ~= nil then
 				has_player_data_values = true
@@ -883,7 +748,7 @@ local function new(dependencies: Dependencies?): Controller
 			local existing_values = player:FindFirstChild("PlayerDataValues")
 			if existing_values ~= nil then
 				if existing_values:GetAttribute("RecordStoreManaged") ~= true then
-					error("PlayerDataValues is reserved for RecordStore-managed formatted or EternityNum values")
+					error("PlayerDataValues is reserved for RecordStore-managed formatted or CodeNum values")
 				end
 				existing_values:Destroy()
 			end
@@ -907,53 +772,32 @@ local function new(dependencies: Dependencies?): Controller
 				continue
 			end
 
+			if field.class_name == "CodeNumValue" then
+				if type(stored_value) ~= "string" or not CodeNumValueFactory.is_serialized(stored_value) then continue end
+				local value_folder = player_data_values
+				if value_folder == nil then error("CodeNum leaderstats require the PlayerDataValues folder") end
+				local backing_value = create_codenum_backing_value(player, record, definition.key, stored_value)
+				local display_value = new_string_value()
+				display_value.Name = definition.name
+				display_value.Value = code_num_value_factory.format(stored_value, definition.number_format)
+				display_value.Changed:Connect(function()
+					local ok, expected = pcall(code_num_value_factory.format, backing_value.Value, definition.number_format)
+					if ok and display_value.Value ~= expected then display_value.Value = expected end
+				end)
+				backing_value.Changed:Connect(function(serialized_value: string)
+					if CodeNumValueFactory.is_serialized(serialized_value) then
+						display_value.Value = code_num_value_factory.format(serialized_value, definition.number_format)
+					end
+				end)
+				display_value.Parent = leaderstats
+				backing_value.Parent = value_folder
+				continue
+			end
 			local format_options = definition.number_format
 			if format_options ~= nil then
 				local value_folder = player_data_values
 				if value_folder == nil then
 					error("formatted leaderstats require the PlayerDataValues folder")
-				end
-
-				if field.class_name == "EternityNumValue" then
-					if type(stored_value) ~= "table" then
-						continue
-					end
-
-					local eternity_value = eternity_num_value_factory.normalize(stored_value)
-					local backing_value = create_eternity_num_backing_value(
-						player,
-						record,
-						definition.key,
-						eternity_value
-					)
-					local display_value = new_string_value()
-					display_value.Name = definition.name
-					display_value.Value = format_eternity_num(eternity_value, format_options)
-					display_value.Changed:Connect(function()
-						local decode_ok, decoded = pcall(
-							eternity_num_value_factory.decode,
-							backing_value.Value
-						)
-					if decode_ok then
-						local expected = format_eternity_num(decoded :: EternityNumValueFactory.Value, format_options)
-						if display_value.Value ~= expected then
-							display_value.Value = expected
-						end
-					end
-				end)
-					backing_value.Changed:Connect(function(serialized_value: string)
-						local decode_ok, decoded = pcall(
-							eternity_num_value_factory.decode,
-							serialized_value
-						)
-					if decode_ok then
-						display_value.Value = format_eternity_num(decoded :: EternityNumValueFactory.Value, format_options)
-					end
-					end)
-
-					display_value.Parent = leaderstats
-					backing_value.Parent = value_folder
-					continue
 				end
 
 				if type(stored_value) ~= "number" then
@@ -1085,23 +929,23 @@ local function new(dependencies: Dependencies?): Controller
 		end
 
 		if player_data_values ~= nil then
-			local displayed_eternity_keys: {[string]: boolean} = {}
+			local displayed_codenum_keys: {[string]: boolean} = {}
 			for _, definition in ipairs(CONFIG.leaderstats.values) do
 				local field = CONFIG.data[definition.key]
-				if field ~= nil and field.class_name == "EternityNumValue" then
-					displayed_eternity_keys[definition.key] = true
+				if field ~= nil and field.class_name == "CodeNumValue" then
+					displayed_codenum_keys[definition.key] = true
 				end
 			end
 
 			for key, field in pairs(CONFIG.data) do
-				if field.class_name == "EternityNumValue" and not displayed_eternity_keys[key] then
+				if field.class_name == "CodeNumValue" and not displayed_codenum_keys[key] then
 					local stored_value = data[key]
-					if type(stored_value) == "table" then
-						local backing_value = create_eternity_num_backing_value(
+					if type(stored_value) == "string" and CodeNumValueFactory.is_serialized(stored_value) then
+						local backing_value = create_codenum_backing_value(
 							player,
 							record,
 							key,
-							eternity_num_value_factory.normalize(stored_value)
+							code_num_value_factory.normalize(stored_value)
 						)
 						backing_value.Parent = player_data_values
 					end
