@@ -149,7 +149,8 @@ function NumberFormatter.formatScientific(sign_value: number, mantissa: number, 
 		or (sign_value ~= -1 and sign_value ~= 1)
 		or type(mantissa) ~= "number"
 		or not math.isfinite(mantissa)
-		or mantissa <= 0
+		or mantissa < 1
+		or mantissa >= 10
 		or type(exponent) ~= "string"
 		or not string.match(exponent, "^[+-]?%d+$")
 	then
