@@ -1,10 +1,11 @@
 --!strict
 
-local PlayerDataCore = require(script.Parent.PlayerDataCore)
+-- This Script initializes the shared PlayerData module. Gameplay Scripts should
+-- require ServerScriptService.PlayerData and call PlayerData.Set(...).
+local PlayerData = require(script.Parent:WaitForChild("PlayerData"))
 
-local controller = PlayerDataCore.new()
-controller:Start()
+PlayerData:Start()
 
 game:BindToClose(function()
-	controller:Shutdown()
+	PlayerData:Shutdown()
 end)

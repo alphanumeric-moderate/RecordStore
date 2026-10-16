@@ -54,6 +54,58 @@ The repository also includes:
 - `src/CodeNumValue.luau`: an adapter for your CodeNum module. It persists CodeNum's own versioned `encode`/`decode` JSON format and provides `get`/`set` helpers for a replicated StringValue backing instance.
 - `examples/PlayerData.server.luau`: a standard Script that starts the controller and shuts it down from `BindToClose`.
 
+### PlayerData.Set API
+
+The Rojo project maps `src/PlayerData.luau` to a shared `ServerScriptService.PlayerData` ModuleScript.
+Use the included `examples/PlayerData.server.luau` Script (mapped as `PlayerDataInitializer` in
+`examples.project.json`) to start the controller and shut it down safely. Gameplay Scripts require the
+same ModuleScript, so they share one controller and persistence queue.
+
+When building with default.project.json, add one Script under ServerScriptService to initialize it:
+
+```lua
+local PlayerData = require(script.Parent:WaitForChild("PlayerData"))
+PlayerData:Start()
+
+game:BindToClose(function()
+	PlayerData:Shutdown()
+end)
+```
+
+Use exactly one initializer. The example project already includes this Script as PlayerDataInitializer;
+do not add a second initializer when using that project.
+
+```lua
+local ServerScriptService = game:GetService("ServerScriptService")
+local PlayerData = require(ServerScriptService:WaitForChild("PlayerData"))
+
+-- All keys are the lowercase keys in CONFIG.data, not the displayed leaderboard labels.
+local ok, message = PlayerData.Set(player, "kills", 12500124)
+assert(ok, message)
+
+PlayerData.Set(player, "equipped", "Hi")
+PlayerData.Set(player, "admin", true)
+```
+
+`Set` uses **dot-call syntax** (`PlayerData.Set(player, key, value)`), not colon syntax.
+It returns `true, nil` when the value was accepted by the runtime API, or `false, reason` for an
+unknown key, invalid value, missing active session, or missing required runtime value instance. For
+fields represented by a Value object, the existing `Changed` listener updates formatted display text
+and queues the value for persistence. Data fields without a leaderboard entry, such as `admin`, are
+queued directly. Persistence is asynchronous and coalesced; a successful return does not mean a
+DataStore write has completed synchronously.
+
+Numeric fields are normalized according to their configured Value type. For example, `kills` uses
+`IntegerInfinityValue`, so fractional input is rounded using the field's configured rounding rule.
+CodeNum fields accept a CodeNum value (or a supported input accepted by `CodeNumValue.normalize`)
+and serialize it without coercing it to a native `number`. To use CodeNum, enable a field in
+`CONFIG.data`, for example `cash = define_data_field("CodeNumValue", 0)`. CodeNum values retain
+their exact serialized representation in `PlayerDataValues`; the leaderboard remains a formatted,
+display-only `StringValue`.
+
+`Set` is server-side. Do not use it as a client-authoritative economy or permission boundary; validate
+gameplay actions and authorization on the server before changing protected fields.
+
 ### Number formatting
 
 Use the formatter directly when you only need display text:
