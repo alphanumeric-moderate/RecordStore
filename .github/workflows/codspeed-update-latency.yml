@@ -1,0 +1,34 @@
+name: RecordStore Update Latency
+
+on:
+  push:
+    branches:
+      - "main"
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  recordstore-update-latency:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: CompeyDev/setup-rokit@v0.1.2
+
+      - name: Prepare paired benchmark scripts and pre-optimization source
+        run: |
+          git show 6bdee16fc6e02cbc25fb90aa3a6229bb3c56579a:src/RecordStore.luau > benchmarks/RecordStore.preoptimization.luau
+          sed 's/local variant = "optimized"/local variant = "baseline"/; s@local module_path = "../src/RecordStore"@local module_path = "./RecordStore.preoptimization"@' benchmarks/RecordStore.bench.luau > benchmarks/RecordStore.baseline.bench.luau
+          cp benchmarks/RecordStore.bench.luau benchmarks/RecordStore.optimized.bench.luau
+
+      - name: Run paired RecordStore mock latency benchmarks
+        uses: CodSpeedHQ/action@v5
+        with:
+          mode: walltime
+          config: codspeed-update-latency.yml
