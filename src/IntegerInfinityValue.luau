@@ -52,6 +52,14 @@ local function normalize(value: number, rounding: Rounding): number
 	return if result == 0 then 0 else result
 end
 
+function IntegerInfinityValue.normalize(value: number, rounding: Rounding?): number
+	if type(value) ~= "number" then
+		error("value must be a number", 2)
+	end
+
+	return normalize(value, resolve_rounding(rounding))
+end
+
 function IntegerInfinityValue.new(
 	name: string,
 	initial_value: number?,
