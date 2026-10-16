@@ -1128,7 +1128,13 @@ local function new(dependencies: Dependencies?): Controller
 			return
 		end
 
-		local normalized, changed = normalize_player_data(record:Get(), integer_infinity_value_factory, code_num_value_factory)
+		local normalize_call_ok, normalized_or_error, changed_or_nil = pcall(function()
+			return normalize_player_data(record:Get(), integer_infinity_value_factory, code_num_value_factory)
+		end)
+		local normalized: PlayerData? = if normalize_call_ok then normalized_or_error :: PlayerData? else nil
+		local changed = normalize_call_ok and changed_or_nil == true
+		local normalization_error = if normalize_call_ok then nil else tostring(normalized_or_error)
+
 		if normalized == nil then
 			local should_kick = not shutting_down and not cancelled_loading[player] and player.Parent == players
 			loading[player] = nil
@@ -1139,7 +1145,7 @@ local function new(dependencies: Dependencies?): Controller
 					"normalize",
 					"validation",
 					1,
-					"loaded value does not match the configured PlayerData schema",
+					normalization_error or "loaded value does not match the configured PlayerData schema",
 					record
 				)
 				set_load_status(player, "Failed")
