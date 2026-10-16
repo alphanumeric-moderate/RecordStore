@@ -16,4 +16,4 @@ benchmarks:
     exec: lune run bench/read_history.bench.luau
 
   - name: "compatibility regression suite"
-    exec: lune run bench/run_regression_tests.luau
+    exec: lune run bench/run_compatibility_regression_tests.luau
