@@ -1,0 +1,24 @@
+name: CodSpeed Benchmarks
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  recordstore-update-latency:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: CompeyDev/setup-rokit@v0.1.2
+      - name: Run RecordStore mock update latency benchmark
+        uses: CodSpeedHQ/action@v5
+        with:
+          mode: walltime
+          run: lune run benchmarks/RecordStore.bench.luau
