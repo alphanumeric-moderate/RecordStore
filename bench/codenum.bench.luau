@@ -38,4 +38,4 @@ end
 
 local symbolic = CodeNum.boogolplex()
 assert(CodeNum.equals(symbolic, CodeNum.decode(CodeNum.encode(symbolic))), "symbolic codec guard failed")
-print(("[CodeNum] completed %d exact arithmetic and codec iterations"):format(iterations))
+
