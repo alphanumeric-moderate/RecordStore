@@ -4,22 +4,78 @@
 local NumberFormatter = {}
 export type Options = { decimals: number?, trim_trailing_zeros: boolean? }
 local SUFFIX_GROUPS = {
-	beginning = { "K", "M", "B" },
-	first = { "U", "D", "T", "Qd", "Qn", "Sx", "Sp", "Oc", "No" },
-	second = { "De", "Vt", "Tg", "Qdg", "Qng", "Sxg", "Spg", "Ocg", "Nog" },
-	third = { "Ce", "Dce", "Tce", "Qdce", "Qnce", "Sxce", "Spce", "Occe", "Noce" },
+	beginning = {
+		"K", "M", "B", "T",
+	},
+	first = {
+		"Qa", "Qi", "Sx", "Sp", "Oc", "No",
+	},
+	second = {
+		"Dc", "Ud", "Dd", "Td", "Qad", "Qid",
+		"Sxd", "Spd", "Ocd", "Nod",
+	},
+	third = {
+		"Vg", "Uvg", "Dvg", "Tvg", "Qavg", "Qivg",
+		"Sxvg", "Spvg", "Ocvg", "Novg",
+		"Tg", "Ut", "Dt", "Tt", "Qat", "Qit",
+		"Sxt", "Spt", "Oct", "Not",
+		"Qag", "Uqag", "Dqag", "Tqag", "Qaqag", "Qiqag",
+		"Sxqag", "Spqag", "Ocqag", "Noqag",
+		"Qig", "Uqig", "Dqig", "Tqig", "Qaqig", "Qiqig",
+		"Sxqig", "Spqig", "Ocqig", "Noqig",
+		"Sxg", "Usxg", "Dsxg", "Tsxg", "Qasxg", "Qisxg",
+		"Sxsxg", "Spsxg", "Ocsxg", "Nosxg",
+		"Spg", "Uspg", "Dspg", "Tspg", "Qaspg", "Qispg",
+		"Sxspg", "Spspg", "Ocspg", "Nospg",
+		"Ocg", "Uocg", "Docg", "Tocg", "Qaocg", "Qiocg",
+		"Sxocg", "Spocg", "Ococg", "Noocg",
+		"Nog", "Unog", "Dnog", "Tnog", "Qanog", "Qinog",
+		"Sxnog", "Spnog", "Ocnog", "Nonog",
+		"Ce",
+	},
 	mult = {
-		"Mi", "Mc", "Na", "Pi", "Fm", "At", "Zp", "Yc", "Xo", "Ve", "Me", "Due", "Tre", "Te", "Pt", "He", "Hp", "Oct", "En", "Ic",
-		"Mei", "Dui", "Tri", "Teti", "Pti", "Hei", "Hp", "Oci", "Eni", "Tra", "TeC", "MTc", "DTc", "TrTc", "TeTc", "PeTc", "HTc", "HpT", "OcT", "EnT",
-		"TetC", "MTetc", "DTetc", "TrTetc", "TeTetc", "PeTetc", "HTetc", "HpTetc", "OcTetc", "EnTetc", "PcT", "MPcT", "DPcT", "TPCt", "TePCt", "PePCt", "HePCt", "HpPct", "OcPct", "EnPct",
-		"HCt", "MHcT", "DHcT", "THCt", "TeHCt", "PeHCt", "HeHCt", "HpHct", "OcHct", "EnHct", "HpCt", "MHpcT", "DHpcT", "THpCt", "TeHpCt", "PeHpCt", "HeHpCt", "HpHpct", "OcHpct", "EnHpct",
-		"OCt", "MOcT", "DOcT", "TOCt", "TeOCt", "PeOCt", "HeOCt", "HpOct", "OcOct", "EnOct", "Ent", "MEnT", "DEnT", "TEnt", "TeEnt", "PeEnt", "HeEnt", "HpEnt", "OcEnt", "EnEnt",
+		"Mi", "Mc", "Na", "Pi", "Fm", "At", "Zp", "Yc",
+		"Xo", "Ve", "Me", "Due", "Tre", "Te", "Pt", "He",
+		"Hp", "Oct", "En", "Ic",
+
+		"Mei", "Dui", "Tri", "Teti", "Pti", "Hei",
+		"Oci", "Eni", "Tra", "TeC", "MTc", "DTc", "TrTc",
+		"TeTc", "PeTc", "HTc", "HpT", "OcT", "EnT",
+
+		"TetC", "MTetc", "DTetc", "TrTetc", "TeTetc",
+		"PeTetc", "HTetc", "HpTetc", "OcTetc", "EnTetc",
+		"PcT", "MPcT", "DPcT", "TPCt", "TePCt", "PePCt",
+		"HePCt", "HpPct", "OcPct", "EnPct",
+
+		"HCt", "MHcT", "DHcT", "THCt", "TeHCt", "PeHCt",
+		"HeHCt", "HpHct", "OcHct", "EnHct", "HpCt",
+		"MHpcT", "DHpcT", "THpCt", "TeHpCt", "PeHpCt",
+		"HeHpCt", "HpHpct", "OcHpct", "EnHpct",
+
+		"OCt", "MOcT", "DOcT", "TOCt", "TeOCt", "PeOCt",
+		"HeOCt", "HpOct", "OcOct", "EnOct", "Ent", "MEnT",
+		"DEnT", "TEnt", "TeEnt", "PeEnt", "HeEnt", "HpEnt",
+		"OcEnt", "EnEnt",
+
 		"Hect", "MeHect",
 	},
 }
 local SUFFIXES: {string} = {}
-for _, group in { SUFFIX_GROUPS.beginning, SUFFIX_GROUPS.first, SUFFIX_GROUPS.second, SUFFIX_GROUPS.third, SUFFIX_GROUPS.mult } do
-	for _, suffix in group do SUFFIXES[#SUFFIXES + 1] = suffix end
+local SEEN_SUFFIXES: {[string]: boolean} = {}
+for _, group in {
+	SUFFIX_GROUPS.beginning,
+	SUFFIX_GROUPS.first,
+	SUFFIX_GROUPS.second,
+	SUFFIX_GROUPS.third,
+	SUFFIX_GROUPS.mult,
+	} do
+	for _, suffix in group do
+		if SEEN_SUFFIXES[suffix] then
+			error("duplicate suffix: " .. suffix, 0)
+		end
+		SEEN_SUFFIXES[suffix] = true
+		SUFFIXES[#SUFFIXES + 1] = suffix
+	end
 end
 table.freeze(SUFFIXES)
 for _, group in SUFFIX_GROUPS do table.freeze(group) end
@@ -65,6 +121,9 @@ function NumberFormatter.format(value: number, options: Options?): string
 	end
 	return format_scaled(scaled, SUFFIXES[index], value < 0 and "-" or "", decimals, trim)
 end
+local function suffix_index_from_exponent(exponent: number): number
+	return math.floor(exponent / 3)
+end
 function NumberFormatter.formatInteger(value: string, options: Options?): string
 	if type(value) ~= "string" or not string.match(value, "^[+-]?%d+$") then error("integer value must be a signed decimal integer string", 2) end
 	local decimals, trim = resolve_options(options)
@@ -74,7 +133,7 @@ function NumberFormatter.formatInteger(value: string, options: Options?): string
 	if value == "" then return "0" end
 	if #value <= 3 then return sign .. value end
 	local exponent = #value - 1
-	local index = math.floor(exponent / 3)
+	local index = suffix_index_from_exponent(exponent)
 	if index == 0 then return sign .. value end
 	if index > #SUFFIXES then
 		local count = math.min(#value, decimals + 1)
@@ -92,7 +151,7 @@ function NumberFormatter.formatScientific(sign_value: number, mantissa: number, 
 	local exp = tonumber(exponent)
 	if exp ~= nil and math.isfinite(exp) and math.floor(exp) == exp then
 		if exp >= 0 and exp <= (#SUFFIXES * 3 + 2) then
-			local index = math.floor(exp / 3)
+			local index = suffix_index_from_exponent(exp)
 			local scaled = mantissa * (10 ^ (exp % 3))
 			if index == 0 then return NumberFormatter.format(sign_value * scaled, options) end
 			if index <= #SUFFIXES then return format_scaled(scaled, SUFFIXES[index], sign, decimals, trim) end
