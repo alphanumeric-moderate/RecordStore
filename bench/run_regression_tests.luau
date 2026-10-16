@@ -12,6 +12,8 @@ for _, path in {
 	"src/CodeNum.luau",
 	"src/CodeNumValue.luau",
 	"examples/PlayerData.server.luau",
+	"src/PlayerData.luau",
+	"tests/PlayerDataSetRegression.server.luau",
 	"tests/IntegerInfinityValueRegression.server.luau",
 	"tests/NumberFormatterRegression.server.luau",
 } do
