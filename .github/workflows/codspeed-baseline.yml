@@ -1,0 +1,23 @@
+name: CodSpeed Baseline Benchmark
+
+on:
+  push:
+    branches:
+      - benchmark-baseline/recordstore-pre-optimization
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  recordstore-update-latency:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: CompeyDev/setup-rokit@v0.1.2
+      - name: Run pre-optimization RecordStore mock update latency benchmark
+        uses: CodSpeedHQ/action@v5
+        with:
+          mode: walltime
+          config: codspeed.yml
