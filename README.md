@@ -50,7 +50,27 @@ The repository also includes:
 
 - `src/PlayerDataCore.luau`: a configurable player session, leaderstats, persistence, retry, and shutdown controller.
 - `src/IntegerInfinityValue.luau`: a `NumberValue` factory that rounds finite values to integers while preserving positive infinity, negative infinity, and NaN. The default `kills` field uses this type so non-finite values are not silently replaced with zero.
+- `src/NumberFormatter.luau`: a display formatter for large numbers (for example, `1250` becomes `1.25K` and `1000000000000` becomes `1T`). Formatting never changes stored values.
 - `examples/PlayerData.server.luau`: a standard Script that starts the controller and shuts it down from `BindToClose`.
+
+### Number formatting
+
+Use the formatter directly when you only need display text:
+
+```lua
+local NumberFormatter = require(game:GetService("ServerScriptService"):WaitForChild("NumberFormatter"))
+
+print(NumberFormatter.format(1_250)) -- 1.25K
+print(NumberFormatter.format(1_000_000_000_000)) -- 1T
+```
+
+Formatting can also be enabled for an individual numeric PlayerDataCore leaderboard entry by passing options as the third argument to `define_leaderstat` in `src/PlayerDataCore.luau`:
+
+```lua
+define_leaderstat("kills", "Kills", { decimals = 2 })
+```
+
+When enabled, the leaderboard entry becomes a `StringValue` containing the abbreviated text. Its numeric backing value is placed at `player.PlayerDataValues.kills`, and that backing value remains the value persisted by PlayerDataCore. Gameplay scripts must change `player.PlayerDataValues.kills.Value` instead of `player.leaderstats.Kills.Value`, because the latter is display-only. Leave the third argument omitted to preserve the existing numeric leaderboard value API.
 
 The default Rojo project maps the three ModuleScripts, but does **not** include the example server Script. To build the project with the example Script included:
 

@@ -12,6 +12,9 @@
       },
       "IntegerInfinityValue": {
         "$path": "src/IntegerInfinityValue.luau"
+      },
+      "NumberFormatter": {
+        "$path": "src/NumberFormatter.luau"
       }
     }
   }
