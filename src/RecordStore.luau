@@ -1903,12 +1903,7 @@ local function get_string_field(value: unknown, key: string): unknown
 	if type(value) ~= "table" then
 		return nil
 	end
-	for child_key, child_value in value do
-		if type(child_key) == "string" and child_key == key then
-			return child_value
-		end
-	end
-	return nil
+	return rawget(value, key)
 end
 local function parse_envelope(raw: unknown): (Envelope?, string?, boolean)
 	if raw == nil then
