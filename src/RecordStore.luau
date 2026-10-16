@@ -6744,6 +6744,22 @@ local function normalize_options(options: Options): (Options?, string?)
 	local queue_max_messages = copied.queue_max_messages or DEFAULT_QUEUE_MAX_MESSAGES
 	local queue_max_bytes = copied.queue_max_bytes or DEFAULT_QUEUE_MAX_BYTES
 	local queue_max_attempts = copied.queue_max_attempts or DEFAULT_QUEUE_MAX_ATTEMPTS
+	if type(copied.messaging_enabled) ~= "boolean" then
+		return nil, "messaging_enabled must be a boolean"
+	end
+	if type(copied.takeover_enabled) ~= "boolean" then
+		return nil, "takeover_enabled must be a boolean"
+	end
+	if type(copied.durable_queue_enabled) ~= "boolean" then
+		return nil, "durable_queue_enabled must be a boolean"
+	end
+	if type(copied.message_topic_prefix) ~= "string" then
+		return nil, "message_topic_prefix must be a string of at most 72 characters"
+	end
+	local topic_prefix_length = utf8.len(copied.message_topic_prefix)
+	if topic_prefix_length == nil or topic_prefix_length > 72 then
+		return nil, "message_topic_prefix must be valid UTF-8 and at most 72 characters"
+	end
 	if type(copied.queue_store_name) ~= "string" or copied.queue_store_name == "" or #copied.queue_store_name > 50 then
 		return nil, "queue_store_name must be 1 to 50 characters"
 	end
