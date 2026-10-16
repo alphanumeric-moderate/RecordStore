@@ -123,30 +123,7 @@ local function normalize_integer_infinity(
 	value: number,
 	rounding: IntegerInfinityRounding
 ): number
-	if math.isnan(value) then
-		return value
-	end
-
-	if math.isinf(value) then
-		return value
-	end
-
-	if value == 0 then
-		return 0
-	end
-
-	local result: number
-	if rounding == "nearest" then
-		result = math.round(value)
-	elseif rounding == "floor" then
-		result = math.floor(value)
-	elseif rounding == "ceil" then
-		result = math.ceil(value)
-	else
-		result = if value < 0 then math.ceil(value) else math.floor(value)
-	end
-
-	return if result == 0 then 0 else result
+	return IntegerInfinityValueFactory.normalize(value, rounding)
 end
 
 local function numeric_values_equal(left: number, right: number): boolean
