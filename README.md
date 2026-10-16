@@ -64,13 +64,11 @@ print(NumberFormatter.format(1_250)) -- 1.25K
 print(NumberFormatter.format(1_000_000_000_000)) -- 1T
 ```
 
-Formatting can also be enabled for an individual numeric PlayerDataCore leaderboard entry by passing options as the third argument to `define_leaderstat` in `src/PlayerDataCore.luau`:
+The default `PlayerDataCore` configuration abbreviates `Kills` using `define_leaderstat("kills", "Kills", { decimals = 2 })`. Large values display as `1K`, `1.25M`, `1B`, `1T`, and so on. Other numeric leaderstats can opt in by passing `{ decimals = 2 }` as the third argument to `define_leaderstat` in `src/PlayerDataCore.luau`.
 
-```lua
-define_leaderstat("kills", "Kills", { decimals = 2 })
-```
+A formatted leaderboard entry is a display-only `StringValue`. Its numeric backing value is placed at `player.PlayerDataValues.kills`, and that backing value remains the value persisted by PlayerDataCore. Gameplay scripts must update `player.PlayerDataValues.kills.Value` instead of `player.leaderstats.Kills.Value`, because the leaderboard entry contains text. The `PlayerDataValues` folder name is reserved by this feature.
 
-When enabled, the leaderboard entry becomes a `StringValue` containing the abbreviated text. Its numeric backing value is placed at `player.PlayerDataValues.kills`, and that backing value remains the value persisted by PlayerDataCore. Gameplay scripts must change `player.PlayerDataValues.kills.Value` instead of `player.leaderstats.Kills.Value`, because the latter is display-only. The `PlayerDataValues` folder name is reserved by this feature. Leave the third argument omitted to preserve the existing numeric leaderboard value API.
+To opt out for a particular entry, omit the third argument, for example `define_leaderstat("kills", "Kills")`.
 
 The default Rojo project maps the four ModuleScripts, but does **not** include the example server Script. To build the project with the example Script included:
 
