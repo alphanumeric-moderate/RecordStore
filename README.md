@@ -112,7 +112,7 @@ RecordStore persists CodeNum's serialized JSON string, not a metatable-backed no
 
 ### Number formatting
 
-The sequence is `K, M, B, T`, followed by the `first`, `second`, `third`, and `mult` suffix groups. For example, `1e12` formats as `1T`, `1e15` as `1Qa`, and `1e36` as `1Ud`. Exact CodeNum integer/scientific values use this sequence without converting the entire value to binary64. Once the suffix table runs out, values display in scientific notation.
+The 202-entry sequence is `K, M, B, T`, followed by the `first`, `second`, `third`, and `mult` suffix groups. For example, `1e12` formats as `1T`, `1e15` as `1Qa`, and `1e36` as `1Ud`. Exact CodeNum integer/scientific values use this sequence without converting the entire value to binary64. Once the suffix table runs out, values display in scientific notation.
 
 ## Rojo
 
