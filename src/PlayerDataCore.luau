@@ -734,11 +734,15 @@ local function new(dependencies: Dependencies?): Controller
 		if has_formatted_stats then
 			local existing_values = player:FindFirstChild("PlayerDataValues")
 			if existing_values ~= nil then
+				if existing_values:GetAttribute("RecordStoreManaged") ~= true then
+					error("PlayerDataValues is reserved for RecordStore's formatted numeric leaderstats")
+				end
 				existing_values:Destroy()
 			end
 
 			player_data_values = new_folder()
 			player_data_values.Name = "PlayerDataValues"
+			player_data_values:SetAttribute("RecordStoreManaged", true)
 		end
 
 		local leaderstats = new_folder()
