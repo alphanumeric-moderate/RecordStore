@@ -978,7 +978,7 @@ local function new(dependencies: Dependencies?): Controller
 			for key, field in pairs(CONFIG.data) do
 				if field.class_name == "CodeNumValue" and not displayed_codenum_keys[key] then
 					local stored_value = data[key]
-					if type(stored_value) == "string" and CodeNumValueFactory.is_serialized(stored_value) then
+					if type(stored_value) == "string" and code_num_value_factory.is_serialized(stored_value) then
 						local backing_value = create_codenum_backing_value(
 							player,
 							record,
@@ -1240,7 +1240,8 @@ local function new(dependencies: Dependencies?): Controller
 
 	local function remove_player(player: Player, shared_deadline: number?)
 		if removing[player] then
-			while removing[player] do
+			local duplicate_deadline = shared_deadline or (os.clock() + CONFIG.operation_deadline)
+			while removing[player] and os.clock() < duplicate_deadline do
 				scheduler.wait(0.05)
 			end
 			return
