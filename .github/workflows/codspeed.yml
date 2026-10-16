@@ -1,31 +1,42 @@
-name: CodSpeed Benchmarks
+name: CodSpeed
 
 on:
   push:
     branches:
-      - main
+      - "main"
   pull_request:
+  # `workflow_dispatch` allows CodSpeed to trigger backtest
+  # performance analysis in order to generate initial data.
   workflow_dispatch:
 
 permissions:
   contents: read
-  id-token: write
+  id-token: write # for OpenID Connect authentication with CodSpeed
+
+env:
+  LUNE_VERSION: "0.11.0"
 
 jobs:
-  recordstore-update-latency:
+  benchmarks:
+    name: Run benchmarks
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - uses: CompeyDev/setup-rokit@v0.1.2
-      - name: Prepare paired benchmark scripts and pre-optimization source
+
+      - name: Install Lune
         run: |
-          git show 6bdee16fc6e02cbc25fb90aa3a6229bb3c56579a:src/RecordStore.luau > benchmarks/RecordStore.preoptimization.luau
-          sed 's/local variant = "optimized"/local variant = "baseline"/; s@local module_path = "../src/RecordStore"@local module_path = "./RecordStore.preoptimization"@' benchmarks/RecordStore.bench.luau > benchmarks/RecordStore.baseline.bench.luau
-          cp benchmarks/RecordStore.bench.luau benchmarks/RecordStore.optimized.bench.luau
-      - name: Run paired RecordStore mock latency benchmarks
+          curl -fsSL -o lune.zip "https://github.com/lune-org/lune/releases/download/v${LUNE_VERSION}/lune-${LUNE_VERSION}-linux-x86_64.zip"
+          mkdir -p "$HOME/.local/bin"
+          unzip -o lune.zip -d "$HOME/.local/bin"
+          chmod +x "$HOME/.local/bin/lune"
+          rm lune.zip
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Check the regression suite passes
+        run: lune run bench/run_regression_tests.luau
+
+      - name: Run the benchmarks
         uses: CodSpeedHQ/action@v5
         with:
-          mode: walltime
-          config: codspeed.yml
+          mode: simulation
+          # Benchmarks are defined in codspeed.yml
