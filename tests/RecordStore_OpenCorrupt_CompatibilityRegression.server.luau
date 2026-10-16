@@ -424,7 +424,8 @@ do
 	end)
 	assert(mixed_result == "validation", "mixed-key Update data was not rejected")
 	assert(string.find(mixed_message or "", "mixed table keys", 1, true) ~= nil, "mixed-key validation precedence changed when a child was cyclic")
-	assert(record:Get().Stable == 1, "rejected mixed-key Update changed live data")
+	local after_mixed = record:Get() :: { [string]: RecordStore.JsonValue }
+	assert(after_mixed.Stable == 1, "rejected mixed-key Update changed live data")
 
 	local unsupported = {}
 	local unsupported_key = {}
@@ -435,14 +436,16 @@ do
 	end)
 	assert(unsupported_result == "validation", "unsupported table key was not rejected")
 	assert(string.find(unsupported_message or "", "unsupported table key", 1, true) ~= nil, "unsupported-key validation precedence changed when a child was cyclic")
-	assert(record:Get().Stable == 1, "rejected unsupported-key Update changed live data")
+	local after_unsupported = record:Get() :: { [string]: RecordStore.JsonValue }
+	assert(after_unsupported.Stable == 1, "rejected unsupported-key Update changed live data")
 
 	local sparse = { [1] = "first", [3] = "third" }
 	local sparse_result = record:Update(function(_data)
 		return { Sparse = sparse }
 	end)
 	assert(sparse_result == "validation", "sparse-array Update data was not rejected")
-	assert(record:Get().Stable == 1, "rejected sparse-array Update changed live data")
+	local after_sparse = record:Get() :: { [string]: RecordStore.JsonValue }
+	assert(after_sparse.Stable == 1, "rejected sparse-array Update changed live data")
 	assert(record:Close() == "closed", "copy traversal redo record did not close")
 end
 
