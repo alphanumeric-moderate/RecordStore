@@ -13,6 +13,9 @@
       "IntegerInfinityValue": {
         "$path": "src/IntegerInfinityValue.luau"
       },
+      "NumberFormatter": {
+        "$path": "src/NumberFormatter.luau"
+      },
       "PlayerData": {
         "$path": "examples/PlayerData.server.luau"
       }

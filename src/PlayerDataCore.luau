@@ -1,5 +1,5 @@
 --!strict
-
+--!optimize 2
 -- Hardened lifecycle/persistence core.
 -- RecordStore persists non-finite numbers using its versioned envelope encoding.
 
@@ -7,6 +7,7 @@ local Players = game:GetService("Players")
 
 local RecordStore = require(script.Parent.RecordStore)
 local IntegerInfinityValueFactory = require(script.Parent.IntegerInfinityValue)
+local NumberFormatterFactory = require(script.Parent.NumberFormatter)
 
 type Scalar = string | number | boolean
 type PlayerData = {
@@ -30,12 +31,14 @@ type DataField = {
 type Leaderstat = {
 	key: string,
 	name: string,
+	number_format: NumberFormatterFactory.Options?,
 }
 
 export type Dependencies = {
 	Players: typeof(Players)?,
 	RecordStore: typeof(RecordStore)?,
 	IntegerInfinityValue: typeof(IntegerInfinityValueFactory)?,
+	NumberFormatter: typeof(NumberFormatterFactory)?,
 	new_instance: ((string) -> Instance)?,
 	task: typeof(task)?,
 }
@@ -59,10 +62,15 @@ local function define_data_field(
 	}
 end
 
-local function define_leaderstat(key: string, name: string): Leaderstat
+local function define_leaderstat(
+	key: string,
+	name: string,
+	number_format: NumberFormatterFactory.Options?
+): Leaderstat
 	return {
 		key = key,
 		name = name,
+		number_format = number_format,
 	}
 end
 
@@ -101,6 +109,7 @@ local CONFIG = {
 		enabled = true,
 		name = "leaderstats",
 		values = {
+			-- Pass { decimals = 2 } as the third argument to abbreviate a numeric stat.
 			define_leaderstat("kills", "Kills"),
 			define_leaderstat("equipped", "Equipped"),
 		},
@@ -264,6 +273,31 @@ for _, leaderstat in ipairs(CONFIG.leaderstats.values) do
 	leaderstat_keys[leaderstat.key] = true
 	leaderstat_names[leaderstat.name] = true
 
+	if leaderstat.number_format ~= nil then
+		if field.class_name ~= "IntValue"
+			and field.class_name ~= "NumberValue"
+			and field.class_name ~= "IntegerInfinityValue"
+		then
+			error(
+				("leaderstats value %q requests number formatting but is not numeric"):format(
+					leaderstat.key
+				)
+			)
+		end
+
+		local format_ok, format_error = pcall(function()
+			NumberFormatterFactory.format(0, leaderstat.number_format)
+		end)
+		if not format_ok then
+			error(
+				("leaderstats value %q has invalid number-format options: %s"):format(
+					leaderstat.key,
+					tostring(format_error)
+				)
+			)
+		end
+	end
+
 	if field.class_name == "BoolValue" then
 		warn(
 			("[PlayerData] leaderstats %q uses BoolValue; verify PlayerList presentation"):format(
@@ -363,6 +397,7 @@ local function new(dependencies: Dependencies?): Controller
 	local players = injected.Players or Players
 	local record_store = injected.RecordStore or RecordStore
 	local integer_infinity_value_factory = injected.IntegerInfinityValue or IntegerInfinityValueFactory
+	local number_formatter = injected.NumberFormatter or NumberFormatterFactory
 	local new_instance = injected.new_instance or function(class_name: string): Instance
 		return Instance.new(class_name)
 	end
@@ -687,6 +722,29 @@ local function new(dependencies: Dependencies?): Controller
 			existing:Destroy()
 		end
 
+		local has_formatted_stats = false
+		for _, definition in ipairs(CONFIG.leaderstats.values) do
+			if definition.number_format ~= nil then
+				has_formatted_stats = true
+				break
+			end
+		end
+
+		local player_data_values: Folder? = nil
+		if has_formatted_stats then
+			local existing_values = player:FindFirstChild("PlayerDataValues")
+			if existing_values ~= nil then
+				if existing_values:GetAttribute("RecordStoreManaged") ~= true then
+					error("PlayerDataValues is reserved for RecordStore's formatted numeric leaderstats")
+				end
+				existing_values:Destroy()
+			end
+
+			player_data_values = new_folder()
+			player_data_values.Name = "PlayerDataValues"
+			player_data_values:SetAttribute("RecordStoreManaged", true)
+		end
+
 		local leaderstats = new_folder()
 		leaderstats.Name = CONFIG.leaderstats.name
 
@@ -698,6 +756,64 @@ local function new(dependencies: Dependencies?): Controller
 
 			local stored_value = data[definition.key]
 			if not field_value_is_valid(field, stored_value) then
+				continue
+			end
+
+			local format_options = definition.number_format
+			if format_options ~= nil then
+				if type(stored_value) ~= "number" then
+					continue
+				end
+
+				local value_folder = player_data_values
+				if value_folder == nil then
+					error("formatted leaderstats require the PlayerDataValues folder")
+				end
+
+				local backing_value: NumberValue | IntValue
+				if field.class_name == "IntValue" then
+					local value = new_int_value()
+					value.Name = definition.key
+					value.Value = stored_value
+					backing_value = value
+				elseif field.class_name == "NumberValue" then
+					local value = new_number_value()
+					value.Name = definition.key
+					value.Value = stored_value
+					backing_value = value
+				elseif field.class_name == "IntegerInfinityValue" then
+					local value = integer_infinity_value_factory.new(
+						definition.key,
+						stored_value,
+						{ rounding = field.rounding }
+					)
+					if not value:IsA("NumberValue") then
+						error("IntegerInfinityValue factory must return a NumberValue")
+					end
+					backing_value = value
+				else
+					continue
+				end
+
+				local display_value = new_string_value()
+				display_value.Name = definition.name
+				display_value.Value = number_formatter.format(stored_value, format_options)
+				display_value.Changed:Connect(function()
+					local expected = number_formatter.format(backing_value.Value, format_options)
+					if display_value.Value ~= expected then
+						display_value.Value = expected
+					end
+				end)
+
+				backing_value.Changed:Connect(function(new_value: number)
+					display_value.Value = number_formatter.format(new_value, format_options)
+					if record.State == "active" then
+						queue_value_change(record, definition.key, new_value)
+					end
+				end)
+
+				display_value.Parent = leaderstats
+				backing_value.Parent = value_folder
 				continue
 			end
 
@@ -778,6 +894,9 @@ local function new(dependencies: Dependencies?): Controller
 			end
 		end
 
+		if player_data_values ~= nil then
+			player_data_values.Parent = player
+		end
 		leaderstats.Parent = player
 	end
 
