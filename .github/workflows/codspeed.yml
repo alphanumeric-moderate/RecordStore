@@ -37,6 +37,7 @@ jobs:
           lune run bench/run_regression_tests.luau
           lune run bench/run_codenum_regression_tests.luau
           lune run bench/run_codenumvalue_regression_tests.luau
+          lune run bench/run_playerdata_set_regression_tests.luau
 
       - name: Run the benchmarks
         uses: CodSpeedHQ/action@v5
