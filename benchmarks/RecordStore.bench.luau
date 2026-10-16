@@ -72,7 +72,10 @@ globals.task = {
 	end,
 }
 
-local RecordStore = require("../src/RecordStore")
+local variant = process.args[1] or "optimized"
+assert(variant == "baseline" or variant == "optimized", "variant must be baseline or optimized")
+local module_path = if variant == "baseline" then "./RecordStore.preoptimization" else "../src/RecordStore"
+local RecordStore = require(module_path)
 local iterations = 3000
 local inventory = {}
 
@@ -113,4 +116,4 @@ end
 local close_result, close_message = record:Close()
 assert(close_result == "closed", ("benchmark close failed: %s: %s"):format(close_result, close_message or "no message"))
 
-print(("RecordStore.Mock Update batch completed: %d updates"):format(iterations))
+print(("RecordStore.Mock Update batch completed: %d updates (%s)"):format(iterations, variant))
