@@ -273,6 +273,15 @@ do
 	assert(#events == 1, ("expected one nested change event, got %d"):format(#events))
 	assert(#events[1].Path == 2 and events[1].Path[1] == "Alpha" and events[1].Path[2] == "Value", "nested change event path changed")
 	assert(events[1].OldValue == 1 and events[1].NewValue == 3, "nested change event values changed")
+	local ordered_result, ordered_message = record:Update(function(_data)
+		return { Gamma = 1, Beta = 3, Alpha = 4 }
+	end)
+	assert(ordered_result == "success", ordered_message)
+	task.wait()
+	assert(#events == 4, ("expected four total change events, got %d"):format(#events))
+	assert(#events[2].Path == 1 and events[2].Path[1] == "Alpha", "change events were not sorted by Alpha")
+	assert(#events[3].Path == 1 and events[3].Path[1] == "Beta", "change events were not sorted by Beta")
+	assert(#events[4].Path == 1 and events[4].Path[1] == "Gamma", "change events were not sorted by Gamma")
 	subscription:Disconnect()
 	assert(record:Close() == "closed", "change-event test record did not close")
 end
