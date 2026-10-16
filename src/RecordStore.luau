@@ -1221,8 +1221,8 @@ local function append_change_event(events: { ChangeEvent }, path: { string }, ol
 		OperationId = operation_id,
 		Sequence = sequence,
 		Path = table.clone(path),
-		OldValue = copy_value(old_value),
-		NewValue = copy_value(new_value),
+		OldValue = old_value,
+		NewValue = new_value,
 		Truncated = false,
 		Kind = kind,
 	}
@@ -1281,8 +1281,8 @@ local function enqueue_change_observation(state: InternalState, old_value: unkno
 			OperationId = operation_id,
 			Sequence = state.change_sequence,
 			Path = {},
-			OldValue = copy_value(old_value),
-			NewValue = copy_value(new_value),
+			OldValue = old_json,
+			NewValue = new_json,
 			Truncated = true,
 			Kind = kind,
 		}

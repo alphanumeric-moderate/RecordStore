@@ -355,5 +355,58 @@ do
 	assert(record:Close() == "closed", "identity-set regression record did not close")
 end
 
-print("[PASS] Corruption compatibility, persistence, direct-mutation capture, validator isolation, change-event diff, and Update/Reconcile sync fast-path invariants.")
+RecordStore.Mock.reset()
+do
+	local record = RecordStore.Mock.new("RecordStore_ChangeEventPayloadIsolationRegression", "global", "detached-event-payload", { schema_version = 1 })
+	local open_result, open_message = record:Open({ Revision = 0 })
+	assert(open_result == "created" or open_result == "loaded", open_message)
+	local subscription, subscribe_result, subscribe_message = record:SubscribeChanges(function(event)
+		if event.Path[1] ~= "Archive" then
+			return
+		end
+		if type(event.NewValue) == "table" then
+			local archive = event.NewValue :: { [string]: RecordStore.JsonValue }
+			local item_value = archive["Item"]
+			if type(item_value) == "table" then
+				local item = item_value :: { [string]: RecordStore.JsonValue }
+				item["Value"] = 999
+			end
+		elseif event.NewValue == nil and type(event.OldValue) == "table" then
+			local archive = event.OldValue :: { [string]: RecordStore.JsonValue }
+			local item_value = archive["Item"]
+			if type(item_value) == "table" then
+				local item = item_value :: { [string]: RecordStore.JsonValue }
+				item["Value"] = -999
+			end
+		end
+	end)
+	assert(subscription ~= nil and subscribe_result == "success", subscribe_message)
+	local add_result, add_message = record:Update(function(data)
+		return {
+			Revision = (data :: { [string]: RecordStore.JsonValue })["Revision"] :: number + 1,
+			Archive = { Item = { Value = 10 } },
+		}
+	end)
+	assert(add_result == "success", add_message)
+	task.wait()
+	local after_add = record:Get()
+	assert(type(after_add) == "table" and type(after_add["Archive"]) == "table", "Archive was not added")
+	local saved_archive = (record.Data :: { [string]: RecordStore.JsonValue })["Archive"] :: { [string]: RecordStore.JsonValue }
+	local saved_item = saved_archive["Item"] :: { [string]: RecordStore.JsonValue }
+	assert(saved_item["Value"] == 10, "mutating an emitted NewValue payload changed record data")
+	local remove_result, remove_message = record:Update(function(data)
+		return {
+			Revision = (data :: { [string]: RecordStore.JsonValue })["Revision"] :: number + 1,
+		}
+	end)
+	assert(remove_result == "success", remove_message)
+	task.wait()
+	assert(saved_item["Value"] == 10, "mutating an emitted OldValue payload changed a previously returned public subtree")
+	local after_remove = record:Get()
+	assert(type(after_remove) == "table" and after_remove["Archive"] == nil, "removed Archive unexpectedly remained in record data")
+	subscription:Disconnect()
+	assert(record:Close() == "closed", "event-payload isolation record did not close")
+end
+
+print("[PASS] Corruption compatibility, persistence, direct-mutation capture, validator isolation, change-event diff, and Update/Reconcile sync fast-path and event payload isolation invariants.")
 

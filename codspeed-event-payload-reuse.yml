@@ -1,0 +1,8 @@
+$schema: https://raw.githubusercontent.com/CodSpeedHQ/codspeed/refs/heads/main/schemas/codspeed.schema.json
+
+benchmarks:
+  - name: "Event payload copy baseline"
+    exec: lune run bench/event_payload_reuse_baseline.bench.luau
+
+  - name: "Event payload copy optimized"
+    exec: lune run bench/event_payload_reuse.bench.luau
