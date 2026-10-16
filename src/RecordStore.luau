@@ -1239,15 +1239,8 @@ local function get_table_child(value: JsonValue?, key: string | number): JsonVal
 	if value == nil or type(value) ~= "table" then
 		return nil
 	end
-	for child_key, child_value in value do
-		if type(key) == "string" and type(child_key) == "string" and child_key == key then
-			return child_value
-		end
-		if type(key) == "number" and type(child_key) == "number" and child_key == key then
-			return child_value
-		end
-	end
-	return nil
+	local table_value = value :: { [string | number]: JsonValue }
+	return table_value[key]
 end
 
 local function diff_change_events(events: { ChangeEvent }, old_value: JsonValue?, new_value: JsonValue?, path: { string }, operation_id: string, sequence: number, kind: string): boolean
@@ -1257,11 +1250,12 @@ local function diff_change_events(events: { ChangeEvent }, old_value: JsonValue?
 	if type(old_value) == "table" and type(new_value) == "table" then
 		local keys = sorted_child_keys(old_value, new_value)
 		for _, entry in ipairs(keys) do
-			local next_path = table.clone(path)
-			next_path[#next_path + 1] = entry.PathSegment
+			path[#path + 1] = entry.PathSegment
 			local old_child = get_table_child(old_value, entry.Key)
 			local new_child = get_table_child(new_value, entry.Key)
-			if not diff_change_events(events, old_child, new_child, next_path, operation_id, sequence, kind) then
+			local complete = diff_change_events(events, old_child, new_child, path, operation_id, sequence, kind)
+			path[#path] = nil
+			if not complete then
 				return false
 			end
 		end

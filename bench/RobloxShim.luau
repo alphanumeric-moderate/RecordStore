@@ -97,11 +97,11 @@ local Instance = table.freeze({
 
 local loaded_module: any = nil
 
-local function load_record_store()
+local function load_record_store(source_path: string?)
 	if loaded_module ~= nil then
 		return loaded_module
 	end
-	local source = fs.readFile(SOURCE_PATH)
+	local source = fs.readFile(source_path or SOURCE_PATH)
 	local chunk = luau.load(source, {
 		debugName = "RecordStore",
 		environment = Shim.environment,
@@ -161,8 +161,8 @@ Shim.environment = {
 }
 
 -- Returns the RecordStore module, loaded inside the shimmed environment.
-function Shim.load(): any
-	return load_record_store()
+function Shim.load(source_path: string?): any
+	return load_record_store(source_path)
 end
 
 -- Runs a Roblox-style script (e.g. the regression tests) inside the shimmed environment.

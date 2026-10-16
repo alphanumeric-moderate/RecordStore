@@ -1,0 +1,8 @@
+$schema: https://raw.githubusercontent.com/CodSpeedHQ/codspeed/refs/heads/main/schemas/codspeed.schema.json
+
+benchmarks:
+  - name: "wide-profile change-event diff baseline"
+    exec: lune run bench/change_diff_baseline.bench.luau
+
+  - name: "wide-profile change-event diff optimized"
+    exec: lune run bench/change_diff.bench.luau

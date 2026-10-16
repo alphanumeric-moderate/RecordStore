@@ -255,5 +255,29 @@ do
 end
 
 RecordStore.Mock.reset()
+RecordStore.Mock.reset()
+do
+	local record = RecordStore.Mock.new("RecordStore_ChangeEventDiffRegression", "global", "nested-change", { schema_version = 1 })
+	local open_result, open_message = record:Open({ Alpha = { Value = 1 }, Beta = 2 })
+	assert(open_result == "created" or open_result == "loaded", open_message)
+	local events: { RecordStore.ChangeEvent } = {}
+	local subscription, subscribe_result, subscribe_message = record:SubscribeChanges(function(event)
+		events[#events + 1] = event
+	end)
+	assert(subscription ~= nil and subscribe_result == "success", subscribe_message)
+	local update_result, update_message = record:Update(function(_data)
+		return { Alpha = { Value = 3 }, Beta = 2 }
+	end)
+	assert(update_result == "success", update_message)
+	task.wait()
+	assert(#events == 1, ("expected one nested change event, got %d"):format(#events))
+	assert(#events[1].Path == 2 and events[1].Path[1] == "Alpha" and events[1].Path[2] == "Value", "nested change event path changed")
+	assert(events[1].OldValue == 1 and events[1].NewValue == 3, "nested change event values changed")
+	subscription:Disconnect()
+	assert(record:Close() == "closed", "change-event test record did not close")
+end
+
+RecordStore.Mock.reset()
+
 print("[PASS] Corruption compatibility, save/reopen persistence, close mutation capture, and validator input isolation.")
 
