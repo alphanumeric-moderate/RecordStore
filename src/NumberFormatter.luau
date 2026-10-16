@@ -70,6 +70,8 @@ function NumberFormatter.format(value: number, options: Options?): string
 		error("value must be a number", 2)
 	end
 
+	local decimals, trim_trailing_zeros = resolve_options(options)
+
 	if math.isnan(value) then
 		return "NaN"
 	elseif value == math.huge then
@@ -85,7 +87,6 @@ function NumberFormatter.format(value: number, options: Options?): string
 		return tostring(value)
 	end
 
-	local decimals, trim_trailing_zeros = resolve_options(options)
 	local scaled = magnitude
 	local suffix_index = 0
 

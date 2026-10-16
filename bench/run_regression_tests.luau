@@ -48,6 +48,19 @@ assert(NumberFormatter.format(math.huge) == "∞", "infinity formatting failed")
 assert(NumberFormatter.format(-math.huge) == "-∞", "negative infinity formatting failed")
 assert(NumberFormatter.format(0 / 0) == "NaN", "NaN formatting failed")
 assert(NumberFormatter.format(1_000, { decimals = 0 }) == "1K", "zero-decimal formatting failed")
+assert(
+	NumberFormatter.format(1_200_000, { decimals = 3, trim_trailing_zeros = false }) == "1.200M",
+	"preserving trailing zeros failed"
+)
+assert(
+	NumberFormatter.format(1_200_000, { decimals = 3 }) == "1.2M",
+	"trailing zero trimming failed"
+)
+assert(NumberFormatter.format(1e36) == "1.00e+36", "large-number scientific fallback failed")
+local invalid_options_ok = pcall(function()
+	NumberFormatter.format(1, { decimals = 7 })
+end)
+assert(not invalid_options_ok, "invalid decimal precision was accepted")
 
 Shim.run_script("tests/RecordStore_OpenCorrupt_CompatibilityRegression.server.luau")
 Shim.run_script("tests/RecordStore_NonFiniteNumbersRegression.server.luau")

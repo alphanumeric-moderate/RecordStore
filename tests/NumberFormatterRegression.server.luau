@@ -18,8 +18,12 @@ assert(NumberFormatter.format(-math.huge) == "-∞")
 assert(NumberFormatter.format(0 / 0) == "NaN")
 assert(NumberFormatter.format(1_000, { decimals = 0 }) == "1K")
 assert(
-	NumberFormatter.format(1_234_567, { decimals = 3, trim_trailing_zeros = false }) == "1.234M",
-	"trailing-zero option or decimal precision failed"
+	NumberFormatter.format(1_200_000, { decimals = 3, trim_trailing_zeros = false }) == "1.200M",
+	"preserving trailing zeros failed"
 )
+assert(NumberFormatter.format(1_200_000, { decimals = 3 }) == "1.2M")
+assert(not pcall(function()
+	NumberFormatter.format(1, { decimals = 7 })
+end), "invalid decimal precision was accepted")
 
 print("[NumberFormatter] regression tests passed")

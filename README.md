@@ -72,7 +72,7 @@ define_leaderstat("kills", "Kills", { decimals = 2 })
 
 When enabled, the leaderboard entry becomes a `StringValue` containing the abbreviated text. Its numeric backing value is placed at `player.PlayerDataValues.kills`, and that backing value remains the value persisted by PlayerDataCore. Gameplay scripts must change `player.PlayerDataValues.kills.Value` instead of `player.leaderstats.Kills.Value`, because the latter is display-only. Leave the third argument omitted to preserve the existing numeric leaderboard value API.
 
-The default Rojo project maps the three ModuleScripts, but does **not** include the example server Script. To build the project with the example Script included:
+The default Rojo project maps the four ModuleScripts, but does **not** include the example server Script. To build the project with the example Script included:
 
 ```sh
 rojo build examples.project.json -o RecordStore-PlayerDataExample.rbxlx
