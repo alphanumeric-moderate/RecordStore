@@ -54,7 +54,7 @@ The repository also includes:
 - `src/CodeNumValue.luau`: an adapter for your CodeNum module. It persists CodeNum's own versioned `encode`/`decode` JSON format and provides `get`/`set` helpers for a replicated StringValue backing instance.
 - `examples/PlayerData.server.luau`: a standard Script that starts the controller and shuts it down from `BindToClose`.
 
-## PlayerData.Set API
+### PlayerData.Set API
 
 The Rojo project maps `src/PlayerData.luau` to a shared `ServerScriptService.PlayerData` ModuleScript.
 Use the included `examples/PlayerData.server.luau` Script (mapped as `PlayerDataInitializer` in
