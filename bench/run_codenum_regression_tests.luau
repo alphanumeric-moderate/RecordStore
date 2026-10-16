@@ -67,6 +67,14 @@ for _, value in {
     end
 end
 
+local max_safe_integer = CodeNum.integer("9007199254740991")
+local first_unsafe_integer = CodeNum.integer("9007199254740992")
+local huge_integer = CodeNum.integer("10000000000000000")
+assert(CodeNum.toString(max_safe_integer) == "9007199254740991", "maximum safe integer changed")
+assert(CodeNum.toString(first_unsafe_integer) == "9007199254740992", "first unsafe integer lost precision")
+assert(CodeNum.toString(huge_integer) == "10000000000000000", "large integer exactness changed")
+assert(CodeNum.toString(CodeNum.integer("-9007199254740992")) == "-9007199254740992", "negative integer exactness changed")
+
 assert(CodeNum.tryToNumber(CodeNum.new(math.huge)) == math.huge, "positive infinity conversion failed")
 assert(CodeNum.tryToNumber(CodeNum.new(-math.huge)) == -math.huge, "negative infinity conversion failed")
 local minimum_subnormal = tonumber("5e-324")
