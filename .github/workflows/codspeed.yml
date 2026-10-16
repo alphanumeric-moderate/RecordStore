@@ -21,4 +21,4 @@ jobs:
         uses: CodSpeedHQ/action@v5
         with:
           mode: walltime
-          run: lune run benchmarks/RecordStore.bench.luau
+          config: codspeed.yml
