@@ -41,7 +41,7 @@ do
 	local raw = RecordStore.Mock.get_record_raw(store_name, scope, key)
 	assert(type(raw) == "table", "no durable mock record after legacy Open")
 	assert(raw.__recordStore == nil, "legacy envelope was not migrated")
-	assert(raw.implementation_version == 1, "current envelope marker was not written")
+	assert(raw.implementation_version == 2, "current envelope marker was not written")
 	assert(raw.fencing_generation == 2, "expected old string-fence migration to acquire generation 2")
 	assert(type(raw.data) == "table" and raw.data.Coins == 123, "migrated legacy data differs from source")
 	local close_result, close_message = record:Close()
