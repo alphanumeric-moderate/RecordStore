@@ -273,18 +273,103 @@ do
 	assert(#events == 1, ("expected one nested change event, got %d"):format(#events))
 	assert(#events[1].Path == 2 and events[1].Path[1] == "Alpha" and events[1].Path[2] == "Value", "nested change event path changed")
 	assert(events[1].OldValue == 1 and events[1].NewValue == 3, "nested change event values changed")
+	local ordered_result, ordered_message = record:Update(function(_data)
+		return { Gamma = 1, Beta = 3, Alpha = 4 }
+	end)
+	assert(ordered_result == "success", ordered_message)
+	task.wait()
+	assert(#events == 4, ("expected four total change events, got %d"):format(#events))
+	assert(#events[2].Path == 1 and events[2].Path[1] == "Alpha", "change events were not sorted by Alpha")
+	assert(#events[3].Path == 1 and events[3].Path[1] == "Beta", "change events were not sorted by Beta")
+	assert(#events[4].Path == 1 and events[4].Path[1] == "Gamma", "change events were not sorted by Gamma")
 	subscription:Disconnect()
 	assert(record:Close() == "closed", "change-event test record did not close")
 end
 
 RecordStore.Mock.reset()
 do
-	local record = RecordStore.Mock.new("RecordStore_ChangeEventPayloadIsolationRegression", "global", "subtree-payload", { schema_version = 1 })
+	local record = RecordStore.Mock.new("RecordStore_UpdateSyncFastPathRegression", "global", "direct-mutation-after-update", { schema_version = 1 })
+	local open_result, open_message = record:Open({ Kills = 100, Nested = { Value = 1 } })
+	assert(open_result == "created" or open_result == "loaded", open_message)
+	local update_result, update_message = record:Update(function(data)
+		data.Kills += 1
+		return data
+	end)
+	assert(update_result == "success", update_message)
+	local reconcile_result, reconcile_message = record:Reconcile({ Kills = 0, Nested = { Value = 0, Added = 3 } })
+	assert(reconcile_result == "success", reconcile_message)
+	assert(type(record.Data) == "table", "public Data table is unavailable after Update and Reconcile")
+	record.Data.Nested.Value = 2
+	local data = record:Get()
+	assert(type(data) == "table" and data.Kills == 101, "Update result changed during the sync fast path")
+	assert(data.Nested.Value == 2 and data.Nested.Added == 3, "direct mutation after the sync fast path was not detected")
+	assert(record:Close() == "closed", "sync fast-path record did not close")
+	local reopen_result, reopen_message = record:Open({ Kills = 0, Nested = { Value = 0 } })
+	assert(reopen_result == "loaded", reopen_message)
+	local persisted = record:Get()
+	assert(persisted.Kills == 101 and persisted.Nested.Value == 2 and persisted.Nested.Added == 3, "sync fast-path values did not survive reopen")
+	assert(record:Close() == "closed", "reopened sync fast-path record did not close")
+end
+
+RecordStore.Mock.reset()
+do
+	local record: RecordStore.Record? = nil
+	record = RecordStore.Mock.new("RecordStore_UpdateSyncCallbackRegression", "global", "callback-mutation", {
+		schema_version = 1,
+		on_event = function(event, _key, result, _message)
+			if event == "update" and result == "success" and record ~= nil then
+				record.Data = { Kills = 101, CallbackMutation = true }
+			end
+		end,
+	})
+	local open_result, open_message = record:Open({ Kills = 100 })
+	assert(open_result == "created" or open_result == "loaded", open_message)
+	local update_result, update_message = record:Update(function(data)
+		data.Kills += 1
+		return data
+	end)
+	assert(update_result == "success", update_message)
+	local data = record:Get()
+	assert(type(data) == "table" and data.Kills == 101 and data.CallbackMutation == true, "on_event mutation was not preserved by sync_public")
+	assert(record:Close() == "closed", "callback-mutation record did not close")
+end
+
+RecordStore.Mock.reset()
+
+RecordStore.Mock.reset()
+do
+	local record = RecordStore.Mock.new("RecordStore_IdentitySetCopyRegression", "global", "cycle-and-shared-table", { schema_version = 1 })
+	local open_result, open_message = record:Open({ Value = 1 })
+	assert(open_result == "created" or open_result == "loaded", open_message)
+
+	local cycle = {}
+	cycle.Self = cycle
+	local invalid_result = record:Update(function(_data)
+		return cycle
+	end)
+	assert(invalid_result == "validation", "cyclic Update result was not rejected")
+	local unchanged = record:Get() :: { [string]: RecordStore.JsonValue }
+	assert(unchanged["Value"] == 1, "rejected cyclic Update changed live data")
+
+	local shared = { Value = 7 }
+	local shared_result, shared_message = record:Update(function(_data)
+		return { First = shared, Second = shared }
+	end)
+	assert(shared_result == "success", shared_message)
+	local copied = record:Get() :: { [string]: RecordStore.JsonValue }
+	local first = copied["First"] :: { [string]: RecordStore.JsonValue }
+	local second = copied["Second"] :: { [string]: RecordStore.JsonValue }
+	assert(first["Value"] == 7 and second["Value"] == 7, "shared non-cyclic subtable was not copied correctly")
+	assert(first ~= second, "shared input subtree must be detached into independent copies")
+	assert(record:Close() == "closed", "identity-set regression record did not close")
+end
+
+RecordStore.Mock.reset()
+do
+	local record = RecordStore.Mock.new("RecordStore_ChangeEventPayloadIsolationRegression", "global", "detached-event-payload", { schema_version = 1 })
 	local open_result, open_message = record:Open({ Revision = 0 })
 	assert(open_result == "created" or open_result == "loaded", open_message)
-	local events: { RecordStore.ChangeEvent } = {}
 	local subscription, subscribe_result, subscribe_message = record:SubscribeChanges(function(event)
-		events[#events + 1] = event
 		if event.Path[1] ~= "Archive" then
 			return
 		end
@@ -333,6 +418,28 @@ do
 end
 
 RecordStore.Mock.reset()
+do
+	local record = RecordStore.Mock.new("RecordStore_CopyTraversalRegression", "global", "copy-traversal", {
+		schema_version = 1,
+	})
+	local open_result, open_message = record:Open({ Stable = 1, Nested = { Value = 2 } })
+	assert(open_result == "created", open_message)
 
-print("[PASS] Corruption compatibility, save/reopen persistence, close mutation capture, validator input isolation, and event payload isolation.")
+	local mixed = { Key = "text", [1] = "number" }
+	local mixed_result = record:Update(function(_data)
+		return { Mixed = mixed }
+	end)
+	assert(mixed_result == "validation", "mixed-key Update data was not rejected")
 
+	local sparse = { [1] = "first", [3] = "third" }
+	local sparse_result = record:Update(function(_data)
+		return { Sparse = sparse }
+	end)
+	assert(sparse_result == "validation", "sparse-array Update data was not rejected")
+
+	local unchanged = record:Get() :: { [string]: RecordStore.JsonValue }
+	assert(unchanged["Stable"] == 1 and type(unchanged["Nested"]) == "table", "rejected Update data changed live data")
+	assert(record:Close() == "closed", "copy-traversal record did not close")
+end
+
+print("[PASS] Corruption compatibility, persistence, direct-mutation capture, validator isolation, change-event diff, and Update/Reconcile sync fast-path and event payload isolation and copy traversal invariants.")

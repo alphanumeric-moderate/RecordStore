@@ -782,7 +782,7 @@ local function validate_value_shape(value: unknown, max_depth: number?, max_node
 	local node_limit = max_nodes or 100000
 	local string_limit = max_string_length or 4_000_000
 	local node_count = 0
-	local active_tables: { [string]: boolean } = {}
+	local active_tables: { [table]: boolean } = {}
 
 	local function visit(current: unknown, depth: number): (boolean, string?)
 		node_count += 1
@@ -813,23 +813,22 @@ local function validate_value_shape(value: unknown, max_depth: number?, max_node
 		if type(current) ~= "table" then
 			return false, "value contains an unsupported type: " .. type(current)
 		end
-		local table_value = current
-		local identity = tostring(table_value)
-		if active_tables[identity] then
+		local table_value = current :: table
+		if active_tables[table_value] then
 			return false, "value contains a cyclic table"
 		end
-		active_tables[identity] = true
+		active_tables[table_value] = true
 		local string_keys = 0
 		local numeric_keys = 0
 		local max_numeric_key = 0
 		for key, child in table_value do
 			if type(key) ~= "string" and type(key) ~= "number" then
-				active_tables[identity] = nil
+				active_tables[table_value] = nil
 				return false, "value contains an unsupported table key type"
 			end
 			if type(key) == "number" then
 				if not math.isfinite(key) or math.floor(key) ~= key or key < 1 then
-					active_tables[identity] = nil
+					active_tables[table_value] = nil
 					return false, "numeric table keys must be positive integers"
 				end
 				numeric_keys += 1
@@ -841,19 +840,19 @@ local function validate_value_shape(value: unknown, max_depth: number?, max_node
 			end
 			local child_ok, child_message = visit(child, depth + 1)
 			if not child_ok then
-				active_tables[identity] = nil
+				active_tables[table_value] = nil
 				return false, child_message
 			end
 		end
 		if string_keys > 0 and numeric_keys > 0 then
-			active_tables[identity] = nil
+			active_tables[table_value] = nil
 			return false, "tables cannot mix string and numeric keys"
 		end
 		if numeric_keys > 0 and max_numeric_key ~= numeric_keys then
-			active_tables[identity] = nil
+			active_tables[table_value] = nil
 			return false, "numeric-keyed tables must be dense arrays"
 		end
-		active_tables[identity] = nil
+		active_tables[table_value] = nil
 		return true, nil
 	end
 
@@ -908,7 +907,7 @@ copy_value = function(value: unknown): JsonValue?
 		return nil
 	end
 
-	local seen: { unknown } = {}
+	local active_tables: { [table]: boolean } = {}
 
 	local function clone(current: unknown, depth: number): JsonValue?
 		if current == nil then
@@ -935,70 +934,73 @@ copy_value = function(value: unknown): JsonValue?
 		if type(current) ~= "table" then
 			error("value contains an unsupported type")
 		end
-		for _, previous in ipairs(seen) do
-			if previous == current then
-				error("value contains a cyclic table")
-			end
+
+		local table_value = current :: table
+		if active_tables[table_value] then
+			error("value contains a cyclic table")
 		end
-		seen[#seen + 1] = current
+		active_tables[table_value] = true
 		local has_string_key = false
 		local has_number_key = false
-		for key in current do
+		local result_dictionary: { [string]: JsonValue }? = nil
+		local result_array: { JsonValue }? = nil
+
+		for key, child in current do
 			local key_type = type(key)
 			if key_type == "string" then
+				if has_number_key then
+					active_tables[table_value] = nil
+					error("value contains mixed table keys")
+				end
 				has_string_key = true
+				local dictionary_key = key :: string
+				local copied = clone(child, depth + 1)
+				if copied == nil then
+					active_tables[table_value] = nil
+					error("value contains an invalid nil child")
+				end
+				if result_dictionary == nil then
+					result_dictionary = {}
+				end
+				result_dictionary[dictionary_key] = copied
 			elseif key_type == "number" then
+				if has_string_key then
+					active_tables[table_value] = nil
+					error("value contains mixed table keys")
+				end
 				has_number_key = true
+				local numeric_key = key :: number
+				if not math.isfinite(numeric_key)
+					or math.floor(numeric_key) ~= numeric_key
+					or numeric_key < 1
+				then
+					active_tables[table_value] = nil
+					error("value contains an invalid array index")
+				end
+				local copied = clone(child, depth + 1)
+				if copied == nil then
+					active_tables[table_value] = nil
+					error("value contains an invalid nil child")
+				end
+				if result_array == nil then
+					result_array = {}
+				end
+				result_array[numeric_key] = copied
 			else
-				seen[#seen] = nil
+				active_tables[table_value] = nil
 				error("value contains an unsupported table key")
 			end
 		end
-		if has_string_key and has_number_key then
-			seen[#seen] = nil
-			error("value contains mixed table keys")
-		end
+
+		active_tables[table_value] = nil
 		if has_string_key then
-			local result: { [string]: JsonValue } = {}
-			for key, child in current do
-				if type(key) ~= "string" then
-					seen[#seen] = nil
-					error("value contains an invalid dictionary key")
-				end
-				local dictionary_key = key
-				local copied = clone(child, depth + 1)
-				if copied == nil then
-					seen[#seen] = nil
-					error("value contains an invalid nil child")
-				end
-				result[dictionary_key] = copied
-			end
-			seen[#seen] = nil
-			return result
+			return result_dictionary
 		end
-		local result: { JsonValue } = {}
-		for key, child in current do
-			if type(key) ~= "number" then
-				seen[#seen] = nil
-				error("value contains an invalid array key")
-			end
-			local numeric_key = key
-			if not math.isfinite(numeric_key)
-				or math.floor(numeric_key) ~= numeric_key
-				or numeric_key < 1
-			then
-				seen[#seen] = nil
-				error("value contains an invalid array index")
-			end
-			local copied = clone(child, depth + 1)
-			if copied == nil then
-				seen[#seen] = nil
-				error("value contains an invalid nil child")
-			end
-			result[numeric_key] = copied
+		if result_array ~= nil then
+			return result_array
 		end
-		seen[#seen] = nil
-		return result
+		local empty_result: { JsonValue } = {}
+		return empty_result
 	end
 	return clone(value, 1)
 end
@@ -1174,25 +1176,15 @@ type DiffKey = {
 }
 
 local function sorted_child_keys(old_value: JsonValue?, new_value: JsonValue?): { DiffKey }
-	local keys: { [string]: DiffKey } = {}
+	local seen_keys: { [string | number]: boolean } = {}
 	local result: { DiffKey } = {}
 	local function add_key(key: string | number)
-		if type(key) == "number" then
-			local identity = "n:" .. tostring(key)
-			if keys[identity] == nil then
-				keys[identity] = {
-					Key = key,
-					PathSegment = "[" .. tostring(key) .. "]",
-				}
-			end
-		elseif type(key) == "string" then
-			local identity = "s:" .. key
-			if keys[identity] == nil then
-				keys[identity] = {
-					Key = key,
-					PathSegment = key,
-				}
-			end
+		if not seen_keys[key] then
+			seen_keys[key] = true
+			result[#result + 1] = {
+				Key = key,
+				PathSegment = if type(key) == "number" then "[" .. tostring(key) .. "]" else key,
+			}
 		end
 	end
 	if old_value ~= nil and type(old_value) == "table" then
@@ -1209,15 +1201,11 @@ local function sorted_child_keys(old_value: JsonValue?, new_value: JsonValue?): 
 			end
 		end
 	end
-	for _, entry in pairs(keys) do
-		result[#result + 1] = entry
-	end
 	table.sort(result, function(left: DiffKey, right: DiffKey): boolean
 		return left.PathSegment < right.PathSegment
 	end)
 	return result
 end
-
 
 local function append_change_event(events: { ChangeEvent }, path: { string }, old_value: JsonValue?, new_value: JsonValue?, operation_id: string, sequence: number, kind: string): boolean
 	if #events >= CHANGE_OBSERVER_CAPACITY then
@@ -3959,13 +3947,15 @@ track_external_data_mutation = function(state: InternalState)
 	state.public_data_source = current_data
 end
 
-local function sync_public(record: Record)
+local function sync_public(record: Record, skip_external_mutation_check: boolean?)
 	local state = private[record]
 	if state == nil then
 		return
 	end
 
-	track_external_data_mutation(state)
+	if not skip_external_mutation_check then
+		track_external_data_mutation(state)
+	end
 	record.Data = state.data
 	record.State = state.state
 	record.Key = state.key
@@ -4360,6 +4350,7 @@ local function update(self: Record, callback: (JsonValue?) -> JsonValue?): (Resu
 	if not valid then
 		return "validation", message
 	end
+	local skip_sync_external_mutation_check = state.options.on_event == nil and next(state.change_observers) == nil
 	state.data = copied
 	state.public_data_source = copy_value(state.data)
 	self.Data = state.data
@@ -4371,7 +4362,7 @@ local function update(self: Record, callback: (JsonValue?) -> JsonValue?): (Resu
 	state.next_autosave = now_local()
 	state.last_observed = now_unix()
 	observe(state, "update", "success", nil)
-	sync_public(self)
+	sync_public(self, skip_sync_external_mutation_check)
 	return "success", nil
 end
 
@@ -4411,18 +4402,16 @@ local function reconcile(self: Record, template: JsonValue): (ResultCode, string
 			return target, false
 		end
 		if type(key) == "string" then
-			local result: { [string]: JsonValue } = {}
-			for child_key, child_value in target do
+			for child_key in target do
 				if type(child_key) ~= "string" then
 					return target, false
 				end
-				result[child_key] = child_value
 			end
-			result[key] = value
-			return result, true
+			local target_table = target :: { [string]: JsonValue }
+			target_table[key] = value
+			return target, true
 		end
-		local result: { JsonValue } = {}
-		for child_key, child_value in target do
+		for child_key in target do
 			if type(child_key) ~= "number"
 				or not math.isfinite(child_key)
 				or math.floor(child_key) ~= child_key
@@ -4430,20 +4419,17 @@ local function reconcile(self: Record, template: JsonValue): (ResultCode, string
 			then
 				return target, false
 			end
-			result[child_key] = child_value
 		end
-		result[key] = value
-		return result, true
+		local target_table = target :: { [number]: JsonValue }
+		target_table[key] = value
+		return target, true
 	end
 
 	local function reconcile_value(target: JsonValue, target_template: JsonValue): (JsonValue, boolean)
 		if type(target) ~= "table" or type(target_template) ~= "table" then
 			return target, false
 		end
-		local result = copy_value(target)
-		if result == nil or type(result) ~= "table" then
-			return target, false
-		end
+		local result = target
 		local changed = false
 		for key, template_child in target_template do
 			if type(key) ~= "string" and type(key) ~= "number" then
@@ -4457,13 +4443,9 @@ local function reconcile(self: Record, template: JsonValue): (ResultCode, string
 					changed = true
 				end
 			elseif type(current) == "table" and type(template_child) == "table" then
-				local nested, nested_changed = reconcile_value(current, template_child)
-				local updated, updated_ok = set_table_child(result, key, nested)
-				if updated_ok then
-					result = updated
-					if nested_changed then
-						changed = true
-					end
+				local _, nested_changed = reconcile_value(current, template_child)
+				if nested_changed then
+					changed = true
 				end
 			end
 		end
@@ -4478,6 +4460,7 @@ local function reconcile(self: Record, template: JsonValue): (ResultCode, string
 	if not valid then
 		return "validation", message
 	end
+	local skip_sync_external_mutation_check = state.options.on_event == nil and next(state.change_observers) == nil
 	state.data = next_value
 	state.public_data_source = copy_value(state.data)
 	self.Data = state.data
@@ -4490,7 +4473,7 @@ local function reconcile(self: Record, template: JsonValue): (ResultCode, string
 		state.next_autosave = now_local()
 	end
 	observe(state, "reconcile", "success", nil)
-	sync_public(self)
+	sync_public(self, skip_sync_external_mutation_check)
 	return "success", nil
 end
 

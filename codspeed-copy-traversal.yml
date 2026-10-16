@@ -1,0 +1,8 @@
+$schema: https://raw.githubusercontent.com/CodSpeedHQ/codspeed/refs/heads/main/schemas/codspeed.schema.json
+
+benchmarks:
+  - name: "Large profile copy traversal baseline"
+    exec: lune run bench/copy_traversal_baseline.bench.luau
+
+  - name: "Large profile copy traversal optimized"
+    exec: lune run bench/large_profile.bench.luau
