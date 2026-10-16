@@ -117,6 +117,7 @@ assert(CodeNumValue.format(symbolic) == CodeNum.toString(symbolic), "symbolic di
 assert(CodeNumValue.normalize("123") == CodeNum.encode("123"), "numeric string normalization failed")
 assert(not CodeNumValue.is_serialized('{"schema":"CodeNum","version":999}'), "unsupported codec version was accepted")
 assert(not CodeNumValue.is_value({}), "unsupported table was accepted")
+assert(not CodeNumValue.is_value(string.rep("9", 200_000)), "oversized decimal input was accepted")
 
 local previous = backing.Value
 assert(not pcall(function()
