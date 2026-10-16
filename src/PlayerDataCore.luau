@@ -798,3 +798,406 @@ local function new(dependencies: Dependencies?): Controller
 		end
 
 		leaderstats.Parent = player
+	end
+
+	local function close_record(player: Player, record: PlayerRecord)
+		local call_ok, result, message = pcall(function()
+			return record:Close()
+		end)
+		if not call_ok then
+			warn("[PlayerData]", player.Name, "record close threw", tostring(result))
+			return
+		end
+		if result ~= "closed" and result ~= "fenced" and result ~= "tombstoned" then
+			warn("[PlayerData]", player.Name, result, message or "")
+		end
+	end
+
+	local function setup_player(player: Player)
+		if shutting_down or departed_players[player] or loading[player] or sessions[player] ~= nil then
+			return
+		end
+
+		loading[player] = true
+		set_load_status(player, "Loading")
+
+		local create_ok, record_or_error = pcall(function()
+			return record_store.new(CONFIG.store_name, CONFIG.scope, resolve_key(player), {
+				schema_version = CONFIG.schema_version,
+				autosave_interval = CONFIG.autosave_interval,
+				lease_duration = CONFIG.lease_duration,
+				lease_renewal = CONFIG.lease_renewal,
+				retry_attempts = CONFIG.retry_attempts,
+				operation_deadline = CONFIG.operation_deadline,
+				shutdown_deadline = CONFIG.shutdown_deadline,
+				shutdown_attempts = CONFIG.shutdown_attempts,
+				budget_wait = CONFIG.budget_wait,
+				user_ids = { player.UserId },
+				validator = validate_player_data,
+				on_event = function(event, key, result, message)
+					if should_warn_result(result) then
+						warn("[RecordStore]", event, key, result, message or "")
+					end
+				end,
+			})
+		end)
+		if not create_ok then
+			loading[player] = nil
+			cancelled_loading[player] = nil
+			if not shutting_down and not departed_players[player] and player.Parent == players then
+				local code = log_load_failure(player, "create", "unknown", 0, tostring(record_or_error), nil)
+				set_load_status(player, "Failed")
+				player:Kick(make_player_kick_message(code, "create", "unknown"))
+			end
+			return
+		end
+
+		local record: PlayerRecord = record_or_error :: PlayerRecord
+		local open_result: RecordStore.ResultCode = "unknown"
+		local open_message: string? = nil
+		local open_succeeded = false
+		local open_attempts = 0
+		local open_retry_deadline = os.clock() + CONFIG.load_retry_window
+
+		for attempt = 1, CONFIG.load_retry_attempts do
+			open_attempts = attempt
+			if shutting_down or cancelled_loading[player] or departed_players[player] or player.Parent ~= players then
+				open_result = "closing"
+				open_message = "player load was cancelled before record acquisition completed"
+				break
+			end
+
+			local open_call_ok, returned_result, returned_message = pcall(function()
+				return record:Open(template)
+			end)
+			if open_call_ok then
+				open_result = returned_result :: RecordStore.ResultCode
+				open_message = returned_message
+			else
+				open_result = "unknown"
+				open_message = tostring(returned_result)
+			end
+
+			if record_is_open(record) then
+				if open_result ~= "created" and open_result ~= "loaded" then
+					open_result = "loaded"
+				end
+				open_succeeded = true
+				break
+			end
+
+			if open_result == "created" or open_result == "loaded" then
+				open_result = "unknown"
+				open_message = "RecordStore reported a loaded result but did not confirm active ownership"
+			end
+
+			if not is_retryable_load_result(open_result, "open")
+				or attempt >= CONFIG.load_retry_attempts
+				or os.clock() >= open_retry_deadline
+			then
+				break
+			end
+
+			local delay = math.min(load_retry_delay(attempt), math.max(0, open_retry_deadline - os.clock()))
+			if delay <= 0 then
+				break
+			end
+			set_load_status(player, "Retrying")
+			warn("[PlayerData]", player.Name, "record open retry", attempt, open_result, open_message or "")
+			scheduler.wait(delay)
+		end
+
+		if not open_succeeded then
+			local should_kick = not shutting_down and not cancelled_loading[player] and player.Parent == players
+			loading[player] = nil
+			cancelled_loading[player] = nil
+			if should_kick then
+				local code = log_load_failure(player, "open", open_result, open_attempts, open_message, record)
+				set_load_status(player, "Failed")
+				player:Kick(make_player_kick_message(code, "open", open_result))
+			else
+				set_load_status(player, "Cancelled")
+			end
+			return
+		end
+
+		if shutting_down or cancelled_loading[player] or departed_players[player] or player.Parent ~= players then
+			loading[player] = nil
+			cancelled_loading[player] = nil
+			close_record(player, record)
+			set_load_status(player, "Cancelled")
+			return
+		end
+
+		local normalized, changed = normalize_player_data(record:Get())
+		if normalized == nil then
+			local should_kick = not shutting_down and not cancelled_loading[player] and player.Parent == players
+			loading[player] = nil
+			cancelled_loading[player] = nil
+			if should_kick then
+				local code = log_load_failure(
+					player,
+					"normalize",
+					"validation",
+					1,
+					"loaded value does not match the configured PlayerData schema",
+					record
+				)
+				set_load_status(player, "Failed")
+				close_record(player, record)
+				player:Kick(make_player_kick_message(code, "normalize", "validation"))
+			else
+				close_record(player, record)
+			end
+			return
+		end
+
+		if changed then
+			local update_result: RecordStore.ResultCode = "unknown"
+			local update_message: string? = nil
+			local update_succeeded = false
+			local update_attempts = 0
+			local update_retry_deadline = os.clock() + CONFIG.load_retry_window
+
+			for attempt = 1, CONFIG.load_retry_attempts do
+				update_attempts = attempt
+				local update_call_ok, returned_result, returned_message = pcall(function()
+					return record:Update(function()
+						return encode_player_data(normalized)
+					end)
+				end)
+				if update_call_ok then
+					update_result = returned_result :: RecordStore.ResultCode
+					update_message = returned_message
+				else
+					update_result = "unknown"
+					update_message = tostring(returned_result)
+				end
+
+				if update_result == "success" then
+					update_succeeded = true
+					break
+				end
+
+				if not is_retryable_load_result(update_result, "update")
+					or attempt >= CONFIG.load_retry_attempts
+					or os.clock() >= update_retry_deadline
+				then
+					break
+				end
+
+				local delay = math.min(load_retry_delay(attempt), math.max(0, update_retry_deadline - os.clock()))
+				if delay <= 0 then
+					break
+				end
+				set_load_status(player, "Retrying")
+				warn("[PlayerData]", player.Name, "initial data normalization retry", attempt, update_result, update_message or "")
+				scheduler.wait(delay)
+			end
+
+			if not update_succeeded then
+				local should_kick = not shutting_down and not cancelled_loading[player] and player.Parent == players
+				loading[player] = nil
+				cancelled_loading[player] = nil
+				if should_kick then
+					local code = log_load_failure(player, "update", update_result, update_attempts, update_message, record)
+					set_load_status(player, "Failed")
+					close_record(player, record)
+					player:Kick(make_player_kick_message(code, "update", update_result))
+				else
+					close_record(player, record)
+				end
+				return
+			end
+		end
+
+		if shutting_down or cancelled_loading[player] or player.Parent ~= players or loading[player] ~= true then
+			loading[player] = nil
+			cancelled_loading[player] = nil
+			close_record(player, record)
+			return
+		end
+
+		sessions[player] = record
+		loading[player] = nil
+		cancelled_loading[player] = nil
+
+		local stats_ok, stats_error = pcall(function()
+			create_leaderstats(player, record, normalized)
+		end)
+		if not stats_ok then
+			sessions[player] = nil
+			closing_records[record] = true
+			close_record(player, record)
+			closing_records[record] = nil
+			set_load_status(player, "Failed")
+			warn("[PlayerData]", player.Name, "leaderstats initialization failed", tostring(stats_error))
+			if player.Parent == players then
+				player:Kick("Your data could not be initialized. Please rejoin.")
+			end
+			return
+		end
+
+		set_load_status(player, "Loaded")
+	end
+
+	local function remove_player(player: Player, shared_deadline: number?)
+		if removing[player] then
+			while removing[player] do
+				scheduler.wait(0.05)
+			end
+			return
+		end
+
+		removing[player] = true
+		departed_players[player] = true
+		if loading[player] then
+			cancelled_loading[player] = true
+		end
+
+		local record = sessions[player]
+		sessions[player] = nil
+		if record == nil then
+			removing[player] = nil
+			return
+		end
+
+		closing_records[record] = true
+		local deadline = shared_deadline or (os.clock() + CONFIG.shutdown_deadline)
+		while flush_running[record] and os.clock() < deadline do
+			scheduler.wait(0.05)
+		end
+
+		if flush_running[record] then
+			warn(
+				"[PlayerData]",
+				player.Name,
+				"an active flush exceeded its cleanup deadline; deferring record close until it settles"
+			)
+			scheduler.spawn(function()
+				while flush_running[record] do
+					scheduler.wait(0.05)
+				end
+				local deferred_deadline = os.clock() + CONFIG.operation_deadline
+				local deferred_flushed, deferred_result, deferred_message = flush_pending_changes(record, deferred_deadline)
+				if not deferred_flushed and deferred_result ~= nil then
+					warn(
+						"[PlayerData]",
+						player.Name,
+						"deferred pending changes could not be fully flushed",
+						deferred_result,
+						deferred_message or ""
+					)
+				end
+				pending_changes[record] = nil
+				close_record(player, record)
+				closing_records[record] = nil
+				removing[player] = nil
+			end)
+			return
+		end
+
+		local flushed, flush_result, flush_message = flush_pending_changes(record, deadline)
+		if not flushed and flush_result ~= nil then
+			warn("[PlayerData]", player.Name, "pending changes could not be fully flushed", flush_result, flush_message or "")
+		end
+		pending_changes[record] = nil
+		close_record(player, record)
+		closing_records[record] = nil
+		removing[player] = nil
+	end
+
+	local function start(): boolean
+		if started or shutting_down then
+			return false
+		end
+		started = true
+
+		player_added_connection = players.PlayerAdded:Connect(function(player)
+			if not shutting_down then
+				scheduler.spawn(setup_player, player)
+			end
+		end)
+		player_removing_connection = players.PlayerRemoving:Connect(function(player)
+			departed_players[player] = true
+			scheduler.spawn(remove_player, player)
+		end)
+
+		local startup_players = players:GetPlayers()
+		for _, player in ipairs(startup_players) do
+			scheduler.spawn(setup_player, player)
+		end
+		return true
+	end
+
+	local function shutdown(): boolean
+		if shutting_down then
+			return false
+		end
+		shutting_down = true
+		started = false
+
+		if player_added_connection ~= nil then
+			player_added_connection:Disconnect()
+			player_added_connection = nil
+		end
+		if player_removing_connection ~= nil then
+			player_removing_connection:Disconnect()
+			player_removing_connection = nil
+		end
+
+		for player in pairs(loading) do
+			cancelled_loading[player] = true
+		end
+
+		local deadline = os.clock() + CONFIG.shutdown_deadline
+		local load_wait_deadline = math.min(deadline, os.clock() + CONFIG.operation_deadline)
+		while os.clock() < load_wait_deadline do
+			local still_loading = false
+			for _ in pairs(loading) do
+				still_loading = true
+				break
+			end
+			if not still_loading then
+				break
+			end
+			scheduler.wait(0.05)
+		end
+
+		local players_to_remove: {Player} = {}
+		for player in pairs(sessions) do
+			players_to_remove[#players_to_remove + 1] = player
+		end
+		for _, player in ipairs(players_to_remove) do
+			scheduler.spawn(remove_player, player, deadline)
+		end
+
+		while os.clock() < deadline do
+			local still_removing = false
+			for _ in pairs(removing) do
+				still_removing = true
+				break
+			end
+			if not still_removing then
+				break
+			end
+			scheduler.wait(0.05)
+		end
+		return true
+	end
+
+	local controller: Controller = {
+		Start = function(_self: Controller): boolean
+			return start()
+		end,
+		Shutdown = function(_self: Controller): boolean
+			return shutdown()
+		end,
+	}
+
+	return controller
+end
+
+return table.freeze({
+	new = new,
+})
