@@ -408,5 +408,30 @@ do
 	assert(record:Close() == "closed", "event-payload isolation record did not close")
 end
 
-print("[PASS] Corruption compatibility, persistence, direct-mutation capture, validator isolation, change-event diff, and Update/Reconcile sync fast-path and event payload isolation invariants.")
+RecordStore.Mock.reset()
+do
+	local record = RecordStore.Mock.new("RecordStore_CopyTraversalRegression", "global", "copy-traversal", {
+		schema_version = 1,
+	})
+	local open_result, open_message = record:Open({ Stable = 1, Nested = { Value = 2 } })
+	assert(open_result == "created", open_message)
+
+	local mixed = { Key = "text", [1] = "number" }
+	local mixed_result = record:Update(function(_data)
+		return { Mixed = mixed }
+	end)
+	assert(mixed_result == "validation", "mixed-key Update data was not rejected")
+
+	local sparse = { [1] = "first", [3] = "third" }
+	local sparse_result = record:Update(function(_data)
+		return { Sparse = sparse }
+	end)
+	assert(sparse_result == "validation", "sparse-array Update data was not rejected")
+
+	local unchanged = record:Get() :: { [string]: RecordStore.JsonValue }
+	assert(unchanged["Stable"] == 1 and type(unchanged["Nested"]) == "table", "rejected Update data changed live data")
+	assert(record:Close() == "closed", "copy-traversal record did not close")
+end
+
+print("[PASS] Corruption compatibility, persistence, direct-mutation capture, validator isolation, change-event diff, and Update/Reconcile sync fast-path and event payload isolation and copy traversal invariants.")
 
