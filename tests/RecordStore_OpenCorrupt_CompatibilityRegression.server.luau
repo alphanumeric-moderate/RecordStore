@@ -236,5 +236,24 @@ do
 end
 
 RecordStore.Mock.reset()
-print("[PASS] Corruption compatibility and recovery, updated Kills save/reopen, and direct Data mutation capture at close.")
+do
+	local store_name = "RecordStore_ValidatorInputIsolationRegression"
+	local record = RecordStore.Mock.new(store_name, "global", "validator-input-test", {
+		schema_version = 1,
+		validator = function(value)
+			if type(value) == "table" and value.Kills == 300 then
+				value.Kills = 999
+			end
+			return true
+		end,
+	})
+	local open_result, open_message = record:Open({ Kills = 100 })
+	assert(open_result == "created" or open_result == "loaded", ("validator-isolation open failed: %s: %s"):format(open_result, open_message or "no message"))
+	record.Data.Kills = 300
+	local data = record:Get()
+	assert(type(data) == "table" and data.Kills == 300, "validator mutation leaked into RecordStore state during external Data validation")
+end
+
+RecordStore.Mock.reset()
+print("[PASS] Corruption compatibility, save/reopen persistence, close mutation capture, and validator input isolation.")
 

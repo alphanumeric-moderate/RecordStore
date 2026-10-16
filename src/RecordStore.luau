@@ -3926,7 +3926,11 @@ track_external_data_mutation = function(state: InternalState)
 		return
 	end
 	local candidate_copy = copied_or_error
-	local valid, validation_message = validate_value(candidate_copy, state.options.validator)
+	local validation_value: JsonValue? = candidate_copy
+	if state.options.validator ~= nil then
+		validation_value = copy_value(candidate_copy)
+	end
+	local valid, validation_message = validate_value(validation_value, state.options.validator)
 	if not valid then
 		state.data = copy_value(state.public_data_source)
 		if public_record_table ~= nil then
