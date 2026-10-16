@@ -8,7 +8,7 @@
 local HttpService = game:GetService("HttpService")
 local EternityNumValue = {}
 
-export type Value = { number, number, number }
+export type Value = { number }
 
 local function normalize(value: unknown): Value
 	if type(value) ~= "table" then
