@@ -15,6 +15,9 @@
       },
       "NumberFormatter": {
         "$path": "src/NumberFormatter.luau"
+      },
+      "EternityNumValue": {
+        "$path": "src/EternityNumValue.luau"
       }
     }
   }

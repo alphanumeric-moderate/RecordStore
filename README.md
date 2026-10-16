@@ -50,7 +50,8 @@ The repository also includes:
 
 - `src/PlayerDataCore.luau`: a configurable player session, leaderstats, persistence, retry, and shutdown controller.
 - `src/IntegerInfinityValue.luau`: a `NumberValue` factory that rounds finite values to integers while preserving positive infinity, negative infinity, and NaN. The default `kills` field uses this type so non-finite values are not silently replaced with zero.
-- `src/NumberFormatter.luau`: a display formatter for large numbers (for example, `1250` becomes `1.25K` and `1000000000000` becomes `1T`). Formatting never changes stored values.
+- `src/NumberFormatter.luau`: a display formatter for native Luau numbers. Formatting never changes stored values.
+- `src/EternityNumValue.luau`: a JSON-safe adapter for the classic FoundForces EternityNum three-number tuple. It persists the triplet as a regular array and provides `get`/`set` helpers for a replicated StringValue backing instance.
 - `examples/PlayerData.server.luau`: a standard Script that starts the controller and shuts it down from `BindToClose`.
 
 ### Number formatting
@@ -77,6 +78,37 @@ rojo build examples.project.json -o RecordStore-PlayerDataExample.rbxlx
 ```
 
 The included `PlayerDataCore` example uses the store name `PlayerData_Test1`. Change `CONFIG.store_name` in `src/PlayerDataCore.luau` before using it for a live production dataset. Review the config's keys, defaults, schema version, and leaderboard values before publishing.
+
+### EternityNum support
+
+PlayerDataCore's optional `EternityNumValue` field supports the classic FoundForces EternityNum representation, a three-number array `{ sign, layer, magnitude }`. RecordStore persists the tuple as a regular JSON-safe array instead of attempting to convert the enormous value to a native Luau number.
+
+Configure a field and a formatted leaderboard entry in `src/PlayerDataCore.luau`:
+
+```lua
+-- In CONFIG.data:
+cash = define_data_field("EternityNumValue", { 1, 0, 10 }),
+
+-- In CONFIG.leaderstats.values:
+define_leaderstat("cash", "Cash", { decimals = 2 }),
+```
+
+Place the classic EternityNum ModuleScript in `ReplicatedStorage` as `EternityNum`. PlayerDataCore calls its `short(value)` function for leaderboard display. Alternatively, inject a compatible `EternityNum` module in `PlayerDataCore.new({ EternityNum = ... })`.
+
+The encoded StringValue backing instance is at `player.PlayerDataValues.cash`. On the server, use the helper module rather than writing the serialized string directly:
+
+```lua
+local ServerScriptService = game:GetService("ServerScriptService")
+local EternityNumValue = require(ServerScriptService:WaitForChild("EternityNumValue"))
+local EternityNum = require(game:GetService("ReplicatedStorage"):WaitForChild("EternityNum"))
+
+local cash = player.PlayerDataValues:WaitForChild("cash")
+local current = EternityNumValue.get(cash)
+local increased = EternityNum.add(current, EternityNum.convert(100))
+EternityNumValue.set(cash, increased)
+```
+
+This adapter targets the classic three-number EternityNum representation. EternityNum2 or other forks with a different tuple format must be verified separately. Live PlayerDataCore integration still needs a Roblox Studio playtest.
 
 ## Rojo
 
