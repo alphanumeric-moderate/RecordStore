@@ -9,6 +9,7 @@ for _, path in {
 	"src/PlayerDataCore.luau",
 	"src/IntegerInfinityValue.luau",
 	"examples/PlayerData.server.luau",
+	"tests/IntegerInfinityValueRegression.server.luau",
 } do
 	local chunk = luau.load(fs.readFile(path), {
 		debugName = path,
