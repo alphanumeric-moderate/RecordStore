@@ -443,4 +443,3 @@ do
 end
 
 print("[PASS] Corruption compatibility, persistence, direct-mutation capture, validator isolation, change-event diff, and Update/Reconcile sync fast-path and event payload isolation and copy traversal invariants.")
-
