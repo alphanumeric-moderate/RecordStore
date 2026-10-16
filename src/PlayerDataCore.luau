@@ -37,12 +37,22 @@ type Leaderstat = {
 	number_format: NumberFormatterFactory.Options?,
 }
 
+type CodeNumValueNode = { kind: string }
+type CodeNumValueFactoryAPI = {
+	is_value: (value: unknown) -> boolean,
+	normalize: (value: unknown) -> string,
+	is_serialized: (value: unknown) -> boolean,
+	format: (value: unknown, options: NumberFormatterFactory.Options?) -> string,
+	new: (name: string, initial_value: unknown) -> StringValue,
+	normalize_serialized: ((value: unknown) -> (string?, CodeNumValueNode?))?,
+}
+
 export type Dependencies = {
 	Players: typeof(Players)?,
 	RecordStore: typeof(RecordStore)?,
 	IntegerInfinityValue: typeof(IntegerInfinityValueFactory)?,
 	NumberFormatter: typeof(NumberFormatterFactory)?,
-	CodeNumValue: typeof(CodeNumValueFactory)?,
+	CodeNumValue: CodeNumValueFactoryAPI?,
 	new_instance: ((string) -> Instance)?,
 	task: typeof(task)?,
 }
@@ -148,7 +158,7 @@ end
 local function field_value_is_valid(
 	field: DataField,
 	value: DataValue?,
-	code_num_factory: typeof(CodeNumValueFactory)?
+	code_num_factory: CodeNumValueFactoryAPI?
 ): boolean
 	if field.class_name == "IntValue" then
 		return type(value) == "number" and math.isfinite(value) and math.floor(value) == value
@@ -170,7 +180,7 @@ local function encode_field_value(
 	field: DataField,
 	value: DataValue,
 	integer_infinity_factory: typeof(IntegerInfinityValueFactory)?,
-	code_num_factory: typeof(CodeNumValueFactory)?
+	code_num_factory: CodeNumValueFactoryAPI?
 ): DataValue
 	if field.class_name == "IntegerInfinityValue" and type(value) == "number" then
 		return normalize_integer_infinity(value, field.rounding or "nearest", integer_infinity_factory)
@@ -181,12 +191,11 @@ local function encode_field_value(
 end
 
 local function normalize_serialized_code_num(
-    factory: typeof(CodeNumValueFactory),
+    factory: CodeNumValueFactoryAPI,
     value: string
 ): string?
-    local api = factory :: { [string]: unknown }
-    local normalizer = api.normalize_serialized
-    if type(normalizer) == "function" then
+    local normalizer = factory.normalize_serialized
+    if normalizer ~= nil then
         local normalized = normalizer(value)
         return if type(normalized) == "string" then normalized else nil
     end
@@ -200,7 +209,7 @@ local function decode_stored_field_value(
 	field: DataField,
 	value: DataValue?,
 	integer_infinity_factory: typeof(IntegerInfinityValueFactory)?,
-	code_num_factory: typeof(CodeNumValueFactory)?
+	code_num_factory: CodeNumValueFactoryAPI?
 ): (DataValue?, boolean)
 	if field.class_name == "CodeNumValue" then
 		local factory = code_num_factory or CodeNumValueFactory
@@ -223,7 +232,7 @@ local function normalize_runtime_field_value(
 	field: DataField,
 	value: DataValue?,
 	integer_infinity_factory: typeof(IntegerInfinityValueFactory)?,
-	code_num_factory: typeof(CodeNumValueFactory)?
+	code_num_factory: CodeNumValueFactoryAPI?
 ): DataValue?
 	if field.class_name == "CodeNumValue" then
 		local factory = code_num_factory or CodeNumValueFactory
@@ -241,7 +250,7 @@ end
 local function encode_player_data(
 	data: PlayerData,
 	integer_infinity_factory: typeof(IntegerInfinityValueFactory)?,
-	code_num_factory: typeof(CodeNumValueFactory)?
+	code_num_factory: CodeNumValueFactoryAPI?
 ): PlayerData
 	local result: PlayerData = table.clone(data)
 
@@ -350,7 +359,7 @@ end
 
 local function validate_player_data(
 	value: RecordStore.JsonValue,
-	code_num_factory: typeof(CodeNumValueFactory)?
+	code_num_factory: CodeNumValueFactoryAPI?
 ): (boolean, string?)
 	if type(value) ~= "table" then return false, "player data must be an object" end
 	for key, item in value do
@@ -372,7 +381,7 @@ end
 local function normalize_player_data(
 	value: RecordStore.JsonValue?,
 	integer_infinity_factory: typeof(IntegerInfinityValueFactory)?,
-	code_num_factory: typeof(CodeNumValueFactory)?
+	code_num_factory: CodeNumValueFactoryAPI?
 ): (PlayerData?, boolean)
 	if type(value) ~= "table" then return nil, false end
 	local result: PlayerData = {}
