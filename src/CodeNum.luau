@@ -474,7 +474,14 @@ local function nativeValue(value)
     elseif value.kind == KIND_INTEGER then
         return nativeInteger(value)
     elseif value.kind == KIND_SCIENTIFIC then
-        if compareSignedText(value.exponent, "-308") >= 0
+        -- 10^-324 underflows before multiplication on binary64 even though
+        -- some mantissas (for example 5e-324) round to a non-zero subnormal.
+        if value.exponent == "-324" then
+            local result = tonumber(string.format("%.17ge%s", value.mantissa, value.exponent))
+            if result ~= nil and isFiniteNumber(result) then
+                return value.sign * result
+            end
+        elseif compareSignedText(value.exponent, "-308") >= 0
             and compareSignedText(value.exponent, "308") <= 0
         then
             local result = value.sign * value.mantissa * math.pow(10, tonumber(value.exponent))
