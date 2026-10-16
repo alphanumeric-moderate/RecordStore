@@ -1120,9 +1120,6 @@ local function restore_non_finite_numbers(
 	if count == 0 then
 		return value, nil
 	end
-
-	-- parse_envelope has already copied stored data into a private table tree.
-	-- Restore in that tree rather than allocating another full deep copy.
 	local result: JsonValue? = value
 	if result == nil then
 		return nil, "stored data is missing before restoring non-finite numbers"
@@ -1311,9 +1308,6 @@ local function validate_value(value: JsonValue?, validator: Validator?): (boolea
 	if not safe_value_ok then
 		return false, "value could not be encoded for JSON persistence"
 	end
-
-	-- The original value's shape was already validated. The encoded copy only
-	-- replaces non-finite numbers with zero, so avoid a second full tree walk.
 	local encoded_ok, serialized = pcall(function()
 		return HttpService:JSONEncode(safe_value)
 	end)
