@@ -205,7 +205,6 @@ local function multiplyUnsigned(left, right)
     if left == "0" or right == "0" then return "0" end
     local a, b = digitsToLimbs(left), digitsToLimbs(right)
     local out = table.create(#a + #b, 0)
-    for i = 1, #a + #b do out[i] = 0 end
 
     for i = 1, #a do
         local carry = 0
@@ -250,13 +249,18 @@ local function negateIntegerString(value)
     return (sign > 0 and "-" or "") .. digits
 end
 
-local function integerNode(sign, digits)
-    digits = normalizeUnsignedDigits(digits)
+local function integerNodeNormalized(sign, digits)
     if digits == "0" or sign == 0 then return finiteNode(0) end
-    local text = (sign < 0 and "-" or "") .. digits
-    local native = tonumber(text)
-    if native and math.abs(native) <= MAX_SAFE_INTEGER then return finiteNode(native) end
-    return make({ kind = KIND_INTEGER, sign = sign < 0 and -1 or 1, digits = digits })
+    local normalizedSign = sign < 0 and -1 or 1
+    if #digits <= 16 then
+        local native = tonumber((normalizedSign < 0 and "-" or "") .. digits)
+        if native and math.abs(native) <= MAX_SAFE_INTEGER then return finiteNode(native) end
+    end
+    return make({ kind = KIND_INTEGER, sign = normalizedSign, digits = digits })
+end
+
+local function integerNode(sign, digits)
+    return integerNodeNormalized(sign, normalizeUnsignedDigits(digits))
 end
 
 local function sciNode(sign, mantissa, exponent)
@@ -1099,7 +1103,7 @@ end
 
 function CodeNum.integer(value)
     local sign, digits = normalizeSignedInteger(value)
-    return integerNode(sign, digits)
+    return integerNodeNormalized(sign, digits)
 end
 
 function CodeNum.scientific(mantissa, exponent, sign)
@@ -1373,7 +1377,7 @@ local function fromData(data, depth, budget)
         if type(data.digits) ~= "string" or normalizeUnsignedDigits(data.digits) ~= data.digits or data.digits == "0" then
             error("invalid integer digits", 3)
         end
-        return integerNode(data.sign, data.digits)
+        return integerNodeNormalized(data.sign, data.digits)
     elseif data.kind == KIND_SCIENTIFIC then
         if (data.sign ~= -1 and data.sign ~= 1)
             or not isFiniteNumber(data.mantissa)

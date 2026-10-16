@@ -82,6 +82,21 @@ local Instance = {
     end,
 }
 
+local api_calls = { encode = 0, decode = 0 }
+local CodeNumAPI = {
+    encode = function(value)
+        api_calls.encode += 1
+        return CodeNum.encode(value)
+    end,
+    decode = function(value)
+        api_calls.decode += 1
+        return CodeNum.decode(value)
+    end,
+    toString = function(value)
+        return CodeNum.toString(value)
+    end,
+}
+
 local CodeNumValue = load_module("src/CodeNumValue.luau", "CodeNumValue", {
     game = game,
     script = { Parent = { NumberFormatter = NumberFormatter } },
@@ -94,7 +109,7 @@ local CodeNumValue = load_module("src/CodeNumValue.luau", "CodeNumValue", {
     end,
     require = function(module)
         if module == codeNumModule then
-            return CodeNum
+            return CodeNumAPI
         elseif module == NumberFormatter then
             return NumberFormatter
         end
@@ -107,6 +122,13 @@ local backing = CodeNumValue.new("Cash", exact)
 assert(backing.Name == "Cash", "new() did not set the name")
 assert(CodeNum.equals(CodeNumValue.get(backing), exact), "exact integer get() round-trip failed")
 assert(CodeNumValue.is_serialized(backing.Value), "is_serialized() rejected a valid payload")
+api_calls.encode = 0
+api_calls.decode = 0
+assert(CodeNumValue.normalize(backing.Value) == backing.Value, "canonical payload was unexpectedly changed")
+assert(api_calls.encode == 1 and api_calls.decode == 1, "canonical normalization did redundant codec passes")
+local noncanonical_payload = "  " .. backing.Value .. "\n"
+assert(CodeNumValue.normalize(noncanonical_payload) == backing.Value, "noncanonical JSON was not canonicalized")
+assert(CodeNumValue.normalize_serialized("not-json") == nil, "invalid serialized input was accepted by the fast path")
 assert(CodeNumValue.format(exact) == "123.45Ud", "format() failed for exact large integers")
 
 local symbolic = CodeNum.boogolplex()

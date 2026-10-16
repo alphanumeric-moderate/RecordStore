@@ -180,6 +180,22 @@ local function encode_field_value(
 	return value
 end
 
+local function normalize_serialized_code_num(
+    factory: typeof(CodeNumValueFactory),
+    value: string
+): string?
+    local api = factory :: { [string]: unknown }
+    local normalizer = api.normalize_serialized
+    if type(normalizer) == "function" then
+        local normalized = normalizer(value)
+        return if type(normalized) == "string" then normalized else nil
+    end
+    if not factory.is_serialized(value) then
+        return nil
+    end
+    return factory.normalize(value)
+end
+
 local function decode_stored_field_value(
 	field: DataField,
 	value: DataValue?,
@@ -188,8 +204,9 @@ local function decode_stored_field_value(
 ): (DataValue?, boolean)
 	if field.class_name == "CodeNumValue" then
 		local factory = code_num_factory or CodeNumValueFactory
-		if type(value) ~= "string" or not factory.is_serialized(value) then return nil, false end
-		local normalized = factory.normalize(value)
+		if type(value) ~= "string" then return nil, false end
+		local normalized = normalize_serialized_code_num(factory, value)
+		if normalized == nil then return nil, false end
 		return normalized, normalized ~= value
 	end
 	if field.class_name == "IntegerInfinityValue" then
@@ -210,8 +227,8 @@ local function normalize_runtime_field_value(
 ): DataValue?
 	if field.class_name == "CodeNumValue" then
 		local factory = code_num_factory or CodeNumValueFactory
-		if type(value) ~= "string" or not factory.is_serialized(value) then return nil end
-		return factory.normalize(value)
+		if type(value) ~= "string" then return nil end
+		return normalize_serialized_code_num(factory, value)
 	end
 	if field.class_name == "IntegerInfinityValue" then
 		if type(value) ~= "number" then return nil end
@@ -651,15 +668,15 @@ local function new(dependencies: Dependencies?): Controller
 			table.clear(pending)
 			local call_ok, result, message = pcall(function()
 				return record:Update(function(current)
-					local data = normalize_player_data(current, integer_infinity_value_factory, code_num_value_factory)
-					if data == nil then
+					if type(current) ~= "table" then
 						return nil
 					end
+					-- RecordStore supplies an isolated copy of its validated active data.
+					-- queue_value_change canonicalizes every batched value before it arrives.
+					local data = current :: PlayerData
 					for key, value in pairs(batch) do
 						data[key] = value
 					end
-					-- normalize_player_data and queue_value_change already canonicalize
-					-- every configured field; encoding again would re-parse CodeNum JSON.
 					return data
 				end)
 			end)
@@ -708,7 +725,12 @@ local function new(dependencies: Dependencies?): Controller
 		end)
 	end
 
-	local function queue_value_change(record: PlayerRecord, key: string, value: DataValue)
+	local function queue_value_change(
+		record: PlayerRecord,
+		key: string,
+		value: DataValue,
+		already_normalized: boolean?
+	)
 		if closing_records[record] then
 			return
 		end
@@ -719,7 +741,11 @@ local function new(dependencies: Dependencies?): Controller
 			return
 		end
 
-		local normalized_value = normalize_runtime_field_value(field, value, integer_infinity_value_factory, code_num_value_factory)
+		local normalized_value = if already_normalized == true
+			and field.class_name == "CodeNumValue"
+			and type(value) == "string"
+			then value
+			else normalize_runtime_field_value(field, value, integer_infinity_value_factory, code_num_value_factory)
 		if normalized_value == nil then
 			warn("[PlayerData]", record.Key, "rejected an invalid value change", key)
 			return
@@ -742,25 +768,25 @@ local function new(dependencies: Dependencies?): Controller
 		initial_value: string
 	): StringValue
 		local backing_value = code_num_value_factory.new(key, initial_value)
-		local last_valid_serialized = code_num_value_factory.normalize(initial_value)
+		local last_valid_serialized = initial_value
 		local restoring = false
 		backing_value.Changed:Connect(function(serialized_value: string)
 			if restoring then return end
-			if not code_num_value_factory.is_serialized(serialized_value) then
+			local normalized = normalize_serialized_code_num(code_num_value_factory, serialized_value)
+			if normalized == nil then
 				restoring = true
 				backing_value.Value = last_valid_serialized
 				restoring = false
 				warn("[PlayerData]", player.Name, "rejected invalid CodeNum value for", key)
 				return
 			end
-			local normalized = code_num_value_factory.normalize(serialized_value)
 			if normalized ~= serialized_value then
 				restoring = true
 				backing_value.Value = normalized
 				restoring = false
 			end
 			last_valid_serialized = normalized
-			if record.State == "active" then queue_value_change(record, key, normalized) end
+			if record.State == "active" then queue_value_change(record, key, normalized, true) end
 		end)
 		return backing_value
 	end
@@ -808,12 +834,15 @@ local function new(dependencies: Dependencies?): Controller
 			end
 
 			local stored_value = data[definition.key]
-			if not field_value_is_valid(field, stored_value, code_num_value_factory) then
+			if field.class_name == "CodeNumValue" then
+				if type(stored_value) ~= "string" or not code_num_value_factory.is_serialized(stored_value) then
+					continue
+				end
+			elseif not field_value_is_valid(field, stored_value, code_num_value_factory) then
 				continue
 			end
 
 			if field.class_name == "CodeNumValue" then
-				if type(stored_value) ~= "string" or not code_num_value_factory.is_serialized(stored_value) then continue end
 				local value_folder = player_data_values
 				if value_folder == nil then error("CodeNum leaderstats require the PlayerDataValues folder") end
 				local backing_value = create_codenum_backing_value(player, record, definition.key, stored_value)
@@ -985,7 +1014,7 @@ local function new(dependencies: Dependencies?): Controller
 							player,
 							record,
 							key,
-							code_num_value_factory.normalize(stored_value)
+							stored_value
 						)
 						backing_value.Parent = player_data_values
 					end

@@ -85,14 +85,41 @@ local function checked_encode(value: unknown): (string, Value)
     return serialized, decoded
 end
 
+local function normalize_decoded_serialized(value: string, decoded: Value): (string, Value)
+    local serialized = resolve_api().encode(decoded)
+    if type(serialized) ~= "string" then
+        error("CodeNum.encode must return a string", 2)
+    end
+    if #serialized > MAX_SERIALIZED_LENGTH then
+        error("serialized CodeNum exceeds the safe StringValue limit of 199999 bytes", 2)
+    end
+    if serialized == value then
+        return value, decoded
+    end
+
+    local ok, canonical_decoded = try_decode_serialized(serialized)
+    if not ok or canonical_decoded == nil then
+        error("CodeNum.encode returned a payload rejected by CodeNum.decode", 2)
+    end
+    return serialized, canonical_decoded
+end
+
+function CodeNumValue.normalize_serialized(value: unknown): (string?, Value?)
+    local ok, decoded = try_decode_serialized(value)
+    if not ok or decoded == nil then
+        return nil, nil
+    end
+    return normalize_decoded_serialized(value :: string, decoded)
+end
+
 local function normalize_and_decode(value: unknown): (string, Value)
     if type(value) == "string" then
         if #value > MAX_SERIALIZED_LENGTH then
             error("CodeNum input string exceeds the safe StringValue limit of 199999 bytes", 2)
         end
-        local ok, decoded = try_decode_serialized(value)
-        if ok and decoded ~= nil then
-            return checked_encode(decoded)
+        local serialized, decoded = CodeNumValue.normalize_serialized(value)
+        if serialized ~= nil and decoded ~= nil then
+            return serialized, decoded
         end
     end
     return checked_encode(value)

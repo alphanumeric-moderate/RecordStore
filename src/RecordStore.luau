@@ -547,6 +547,7 @@ local shutdown_started = false
 local active_requests = 0
 local records: { [string]: Record } = {}
 local private: { [Record]: InternalState } = {}
+local active_records: { [Record]: boolean } = {}
 local mock_database: { [string]: { [string]: MockEntry } } = {}
 local mock_counter = 0
 local mock_test_clock: (() -> number)? = nil
@@ -1233,6 +1234,8 @@ local function restore_non_finite_numbers(
 	return result, nil
 end
 
+local prepared_envelope_cache: {[table]: JsonValue} = setmetatable({}, { __mode = "k" })
+
 local function encode_envelope_for_storage(envelope: Envelope): JsonValue
 	local stored: { [string]: JsonValue } = {
 		implementation_version = envelope.implementation_version,
@@ -1275,7 +1278,9 @@ local function encode_backend_update_value(value: unknown): unknown
 		and candidate.updated_at ~= nil
 		and candidate.write_id ~= nil
 	then
-		return encode_envelope_for_storage(value :: Envelope)
+		local envelope = value :: Envelope
+		local prepared = prepared_envelope_cache[envelope]
+		return if prepared ~= nil then prepared else encode_envelope_for_storage(envelope)
 	end
 	return value
 end
@@ -2384,7 +2389,13 @@ local function snapshot_from_envelope(key: string, envelope: Envelope, info: Bac
 end
 
 local function validate_envelope(envelope: Envelope): (boolean, string?)
-	return validate_serialized_size(encode_envelope_for_storage(envelope))
+	prepared_envelope_cache[envelope] = nil
+	local prepared = encode_envelope_for_storage(envelope)
+	local valid, message = validate_serialized_size(prepared)
+	if valid then
+		prepared_envelope_cache[envelope] = prepared
+	end
+	return valid, message
 end
 
 local function decode_legacy_read(raw: unknown, decoder: LegacyDecoder?): (Envelope?, string?)
@@ -4274,6 +4285,11 @@ local function sync_public(record: Record, skip_external_mutation_check: boolean
 
 	if not skip_external_mutation_check then
 		track_external_data_mutation(state)
+	end
+	if state.state == "active" then
+		active_records[record] = true
+	else
+		active_records[record] = nil
 	end
 	record.Data = state.data
 	record.State = state.state
@@ -6605,33 +6621,49 @@ local function start_scheduler()
 	scheduler_started = true
 	task.spawn(function()
 		while not closing do
-			for record, state in private do
-				if state.state == "active" then
+			for record in active_records do
+				local state = private[record]
+				if state ~= nil and state.state == "active" then
+					local handled_takeover = false
 					if state.takeover_requested and not state.busy and not state.queue_busy then
 						complete_deferred_takeover(state)
-					elseif not state.busy and not state.queue_busy and now_local() >= state.next_renewal then
-						state.next_renewal = now_local() + (state.options.lease_renewal or DEFAULT_LEASE_RENEWAL)
+						sync_public(record)
+						handled_takeover = true
+					end
+					local now = now_local()
+					if not handled_takeover and state.state == "active"
+						and not state.busy and not state.queue_busy and now >= state.next_renewal
+					then
+						state.next_renewal = now + (state.options.lease_renewal or DEFAULT_LEASE_RENEWAL)
 						task.spawn(function()
 							renew_internal(state)
 							sync_public(record)
 						end)
-					elseif not state.busy and not state.queue_busy and now_local() >= state.next_autosave then
-						state.next_autosave = now_local() + (state.options.autosave_interval or DEFAULT_AUTOSAVE_INTERVAL) * (0.9 + math.random() * 0.2)
+					elseif not handled_takeover and state.state == "active"
+						and not state.busy and not state.queue_busy and now >= state.next_autosave
+					then
+						state.next_autosave = now + (state.options.autosave_interval or DEFAULT_AUTOSAVE_INTERVAL) * (0.9 + math.random() * 0.2)
 						task.spawn(function()
 							save_internal(state, "autosave", nil, nil)
 							sync_public(record)
 						end)
 					end
-					if state.options.on_message ~= nil
+					if state.state == "active"
+						and state.options.on_message ~= nil
 						and messaging_enabled(state)
 						and state.message_subscription == nil
-						and now_local() >= state.next_message_subscribe
+						and now >= state.next_message_subscribe
 					then
 						subscribe_record(state)
 					end
-					if state.options.durable_queue_enabled ~= false and state.options.on_queue_message ~= nil and not state.queue_busy and (state.queue_hint or now_local() >= state.next_queue_poll) then
+					if state.state == "active"
+						and state.options.durable_queue_enabled ~= false
+						and state.options.on_queue_message ~= nil
+						and not state.queue_busy
+						and (state.queue_hint or now >= state.next_queue_poll)
+					then
 						state.queue_hint = false
-						state.next_queue_poll = now_local() + (state.options.queue_poll_interval or DEFAULT_QUEUE_POLL_INTERVAL)
+						state.next_queue_poll = now + (state.options.queue_poll_interval or DEFAULT_QUEUE_POLL_INTERVAL)
 						task.spawn(function()
 							process_queue_internal(state, 4)
 							sync_public(record)
@@ -7295,6 +7327,7 @@ RecordStore.Mock = (function()
 					state.retired = true
 					state.shutdown = true
 					state.state = "closed"
+					active_records[item.record] = nil
 					state.busy = false
 					state.queue_busy = false
 					state.takeover_requested = false
