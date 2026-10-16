@@ -997,7 +997,8 @@ copy_value = function(value: unknown): JsonValue?
 			end
 			local copied = clone(child, depth + 1)
 			if copied == nil then
-				seen[#seen] = nil				error("value contains an invalid nil child")
+				seen[#seen] = nil
+				error("value contains an invalid nil child")
 			end
 			result[numeric_key] = copied
 		end
@@ -1996,7 +1997,8 @@ local function parse_envelope(raw: unknown): (Envelope?, string?, boolean)
 		created_at = created_at,
 		updated_at = updated_at,
 		data = data,
-		user_ids = ids,		tombstone = tombstone,
+		user_ids = ids,
+		tombstone = tombstone,
 		session = session,
 		write_id = write_id,
 	}, nil, true
@@ -2995,7 +2997,8 @@ process_queue_internal = function(state: InternalState, max_messages: number): (
 					continue
 				end
 				failure_result = dead_letter_result
-				failure_message = dead_letter_message			else
+				failure_message = dead_letter_message
+			else
 				failure_result = attempt_failure_result
 				failure_message = attempt_failure
 			end
@@ -3994,7 +3997,8 @@ local function sync_public(record: Record)
 	record.Revision = state.revision
 	record.CreatedAt = state.created_at
 	record.UpdatedAt = state.updated_at
-	record.Tombstoned = state.tombstoned	record.LastError = state.last_error
+	record.Tombstoned = state.tombstoned
+	record.LastError = state.last_error
 end
 
 local function subscribe_changes(self: Record, observer: ChangeObserver): (ChangeSubscription?, ResultCode, string?)
@@ -4993,7 +4997,8 @@ local function delete_record(self: Record): (ResultCode, string?)
 		local decision: ResultCode? = nil
 		local decision_message: string? = nil
 		local result, info, result_code, result_message = backend_update(state.backend, function(raw, info)
-			decision = nil			decision_message = nil
+			decision = nil
+			decision_message = nil
 			local transform_time = session_now_unix(state.backend.mock)
 			local envelope, parse_error, current_format = parse_envelope(raw)
 			if not current_format or envelope == nil then
@@ -5992,7 +5997,8 @@ close_internal = function(state: InternalState, shutdown: boolean): (ResultCode,
 				and envelope.fencing_generation == generation
 				and envelope.revision == target_revision
 			then
-				decision = "success"				return envelope, envelope.user_ids, (if info ~= nil then info.RawMetadata else make_backend_metadata(state.metadata, envelope))
+				decision = "success"
+				return envelope, envelope.user_ids, (if info ~= nil then info.RawMetadata else make_backend_metadata(state.metadata, envelope))
 			end
 			if envelope.schema_version > state.options.schema_version then
 				decision = "future_schema"
@@ -6991,7 +6997,8 @@ RecordStore.Mock = (function()
 				if state ~= nil then
 					state.retired = true
 					state.shutdown = true
-					state.state = "closed"					state.busy = false
+					state.state = "closed"
+					state.busy = false
 					state.queue_busy = false
 					state.takeover_requested = false
 					state.next_autosave = math.huge
@@ -7025,3 +7032,4 @@ game:BindToClose(shutdown)
 table.freeze(RecordStore)
 
 return RecordStore
+
