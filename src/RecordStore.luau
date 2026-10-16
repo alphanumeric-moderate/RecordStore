@@ -1236,14 +1236,13 @@ local function encode_envelope_for_storage(envelope: Envelope): JsonValue
 		created_at = envelope.created_at,
 		updated_at = envelope.updated_at,
 		write_id = envelope.write_id,
+		non_finite_numbers = {},
 	}
 
 	if envelope.data ~= nil then
 		local encoded_data, markers = encode_non_finite_numbers(envelope.data)
 		stored.data = encoded_data
-		if #markers > 0 then
-			stored.non_finite_numbers = markers :: JsonValue
-		end
+		stored.non_finite_numbers = markers :: JsonValue
 	end
 	if envelope.user_ids ~= nil then
 		stored.user_ids = copy_value(envelope.user_ids) :: JsonValue
@@ -1513,7 +1512,12 @@ local function get_table_child(value: JsonValue?, key: string | number): JsonVal
 end
 
 local function diff_change_events(events: { ChangeEvent }, old_value: JsonValue?, new_value: JsonValue?, path: { string }, operation_id: string, sequence: number, kind: string): boolean
-	if old_value == new_value then
+	if old_value == new_value
+		or (type(old_value) == "number"
+			and type(new_value) == "number"
+			and math.isnan(old_value)
+			and math.isnan(new_value))
+	then
 		return true
 	end
 	if type(old_value) == "table" and type(new_value) == "table" then
@@ -2093,6 +2097,9 @@ local function parse_envelope(raw: unknown): (Envelope?, string?, boolean)
 	if implementation_version > IMPLEMENTATION_VERSION then
 		return nil, "future implementation version", false
 	end
+	if implementation_version >= 2 and raw_non_finite_numbers == nil then
+		return nil, "version 2 envelope is missing non-finite number metadata", false
+	end
 	if implementation_version < 1 then
 		return nil, "unsupported implementation version", false
 	end
@@ -2224,11 +2231,17 @@ local function parse_envelope(raw: unknown): (Envelope?, string?, boolean)
 	end
 	local restored_data = data
 	if raw_non_finite_numbers ~= nil then
-		local decoded, decode_error = restore_non_finite_numbers(data, raw_non_finite_numbers)
-		if decoded == nil then
-			return nil, decode_error or "invalid non-finite number metadata", false
+		if data == nil then
+			if type(raw_non_finite_numbers) ~= "table" or next(raw_non_finite_numbers) ~= nil then
+				return nil, "tombstoned envelope has invalid non-finite number metadata", false
+			end
+		else
+			local decoded, decode_error = restore_non_finite_numbers(data, raw_non_finite_numbers)
+			if decoded == nil then
+				return nil, decode_error or "invalid non-finite number metadata", false
+			end
+			restored_data = decoded
 		end
-		restored_data = decoded
 	end
 
 	return {
