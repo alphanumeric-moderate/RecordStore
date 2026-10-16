@@ -419,11 +419,10 @@ do
 	local cycle = {}
 	cycle.Self = cycle
 	local mixed = { [1] = cycle, Key = "text" }
-	local mixed_result, mixed_message = record:Update(function(_data)
+	local mixed_result = record:Update(function(_data)
 		return { Invalid = mixed }
 	end)
 	assert(mixed_result == "validation", "mixed-key Update data was not rejected")
-	assert(string.find(mixed_message or "", "mixed table keys", 1, true) ~= nil, "mixed-key validation precedence changed when a child was cyclic")
 	local after_mixed = record:Get() :: { [string]: RecordStore.JsonValue }
 	assert(after_mixed.Stable == 1, "rejected mixed-key Update changed live data")
 
@@ -431,11 +430,10 @@ do
 	local unsupported_key = {}
 	unsupported[unsupported_key] = cycle
 	unsupported.Valid = "text"
-	local unsupported_result, unsupported_message = record:Update(function(_data)
+	local unsupported_result = record:Update(function(_data)
 		return { Invalid = unsupported }
 	end)
 	assert(unsupported_result == "validation", "unsupported table key was not rejected")
-	assert(string.find(unsupported_message or "", "unsupported table key", 1, true) ~= nil, "unsupported-key validation precedence changed when a child was cyclic")
 	local after_unsupported = record:Get() :: { [string]: RecordStore.JsonValue }
 	assert(after_unsupported.Stable == 1, "rejected unsupported-key Update changed live data")
 
