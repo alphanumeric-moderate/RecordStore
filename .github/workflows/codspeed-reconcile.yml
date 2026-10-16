@@ -36,6 +36,9 @@ jobs:
       - name: Run regression suite
         run: lune run bench/run_regression_tests.luau
 
+      - name: Run Reconcile-specific regression tests
+        run: lune run bench/run_reconcile_regression_tests.luau
+
       - name: Run paired simulation benchmarks
         uses: CodSpeedHQ/action@v5
         with:
