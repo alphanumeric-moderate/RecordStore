@@ -62,6 +62,8 @@ type PlayerRecord = RecordStore.Record
 export type Controller = {
 	Start: (self: Controller) -> boolean,
 	Shutdown: (self: Controller) -> boolean,
+	-- Set is intentionally dot-callable: controller.Set(player, key, value).
+	Set: (player: Player, key: string, value: unknown) -> (boolean, string?),
 }
 
 local function define_data_field(
@@ -294,6 +296,7 @@ end
 
 local leaderstat_keys: {[string]: boolean} = {}
 local leaderstat_names: {[string]: boolean} = {}
+local leaderstat_by_key: {[string]: Leaderstat} = {}
 
 for _, leaderstat in ipairs(CONFIG.leaderstats.values) do
 	local field = CONFIG.data[leaderstat.key]
@@ -312,6 +315,7 @@ for _, leaderstat in ipairs(CONFIG.leaderstats.values) do
 
 	leaderstat_keys[leaderstat.key] = true
 	leaderstat_names[leaderstat.name] = true
+	leaderstat_by_key[leaderstat.key] = leaderstat
 
 	if leaderstat.number_format ~= nil then
 		if field.class_name ~= "IntValue"
@@ -1035,6 +1039,114 @@ local function new(dependencies: Dependencies?): Controller
 		leaderstats.Parent = player
 	end
 
+
+	local function find_player_value_instance(player: Player, key: string, field: DataField): Instance?
+		if not CONFIG.leaderstats.enabled then
+			return nil
+		end
+
+		local definition = leaderstat_by_key[key]
+		if field.class_name == "CodeNumValue"
+			or (definition ~= nil and definition.number_format ~= nil)
+		then
+			local values = player:FindFirstChild("PlayerDataValues")
+			return if values ~= nil then values:FindFirstChild(key) else nil
+		end
+
+		if definition ~= nil then
+			local leaderstats = player:FindFirstChild(CONFIG.leaderstats.name)
+			return if leaderstats ~= nil then leaderstats:FindFirstChild(definition.name) else nil
+		end
+
+		return nil
+	end
+
+	local function normalize_set_value(field: DataField, value: unknown): DataValue?
+		if field.class_name == "CodeNumValue" then
+			local normalize_ok, normalized = pcall(function()
+				return code_num_value_factory.normalize(value)
+			end)
+			if normalize_ok and type(normalized) == "string" then
+				return normalized
+			end
+			return nil
+		end
+
+		local value_type = type(value)
+		if value_type ~= "number" and value_type ~= "string" and value_type ~= "boolean" then
+			return nil
+		end
+		return normalize_runtime_field_value(
+			field,
+			value :: DataValue,
+			integer_infinity_value_factory,
+			code_num_value_factory
+		)
+	end
+
+	local function assign_player_value(instance: Instance, value: DataValue)
+		if instance:IsA("StringValue") then
+			if type(value) ~= "string" then error("expected a string value") end
+			(instance :: StringValue).Value = value
+		elseif instance:IsA("BoolValue") then
+			if type(value) ~= "boolean" then error("expected a boolean value") end
+			(instance :: BoolValue).Value = value
+		elseif instance:IsA("IntValue") then
+			if type(value) ~= "number" then error("expected a numeric value") end
+			(instance :: IntValue).Value = value
+		elseif instance:IsA("NumberValue") then
+			if type(value) ~= "number" then error("expected a numeric value") end
+			(instance :: NumberValue).Value = value
+		else
+			error("configured PlayerData value is not a supported ValueBase instance")
+		end
+	end
+
+	local function set_player_value(player: Player, key: string, value: unknown): (boolean, string?)
+		if typeof(player) ~= "Instance" or not player:IsA("Player") then
+			return false, "player must be a Player instance"
+		end
+		if type(key) ~= "string" or key == "" then
+			return false, "key must be a non-empty string"
+		end
+
+		local field = CONFIG.data[key]
+		if field == nil then
+			return false, ("unknown PlayerData field %q"):format(key)
+		end
+
+		local record = sessions[player]
+		if record == nil or record.State ~= "active" then
+			return false, "player does not have an active PlayerData session"
+		end
+
+		local normalized = normalize_set_value(field, value)
+		if normalized == nil then
+			return false, ("invalid value for PlayerData field %q"):format(key)
+		end
+
+		local requires_instance = CONFIG.leaderstats.enabled
+			and (leaderstat_by_key[key] ~= nil or field.class_name == "CodeNumValue")
+		if requires_instance then
+			local instance = find_player_value_instance(player, key, field)
+			if instance == nil then
+				return false, ("runtime value instance for PlayerData field %q is missing"):format(key)
+			end
+
+			local assign_ok, assign_error = pcall(assign_player_value, instance, normalized)
+			if not assign_ok then
+				return false, ("could not assign PlayerData field %q: %s"):format(key, tostring(assign_error))
+			end
+			-- The existing Value.Changed connection updates the coalesced persistence queue
+			-- and, for formatted fields, refreshes the display StringValue.
+			return true, nil
+		end
+
+		-- Non-leaderstat fields have no replicated ValueBase. Queue them directly.
+		queue_value_change(record, key, normalized)
+		return true, nil
+	end
+
 	local function close_record(player: Player, record: PlayerRecord)
 		local call_ok, result, message = pcall(function()
 			return record:Close()
@@ -1437,6 +1549,9 @@ local function new(dependencies: Dependencies?): Controller
 		end,
 		Shutdown = function(_self: Controller): boolean
 			return shutdown()
+		end,
+		Set = function(player: Player, key: string, value: unknown): (boolean, string?)
+			return set_player_value(player, key, value)
 		end,
 	}
 
