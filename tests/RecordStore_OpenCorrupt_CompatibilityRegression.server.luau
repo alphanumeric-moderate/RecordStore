@@ -278,6 +278,54 @@ do
 end
 
 RecordStore.Mock.reset()
+do
+	local record = RecordStore.Mock.new("RecordStore_UpdateSyncFastPathRegression", "global", "direct-mutation-after-update", { schema_version = 1 })
+	local open_result, open_message = record:Open({ Kills = 100, Nested = { Value = 1 } })
+	assert(open_result == "created" or open_result == "loaded", open_message)
+	local update_result, update_message = record:Update(function(data)
+		data.Kills += 1
+		return data
+	end)
+	assert(update_result == "success", update_message)
+	local reconcile_result, reconcile_message = record:Reconcile({ Kills = 0, Nested = { Value = 0, Added = 3 } })
+	assert(reconcile_result == "success", reconcile_message)
+	assert(type(record.Data) == "table", "public Data table is unavailable after Update and Reconcile")
+	record.Data.Nested.Value = 2
+	local data = record:Get()
+	assert(type(data) == "table" and data.Kills == 101, "Update result changed during the sync fast path")
+	assert(data.Nested.Value == 2 and data.Nested.Added == 3, "direct mutation after the sync fast path was not detected")
+	assert(record:Close() == "closed", "sync fast-path record did not close")
+	local reopen_result, reopen_message = record:Open({ Kills = 0, Nested = { Value = 0 } })
+	assert(reopen_result == "loaded", reopen_message)
+	local persisted = record:Get()
+	assert(persisted.Kills == 101 and persisted.Nested.Value == 2 and persisted.Nested.Added == 3, "sync fast-path values did not survive reopen")
+	assert(record:Close() == "closed", "reopened sync fast-path record did not close")
+end
 
-print("[PASS] Corruption compatibility, save/reopen persistence, close mutation capture, and validator input isolation.")
+RecordStore.Mock.reset()
+do
+	local record: RecordStore.Record? = nil
+	record = RecordStore.Mock.new("RecordStore_UpdateSyncCallbackRegression", "global", "callback-mutation", {
+		schema_version = 1,
+		on_event = function(event, _key, result, _message)
+			if event == "update" and result == "success" and record ~= nil then
+				record.Data = { Kills = 101, CallbackMutation = true }
+			end
+		end,
+	})
+	local open_result, open_message = record:Open({ Kills = 100 })
+	assert(open_result == "created" or open_result == "loaded", open_message)
+	local update_result, update_message = record:Update(function(data)
+		data.Kills += 1
+		return data
+	end)
+	assert(update_result == "success", update_message)
+	local data = record:Get()
+	assert(type(data) == "table" and data.Kills == 101 and data.CallbackMutation == true, "on_event mutation was not preserved by sync_public")
+	assert(record:Close() == "closed", "callback-mutation record did not close")
+end
+
+RecordStore.Mock.reset()
+
+print("[PASS] Corruption compatibility, persistence, direct-mutation capture, validator isolation, change-event diff, and Update/Reconcile sync fast-path invariants.")
 

@@ -1,0 +1,8 @@
+$schema: https://raw.githubusercontent.com/CodSpeedHQ/codspeed/refs/heads/main/schemas/codspeed.schema.json
+
+benchmarks:
+  - name: "Update no-observer sync baseline"
+    exec: lune run bench/update_sync_baseline.bench.luau
+
+  - name: "Update no-observer sync optimized"
+    exec: lune run bench/update_sync.bench.luau

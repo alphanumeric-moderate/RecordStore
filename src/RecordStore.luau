@@ -3959,13 +3959,15 @@ track_external_data_mutation = function(state: InternalState)
 	state.public_data_source = current_data
 end
 
-local function sync_public(record: Record)
+local function sync_public(record: Record, skip_external_mutation_check: boolean?)
 	local state = private[record]
 	if state == nil then
 		return
 	end
 
-	track_external_data_mutation(state)
+	if not skip_external_mutation_check then
+		track_external_data_mutation(state)
+	end
 	record.Data = state.data
 	record.State = state.state
 	record.Key = state.key
@@ -4360,6 +4362,7 @@ local function update(self: Record, callback: (JsonValue?) -> JsonValue?): (Resu
 	if not valid then
 		return "validation", message
 	end
+	local skip_sync_external_mutation_check = state.options.on_event == nil and next(state.change_observers) == nil
 	state.data = copied
 	state.public_data_source = copy_value(state.data)
 	self.Data = state.data
@@ -4371,7 +4374,7 @@ local function update(self: Record, callback: (JsonValue?) -> JsonValue?): (Resu
 	state.next_autosave = now_local()
 	state.last_observed = now_unix()
 	observe(state, "update", "success", nil)
-	sync_public(self)
+	sync_public(self, skip_sync_external_mutation_check)
 	return "success", nil
 end
 
@@ -4478,6 +4481,7 @@ local function reconcile(self: Record, template: JsonValue): (ResultCode, string
 	if not valid then
 		return "validation", message
 	end
+	local skip_sync_external_mutation_check = state.options.on_event == nil and next(state.change_observers) == nil
 	state.data = next_value
 	state.public_data_source = copy_value(state.data)
 	self.Data = state.data
@@ -4490,7 +4494,7 @@ local function reconcile(self: Record, template: JsonValue): (ResultCode, string
 		state.next_autosave = now_local()
 	end
 	observe(state, "reconcile", "success", nil)
-	sync_public(self)
+	sync_public(self, skip_sync_external_mutation_check)
 	return "success", nil
 end
 
