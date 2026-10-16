@@ -86,4 +86,18 @@ local bounded_product = CodeNum.mul(CodeNum.integer(huge_digits), CodeNum.intege
 assert(bounded_product.kind == "expression", "oversized quadratic multiplication was not preserved symbolically")
 assert(string.find(CodeNum.toString(bounded_product), "×", 1, true), "symbolic multiplication display failed")
 
+local nested_expression = CodeNum.boogolplex()
+for _ = 1, 160 do
+    nested_expression = CodeNum.add(nested_expression, CodeNum.ONE)
+end
+assert(not CodeNum.isInteger(nested_expression), "over-depth symbolic integer predicate should return unknown/false")
+
+local nested_hyper = CodeNum.hyper(2, 2, 5)
+local depth_guard_ok = pcall(function()
+    for _ = 1, 160 do
+        nested_hyper = CodeNum.hyper(nested_hyper, 1, 2)
+    end
+end)
+assert(not depth_guard_ok, "over-depth nested hyper bases were not bounded")
+
 print("[CodeNum] Luau regression tests passed")
