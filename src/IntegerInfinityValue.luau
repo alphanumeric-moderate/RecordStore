@@ -1,5 +1,5 @@
 --!strict
-
+--!optimize 2
 -- IntegerInfinityValue
 -- A NumberValue that normalizes finite assignments to integers while preserving
 -- positive infinity, negative infinity, and NaN.

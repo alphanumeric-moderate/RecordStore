@@ -1,5 +1,5 @@
 --!strict
-
+--!optimize 2
 -- Hardened lifecycle/persistence core.
 -- RecordStore persists non-finite numbers using its versioned envelope encoding.
 
