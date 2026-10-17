@@ -512,101 +512,152 @@ function MailboxV2._reclaim_slot(self: Mailbox, kind: string): boolean
 		return false
 	end
 	local slots = manifest.slots :: { unknown }
+
+	local function release_draining_slot(slot_number: number, generation: number): boolean
+		local updated, update_error = self:_update(self:_manifest_key(kind), function(raw)
+			local current = as_dict(raw)
+			if current == nil or current.version ~= VERSION or not same_owner(current.owner, self.owner) then
+				return raw
+			end
+			local next_manifest = clone_dict(current)
+			local slot = locate_slot(next_manifest, slot_number)
+			if slot == nil or slot.generation ~= generation or slot.state ~= "draining" then
+				return raw
+			end
+			local next_slot = clone_dict(slot)
+			next_slot.state = "empty"
+			next_slot.allocation_token = nil
+			(next_manifest.slots :: { unknown })[slot_number] = next_slot
+			return next_manifest
+		end)
+		if update_error ~= nil then
+			return false
+		end
+		local next_manifest = as_dict(updated)
+		local next_slot = if next_manifest ~= nil then locate_slot(next_manifest, slot_number) else nil
+		return next_slot ~= nil and next_slot.generation == generation and next_slot.state == "empty"
+	end
+
+	local function rows_are_safe(segment: Dict, locator: Locator): boolean
+		local entries = segment.entries
+		if type(entries) ~= "table" then
+			return false
+		end
+		for _, raw_row in entries :: { unknown } do
+			local row = as_dict(raw_row)
+			if row == nil then
+				return false
+			end
+			local record_value, record_error = self:_get(tostring(row.route))
+			local record = as_dict(record_value)
+			if record_error ~= nil or record == nil or not same_owner(record.owner, self.owner) then
+				return false
+			end
+			if kind == "active" then
+				local active_locator = as_dict(record.locator)
+				local row_is_stale = record.placement_generation ~= row.placement_generation
+					or active_locator == nil
+					or active_locator.slot ~= locator.slot
+					or active_locator.generation ~= locator.generation
+				if not row_is_stale
+					and record.state ~= "acknowledged"
+					and record.state ~= "dead_lettered"
+					and record.state ~= "discarded"
+					and record.state ~= "expired"
+				then
+					return false
+				end
+			elseif record.state == "replaying"
+				or (record.state == "dead_lettered" and record.dlq_placement_generation == row.placement_generation)
+			then
+				-- Keep the independent DLQ row while it is still the authoritative terminal record,
+				-- and while replay is not yet durably placed in the active index.
+				return false
+			end
+		end
+		return true
+	end
+
 	for slot_number, raw_slot in slots do
 		local slot = as_dict(raw_slot)
-		if slot ~= nil and slot.state == "sealed" then
+		if slot ~= nil and (slot.state == "sealed" or slot.state == "draining") then
+			local generation = slot.generation :: number
 			local locator: Locator = {
 				slot = slot_number,
-				generation = slot.generation :: number,
-				key = self:_segment_key(kind, slot_number, slot.generation :: number),
+				generation = generation,
+				key = self:_segment_key(kind, slot_number, generation),
 			}
-			local segment_value = self:_get(locator.key)
+			local segment_value, segment_error = self:_get(locator.key)
+			if segment_error ~= nil then
+				return false
+			end
 			local segment = as_dict(segment_value)
-			if segment ~= nil and segment.state == "sealed" and segment.generation == locator.generation then
-				local safe = true
-				local entries = segment.entries
-				if type(entries) == "table" then
-					for _, raw_row in entries :: { unknown } do
-						local row = as_dict(raw_row)
-						if row == nil then
-							safe = false
-							break
-						end
-						local record_value = self:_get(tostring(row.route))
-						local record = as_dict(record_value)
-						if record == nil or not same_owner(record.owner, self.owner) then
-							safe = false
-							break
-						end
-						if kind == "active" then
-							local active_locator = as_dict(record.locator)
-							local row_is_stale = record.placement_generation ~= row.placement_generation
-								or active_locator == nil
-								or active_locator.slot ~= locator.slot
-								or active_locator.generation ~= locator.generation
-							if not row_is_stale and record.state ~= "acknowledged" and record.state ~= "dead_lettered" and record.state ~= "discarded" and record.state ~= "expired" then
-								safe = false
-								break
-							end
-						elseif record.state == "replaying"
-							or (record.state == "dead_lettered" and record.dlq_placement_generation == row.placement_generation)
-						then
-							-- Retain the DLQ row until discard/retention or replay completion is verified.
-							safe = false
-							break
-						end
-					end
+
+			-- A crash can occur after RemoveAsync commits but before the manifest slot is
+			-- released. A draining slot plus authoritative absence is safe to finish.
+			if slot.state == "draining" and segment == nil then
+				if release_draining_slot(slot_number, generation) then
+					return true
 				end
-				if safe then
-					if not self:_set_slot_state(kind, locator, "sealed", "draining") then
-						continue
-					end
-					local retired, retire_error = self:_update(locator.key, function(raw)
-						local current = as_dict(raw)
-						if current == nil or current.generation ~= locator.generation or current.state ~= "sealed" then
-							return raw
-						end
-						local next_segment = clone_dict(current)
-						next_segment.state = "retired"
-						return next_segment
-					end)
-					if retire_error ~= nil or as_dict(retired) == nil then
-						return false
-					end
-					-- Removal is safe only after the segment is non-writable and its manifest generation is retired.
-					local storage_remove = self.store.RemoveAsync
-					if storage_remove ~= nil then
-						pcall(function()
-							storage_remove(self.store, locator.key)
-						end)
-					end
-					local current_manifest = self:_get_manifest(kind)
-					if current_manifest ~= nil then
-						local current_slot = locate_slot(current_manifest, slot_number)
-						if current_slot ~= nil and current_slot.generation == locator.generation and current_slot.state == "draining" then
-							local _, release_error = self:_update(self:_manifest_key(kind), function(raw)
-								local current = as_dict(raw)
-								if current == nil or not same_owner(current.owner, self.owner) then
-									return raw
-								end
-								local next_manifest = clone_dict(current)
-								local release_slot = locate_slot(next_manifest, slot_number)
-								if release_slot == nil or release_slot.generation ~= locator.generation or release_slot.state ~= "draining" then
-									return raw
-								end
-								local next_slot = clone_dict(release_slot)
-								next_slot.state = "empty"
-								next_slot.allocation_token = nil
-								(next_manifest.slots :: { unknown })[slot_number] = next_slot
-								return next_manifest
-							end)
-							if release_error == nil then
-								return true
-							end
-						end
-					end
+				return false
+			end
+			if segment == nil
+				or segment.generation ~= generation
+				or not same_owner(segment.owner, self.owner)
+				or (segment.state ~= "sealed" and segment.state ~= "retired")
+			then
+				continue
+			end
+
+			local safe = segment.state == "retired" or rows_are_safe(segment, locator)
+			if not safe then
+				continue
+			end
+			if slot.state == "sealed" then
+				if not self:_set_slot_state(kind, locator, "sealed", "draining") then
+					continue
 				end
 			end
+
+			if segment.state == "sealed" then
+				local retired, retire_error = self:_update(locator.key, function(raw)
+					local current = as_dict(raw)
+					if current == nil or current.generation ~= generation or current.state ~= "sealed"
+						or not same_owner(current.owner, self.owner)
+					then
+						return raw
+					end
+					local next_segment = clone_dict(current)
+					next_segment.state = "retired"
+					return next_segment
+				end)
+				local retired_segment = as_dict(retired)
+				if retire_error ~= nil or retired_segment == nil
+					or retired_segment.generation ~= generation or retired_segment.state ~= "retired"
+				then
+					return false
+				end
+			end
+
+			-- Removal is unconditional, so it occurs only after a durable generation fence.
+			local storage_remove = self.store.RemoveAsync
+			if storage_remove == nil then
+				return false
+			end
+			pcall(function()
+				storage_remove(self.store, locator.key)
+			end)
+			-- Do not trust the ambiguous RemoveAsync response or a cached GetAsync result.
+			local after_remove, verify_error = self:_update(locator.key, function(raw)
+				return raw
+			end)
+			if verify_error ~= nil or after_remove ~= nil then
+				return false
+			end
+			if release_draining_slot(slot_number, generation) then
+				return true
+			end
+			return false
 		end
 	end
 	return false
