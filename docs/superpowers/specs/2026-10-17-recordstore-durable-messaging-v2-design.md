@@ -52,7 +52,7 @@ New APIs return a typed result in addition to preserving existing result-code me
 - `capacity`: no durable space is available and no message was accepted;
 - `retryable`: the attempt is known not to have committed, so retry with the same operation key is safe;
 - `unknown`: the attempt may or may not have committed and could not be reconciled. Query by the returned `message_id` or retry with the same idempotency key. Without either, do not blindly retry an irreversible operation;
-- `processed`, `acknowledged`, `retry_scheduled`, `dead_lettered`, and `discarded`: durable lifecycle states, not publish results.
+- `acknowledged`, `dead_lettered`, `discarded` and `expired`: persisted terminal outcomes; `processed` is an API alias for acknowledged, and `retry_scheduled` is a transition result rather than a stored state. Canonical state names are defined in the mailbox state machine.
 
 A successful MessagingService publish means only that publish succeeded. A MemoryStore enqueue means only that an ephemeral hint was recorded. Neither proves that a durable message exists or that a handler completed.
 
@@ -205,7 +205,17 @@ Add `Record:DispatchOutboxBatchAsync(max_events)` as an opt-in dispatcher. It se
 
 This batches source cleanup and overlaps independent destination work, but does not claim atomic delivery across destinations. Preserve per-target ordering when requested and cap concurrency to avoid turning a fan-out into a burst of DataStore throttling.
 
-### 3.5 Recoverable workflow/saga API
+### 3.5 Opt-in yielding queue handlers
+
+Preserve the existing `on_queue_message` contract: it is synchronous and must not yield. Add a separate opt-in `on_queue_message_async` callback for operations that need to await Roblox APIs. Do not silently change the old callback's execution model.
+
+The async callback runs only after the current canonical message claim and owning Record session fence are verified. A shared worker renews the persisted claim lease while the handler is active, using a higher scheduler priority than routine queue scans and maintenance. It must verify the same claim token and session generation on every renewal; an expired or replaced claim cannot renew itself.
+
+Pass a context containing the stable `message_id`, attempt number, current deadline and a cooperative `is_cancelled()`/cancellation reason. If renewal cannot be verified, the session is fenced, the lease expires, or shutdown begins, mark the context cancelled and stop scheduling further handler work. The handler must check cancellation before starting another external effect. RecordStore cannot forcibly reverse an already-committed HTTP/service side effect and cannot prove a yielding callback is safe simply because its coroutine was cancelled.
+
+Treat timeout, lease loss, or an uncertain external response as an unknown side-effect outcome, not evidence of failure. The message remains at-least-once and may be redelivered. Require application idempotency for irreversible effects; only enter the durable `acknowledging` state after the handler reports success and the current token is still valid. Renewal intervals and maximum handler deadlines are validated within hard bounds. Runtime adaptation must not extend the claim lease of an already-claimed message or suppress lease-renewal work.
+
+### 3.6 Recoverable workflow/saga API
 
 Add an optional companion module, for example `RecordStoreWorkflow`, after inbox/outbox correctness is established. Its durable API should provide:
 
@@ -619,6 +629,13 @@ Required test groups:
 16. **Scale**: 0/100/1,000/10,000 DLQ items; segment counts at low and configured max; high retry backlog; scan fairness and bounded requests; inbox/outbox capacity and retention.
 17. **Transform purity**: instrumentation and review prove library-owned transforms do not yield or call MessagingService/MemoryStore, observers, GUID generation, or cross-key APIs. Consumer callbacks are separately documented as pure/non-yielding; no test can prove arbitrary callback code has no hidden external side effects.
 
+18. **Adaptive configuration**: budget traces with sustained low/healthy/flapping budgets, throttle bursts, changing player counts and Heartbeat delays; one governor coordinates all Records, downshifts promptly, recovers slowly and never changes correctness limits or starves its internal critical lane.
+19. **Policy snapshots**: stale revisions, repeated identical revision, same-revision conflicting contents, invalid bounds/schema, provider failures, missing invalidation messages and cold start; last-known-good policy or built-in safe defaults remain effective without blocking profile startup.
+20. **Inbox batch and claim races**: repeated IDs inside one batch are rejected before writes; earlier matching receipts are duplicates; payload conflicts and capacity overflow abort all new mutations; claims that expire before the profile transaction are not acknowledged; crash after profile commit before queue ack replays as duplicates.
+21. **Outbox event identity and cleanup**: same commit key/payload from the same source returns the same events; the same commit key on different source profiles generates distinct event IDs; different payload under the same source commit key conflicts; partial destination success, cleanup crash and repeated dispatch remove only events whose destination receipts are verified.
+22. **Acceleration and fairness**: all hints dropped, duplicated or reordered; cache invalidation missed; high-profile fan-out; per-owner hot spots; MemoryStore throttling/expiry; topic count remains fixed by shard configuration; low-priority maintenance cannot consume RecordStore's critical internal concurrency reserve.
+23. **Yielding handlers**: lease renewals under budget pressure, handler yield/error, uncertain service response, cooperative cancellation, session fencing, expired/replaced claims, server shutdown during yield, and redelivery after an external side effect may already have committed.
+
 The regression test must fail against the old implementation for the reason it claims to cover. A passing unit fake does not replace a Studio server playtest for real DataStore and service throttling behavior.
 
 ## 13. CodSpeed and service-budget validation
@@ -659,7 +676,7 @@ All performance measurements go through CodSpeed. Use Simulation for determinist
 
 - Build the canonical message record, bounded append-only segment index, receipt protocol and recovery.
 - Keep the existing v3 queue reader and add the freeze/migration path.
-- Implement retries, lease fencing, acknowledgement recovery, independent DLQ, replay and status queries.
+- Implement retries, lease fencing, acknowledgement recovery, independent DLQ, replay and status queries. Preserve the existing synchronous/non-yielding handler; add the separate yielding callback only with tested claim renewal, cooperative cancellation and shutdown fencing.
 - No MemoryStore dependency and no inbox/outbox format change yet.
 
 ### Phase 2 — profile transactional primitives
