@@ -184,5 +184,44 @@ local dependency_result = dependency_guard:ExecuteAsync(115, "erasure-missing-de
 assert(dependency_result.code == "unsupported", "missing dependency proof did not fail closed")
 assert(delete_calls == deleted_before_guard, "erasure deleted a record without dependency-clearance proof")
 
+local absent = V2.Erasure.new(new_store(), {}, {})
+local absent_result, absent_status = absent:IsErased(117)
+assert(absent_result == false and absent_status.code == "not_found",
+	"a provably absent erasure manifest did not return false")
+
+local broken_store = {}
+function broken_store:GetAsync(_key) error("transient read failure") end
+function broken_store:UpdateAsync(_key, _transform) error("transient write failure") end
+local unresolved = V2.Erasure.new(broken_store, {}, {})
+local unresolved_result, unresolved_status = unresolved:IsErased(118)
+assert(unresolved_result == nil and unresolved_status.code == "unknown",
+	"unavailable erasure state was misreported as permission to write")
+
+local projection_store = new_store()
+local guarded_projections = V2.Projections.new(projection_store, {
+	is_erased = function(user_id) return unresolved:IsErased(user_id) end,
+})
+assert(guarded_projections:Register("player_summary", 1, function(value, event)
+	value.coins = event.coins
+	return value
+end))
+local blocked_projection = guarded_projections:ApplyAsync("player_summary", {
+	event_id = "unknown-erasure-projection",
+	entity_id = "player-118",
+	source_revision = 1,
+	coins = 100,
+	subject_user_ids = { 118 },
+})
+assert(blocked_projection.code == "unknown",
+	"projection applied while authoritative erasure status was unavailable")
+
+local unsupported_store = new_store()
+unsupported_store:UpdateAsync("rv2erase-u119", function()
+	return { version = 999, user_id = 119, erasure_id = "future-erasure", status = "future_state" }
+end)
+local unsupported = V2.Erasure.new(unsupported_store, {}, {})
+local unsupported_result = unsupported:IsErased(119)
+assert(unsupported_result == nil, "unknown/future erasure state did not fail closed")
+
 print("[PASS] Erasure coverage gating, bounded inventory, immutable checkpoints, writer fencing and generation-aware deletion.")
 Shim.close()
