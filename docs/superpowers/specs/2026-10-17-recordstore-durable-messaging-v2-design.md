@@ -81,6 +81,7 @@ The unique value is the combination of capabilities below. Statements about Prof
 | Schema-aware message validation and safe dead-letter replay | No equivalent documented queue/replay API found | Versioned payload codecs, validation-before-replay, replay audit and operator-controlled retention |
 | Queue/outbox/inbox health snapshots | ProfileStore exposes critical-state/error signals for its profile operations | RecordStore adds bounded, explicitly approximate queue and workflow diagnostics without using metrics for correctness |
 | Server-local adaptive configuration and policy introspection | No equivalent documented public runtime governor API found | Shared budget-aware scheduler, versioned validated policy snapshots, server roles/profiles, last-known-good fallback and explainable effective settings |
+| Explicit durable-message priority scheduling with anti-starvation and ordering constraints | No equivalent documented public priority scheduling contract found | Optional message priority tiers and fair per-server scheduling; no cross-server priority authority |
 | Idempotent arbitrary profile-key business transaction with stored result | No equivalent documented transaction-receipt API found | One profile-key mutation and stable operation receipt with duplicate/conflict/unknown outcomes |
 | First-class MarketplaceService receipt adapter | No equivalent documented ProfileStore receipt adapter found | Opt-in receipt integration backed by idempotent profile transactions and explicit lifetime/retention policy |
 | Application-schema migration engine | No equivalent documented application-data migration registry found | Ordered, resumable migrations distinct from the serialization-envelope version, with validation and future-version fencing |
@@ -555,7 +556,7 @@ Apply acceleration where it reduces actual Roblox service calls or wasted work. 
 
 **E. Fair multi-lane scheduling**
 - Separate critical profile persistence and lease work from durable-message processing, outbox fan-out, and maintenance/diagnostics.
-- Use weighted fair scheduling and bounded per-owner slices so a noisy profile or poison message cannot starve other profiles. Preserve ordering for the same configured ordering key. Per-message priority values remain a later opt-in scheduling feature; do not imply that they are active in the initial mailbox release.
+- Use weighted fair scheduling and bounded per-owner slices so a noisy profile or poison message cannot starve other profiles. Preserve ordering for the same configured ordering key. The priority-aware scheduler is specified in section 28 as a future opt-in feature. The initial mailbox release uses the normal/default priority and does not claim priority-aware queue ordering.
 - Under pressure, drop only ephemeral hints/cache entries, not accepted durable messages. Delay low-priority work rather than consuming the reserved budget.
 - Keep queue and maintenance concurrency in one shared request governor; do not create independent semaphores per feature that oversubscribe the same DataStore budget.
 
@@ -674,6 +675,15 @@ The regression test must fail against the old implementation for the reason it c
 31. **Secondary indexes and tracing**: duplicate/out-of-order projection events, rebuild from checkpoint, deleted source, stale query confirmation, trace truncation/privacy, trace-sink failure and proof that tracing adds no separate hot-path write.
 32. **Performance optimizations preserve contracts**: no-op save only when clean is proven; coalescing obeys maximum dirty age; read singleflight never merges session acquisition; compression round-trips all supported codecs; queue cursors recover dropped hints; budget reserves prevent starvation; benchmark toggles do not alter durable state semantics.
 
+
+
+38. **Priority correctness and idempotency**: same stable enqueue idempotency key with differing priority yields the documented duplicate/conflict behavior; accepted priority is immutable unless the explicit reprioritize protocol is enabled; repeated/stale reprioritize IDs are idempotent.
+39. **Priority versus ordering**: high priority does not bypass an earlier message sharing an ordering key; unkeyed eligible messages can be selected by lane; delayed/preparing/claimed/expired items cannot be claimed merely due to priority.
+40. **Anti-starvation under load**: sustain a high-priority flood while normal/background messages are pending; assert bounded lane service under healthy service conditions, configured aging behavior, per-owner fairness and no unlimited high-lane monopolization.
+41. **Index hints and lane migration**: stale priority bucket, duplicated index row, stale placement generation, new lane creation and disabled-priority fallback never permit duplicate delivery or permanent message invisibility.
+42. **Local work-class priority**: critical saves/releases during queue/outbox/maintenance pressure retain reserved internal capacity; maintenance yields; disabled priority scheduler falls back to fair FIFO/weighted scheduling without changing durable semantics.
+43. **No global server-priority assumption**: competing servers with different roles/budgets, lost and delayed hints, server death and replacement, stale role policy and background-only worker failure; any eligible healthy server can still recover/claim according to durable CAS/fencing.
+44. **Priority performance trade-offs**: compare enabled/disabled and multiple priority mixes with equal input volume; record queue wait by lane, scan amplification, request counts, critical-save p95 and background starvation under high load; no benefit is claimed from synthetic scheduling tests alone.
 
 33. **Durability SLO and dirty-state visibility**: nested mutation, direct-mutable-table tracking gap, successful commit versus unknown write, age threshold crossing, repeated alert coalescing, no DataStore write per alert and accurate unavailable/estimated status.
 34. **Unified outcome/retry policy**: inject definitive failure, commit-then-error, fenced session, schema conflict and capacity result for each API family; verify that unknown outcomes are reconciled by the same stable operation ID and never converted to presumed failure.
@@ -823,6 +833,8 @@ The design is implementable only when tests and runtime evidence demonstrate all
 - Durability snapshots expose age/revision/uncertain-write limitations and cannot claim clean state when mutation tracking is incomplete.
 - Degraded-mode policies have hard bounds and never treat an in-memory buffer as durable acknowledgement.
 - Session diagnostics are read-only with respect to ownership; maintenance/compaction is resumable, cursor-bounded and protects live idempotency/workflow dependencies.
+
+- The planned failure-injection matrix contains 44 groups, including priority/ordering/fairness and cross-server worker-role cases.
 
 ## 16. Roblox and comparison references
 
@@ -1289,7 +1301,113 @@ This is a dependency order, not a promise to release everything as one monolithi
 - Compaction/maintenance resumes after crashes, never skips a page whose previous result is unknown, and never removes evidence required by a live workflow or advertised idempotency guarantee.
 - Each new P0/P1 feature has a focused benchmark paired with the correctness suite; the performance optimization remains off unless its target workload and adjacent critical-save workloads meet the measurement gate.
 
-## 28. Final adversarial audit: remaining risks and required controls
+
+## 28. Priority-aware scheduling design: messages, work lanes and server priority
+
+**Decision:** add opt-in, bounded **message priority** and formalize **server-local work-class priority**. Do not add a global or per-instance **server-priority** ranking to the core protocol.
+
+Priority changes scheduling preference only. It never changes whether a message is durable, whether its claim is valid, whether a reducer is allowed to run, whether an acknowledgement committed, or how session fencing works. Priorities cannot turn at-least-once delivery into exactly-once execution.
+
+### 28.1 Three distinct priority concepts
+
+Keep these mechanisms separate:
+
+1. **Message priority** selects which eligible messages should be attempted first within the same owner mailbox, subject to ordering constraints. This is an opt-in queue feature.
+2. **Server-local work-class priority** decides how one server's shared governor schedules critical profile saves/releases, transactions, queue work, outbox dispatch, and maintenance. The existing shared governor owns this policy.
+3. **Server-instance priority** would rank one Roblox game server above other server instances in a global scheduler. **This is not needed for the initial or default RecordStore design.** A server's configured role/profile may influence its own local work mix, but must not create a global lease-owner ranking or allow one server to steal another server's jobs.
+
+The local request budget is reported by `DataStoreService:GetRequestBudgetForRequestType()`; Roblox also applies shared service limits, and the server-local governor cannot infer total experience-wide demand from its own budget snapshot. MessagingService delivery is best-effort. A globally coordinated server-priority system would therefore need its own cross-server authority, contention control, stale-member handling and failure recovery, adding request cost and new failure modes without strengthening durable delivery. Do not build that coordinator unless a measured application requirement demonstrates the need.
+
+### 28.2 Message priority contract
+
+Propose a bounded, opt-in `priority` option for the existing enqueue options. Names and exact tiers remain provisional; an initial implementation should use a small fixed enum such as:
+
+- `high`: time-sensitive gameplay work with a justified server-side use case;
+- `normal`: default business/gameplay work;
+- `background`: maintenance or deferrable work.
+
+Do not use arbitrary integers, untrusted client-supplied priority, or unlimited priority names in the durable protocol. Map caller-visible values to a small versioned enum. Default old calls and migrated messages to `normal`. A caller may set priority only through server-authoritative code; it cannot bypass payload validation, owner checking, idempotency, capacity or authorization.
+
+Store the selected priority on the canonical message record. A segment/index row may copy a priority bucket as an acceleration hint, but the canonical record remains authoritative. The worker revalidates canonical state and placement generation before claiming. A stale priority hint may waste a read but cannot authorize or suppress a valid message indefinitely.
+
+Priority is immutable after acceptance in the first iteration. If later requirements justify reprioritization, provide an explicit `ReprioritizeAsync(message_id, new_priority, operation_id)` with a CAS check on current state and placement generation, an idempotent operation ID, a new index placement generation, and stale-row filtering. Do not edit a message's priority in place while an index row is assumed to remain current.
+
+A delivery receipt exposes priority, enqueue time, eligible time, claim state and an optional bounded wait/age estimate. The estimate is observational only; it is not a deadline guarantee. `expires_at`, retries, attempts and retention remain separate from priority. Do not raise priority automatically just because a message retries repeatedly; repeated failures may represent poison work and should trigger retry classification/circuit-breaker/DLQ policy, not monopolize execution.
+
+### 28.3 Ordering and fairness are mandatory
+
+Priority must never silently reorder work that the application declared ordered.
+
+- If messages share an `ordering_key`, preserve the documented order within that key. A later high-priority message cannot jump ahead of an earlier eligible message on the same key unless the caller explicitly opted into a different ordering contract.
+- Without an ordering key, use priority to select among eligible messages only, not among preparing, claimed, delayed, expired or otherwise non-claimable records.
+- Use weighted fair scheduling across priority lanes, with a maximum consecutive high-priority service budget and periodic service to normal/background lanes.
+- Add bounded age-based promotion to prevent starvation: a background item waiting beyond a configured threshold can become eligible for the next lower-lane service opportunity. Aging only affects scheduler preference; it does not modify the canonical priority, expiry, retry schedule, lease or protocol state.
+- Enforce per-owner/per-lane concurrency and admission caps so one profile cannot consume the entire server-local queue budget.
+- A high-priority arrival may take the next available worker slot, but it must not pretend to cancel an in-flight DataStore request or interrupt a handler that has already started. Existing claim tokens, cooperative cancellation and session fencing continue to govern running work.
+- Under saturation, return explicit capacity/backpressure where appropriate. Do not silently discard background work or accepted messages to keep the high lane short.
+
+The design must name the starvation bound as a configurable policy target and demonstrate it under sustained high-priority load. A weighted scheduler cannot promise a hard elapsed-time deadline when DataStore requests are throttled or unavailable.
+
+### 28.4 Per-server work-class priorities
+
+The shared governor should reserve internal concurrency for critical profile writes, session release/fencing and already-accepted transactions before servicing optional queue scans, outbox fan-out, projection rebuild, erasure, diagnostics and compaction. Within the non-critical reserve, use bounded weighted fairness rather than one global FIFO that lets maintenance block gameplay work.
+
+Proposed work classes:
+
+| Local work class | Scheduling treatment | Constraint |
+| --- | --- | --- |
+| Critical profile/session persistence | Reserved bounded capacity; highest local scheduling urgency | Never report success solely because the task received priority; durable result still must be verified |
+| Explicit profile transactions and receipt settlement | High local preference, bounded concurrency | Idempotency and capacity gates remain mandatory |
+| Eligible high-priority messages | Preferential queue lane, subject to ordering/fairness | Cannot starve normal work or override owner/claim checks |
+| Normal messages and outbox delivery | Weighted normal service | Ordering and retries remain unchanged |
+| Migration, erasure, index rebuild, trace export and compaction | Background slices; yield when critical work needs capacity | Progress must be resumable; maintenance may not purge unverified/live state |
+
+These are scheduler preferences, not separate request budgets granted by Roblox. The governor must account for DataStore read/write costs of UpdateAsync, observe throttling and latency, and retain a fallback scheduler if priority tuning is disabled. Do not call `SetRateLimitForRequestType()` automatically to manufacture priority.
+
+### 28.5 Is server-priority needed?
+
+**No, not as a core cross-server feature.** Do not define `server_priority`, "master server", "leader server" or a permanent privileged JobId for mailbox work in the first release.
+
+Reasons:
+
+- Each server has its own request budget snapshot and contention conditions. A static global rank will not reveal whether that server currently has useful headroom.
+- Durable message claiming is already arbitrated by canonical message state, CAS and fencing. A global priority lease owner would duplicate coordination without improving correctness.
+- Server instances churn, can become unreachable, and can have stale membership/health views; rankings add discovery, expiry, election and takeover cases.
+- Cross-server control messages are not a durable source of truth. A lost or delayed priority update must not block messages.
+- A privileged worker can starve ordinary workers or make a single server a hot spot. Requiring a global coordinator can add a write to each dispatch decision, defeating the performance goal.
+
+Use `server_role` / `runtime_profile` for **local policy intent only**. For example, a gameplay server may reserve more internal capacity for profile/session work; a background server may choose a lower queue concurrency. Each server still respects its local budget feedback and all servers remain eligible to claim valid work under the same durable state machine. Do not have background-role servers become the only workers for accepted messages, because job termination would then delay recovery.
+
+A future cross-server worker-tier experiment is only justified if measurements show local fairness cannot meet the use case. It must be advisory, lease-fenced, TTL-bounded, shard-aware, independently disableable and backed by ordinary workers as fallback. It cannot affect whether a message is accepted or durable. Treat it as a separately reviewed design, not a priority flag on the core message schema.
+
+### 28.6 Performance and benchmarks
+
+Priority can reduce queueing delay for selected work but may increase scan/index cost and worsen tail latency for lower lanes. Benchmark it as a trade-off, not a global speedup.
+
+Add CodSpeed/fault-simulator scenarios for:
+
+- priority disabled versus enabled under identical input and runner settings;
+- balanced low/normal/high mixes and a sustained high-priority flood;
+- starvation age and p50/p95/p99 eligible-to-claim latency for every lane;
+- one hot owner versus many owners, including per-owner caps and ordering keys;
+- separate priority lanes versus a shared index with weighted selection;
+- stale/misleading index priority hints, reprioritization CAS races and duplicate index rows;
+- simultaneous critical saves/releases, inbox/outbox traffic and background maintenance;
+- disabled/missing MessagingService hints and polling-only recovery;
+- low request budgets, commit-then-error, lease expiry and handler failures with priority enabled.
+
+Report both gains and regressions: request count per completed message, index scan amplification, queue wait by lane, oldest pending age, critical-save p95, service-budget headroom, throughput and starvation bound. Compare simulation CPU separately from wall-time and real Roblox service behavior. A priority scheduler is accepted only if target-lane latency improves under the stated workload, background work has a demonstrated anti-starvation bound, and critical persistence shows no unacceptable regression.
+
+### 28.7 Rollout and compatibility
+
+- First release: keep priority selection feature-gated/off by default, with all old/migrated messages mapped to `normal`.
+- Validate encoded payload/index limits and migration compatibility before adding a duplicated index hint or a new priority lane.
+- The first working priority implementation should prefer a small enum and bounded local scheduling state over a complicated cross-server priority registry.
+- The normal poller remains able to discover and claim valid messages if priority caches or hints fail.
+- Reprioritization, if approved later, requires a separate versioned operation and crash tests; it is not implied by the initial `priority` field.
+- Disabling priority must preserve message identity, queue state, ordering contracts, retry/expiry semantics and accepted work.
+
+## 29. Final adversarial audit: remaining risks and required controls
 
 This section is the final review checklist, not evidence that the future implementation has passed it.
 
