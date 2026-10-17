@@ -159,16 +159,24 @@ local result, snapshot = record:CommitWithOutboxAsync(
     "shop-purchase:operation-123",
     "ShopPurchase",
     { item_id = "sword_01", recipient_key = "player_456" },
+    {
+        {
+            target_store = "PlayerData",
+            target_scope = "global",
+            target_key = "player_456",
+            type = "ItemGift",
+            payload_version = 1,
+            data = { item_id = "sword_01" },
+        },
+    },
     function(current_data, command)
-        -- Pure reducer. The command is the canonical input.
-        local next_data = copy_and_apply_purchase(current_data, command)
-        local events = build_outbound_events(next_data, command)
-        return next_data, events
+        -- Pure, deterministic reducer. Outbox events are explicit inputs.
+        return copy_and_apply_purchase(current_data, command)
     end
 )
 ```
 
-The API accepts an explicit command type and canonical command payload; it does not try to fingerprint a Lua callback. One UpdateAsync on the source profile key commits the data mutation, exact-request commit receipt, and bounded outbox entries together. Event IDs derive from the stable commit key and event ordinal before entering the transform; reducers cannot generate IDs or time-dependent output. An already-committed key returns its stored outcome without reapplying the reducer. Reusing the key with different command type/payload returns conflict.
+The API accepts an explicit command type, canonical command payload, and explicit bounded outbound event list; it does not try to fingerprint a Lua callback or infer event intent from arbitrary side effects. One UpdateAsync on the source profile key commits the data mutation, exact-request commit receipt, and bounded outbox entries together. Stable event IDs derive deterministically from the stable commit key and event ordinal before the transform. The same commit key with a different command type, payload, or event list returns conflict.
 
 Serialize the operation through the Record write gate: flush pending local dirty data, block local mutators while the durable transform runs, and rebase the live cache/revision after commit. If the dirty flush has an unknown outcome, stop and reconcile instead of applying the command to stale data.
 
@@ -309,16 +317,16 @@ For purchase receipts that must remain deduplicated indefinitely, applications k
 
 ### 6.1 Atomic commit
 
-`CommitWithOutboxAsync(commit_key, command_type, command_payload, reducer)` performs one UpdateAsync against the source profile key. The reducer returns the next data value and a bounded list of outbound events. The same transform writes:
+`CommitWithOutboxAsync(commit_key, command_type, command_payload, outbox_events, reducer)` performs one UpdateAsync against the source profile key. The reducer returns the next profile-data value. The same transform writes:
 
 - next profile data;
-- an exact-request commit receipt keyed by `commit_key`;
-- stable outbox event IDs derived from `commit_key` and event ordinal;
-- event payload schema version, target identity and correlation/causation fields.
+- an exact-request commit receipt keyed by `commit_key`, including the canonical command and event list identity;
+- stable outbox event IDs derived deterministically from `commit_key` and event ordinal;
+- each event's schema version, target identity and correlation/causation fields.
 
-The receipt compares the exact canonical `command_type + command_payload`; it must not attempt to compare callback identity. All IDs, timestamps and request canonicalization are prepared outside the transform. The reducer receives the current durable data from the transform, is deterministic/pure/non-yielding, and may be invoked multiple times. A retry of an already committed `commit_key` returns the stored prior outcome without applying the data mutation again. The same key with a different command type/payload conflicts.
+Canonicalize the command and bounded event list before entering the transform. The reducer must be deterministic, pure and non-yielding; Roblox may invoke it more than once. An already-committed key with the same exact request returns its prior outcome without applying the data mutation again. The same key with a different command, payload or event list conflicts.
 
-Serialize this operation through the Record write gate: block local mutators, flush pending local dirty data, then run the durable transform. If flushing fails or is ambiguous, do not apply the command to a potentially stale envelope. After a confirmed commit, update/rebase the in-memory data, revision and saved snapshot before releasing the gate. If the result is uncertain, reconcile through the stable `commit_key` rather than applying a new operation.
+Serialize this operation through the Record write gate: block local mutators, flush pending local dirty data, then run the durable transform. If flushing fails or is ambiguous, do not apply the command to a potentially stale envelope. After a confirmed commit, rebase the in-memory data, revision and saved snapshot before releasing the gate. If the result is uncertain, reconcile through the stable `commit_key` rather than applying a new operation.
 
 The transform rejects the entire operation when the outbox byte/item budget would be exceeded. The profile mutation and outbound intent are committed together; neither is allowed to commit alone.
 
