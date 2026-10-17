@@ -297,7 +297,7 @@ do
 	})
 	expect_code(enqueued, "accepted", "lease margin fixture enqueue")
 	local handler_calls = 0
-	store:DelayNextUpdateBy(900)
+	store:DelayUpdateForKey(enqueued.message_id, 900)
 	local delayed_claim = mailbox:ProcessNextAsync(function()
 		handler_calls += 1
 		return true
