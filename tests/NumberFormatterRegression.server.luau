@@ -1,6 +1,6 @@
 --!strict
 local ServerScriptService = game:GetService("ServerScriptService")
-local NumberFormatter = require(ServerScriptService:WaitForChild("NumberFormatter"))
+local NumberFormatter = require(ServerScriptService.NumberFormatter)
 assert(NumberFormatter.format(999) == "999")
 assert(NumberFormatter.format(1_000) == "1K")
 assert(NumberFormatter.format(1_250) == "1.25K")

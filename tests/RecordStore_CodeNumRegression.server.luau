@@ -1,6 +1,7 @@
 --!nocheck
 -- CodeNum JSON payload persistence regression. Uses RecordStore.Mock only.
-local RecordStore = require(game:GetService("ServerScriptService"):WaitForChild("RecordStore"))
+local ServerScriptService = game:GetService("ServerScriptService")
+local RecordStore = require(ServerScriptService.RecordStore)
 RecordStore.Mock.reset()
 local store_name, scope, key = "RecordStore_CodeNumRegression", "global", "cash"
 

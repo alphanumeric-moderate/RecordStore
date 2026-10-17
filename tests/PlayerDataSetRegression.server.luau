@@ -4,8 +4,8 @@
 
 local Players = game:GetService("Players")
 local ServerScriptService = game:GetService("ServerScriptService")
-local RecordStore = require(ServerScriptService:WaitForChild("RecordStore"))
-local PlayerDataCore = require(ServerScriptService:WaitForChild("PlayerDataCore"))
+local RecordStore = require(ServerScriptService.RecordStore)
+local PlayerDataCore = require(ServerScriptService.PlayerDataCore)
 local controller = PlayerDataCore.new({
 	RecordStore = RecordStore.Mock,
 })
