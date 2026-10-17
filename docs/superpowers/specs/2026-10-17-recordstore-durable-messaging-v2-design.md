@@ -197,6 +197,12 @@ The API accepts an explicit command type, canonical command payload, and explici
 
 Serialize the operation through the Record write gate: flush pending local dirty data, block local mutators while the durable transform runs, and rebase the live cache/revision after commit. If the dirty flush has an unknown outcome, stop and reconcile instead of applying the command to stale data.
 
+### 3.4.1 Bounded outbox dispatch
+
+Add `Record:DispatchOutboxBatchAsync(max_events)` as an opt-in dispatcher. It selects a bounded set of independent pending entries, applies the shared governor's concurrency limit, and records a per-event result. It enqueues each event using its stable event ID as the destination idempotency key. Once several destination receipts are verified accepted, it marks only those event IDs delivered in one compare-and-set source-envelope update. An unverified or failed event remains pending; after a crash, accepted destinations are safely recognized by their original IDs.
+
+This batches source cleanup and overlaps independent destination work, but does not claim atomic delivery across destinations. Preserve per-target ordering when requested and cap concurrency to avoid turning a fan-out into a burst of DataStore throttling.
+
 ### 3.5 Recoverable workflow/saga API
 
 Add an optional companion module, for example `RecordStoreWorkflow`, after inbox/outbox correctness is established. Its durable API should provide:
@@ -231,7 +237,7 @@ A per-message canonical record costs more keys and service calls than one large 
 
 Roblox DataStore key names are limited to 50 characters. Define and test a stable key codec for every route, message, segment, idempotency, and DLQ key. Include store/scope/owner identity in the stored value, not only in the key name.
 
-- Use fixed-length routing digests to fit names. Document the exact deterministic hash implementation; do not assume Roblox provides a cryptographic hash function.
+- Use a versioned deterministic route codec. For example, a canonical message key is `m2i-<32-hex-digest>` when a producer key is supplied and `m2g-<32-hex-guid>` otherwise; both are 36 characters. The idempotency digest covers a length-prefixed canonical tuple of store, scope, profile key and producer key. Document the exact pure-Luau digest algorithm and fixed test vectors; do not assume Roblox provides a built-in cryptographic hash.
 - On every read/update, compare the complete stored owner, producer key (when present), message ID and exact canonical request to the requested values.
 - An idempotent message's record key is derived from a deterministic owner fingerprint and producer-key digest, so the same logical submission maps directly to its canonical message record without a second receipt lookup. A submission without an idempotency key uses a generated ID and cannot deduplicate an ambiguous retry.
 - If two inputs map to the same routing key but differ in full identity or request, fail closed with an explicit route-collision/conflict result. Never read, mutate, or overwrite the other owner's record.
@@ -320,7 +326,7 @@ No DataStore callback may perform any of these transitions by directly calling a
 
 Before entering this transform, serialize the operation through the Record's write gate: block local mutators, flush pending dirty data, then apply the reducer to the current envelope. If flushing fails or its outcome is unknown, do not proceed from a stale cache. On successful commit, rebase the in-memory Record to the committed data/revision before releasing the gate. On an ambiguous commit, reconcile by the stable message ID and receipt before allowing a second mutation.
 
-The reducer may run multiple times and must be pure, deterministic and non-yielding. If it throws, yields, or returns an invalid value, abort both the data mutation and receipt insertion. This provides at-most-once application of that reducer to the one profile key while the receipt remains retained. Delivery may repeat, but the same persisted profile mutation does not. It does not protect side effects outside the same UpdateAsync or make another profile key part of the transaction.
+The reducer may run multiple times and must be pure, deterministic and non-yielding. If it throws, yields, or returns an invalid value, abort both the data mutation and receipt insertion. The library can detect callback errors and yields, but cannot prove arbitrary callback code has no external side effects; purity is an API contract, not a sandbox guarantee. This provides at-most-once application of the reducer to the one profile key while the receipt remains retained. Delivery may repeat, but the same persisted profile mutation does not. It does not protect side effects outside the same UpdateAsync or make another profile key part of the transaction.
 
 ### 5.2 Receipt retention and capacity
 
@@ -603,7 +609,7 @@ Required test groups:
 9. **Replay/purge**: repeated replay ID, stale replay token, schema migration failure, future schema quarantine, retention boundaries, active index references, and purge interruption.
 10. **Inbox atomicity**: crash after profile mutation and before mailbox ack; redelivery is duplicate and does not increment balance twice; payload/recipient mismatch conflicts; receipt capacity aborts both mutation and receipt.
 11. **Outbox atomicity**: profile mutation cannot commit without outbox intent; crash after outbox append before response; crash after destination enqueue before outbox cleanup; repeat uses the same event ID; normal session save races with outbox-only update without dropping either change.
-12. **Reducer semantics**: transforms may run more than once; deterministic pure reducer yields same result; exceptions/yields abort; external side-effect test fixture fails the contract test rather than simulating exactly-once.
+12. **Reducer semantics**: transforms may run more than once; deterministic pure reducer yields the same result; exceptions/yields abort; document and test the callback contract without claiming the library can detect every external side effect.
 13. **Saga**: crash after each reserve/credit/finalize and before checkpoint; each step is idempotent; source funds are not duplicated; retry leads to completion or defined compensation; stuck state remains observable.
 14. **Acceleration failures**: MessagingService errors, dropped/reordered/duplicated hints, MemoryStore expiry/eviction/throttling/quotas, and disabled acceleration; durable polling recovers everything.
 15. **Migration**: empty/non-empty v3, active and dead-letter records, malformed/future version, wrong owner, crash between each import, old writer races, freeze marker read by actual v3 code, feature gate and reverse migration.
@@ -625,6 +631,11 @@ Add repeatable benchmarks for:
 - outbox commit, dispatch, and recovery after destination acceptance;
 - inbox first-application versus duplicate delivery;
 - saga replay/compensation and migration;
+- `ApplyInboxBatchAsync` batches of 1, 4, 8 and 16 messages with duplicate receipts, payload sizes, reducer costs and constrained budgets;
+- `DispatchOutboxBatchAsync` with mixed destination latency/errors and grouped source cleanup;
+- adaptive-controller CPU cost with 1/10/100 active Records, policy updates, budget traces, throttling and recovery hysteresis;
+- fixed-shard wake-up coalescing at growing profile counts versus per-profile subscriptions, including MemoryStore-assisted versus polling-only service-call counts;
+- hot-segment contention, canonical message-key updates and worst-case collision verification;
 - 1, 32, 256, 1,000 and configured-maximum pending messages;
 - high dead-letter history independent of active segment update size;
 - 10/30/50 concurrent producers with ample and constrained fake budgets;
@@ -651,7 +662,8 @@ All performance measurements go through CodSpeed. Use Simulation for determinist
 ### Phase 2 — profile transactional primitives
 
 - Version and migrate the primary profile envelope for inbox/outbox sidecars.
-- Implement `ApplyInboxAsync` and `CommitWithOutboxAsync` with capacity/backpressure.
+- Implement `ApplyInboxAsync`, opt-in `ApplyInboxBatchAsync`, and `CommitWithOutboxAsync` with capacity/backpressure and explicit transaction boundaries.
+- Implement bounded outbox fan-out with grouped cleanup using verified destination receipts.
 - Prove that normal session saves preserve concurrent sidecar changes.
 - Keep feature activation gated until old writers are drained.
 
@@ -661,13 +673,21 @@ All performance measurements go through CodSpeed. Use Simulation for determinist
 - Publish a transfer example only after crash matrix coverage passes.
 - Do not expose a misleading atomic cross-profile transfer helper.
 
-### Phase 4 — optional acceleration and operations
+### Phase 4 — server-local adaptive governor
 
-- Add the MemoryStore/MessagingService hint adapter behind an off-by-default setting.
+- Build one governor shared by all Record instances and integrate it with the existing request-concurrency scheduler.
+- Add bounded runtime profiles, configuration validation/revisioning, `get_runtime_snapshot()`, and `apply_runtime_policy()`.
+- Preserve a reserved share for profile/session persistence. Do not call `SetRateLimitForRequestType()` automatically.
+- Add deterministic budget/throttle traces and hysteresis tests before enabling adaptive mode.
+
+### Phase 5 — measured acceleration and operations
+
+- Add explicit inbox batching and outbox grouped cleanup; verify batch atomicity and per-message idempotency receipts.
+- Add the shared sharded MessagingService/MemoryStore hint adapter behind an off-by-default setting, local wake-up coalescing and bounded candidate cache.
 - Add approximate health/status endpoints, paginated DLQ tools, repair dry-run and diagnostics.
-- Benchmark against polling-only behavior and keep acceleration disabled without measurable benefit.
+- Benchmark against polling-only behavior, keep accelerators disabled without measurable benefit, and never change persisted delivery semantics for a performance profile.
 
-### Phase 5 — staged rollout
+### Phase 6 — staged rollout
 
 - Run all Lune regressions, fake DataStore integration/fault-injection suites, Rojo builds, Studio tests and CodSpeed.
 - Perform a controlled migration in a disposable DataStore namespace before real data.
@@ -691,14 +711,45 @@ The design is implementable only when tests and runtime evidence demonstrate all
 - Multi-profile workflows converge through idempotent steps or a documented compensation/manual resolution.
 - Stats identify their completeness and are never treated as source of truth.
 - Migration preserves the v3 source, old writers fail closed, and rollback never silently drops unsupported sidecars.
-- Performance claims come from dedicated queue/outbox/inbox/saga benchmarks and are separated from live Roblox behavior that remains unverified.
+- Performance claims come from dedicated queue/outbox/inbox/saga/adaptive-controller benchmarks and are separated from live Roblox behavior that remains unverified.
+- A single server-local governor adapts only bounded scheduling settings from observed DataStore budgets and failures; it never weakens correctness policy or starves critical profile saves/releases.
+- A stale or invalid shared policy cannot overwrite last-known-good configuration, and missed policy hints recover through bounded periodic refresh.
+- Explicit inbox batches commit all new data mutations and receipts or none; queue acknowledgements occur only after that profile update is verified.
+- Optional wake-up topics and local candidate caches are bounded, coalesced and non-authoritative; polling recovers dropped notifications.
+- No default code path modifies engine-level DataStore rate limits or assumes a server-local budget proves game-wide headroom.
 
 ## 16. Roblox and comparison references
 
 - Roblox DataStore limits: https://create.roblox.com/docs/cloud-services/data-stores/error-codes-and-limits
 - Roblox data stores / UpdateAsync: https://create.roblox.com/docs/cloud-services/data-stores
 - Roblox versioning, listing and caching: https://create.roblox.com/docs/cloud-services/data-stores/versioning-listing-and-caching
+- DataStore request budgets and request categories: https://create.roblox.com/docs/reference/engine/enums/DataStoreRequestType
 - MessagingService delivery/limits: https://create.roblox.com/docs/reference/engine/classes/MessagingService/SubscribeAsync
 - MemoryStore limits and TTL: https://create.roblox.com/docs/cloud-services/memory-stores
 - ProfileStore README: https://github.com/MadStudioRoblox/ProfileStore/blob/main/README.md
 - ProfileStore API: https://github.com/MadStudioRoblox/ProfileStore/blob/main/docs/api.md
+
+
+## 17. Final adversarial audit: remaining risks and required controls
+
+This section is the final review checklist, not evidence that the future implementation has passed it.
+
+| Risk / weakness | Why it matters | Required correction or release gate |
+| --- | --- | --- |
+| **More small writes can still exhaust budgets** | A canonical message key reduces rewrite amplification but enqueue still spans message state and segment index; profile sidecars add additional request work. | Measure actual request counts and byte throughput. Use inbox batching, outbox grouped cleanup, adaptive admission and fairness. Never claim the new layout is faster just because each key is smaller. |
+| **Digest collision or unstable canonicalization** | A hash can route two requests to one key; ordinary JSON output is not automatically a canonical identity encoding. | Use a versioned length-prefixed identity codec, fixed test vectors, full stored identity/request comparison and fail-closed collision handling. Keep exact canonical request identity through the dedup window. |
+| **A preparing message may not be indexed yet** | A crash between canonical record creation and segment append leaves a preparing record that routine segment scans cannot discover. | Do not report acceptance before the index and ready state are verified. Caller retries with the same key resume the record. If automatic recovery without caller retry is required, add a bounded preparation journal/index or prove a safe bounded discovery strategy; never solve this by enumerating the whole keyspace each poll. |
+| **Per-owner hot keys and bounded slot capacity** | One profile's manifest and append segment can become hot, and a full slot table can return capacity even while some individual messages are small. | Make saturation explicit; measure worst-case same-owner concurrency. Do not add partitions or relocate ready messages without an ordering and stale-writer protocol. A future index-sharding design must be a separately reviewed migration. |
+| **Session cache versus durable atomic operations** | A direct inbox/outbox UpdateAsync racing local dirty data or old session ownership can lose updates. | Require a write gate, flush/reconcile dirty state, owner/token/generation fencing inside the transform, and in-memory rebase after confirmed commit. Test old-server races and uncertain flushes. |
+| **User reducers can cause external effects** | A reducer can be called more than once by UpdateAsync; the library cannot sandbox arbitrary Luau code or detect all side effects. | Document strict purity. Use only reducers that return data; put non-idempotent effects behind inbox/domain ledgers outside the transform. Tests can cover library code but cannot prove arbitrary consumer callbacks pure. |
+| **Adaptive tuning can oscillate or starve saves** | Every Record might otherwise create its own feedback loop, and queue processing could consume budget needed for session save/release. | One server-local governor; fast throttle backoff, slow recovery, hysteresis, reserved critical budget, shared semaphore and deterministic load tests. |
+| **Local budgets do not reveal all universe-wide contention** | The per-server budget is not a complete view of shared experience traffic; several servers may collectively trigger throttling. | Incorporate throttle and latency feedback. State that the controller is locally adaptive, not a globally optimal allocator. Any cross-server budget coordinator remains optional and non-authoritative. |
+| **Remote policy is untrusted/stale input** | Bad or out-of-order updates could push a server into unsafe settings or cause policy flapping. | Validate whole snapshots, monotonic revisions, strict hard bounds, last-known-good fallback, jittered polling and no per-operation policy reads. Keep runtime settings out of persistence protocol state. |
+| **Notification-only acceleration can lose wake-ups** | MessagingService and MemoryStore are transient/best-effort or expiring; per-profile subscriptions can scale poorly. | Fixed bounded topic shards, coalesced wakeups, TTL-limited hints, periodic polling, and tests that intentionally drop every hint. |
+| **Metrics can be inconsistent** | A multi-key stats scan is not a linearizable global snapshot. | Label scope/completeness/observation time. Metrics never authorize claims, acknowledgements, purge or migration. |
+| **Rollback across envelope versions can lose sidecars** | Old binaries may strip inbox/outbox fields or mutate a format they do not understand. | Old-writer freeze sentinel, version compatibility matrix, retained source copy and explicit reverse migration only when quiesced and verified. |
+| **The design is not yet a performance result** | More safety states and per-message records create overhead, and existing CodSpeed baselines lack these workloads. | Add representative CodSpeed workloads, then run isolated Studio/server tests for real request budgets, throttling and cross-server delivery. Keep adaptive/acceleration defaults conservative until measured. |
+
+The most important unresolved design gate is the preparation recovery path: because DataStore has no transactional index across keys and routine recovery must not enumerate the whole keyspace, implementation must provide a bounded way to discover preparing submissions left between message creation and index append. If that bounded recovery structure cannot be proved safe under crash/concurrency tests, do not implement or enable the v2 mailbox yet.
+
+Known implementation limitation: the API can enforce validation, yielding rules where supported, version fences and bounded calls; it cannot prove arbitrary consumer callback purity, guarantee external API side effects exactly once, or infer all experience-wide request consumption from one server. Those limitations must remain explicit in API docs.
