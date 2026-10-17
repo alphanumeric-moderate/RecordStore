@@ -94,7 +94,7 @@ Names are provisional. Preserve existing two-argument `Record:EnqueueAsync(type,
 Add a store-level operation analogous to:
 
 ```lua
-local result = RecordStore.EnqueueToAsync(
+local result = RecordStore.enqueue_to_async(
     store_name,
     scope,
     profile_key,
@@ -117,7 +117,7 @@ Existing `Record:EnqueueAsync(type, data)` remains a convenience method; it dele
 
 ### 3.2 Query delivery outcome
 
-Add `RecordStore.GetDeliveryAsync(store_name, scope, profile_key, message_id)` and/or `Record:GetDeliveryAsync(message_id)`. Return a single canonical message snapshot:
+Add module-level `RecordStore.get_delivery_async(store_name, scope, profile_key, message_id)` and/or the `Record:GetDeliveryAsync(message_id)` convenience method. Module-level functions use RecordStore's existing snake_case naming convention; Record instance methods retain PascalCase. Return a single canonical message snapshot:
 
 - message ID, owner identity, type, payload schema version;
 - lifecycle state, created/updated time, current attempt and total attempts;
@@ -182,7 +182,7 @@ Serialize the operation through the Record write gate: flush pending local dirty
 
 ### 3.5 Recoverable workflow/saga API
 
-Add an optional companion module, for example `RecordStore.Workflow`, after inbox/outbox correctness is established. Its durable API should provide:
+Add an optional companion module, for example `RecordStoreWorkflow`, after inbox/outbox correctness is established. Its durable API should provide:
 
 - stable workflow ID and exact-request idempotency;
 - named, versioned steps with checkpoints and status;
@@ -423,7 +423,7 @@ Priority lanes and strict ordering should be enabled only after a starvation-pro
 
 Dead letters are canonical message records plus a separately segmented DLQ index. A dead-letter append is idempotent by message ID and terminal generation. No active segment size calculation may include historical DLQ records.
 
-Expose:
+Expose module-level `RecordStore.list_dead_letters_async(store_name, scope, profile_key, cursor, page_size)` plus Record convenience methods:
 - paginated `ListDeadLettersAsync(cursor, page_size)`;
 - `ClaimDeadLetterAsync`, `ReplayDeadLetterAsync`, and `DiscardDeadLetterAsync` with fenced tokens;
 - bounded last error, attempts, timestamps and replay history;
@@ -445,7 +445,7 @@ Purge only terminal data that is past its declared retention and no longer refer
 
 ## 10. Operational observability
 
-Add `GetQueueStatsAsync()`, `GetDeliveryAsync()`, `GetOutboxStatsAsync()`, `GetInboxStatsAsync()` and workflow status snapshots without breaking `Stats()`.
+Add module-level `RecordStore.get_queue_stats_async()`, `RecordStore.get_delivery_async()`, `RecordStore.get_outbox_stats_async()`, and `RecordStore.get_inbox_stats_async()`, plus Record convenience methods where a live Record is available. Keep `Stats()` backwards compatible. Expose workflow status through the optional `RecordStoreWorkflow` module.
 
 Useful fields include active/claimed/delayed/acknowledging/dead-lettering counts, oldest eligible age, oldest pending outbox age, expired claim recoveries, retry distribution, terminal error distribution, idempotent duplicate submissions, conflict/capacity/unknown outcomes, migration phase, segment count, scan cursor progress, hint failures, DLQ retention eligibility and stuck workflow step.
 
