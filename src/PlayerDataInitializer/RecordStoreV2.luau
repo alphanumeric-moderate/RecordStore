@@ -972,6 +972,7 @@ local function new_migrations()
 	function registry:MigrateAsync(record, store_name, target_version, options)
 		options = options or {}
 		local field = options.schema_field or (RESERVED .. "application_schema_version")
+		local schema_reserved_fields = if string.sub(field, 1, #RESERVED) == RESERVED then { field } else {}
 		local data, read_error = record_data(record)
 		if type(data) ~= "table" then return { code = "fenced", message = read_error } end
 		local version = data[field] or 0
@@ -993,7 +994,7 @@ local function new_migrations()
 				if step.validate then local valid, validation_error = pure(step.validate, next_data); if valid ~= true then error("migration validation rejected: " .. tostring(validation_error)) end end
 				next_data[field] = step.to_version
 				return next_data
-			end, nil, nil, { field })
+			end, nil, nil, schema_reserved_fields)
 			self.local_status[operation_id] = { code = result.code, message = result.message, migration_id = step.id, revision = step.revision }
 			if result.code ~= "committed" and result.code ~= "duplicate" then result.completed_steps = completed; result.current_version = step.from_version; return result end
 			completed += 1
@@ -1704,10 +1705,11 @@ local function new_receipt_processor(config)
 					if prior.user_id ~= user_id or prior.product_id ~= product_id or prior.revision ~= revision then error("purchase receipt conflict") end
 					return data
 				end
-				local granted_data, grant_error = pure(grant, data, copy(receipt), copy(product))
+				-- Purchase grant code must not be able to erase or rewrite previous receipts.
+				local grant_input = copy(data)
+				grant_input[field] = nil
+				local granted_data, grant_error = pure(grant, grant_input, copy(receipt), copy(product))
 				if type(granted_data) ~= "table" then error("purchase grant rejected: " .. tostring(grant_error)) end
-				receipts = granted_data[field] or receipts
-				if type(receipts) ~= "table" then error("grant reducer corrupted purchase receipt namespace") end
 				receipts[id] = { user_id = user_id, product_id = product_id, revision = revision, granted_at = granted_at }
 				granted_data[field] = receipts
 				return granted_data
