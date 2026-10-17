@@ -2,10 +2,10 @@
 -- CodSpeed benchmark for repeated PlayerData.Set runtime path resolution.
 local create_harness = require("./playerdata_set_harness")
 
--- This first run is the legacy lookup baseline. The follow-up commit switches
--- the same benchmark URI to the cached implementation for a controlled diff.
+-- The previous commit measured the legacy path; this commit measures the
+-- cached path with the same benchmark URI for a controlled CodSpeed comparison.
 -- The repeated value stabilizes persistence work so this measures Set path lookup.
-local USE_CACHED_PATHS = false
+local USE_CACHED_PATHS = true
 local ITERATIONS = 10000
 
 local harness = create_harness(USE_CACHED_PATHS)
