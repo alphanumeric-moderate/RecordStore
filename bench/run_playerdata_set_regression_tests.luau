@@ -340,8 +340,8 @@ assert(success, message)
 success, message = controller.Set(player, "admin", true)
 assert(success, message)
 assert(
-	find_first_child_calls == path_lookups_before_set + 2,
-	"PlayerData.Set should reuse cached root folders and only look up the target value"
+	find_first_child_calls == path_lookups_before_set,
+	"PlayerData.Set should reuse cached folder and value paths on the steady path"
 )
 assert(not controller.Set(player, "admin", "true"), "invalid boolean value was accepted")
 assert(not controller.Set(player, "not_a_field", 1), "unknown field was accepted")
@@ -370,15 +370,25 @@ local lookups_before_refresh = find_first_child_calls
 success, message = controller.Set(player, "kills", 12500124)
 assert(success, message)
 assert(
-	find_first_child_calls == lookups_before_refresh + 2,
+	find_first_child_calls == lookups_before_refresh + 1,
 	"Set did not rebuild the root path after the folder was restored"
 )
 local lookups_before_cached_set = find_first_child_calls
 success, message = controller.Set(player, "kills", 12500124)
 assert(success, message)
 assert(
-	find_first_child_calls == lookups_before_cached_set + 1,
-	"Set did not reuse the rebuilt root path"
+	find_first_child_calls == lookups_before_cached_set,
+	"Set did not reuse the rebuilt folder and value path"
+)
+
+-- A removed cached value must trigger a safe child lookup rather than being reused.
+local lookups_before_removed_value = find_first_child_calls
+kills:Destroy()
+local removed_value_ok = controller.Set(player, "kills", 12500124)
+assert(not removed_value_ok, "Set accepted a removed cached value instance")
+assert(
+	find_first_child_calls == lookups_before_removed_value + 1,
+	"Set did not re-resolve a removed cached value instance"
 )
 
 task.wait(0.1)
