@@ -163,7 +163,7 @@ end)
 
 One UpdateAsync applies the combined profile mutation and records inbox receipts for all new message IDs. The input must contain unique message IDs; duplicate IDs within one call are rejected as validation errors before any write. Matching receipts from earlier calls are returned as duplicates and excluded from the reducer input. If any ID conflicts with a retained receipt, the full batch aborts without applying any new messages. An invalid reducer result, callback error/yield, owner/session fencing failure or capacity overflow also aborts the entire batch. The result gives an outcome for every input ID.
 
-The batch has strict item and encoded-byte ceilings. Only messages for the same profile and compatible schema/reducer may share a transaction. Preserve delivery order explicitly; do not reorder messages with the same ordering key. Queue acknowledgements begin only after the profile mutation and all receipts are verified durable. A crash after profile commit but before queue acknowledgements is safe: redelivery finds the per-message inbox receipts and does not reapply the data mutations.
+The batch has strict item and encoded-byte ceilings. Only messages for the same profile and compatible schema/reducer may share a transaction. Preserve delivery order explicitly; do not reorder messages with the same ordering key. The scheduler may batch only messages whose claims were successfully acquired for the same owner; it must not wait for a missing claim while holding already-claimed messages indefinitely. If any claim expires before the inbox transaction begins, abort/release or allow those claims to expire and retry the batch. Queue acknowledgements begin only after the profile mutation and all receipts are verified durable. A crash after profile commit but before queue acknowledgements is safe: redelivery finds the per-message inbox receipts and does not reapply the data mutations.
 
 This API is opt-in because one batch is one atomic unit: all new items in that batch commit or none do. Automatic batch-size changes must not silently change a caller's intended transaction boundaries. Runtime acceleration may coalesce candidate discovery and scheduling, but it can merge messages into one atomic batch only where the caller explicitly opted into batch semantics.
 
@@ -386,7 +386,7 @@ For transfer ID `T` from A to B:
 4. On A, finalize the reservation and record inbox key `T:finalize`.
 5. Mark the workflow complete only after each durable step is verified.
 
-Every leg is replay-safe because the profile data mutation and step receipt share one key. A crash after a leg commits but before the saga checkpoint writes is harmless: replay of that leg returns its recorded outcome. If a step permanently fails, execute a defined compensation (such as release the source reservation) with its own idempotency key. Compensation is a new business operation, not rollback of history.
+Every leg is replay-safe because the profile data mutation and step receipt share one key. A crash after a leg commits but before the saga checkpoint writes is harmless: replay of that leg returns its recorded outcome. An ambiguous destination result is `unknown`, not a definitive failure: reconcile or retry the same destination step ID before releasing a source reservation. Never compensate while a prior step could still commit late. If a step is definitively terminal and compensation is safe, execute the defined compensation (such as release the source reservation) with its own idempotency key. Compensation is a new business operation, not rollback of history. A workflow's maximum retry/deadline window must fit inside each participant's inbox-receipt retention window, or the domain must retain a permanent step ledger.
 
 Workflow state is a checkpoint/projection; authoritative effects remain the per-profile inbox receipts and durable data. The reconciler compares them and resumes or compensates. Never assume the workflow record and the profile effects update atomically.
 
@@ -449,7 +449,7 @@ Dynamic configuration is a first-class subsystem, but it is a **bounded runtime 
 Resolve effective settings in this order:
 
 1. **Correctness invariants** compiled into RecordStore: protocol/version checks, owner verification, session/claim fencing, idempotency rules, legal state transitions, minimum retention guarantees and key/value size ceilings. No dynamic or remote policy can weaken these.
-2. **Developer hard bounds** supplied in the RecordStore options.
+2. **Developer hard bounds** supplied through the one-time module-level runtime configuration; per-Record options may tighten request-specific limits but must not exceed server-global hard bounds.
 3. **Validated versioned policy snapshot** supplied by the experience, if configured.
 4. **Server profile** selected by the developer or `auto`: `latency`, `balanced`, `budget_safe`, or `background`.
 5. **Adaptive local overlay** calculated from this server's observed budgets, latency, throttling and workload.
@@ -481,7 +481,7 @@ The controller adapts only scheduling/acceleration knobs that preserve semantics
 
 Use asymmetric control to avoid oscillation:
 1. On a throttle, low budget reserve, or spike in uncertain writes, reduce noncritical concurrency quickly, stop low-priority scans/maintenance and move background work behind critical persistence operations.
-2. Preserve reserved capacity for profile open/save, session lease renewal/release and bounded shutdown work. Queue, DLQ inspection, compaction and metrics may not consume this reserved share.
+2. Preserve reserved capacity within RecordStore's own request scheduler for profile open/save, session lease renewal/release and bounded shutdown work. Queue, DLQ inspection, compaction and metrics may not consume this internal reserved share. This is not an engine-enforced DataStore budget reservation: unrelated scripts in the same server can still consume the engine's request budget.
 3. Keep durable accepted work pending instead of dropping it. A new send is accepted only after its canonical record and segment index are verified; for submissions with an idempotency key, return `retryable` or `unknown` and require retry with that same key. Without a key, an unknown result cannot be safely retried for irreversible work.
 4. Increase concurrency slowly only after several stable samples, adequate budget headroom and no recent throttle/error. Apply hysteresis, cooldowns, per-step change limits and minimum dwell time.
 5. During shutdown, stop new background work, prioritize final profile saves/releases, and finish only work covered by the shutdown deadline. Unfinished queue work stays durable; shutdown never pretends it was delivered.
