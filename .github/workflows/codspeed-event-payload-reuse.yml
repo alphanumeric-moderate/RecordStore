@@ -31,7 +31,11 @@ jobs:
       - name: Prepare baseline source from PR base
         run: |
           base_ref="$(git merge-base HEAD "origin/$GITHUB_BASE_REF")"
-          git show "$base_ref:src/RecordStore.luau" > src/RecordStore.preoptimization.luau
+          source_path="src/RecordStore.luau"
+          if ! git cat-file -e "$base_ref:$source_path" 2>/dev/null; then
+            source_path="src/PlayerDataInitializer/RecordStore.luau"
+          fi
+          git show "$base_ref:$source_path" > src/RecordStore.preoptimization.luau
 
       - name: Run compatibility regression suite
         run: lune run bench/run_regression_tests.luau

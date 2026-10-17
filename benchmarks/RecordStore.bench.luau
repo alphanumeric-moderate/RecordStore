@@ -73,7 +73,7 @@ globals.task = {
 }
 
 local variant = "optimized"
-local module_path = "../src/RecordStore"
+local module_path = "../src/PlayerDataInitializer/RecordStore"
 local RecordStore = require(module_path)
 local iterations = 3000
 local inventory = {}

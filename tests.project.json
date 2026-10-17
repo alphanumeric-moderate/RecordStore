@@ -5,19 +5,19 @@
     "ServerScriptService": {
       "$className": "ServerScriptService",
       "RecordStore": {
-        "$path": "src/RecordStore.luau"
+        "$path": "src/PlayerDataInitializer/RecordStore.luau"
       },
       "IntegerInfinityValue": {
-        "$path": "src/IntegerInfinityValue.luau"
+        "$path": "src/PlayerDataInitializer/IntegerInfinityValue.luau"
       },
       "NumberFormatter": {
-        "$path": "src/NumberFormatter.luau"
+        "$path": "src/PlayerDataInitializer/NumberFormatter.luau"
       },
       "CodeNumValue": {
-        "$path": "src/CodeNumValue.luau"
+        "$path": "src/PlayerDataInitializer/CodeNumValue.luau"
       },
       "PlayerDataCore": {
-        "$path": "src/PlayerDataCore.luau"
+        "$path": "src/PlayerDataInitializer/PlayerDataCore.luau"
       },
       "RecordStoreCompatibilityRegression": {
         "$path": "tests/RecordStore_OpenCorrupt_CompatibilityRegression.server.luau"

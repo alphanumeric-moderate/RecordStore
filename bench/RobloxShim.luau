@@ -13,7 +13,7 @@ local task = require("@lune/task")
 local Shim = {}
 
 local REPO_ROOT = "."
-local SOURCE_PATH = REPO_ROOT .. "/src/RecordStore.luau"
+local SOURCE_PATH = REPO_ROOT .. "/src/PlayerDataInitializer/RecordStore.luau"
 
 -- Deterministic GUIDs keep benchmark runs reproducible.
 local guid_counter = 0

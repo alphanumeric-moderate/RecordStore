@@ -6,13 +6,13 @@ local luau = require("@lune/luau")
 local Shim = require("./RobloxShim")
 
 for _, path in {
-	"src/PlayerDataCore.luau",
-	"src/IntegerInfinityValue.luau",
-	"src/NumberFormatter.luau",
+	"src/PlayerDataInitializer/PlayerDataCore.luau",
+	"src/PlayerDataInitializer/IntegerInfinityValue.luau",
+	"src/PlayerDataInitializer/NumberFormatter.luau",
 	"src/CodeNum.luau",
-	"src/CodeNumValue.luau",
-	"examples/PlayerData.server.luau",
-	"src/PlayerData.luau",
+	"src/PlayerDataInitializer/CodeNumValue.luau",
+	"src/PlayerDataInitializer/init.server.luau",
+	"src/PlayerDataInitializer/PlayerData.luau",
 	"tests/PlayerDataSetRegression.server.luau",
 	"tests/IntegerInfinityValueRegression.server.luau",
 	"tests/NumberFormatterRegression.server.luau",
@@ -25,7 +25,7 @@ end
 
 -- Exercise the same normalizer used by PlayerDataCore, without relying on
 -- Roblox Instance behavior. The separate Studio Script covers NumberValue.
-local integer_infinity_chunk = luau.load(fs.readFile("src/IntegerInfinityValue.luau"), {
+local integer_infinity_chunk = luau.load(fs.readFile("src/PlayerDataInitializer/IntegerInfinityValue.luau"), {
 	debugName = "IntegerInfinityValue",
 })
 local IntegerInfinityValue = integer_infinity_chunk()
@@ -35,7 +35,7 @@ assert(math.isnan(IntegerInfinityValue.normalize(0 / 0, "nearest")), "NaN was no
 assert(IntegerInfinityValue.normalize(17.4, "nearest") == 17, "finite rounding changed")
 assert(IntegerInfinityValue.normalize(-17.6, "nearest") == -18, "negative finite rounding changed")
 
-local number_formatter_chunk = luau.load(fs.readFile("src/NumberFormatter.luau"), {
+local number_formatter_chunk = luau.load(fs.readFile("src/PlayerDataInitializer/NumberFormatter.luau"), {
 	debugName = "NumberFormatter",
 })
 local NumberFormatter = number_formatter_chunk()
