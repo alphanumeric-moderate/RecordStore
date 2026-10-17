@@ -6681,7 +6681,6 @@ local function get_queue(self: Record): ({ QueueMessage }, ResultCode, string?)
 	if state == nil then
 		return {}, "invalid", "record does not exist"
 	end
-	if state.mailbox_v2_binding then return {}, "busy", "V2 mailbox binding is checking the legacy queue" end
 	if state.mailbox_v2 ~= nil then
 		local mailbox, bound_code, bound_message = bound_mailbox_for_state(state)
 		if mailbox == nil then return {}, bound_code or "fenced", bound_message end
@@ -6883,11 +6882,11 @@ local function claim_dead_letter(self: Record, message_id: string): (DeadLetterM
 	if state == nil then
 		return nil, "invalid", "record does not exist"
 	end
-	if state.mailbox_v2_binding then return "busy", "V2 mailbox binding is checking the legacy queue" end
+	if state.mailbox_v2_binding then return nil, "busy", "V2 mailbox binding is checking the legacy queue" end
 	if state.mailbox_v2 ~= nil then
 		local mailbox, bound_code, bound_message = bound_mailbox_for_state(state)
-		if mailbox == nil then return bound_code or "fenced", bound_message end
-		return "invalid", "V2 dead-letter claims use generation-aware V2 APIs; use MailboxV2 directly"
+		if mailbox == nil then return nil, bound_code or "fenced", bound_message end
+		return nil, "invalid", "V2 dead-letter claims use generation-aware V2 APIs; use MailboxV2 directly"
 	end
 	if type(message_id) ~= "string" or message_id == "" or #message_id > 100 then
 		return nil, "invalid", "message_id must be a non-empty string of at most 100 characters"
