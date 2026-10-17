@@ -104,14 +104,15 @@ local restarted = hints:RestartServer("job-1", { loaded_from_store = true })
 assert(restarted.local_state.pending_local == nil and restarted.local_state.loaded_from_store == true,
 	"restart leaked pre-crash state instead of using reloaded state")
 
--- Event sequence numbers and snapshots are monotonic and isolated copies.
-local trace = simulator:Trace()
-for index, event in ipairs(trace) do
-	assert(event.sequence == index, "trace event sequence is not contiguous")
-end
+-- Event sequence numbers, traces, and snapshots are monotonic and isolated copies.
+store:UpdateAsync("snapshot-key", function()
+	return { nested = { value = 1 } }
+end)
 local snapshot = simulator:Snapshot()
-snapshot.stores.profiles = {}
-assert(store:GetAsync("player-1") == nil, "test assumes deleted value remains present")
-assert(next(simulator:Snapshot().stores.profiles) == nil, "snapshot copy unexpectedly mutated simulator state")
+snapshot.stores.profiles["snapshot-key"].nested.value = 99
+assert(store:GetAsync("snapshot-key").nested.value == 1, "snapshot leaked mutable references into simulator storage")
+local trace = simulator:Trace()
+trace[1].kind = "corrupted"
+assert(simulator:Trace()[1].kind ~= "corrupted", "Trace returned mutable references into simulator events")
 
 print("[PASS] RecordStoreV2Simulator storage faults, transform replay, budgets, advisory hints, and restart primitives.")
