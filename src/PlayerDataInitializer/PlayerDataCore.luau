@@ -1088,7 +1088,7 @@ local function new(dependencies: Dependencies?): Controller
 			leaderstats = leaderstats,
 			player_data_values = player_data_values,
 		}
-
+	end
 
 	local function find_cached_player_child(
 		player: Player,
