@@ -1816,6 +1816,12 @@ function MailboxV2.ReplayDeadLetterAsync(self: Mailbox, message_id: string, oper
 		next_record.replay_operation_id = operation_id
 		next_record.pending_replay_generation = (current.placement_generation :: number) + 1
 		next_record.replay_count = (current.replay_count :: number) + 1
+		-- Attempts are per delivery generation; preserve total_attempts as lifetime telemetry.
+		next_record.attempts = 0
+		next_record.claim_token = nil
+		next_record.locked_until = 0
+		next_record.last_error = nil
+		next_record.effect_outcome = "not_started"
 		next_record.updated_at = replay_now
 		return next_record
 	end)
