@@ -282,4 +282,61 @@ do
 	assert(#queue == 1, "restart recovery created multiple logical messages")
 end
 
+-- Exhaustively inject one before-commit and one commit-then-response-loss failure at
+-- each UpdateAsync boundary observed in a successful enqueue. After simulated process
+-- restart, recovery plus an idempotent retry must yield exactly one ready message.
+do
+	local probe, probe_store = make_mailbox()
+	local probe_result = probe:EnqueueAsync("fault_matrix", { probe = true }, {
+		idempotency_key = "fault-matrix-probe",
+	})
+	expect_code(probe_result, "accepted", "fault-matrix successful baseline")
+	local write_boundaries = probe_store.update_calls
+	assert(write_boundaries >= 4, "fault-matrix baseline did not exercise expected durable write phases")
+
+	for _, mode in { "before", "after" } do
+		for target_call = 1, write_boundaries do
+			local mailbox, store = make_mailbox()
+			local idempotency_key = ("fault-matrix-%s-%02d"):format(mode, target_call)
+			local payload = { value = target_call, mode = mode }
+			store:FailUpdateAt(target_call, mode)
+			local first = mailbox:EnqueueAsync("fault_matrix", payload, {
+				idempotency_key = idempotency_key,
+			})
+			assert(first.code == "accepted" or first.code == "unknown",
+				("fault-matrix initial result at call %d/%s was %s: %s"):format(
+					target_call, mode, tostring(first.code), tostring(first.error)
+				))
+			assert(type(first.message_id) == "string", "fault-matrix failure omitted stable message identity")
+
+			local restarted = MailboxV2.new(store, {
+				store_name = "MailboxV2_Test",
+				scope = "global",
+				profile_key = "player-" .. tostring(USER_ID),
+				user_id = USER_ID,
+			}, {
+				now_ms = function() return 1_000_000 end,
+				guid = function() return "fault-matrix-restart" end,
+				encode = function(value) return serde.encode("json", value) end,
+			})
+			local recovery = restarted:RecoverAsync()
+			expect_code(recovery, "success", ("fault-matrix recovery call %d/%s"):format(target_call, mode))
+			local retried = restarted:EnqueueAsync("fault_matrix", payload, {
+				idempotency_key = idempotency_key,
+			})
+			assert(retried.code == "accepted" or retried.code == "duplicate",
+				("fault-matrix retry at call %d/%s was %s: %s"):format(
+					target_call, mode, tostring(retried.code), tostring(retried.error)
+				))
+			assert(retried.message_id == first.message_id, "fault-matrix retry changed canonical message ID")
+			local queue, queue_result = restarted:GetQueueAsync()
+			expect_code(queue_result, "success", ("fault-matrix queue call %d/%s"):format(target_call, mode))
+			assert(#queue == 1, ("fault-matrix created %d logical messages at call %d/%s"):format(
+				#queue, target_call, mode
+			))
+			assert(queue[1].Id == first.message_id, "fault-matrix queue contains a different message")
+		end
+	end
+end
+
 print("[PASS] MailboxV2 idempotency, status lookup, priority, ack recovery, retry/DLQ/replay, expiry uncertainty, capacity recovery, transform replay, and preparation failure recovery.")
