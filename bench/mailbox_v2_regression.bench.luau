@@ -320,6 +320,11 @@ do
 				encode = function(value) return serde.encode("json", value) end,
 			})
 			local recovery = restarted:RecoverAsync()
+			if recovery.code == "unknown" then
+				-- A committed recovery step may itself have an ambiguous response;
+				-- a second pass must settle the durable state after the one-shot fault.
+				recovery = restarted:RecoverAsync()
+			end
 			expect_code(recovery, "success", ("fault-matrix recovery call %d/%s"):format(target_call, mode))
 			local retried = restarted:EnqueueAsync("fault_matrix", payload, {
 				idempotency_key = idempotency_key,
