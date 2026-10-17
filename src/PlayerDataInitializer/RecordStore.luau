@@ -186,6 +186,20 @@ export type Snapshot = {
 	BackendUpdatedAt: number?,
 }
 
+type ReadFlightWaiter = {
+	event: any,
+	active: boolean,
+	timed_out: boolean,
+}
+type ReadFlight = {
+	waiters: { ReadFlightWaiter },
+	done: boolean,
+	snapshot: Snapshot?,
+	code: ResultCode,
+	message: string?,
+}
+local in_flight_reads: { [string]: ReadFlight } = {}
+
 export type HistoryEntry = {
 	Version: string,
 	CreatedTime: number,
@@ -4433,7 +4447,7 @@ local function save_internal(state: InternalState, reason: string?, operation_de
 	return "saved", nil
 end
 
-function RecordStore.read_async(name: string, scope: string, key: string, operation_deadline: number?, legacy_decoder: LegacyDecoder?): (Snapshot?, ResultCode, string?)
+local function read_async_uncached(name: string, scope: string, key: string, operation_deadline: number?, legacy_decoder: LegacyDecoder?): (Snapshot?, ResultCode, string?)
 	local valid_identity, identity_message = validate_store_identity(name, scope, key)
 	if not valid_identity then
 		return nil, "invalid", identity_message
@@ -4468,6 +4482,71 @@ function RecordStore.read_async(name: string, scope: string, key: string, operat
 		return nil, "corrupt", "durable envelope is missing"
 	end
 	return snapshot_from_envelope(key, envelope, info), "success", nil
+end
+
+local function clone_read_snapshot(snapshot: Snapshot?): Snapshot?
+	if snapshot == nil then return nil end
+	local result = table.clone(snapshot)
+	result.Data = copy_value(snapshot.Data)
+	result.UserIds = clone_user_ids(snapshot.UserIds)
+	result.Metadata = clone_metadata(snapshot.Metadata)
+	return result
+end
+
+function RecordStore.read_async(name: string, scope: string, key: string, operation_deadline: number?, legacy_decoder: LegacyDecoder?): (Snapshot?, ResultCode, string?)
+	-- Legacy decoders are application callbacks; do not coalesce across different callback identities.
+	if legacy_decoder ~= nil then
+		return read_async_uncached(name, scope, key, operation_deadline, legacy_decoder)
+	end
+	local valid_identity = validate_store_identity(name, scope, key)
+	if not valid_identity then
+		return read_async_uncached(name, scope, key, operation_deadline, nil)
+	end
+	local deadline, deadline_error = resolve_operation_deadline(operation_deadline)
+	if deadline == nil then return nil, "invalid", deadline_error end
+	local identity = tostring(#name) .. ":" .. name .. tostring(#scope) .. ":" .. scope .. tostring(#key) .. ":" .. key
+	local current = in_flight_reads[identity]
+	if current ~= nil and not current.done then
+		local event_ok, event = pcall(function() return Instance.new("BindableEvent") end)
+		if not event_ok or event == nil then
+			-- Coalescing is an optimization only. If waiter signaling is unavailable, perform a normal read.
+			return read_async_uncached(name, scope, key, operation_deadline, nil)
+		end
+		local waiter: ReadFlightWaiter = { event = event, active = true, timed_out = false }
+		table.insert(current.waiters, waiter)
+		local remaining = math.max(0, (deadline :: number) - now_local())
+		task.delay(remaining, function()
+			if waiter.active then
+				waiter.active = false
+				waiter.timed_out = true
+				pcall(function() event:Fire() end)
+			end
+		end)
+		event.Event:Wait()
+		if waiter.timed_out then
+			pcall(function() event:Destroy() end)
+			return nil, "budget", "coalesced read waiter exceeded its local operation deadline"
+		end
+		pcall(function() event:Destroy() end)
+		return clone_read_snapshot(current.snapshot), current.code, current.message
+	end
+
+	local flight: ReadFlight = { waiters = {}, done = false, snapshot = nil, code = "unknown", message = "read did not produce a result" }
+	in_flight_reads[identity] = flight
+	local snapshot, code, message = read_async_uncached(name, scope, key, operation_deadline, nil)
+	flight.snapshot = clone_read_snapshot(snapshot)
+	flight.code = code
+	flight.message = message
+	flight.done = true
+	if in_flight_reads[identity] == flight then in_flight_reads[identity] = nil end
+	for _, waiter in ipairs(flight.waiters) do
+		if waiter.active then
+			waiter.active = false
+			pcall(function() waiter.event:Fire() end)
+		end
+	end
+	table.clear(flight.waiters)
+	return snapshot, code, message
 end
 
 local function list_versions_internal(name: string, scope: string, key: string, sort_direction: Enum.SortDirection?, min_date_ms: number?, max_date_ms: number?, max_versions: number?, operation_deadline: number?, mock: boolean): ({ HistoryEntry }?, ResultCode, string?)
