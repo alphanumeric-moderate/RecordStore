@@ -602,17 +602,15 @@ local function new_governor(options)
 		local owner_key = digest(owner_id)
 		local original_by_id = {}
 		local queue = {}
-		local seen_routes = {}
 		for index, value in ipairs(candidates) do
 			local candidate = if type(value) == "table" then value else nil
 			local route = if candidate ~= nil then candidate.Id else nil
 			if type(route) ~= "string" or route == "" then
 				return nil, ("candidate %d has no stable string Id"):format(index)
 			end
-			local identity = digest(route)
-			if original_by_id[identity] ~= nil and original_by_id[identity].Id ~= route then
-				return nil, "candidate route digest collision"
-			end
+			-- Mailbox routes are already unique, bounded durable key identities. Reuse them
+			-- directly instead of hashing every candidate on every poll.
+			local identity = route
 			if original_by_id[identity] == nil then
 				local lane = tostring(candidate.Priority or "normal")
 				if lane ~= "high" and lane ~= "normal" and lane ~= "background" then lane = "normal" end
@@ -632,8 +630,6 @@ local function new_governor(options)
 					-- commit the terminal "expired" transition. Expiry remains authoritative there.
 					dependencies = {},
 				})
-			else
-				seen_routes[route] = true
 			end
 		end
 		local shadow = {
