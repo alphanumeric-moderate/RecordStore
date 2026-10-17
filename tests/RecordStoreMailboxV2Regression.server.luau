@@ -34,6 +34,13 @@ local options = {
 }
 local store = MailboxV2.MockStore()
 local mailbox = MailboxV2.new(store, owner, options)
+local bridge_mailbox = MailboxV2.new(MailboxV2.MockStore(), owner, options)
+local bind_code, bind_error = active_record:BindMailboxV2(bridge_mailbox)
+assert(bind_code == "success", tostring(bind_code) .. " " .. tostring(bind_error))
+local bridge_code = active_record:EnqueueAsync("bridge-grant", { coins = 7 }, { idempotency_key = "record-bridge-once" })
+assert(bridge_code == "enqueued", "Record:EnqueueAsync did not route through the bound V2 mailbox: " .. tostring(bridge_code))
+local bridge_duplicate = active_record:EnqueueAsync("bridge-grant", { coins = 7 }, { idempotency_key = "record-bridge-once" })
+assert(bridge_duplicate == "duplicate", "bound Record enqueue did not preserve V2 idempotency")
 local first = mailbox:EnqueueAsync("grant", { coins = 100 }, { idempotency_key = "studio-receipt-1" })
 assert(first.code == "accepted", first.error)
 now_ms += 100
