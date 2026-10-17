@@ -8,9 +8,11 @@ RecordStore is a server-side Roblox Luau persistence module.
 
 The Rojo projects map `src/PlayerDataInitializer` to a Script named `ServerScriptService.PlayerDataInitializer`. Its child ModuleScripts are `PlayerData`, `PlayerDataCore`, `RecordStore`, `IntegerInfinityValue`, `NumberFormatter`, and `CodeNumValue`. The separate `ReplicatedStorage.CodeNum` module is included for CodeNum-backed fields.
 
+**`CodeNum` must be a ModuleScript at `ReplicatedStorage.CodeNum`.** It is intentionally outside `PlayerDataInitializer` because `CodeNumValue` resolves it from `ReplicatedStorage`. Do not move `CodeNum` into `PlayerDataInitializer`.
+
 Use `default.project.json` for the standard setup. The initializer starts the shared controller and registers `BindToClose` shutdown handling. Use exactly one initializer.
 
-For manual Studio installation, create a Script named `PlayerDataInitializer` in `ServerScriptService`, put the modules listed above directly under it, and put `CodeNum` in `ReplicatedStorage`. Use a separate test place or Studio session for compatibility testing.
+For manual Studio installation, create a normal server `Script` named `PlayerDataInitializer` in `ServerScriptService`; place `init.server.luau` there as the Script source and make the six data modules its direct children. Put `CodeNum` in `ReplicatedStorage` as `ReplicatedStorage.CodeNum`, not under the initializer. Use a separate test place or Studio session for compatibility testing.
 
 ## Non-finite numeric values
 
@@ -131,6 +133,8 @@ rojo build examples.project.json -o RecordStore-PlayerDataExample.rbxlx
 The included `PlayerDataCore` example uses the store name `PlayerData_Test1`. Change `CONFIG.store_name` in `src/PlayerDataInitializer/PlayerDataCore.luau` before using it for a live production dataset. Review the config's keys, defaults, schema version, and leaderboard values before publishing.
 
 ### CodeNum support
+
+`ReplicatedStorage.CodeNum` is a required location contract for CodeNum-backed data; the module is not part of the `PlayerDataInitializer` child-module bundle. `CodeNumValue` looks it up from `ReplicatedStorage` on first use and caches its API.
 
 PlayerDataCore's optional `CodeNumValue` field stores values in your CodeNum module's canonical `encode` / `decode` JSON format (format version 2 in the supplied module). Exact decimal integers, scientific values, special values, hyperoperations, unevaluated expressions, and unary calls are serialized without coercion to native numbers.
 

@@ -16,6 +16,9 @@ for _, path in {
 	"tests/PlayerDataSetRegression.server.luau",
 	"tests/IntegerInfinityValueRegression.server.luau",
 	"tests/NumberFormatterRegression.server.luau",
+	"bench/playerdata_startup_common.luau",
+	"bench/playerdata_startup_eager.bench.luau",
+	"bench/playerdata_startup_lazy.bench.luau",
 } do
 	local chunk = luau.load(fs.readFile(path), {
 		debugName = path,

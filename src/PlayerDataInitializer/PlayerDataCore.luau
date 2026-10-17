@@ -8,7 +8,6 @@ local Players = game:GetService("Players")
 local RecordStore = require(script.Parent.RecordStore)
 local IntegerInfinityValueFactory = require(script.Parent.IntegerInfinityValue)
 local NumberFormatterFactory = require(script.Parent.NumberFormatter)
-local CodeNumValueFactory = require(script.Parent.CodeNumValue)
 
 type Scalar = string | number | boolean
 type DataValue = Scalar
@@ -46,6 +45,44 @@ type CodeNumValueFactoryAPI = {
 	new: (name: string, initial_value: unknown) -> StringValue,
 	normalize_serialized: ((value: unknown) -> (string?, CodeNumValueNode?))?,
 }
+
+local cached_code_num_value_factory: CodeNumValueFactoryAPI? = nil
+
+local function get_code_num_value_factory(): CodeNumValueFactoryAPI
+	if cached_code_num_value_factory == nil then
+		cached_code_num_value_factory = require(script.Parent.CodeNumValue) :: CodeNumValueFactoryAPI
+	end
+	return cached_code_num_value_factory
+end
+
+local CodeNumValueFactory: CodeNumValueFactoryAPI = table.freeze({
+	is_value = function(value: unknown): boolean
+		return get_code_num_value_factory().is_value(value)
+	end,
+	normalize = function(value: unknown): string
+		return get_code_num_value_factory().normalize(value)
+	end,
+	is_serialized = function(value: unknown): boolean
+		return get_code_num_value_factory().is_serialized(value)
+	end,
+	format = function(value: unknown, options: NumberFormatterFactory.Options?): string
+		return get_code_num_value_factory().format(value, options)
+	end,
+	new = function(name: string, initial_value: unknown): StringValue
+		return get_code_num_value_factory().new(name, initial_value)
+	end,
+	normalize_serialized = function(value: unknown): (string?, CodeNumValueNode?)
+		local factory = get_code_num_value_factory()
+		local normalize = factory.normalize_serialized
+		if normalize ~= nil then
+			return normalize(value)
+		end
+		if not factory.is_serialized(value) then
+			return nil, nil
+		end
+		return factory.normalize(value), nil
+	end,
+})
 
 export type Dependencies = {
 	Players: typeof(Players)?,
@@ -132,6 +169,14 @@ local CONFIG = {
 		},
 	},
 }
+
+local uses_codenum_values = false
+for _, field in pairs(CONFIG.data) do
+	if field.class_name == "CodeNumValue" then
+		uses_codenum_values = true
+		break
+	end
+end
 
 local function resolve_rounding(value: unknown): IntegerInfinityRounding
 	if value == nil or value == "nearest" then
@@ -440,13 +485,6 @@ local function new(dependencies: Dependencies?): Controller
 	local integer_infinity_value_factory = injected.IntegerInfinityValue or IntegerInfinityValueFactory
 	local number_formatter = injected.NumberFormatter or NumberFormatterFactory
 	local code_num_value_factory = injected.CodeNumValue or CodeNumValueFactory
-	local uses_codenum_values = false
-	for _, field in pairs(CONFIG.data) do
-		if field.class_name == "CodeNumValue" then
-			uses_codenum_values = true
-			break
-		end
-	end
 
 	local new_instance = injected.new_instance or function(class_name: string): Instance
 		return Instance.new(class_name)
