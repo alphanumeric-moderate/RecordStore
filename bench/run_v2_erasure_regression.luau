@@ -217,6 +217,21 @@ assert(restore_record.data.Coins == 5, "blocked restore still replaced profile d
 assert(restore_record.data[restore_tombstone_key] ~= nil,
 	"blocked restore removed the durable erasure tombstone")
 
+local transaction_after_tombstone = V2.Transactions.Run(
+	restore_record,
+	"transaction-after-erasure-fence",
+	{ kind = "increment_after_erasure", amount = 10 },
+	function(current)
+		local next_data = clone(current)
+		next_data.Coins += 10
+		return next_data
+	end
+)
+assert(transaction_after_tombstone.code ~= "committed" and transaction_after_tombstone.code ~= "duplicate",
+	"generic V2 transaction bypassed the atomic profile-key erasure tombstone")
+assert(restore_record.data.Coins == 5,
+	"generic V2 transaction mutated a profile after its erasure tombstone")
+
 local absent = V2.Erasure.new(new_store(), {}, {})
 local absent_result, absent_status = absent:IsErased(117)
 assert(absent_result == false and absent_status.code == "not_found",
