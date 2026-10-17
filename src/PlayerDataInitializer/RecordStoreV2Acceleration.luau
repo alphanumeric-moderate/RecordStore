@@ -91,14 +91,14 @@ local function valid_text(value: unknown, maximum: number): boolean
 	return type(value) == "string" and value ~= "" and #value <= maximum
 end
 
--- Routing only. The full identity is never published or used as a MemoryStore key.
+-- Routing only. Products stay below 2^53, so integer arithmetic is exact in Luau numbers.
+-- The full identity is never published or used as a MemoryStore key.
 local function digest(value: string): string
 	local parts = table.create(4)
 	for seed = 1, 4 do
-		local hash = bit32.bxor(2166136261, seed * 7919)
+		local hash = 2166136261 + seed * 7919
 		for index = 1, #value do
-			hash = bit32.bxor(hash, string.byte(value, index))
-			hash = bit32.band(hash * 16777619, 0xffffffff)
+			hash = (string.byte(value, index) + hash * 65599) % 4294967296
 		end
 		parts[seed] = string.format("%08x", hash)
 	end
