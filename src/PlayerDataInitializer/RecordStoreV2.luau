@@ -1007,133 +1007,554 @@ end
 local function saga_coordinator(store, options)
 	options = options or {}
 	local api = { store = store }
-	local function update_saga(id, request, mutate)
-		local material = canonical(request)
-		local key, now = "rv2s-" .. digest(id), os.time()
-		local decision
-		local value, message = adapter_call(store, "UpdateAsync", key, function(old)
-			decision = nil
-			if old ~= nil and (type(old) ~= "table" or old.transfer_id ~= id or old.request_material ~= material) then decision = "conflict"; return old end
-			local state = if type(old) == "table" then copy(old) else { version = 1, transfer_id = id, request_material = material, phase = "requested", status = "pending", created_at = now, attempts = 0 }
-			local changed, err = pure(mutate, state)
-			if type(changed) ~= "table" then decision = "invalid"; return state end
-			changed.updated_at = now; changed.attempts = (changed.attempts or 0) + 1
-			decision = "committed"
+	local phase_transitions = {
+		requested = { requested = true, reserved = true, rejected = true },
+		reserved = { reserved = true, credit_pending = true },
+		credit_pending = { credit_pending = true, credited = true, refund_pending = true },
+		credited = { credited = true, settled = true },
+		refund_pending = { refund_pending = true, rejected = true },
+		settled = { settled = true },
+		rejected = { rejected = true },
+	}
+
+	local function saga_key(id)
+		return "rv2s-" .. digest(id)
+	end
+
+	local function update_saga(id, request, operation_id, mutate)
+		if not valid_text(id, 128) or not valid_text(operation_id, 128) then
+			return nil, "invalid", "saga ID and operation ID must be stable bounded strings"
+		end
+		local material, material_error = request_material(request)
+		if material == nil then return nil, "invalid", material_error end
+		local operation_material = digest(canonical({ operation_id = operation_id, request_material = material }))
+		local key = saga_key(id)
+		local now = os.time()
+		local initial = {
+			version = 1,
+			transfer_id = id,
+			request_material = material,
+			phase = "requested",
+			status = "pending",
+			created_at = now,
+			updated_at = now,
+			attempts = 0,
+		}
+		local value, write_error = adapter_call(store, "UpdateAsync", key, function(old)
+			-- This callback is a pure transform: no externally visible variables are
+			-- modified, and all IDs/time values were computed before UpdateAsync.
+			if old ~= nil and (type(old) ~= "table" or old.transfer_id ~= id or old.request_material ~= material) then
+				return old
+			end
+			local current = if type(old) == "table" then old else initial
+			if current.last_operation_id == operation_id and current.last_operation_material == operation_material then
+				return current
+			end
+			local changed = pure(mutate, copy(current))
+			if type(changed) ~= "table" or changed.transfer_id ~= id or changed.request_material ~= material then
+				return current
+			end
+			local transitions = phase_transitions[current.phase]
+			if type(transitions) ~= "table" or transitions[changed.phase] ~= true then
+				return current
+			end
+			changed.version = 1
+			changed.transfer_id = id
+			changed.request_material = material
+			changed.last_operation_id = operation_id
+			changed.last_operation_material = operation_material
+			changed.updated_at = now
+			changed.attempts = (current.attempts or 0) + 1
 			return changed
 		end)
-		if message then
-			local seen = adapter_call(store, "GetAsync", key)
-			if type(seen) == "table" and seen.transfer_id == id and seen.request_material == material then return seen, "unknown_reconciled" end
-			return nil, "unknown", message
+
+		if write_error ~= nil then
+			local seen, read_error = adapter_call(store, "GetAsync", key)
+			if type(seen) == "table" and seen.transfer_id == id and seen.request_material == material
+				and seen.last_operation_id == operation_id and seen.last_operation_material == operation_material
+			then
+				return seen, "committed_reconciled"
+			end
+			if type(seen) == "table" and (seen.transfer_id ~= id or seen.request_material ~= material) then
+				return nil, "conflict", "saga ID is already bound to a different request"
+			end
+			return nil, "unknown", write_error .. (read_error and ("; reconciliation read failed: " .. tostring(read_error)) or "")
 		end
-		if decision ~= "committed" then return nil, decision or "unknown" end
-		return value, "committed"
+
+		if type(value) ~= "table" or value.transfer_id ~= id or value.request_material ~= material then
+			return nil, "conflict", "saga ID is already bound to a different request"
+		end
+		if value.last_operation_id == operation_id and value.last_operation_material == operation_material then
+			return value, "committed"
+		end
+		return nil, "conflict", "saga phase changed concurrently or the requested transition was rejected"
 	end
+
 	function api:GetStatus(id)
 		if not valid_text(id, 128) then return { code = "invalid" } end
-		local value, message = adapter_call(store, "GetAsync", "rv2s-" .. digest(id))
+		local value, message = adapter_call(store, "GetAsync", saga_key(id))
 		if message then return { code = "unknown", message = message } end
-		if not value then return { code = "not_found" } end
-		if value.transfer_id ~= id then return { code = "conflict", message = "saga route collision" } end
-		value.code = value.status or "unknown"
-		return copy(value)
+		if value == nil then return { code = "not_found" } end
+		if type(value) ~= "table" or value.transfer_id ~= id then
+			return { code = "conflict", message = "saga route collision or corrupt manifest" }
+		end
+		local result = copy(value)
+		result.code = result.status or "unknown"
+		return result
 	end
+
 	function api:TransferAsync(id, sender, recipient, amount, transfer_options)
 		transfer_options = transfer_options or {}
-		if not valid_text(id, 128) or not finite(amount) or amount <= 0 or (transfer_options.allow_fractional ~= true and math.floor(amount) ~= amount) then return { code = "invalid", message = "stable transfer ID and positive amount required" } end
-		local sender_id, recipient_id = transfer_options.sender_id or "sender", transfer_options.recipient_id or "recipient"
-		if sender_id == recipient_id then return { code = "invalid", message = "self-transfer unsupported" } end
-		local balance_field, escrow_field = transfer_options.balance_field or "Balance", RESERVED .. "escrow"
-		local request = { transfer_id = id, sender_id = sender_id, recipient_id = recipient_id, amount = amount, balance_field = balance_field }
-		local saga, saga_code, saga_error = update_saga(id, request, function(current)
-			if current.phase ~= "settled" and current.phase ~= "rejected" then current.sender_id = sender_id; current.recipient_id = recipient_id; current.amount = amount end
+		if not valid_text(id, 128) or not finite(amount) or amount <= 0
+			or (transfer_options.allow_fractional ~= true and math.floor(amount) ~= amount)
+		then
+			return { code = "invalid", message = "stable transfer ID and positive amount required" }
+		end
+		local sender_id = transfer_options.sender_id or "sender"
+		local recipient_id = transfer_options.recipient_id or "recipient"
+		local balance_field = transfer_options.balance_field or "Balance"
+		if not valid_text(sender_id, 128) or not valid_text(recipient_id, 128)
+			or sender_id == recipient_id or not valid_text(balance_field, 128)
+			or string.sub(balance_field, 1, #RESERVED) == RESERVED
+		then
+			return { code = "invalid", message = "distinct stable sender/recipient IDs and a public balance field are required" }
+		end
+
+		local escrow_field = RESERVED .. "escrow"
+		local received_field = RESERVED .. "received_transfers"
+		local decision_field = RESERVED .. "transfer_credit_decisions"
+		local abort_field = RESERVED .. "transfer_credit_aborts"
+		local refunds_field = RESERVED .. "transfer_refunds"
+		local settled_field = RESERVED .. "settled_transfers"
+		local request = {
+			transfer_id = id,
+			sender_id = sender_id,
+			recipient_id = recipient_id,
+			amount = amount,
+			balance_field = balance_field,
+		}
+		local request_digest = digest(canonical(request))
+		local begin_operation_id = "rv2s-begin-" .. request_digest
+		local saga, saga_code, saga_error = update_saga(id, request, begin_operation_id, function(current)
 			return current
 		end)
 		if not saga then return { code = saga_code, transfer_id = id, message = saga_error } end
-		if saga.phase == "settled" or saga.phase == "rejected" then return copy(saga) end
+		if saga.phase == "settled" or saga.phase == "rejected" then
+			local result = copy(saga)
+			result.code = saga.phase
+			return result
+		end
+
 		local function mark(phase, status, message)
-			return update_saga(id, request, function(current)
-				if current.phase ~= "settled" and current.phase ~= "rejected" then current.phase = phase; current.status = status or "pending"; current.last_error = message and text_error(message, 256) or nil end
+			local intent = { phase = phase, status = status or "pending", message = message }
+			local operation_id = "rv2s-step-" .. digest(id .. "|" .. canonical(intent))
+			local changed, code, update_error = update_saga(id, request, operation_id, function(current)
+				if current.phase == "settled" or current.phase == "rejected" then
+					if current.phase == phase then return current end
+					return nil
+				end
+				if type(phase_transitions[current.phase]) ~= "table"
+					or phase_transitions[current.phase][phase] ~= true
+				then
+					return nil
+				end
+				current.phase = phase
+				current.status = status or "pending"
+				current.last_error = if message == nil then nil else text_error(message, 256)
 				return current
 			end)
+			if changed ~= nil and changed.phase == phase and changed.status == (status or "pending") then
+				return changed, code
+			end
+			return nil, code or "unknown", update_error
 		end
-		if saga.phase == "requested" then
-			local data, read_error = record_data(sender)
-			if type(data) ~= "table" then return { code = "fenced", transfer_id = id, message = read_error } end
-			if not finite(data[balance_field]) or data[balance_field] < amount then
-				local rejected, code = mark("rejected", "rejected", "insufficient available balance")
-				return { code = if rejected then "rejected" else code, phase = "rejected", transfer_id = id }
-			end
-			local reserve = transaction_run(sender, "rv2:transfer:" .. digest(id) .. ":reserve", { transfer_id = id, amount = amount, leg = "reserve", sender_id = sender_id }, function(current)
-				local next_data = copy(current)
-				local escrow = next_data[escrow_field] or {}
-				if type(escrow) ~= "table" then error("escrow namespace malformed") end
-				if escrow[id] then if escrow[id].amount ~= amount then error("escrow amount conflict") end; return next_data end
-				if not finite(next_data[balance_field]) or next_data[balance_field] < amount then error("insufficient balance") end
-				next_data[balance_field] -= amount; escrow[id] = { amount = amount, state = "reserved" }; next_data[escrow_field] = escrow
-				return next_data
-			end)
-			if reserve.code ~= "committed" and reserve.code ~= "duplicate" then
-				local phase = if reserve.code == "unknown" then "reconciliation_required" else "rejected"
-				local marked, marked_code = mark("requested", phase, reserve.message)
-				return { code = if marked then phase else marked_code, transfer_id = id, message = reserve.message }
-			end
-			saga = mark("reserved", "pending")
-			if type(saga) ~= "table" or saga.phase ~= "reserved" then return { code = "unknown", transfer_id = id, message = "reservation committed but saga state is unresolved" } end
+
+		local function outcome(code, phase, message)
+			return { code = code, phase = phase or saga.phase, transfer_id = id, message = message }
 		end
-		if saga.phase == "reserved" or saga.phase == "credit_pending" then
-			if saga.phase == "reserved" then
-				saga = mark("credit_pending", "pending")
-				if type(saga) ~= "table" or saga.phase ~= "credit_pending" then return { code = "unknown", transfer_id = id } end
+
+		local function valid_profile(record)
+			return type(record) == "table" and record_stats(record).state == "active"
+		end
+
+		local function profile_data(record)
+			if not valid_profile(record) then return nil, "active profile session is required" end
+			return record_data(record)
+		end
+
+		local function read_credit_decision(data)
+			if type(data) ~= "table" then return nil, nil, "recipient profile data unavailable" end
+			local received = data[received_field]
+			local decisions = data[decision_field]
+			local aborts = data[abort_field]
+			local receipt = if type(received) == "table" then received[id] else nil
+			local decision = if type(decisions) == "table" then decisions[id] else nil
+			local abort = if type(aborts) == "table" then aborts[id] else nil
+			if receipt ~= nil and receipt ~= amount then
+				return nil, nil, "recipient transfer receipt amount conflicts with the saga"
 			end
-			local credit = transaction_run(recipient, "rv2:transfer:" .. digest(id) .. ":credit", { transfer_id = id, amount = amount, leg = "credit", recipient_id = recipient_id }, function(current)
-				local next_data = copy(current)
-				local ledger = next_data[RESERVED .. "received_transfers"] or {}
-				if type(ledger) ~= "table" then error("received-transfer ledger malformed") end
-				if ledger[id] ~= nil then if ledger[id] ~= amount then error("transfer receipt amount conflict") end; return next_data end
-				if not finite(next_data[balance_field]) then error("recipient balance missing or invalid") end
-				next_data[balance_field] += amount; ledger[id] = amount; next_data[RESERVED .. "received_transfers"] = ledger
-				return next_data
-			end)
-			if credit.code == "unknown" then
-				local marked, code = mark("credit_pending", "reconciliation_required", credit.message)
-				return { code = if marked then "reconciliation_required" else code, transfer_id = id, message = credit.message }
+			if decision ~= nil and (type(decision) ~= "table" or decision.amount ~= amount
+				or (decision.state ~= "credited" and decision.state ~= "aborted"))
+			then
+				return nil, nil, "recipient credit decision is malformed or conflicts with the saga"
 			end
-			if credit.code ~= "committed" and credit.code ~= "duplicate" then
-				local refund = transaction_run(sender, "rv2:transfer:" .. digest(id) .. ":refund", { transfer_id = id, amount = amount, leg = "refund" }, function(current)
-					local next_data = copy(current); local escrow = next_data[escrow_field] or {}
-					if not escrow[id] then return next_data end
-					if escrow[id].amount ~= amount then error("escrow amount mismatch") end
-					escrow[id] = nil; next_data[escrow_field] = escrow; next_data[balance_field] = (next_data[balance_field] or 0) + amount
+			if abort ~= nil and (type(abort) ~= "table" or abort.amount ~= amount or abort.transfer_id ~= id) then
+				return nil, nil, "recipient credit-abort marker conflicts with the saga"
+			end
+			if receipt ~= nil then
+				if abort ~= nil or (decision ~= nil and decision.state ~= "credited") then
+					return nil, nil, "recipient credit receipt conflicts with its abort/decision marker"
+				end
+				return "credited", { receipt = receipt, decision = decision }, nil
+			end
+			if decision ~= nil then
+				if decision.state == "credited" then
+					return nil, nil, "credited decision exists without the recipient receipt"
+				end
+				if abort == nil then return nil, nil, "aborted decision exists without its key-local abort marker" end
+				return "aborted", { decision = decision, abort = abort }, nil
+			end
+			if abort ~= nil then return "aborted", { abort = abort }, nil end
+			return nil, nil, "recipient key has no durable credit decision"
+		end
+
+		local function confirm_credit_decision()
+			local data, read_error = profile_data(recipient)
+			if data == nil then return nil, read_error or "recipient profile could not be read" end
+			local decision, _, decision_error = read_credit_decision(data)
+			return decision, decision_error
+		end
+
+		local function refund_source()
+			-- This branch is reachable only after a durable recipient-key abort marker
+			-- is confirmed. Any delayed credit reducer sees that marker on the same
+			-- key and must refuse to add the recipient receipt/balance.
+			local decision, decision_error = confirm_credit_decision()
+			if decision ~= "aborted" then
+				if decision == "credited" then
+					local marked, code, message = mark("credited", "pending", nil)
+					if marked and marked.phase == "credited" then return nil, "credited", "late recipient credit was found; refund prohibited" end
+					return nil, code or "unknown", message
+				end
+				return nil, "unknown", decision_error or "recipient abort decision is not proven; source refund prohibited"
+			end
+			local refund = transaction_run(sender,
+				"rv2:transfer:" .. digest(id) .. ":refund",
+				{ transfer_id = id, amount = amount, leg = "refund", sender_id = sender_id },
+				function(current)
+					if type(current) ~= "table" then error("source profile data must be a table") end
+					local next_data = copy(current)
+					local refunds = next_data[refunds_field] or {}
+					if type(refunds) ~= "table" then error("transfer refund ledger malformed") end
+					if refunds[id] ~= nil then
+						if refunds[id] ~= amount then error("transfer refund amount conflict") end
+						return next_data
+					end
+					local escrow = next_data[escrow_field] or {}
+					if type(escrow) ~= "table" then error("source escrow namespace malformed") end
+					local held = escrow[id]
+					if type(held) ~= "table" or held.amount ~= amount or held.transfer_id ~= id then
+						error("source escrow is missing or inconsistent; compensation cannot be proven")
+					end
+					escrow[id] = nil
+					next_data[escrow_field] = escrow
+					next_data[balance_field] += amount
+					refunds[id] = amount
+					next_data[refunds_field] = refunds
 					return next_data
 				end)
-				if refund.code == "committed" or refund.code == "duplicate" then
-					local rejected, code = mark("rejected", "rejected", credit.message)
-					return { code = if rejected then "rejected" else code, transfer_id = id, message = credit.message }
+			if refund.code ~= "committed" and refund.code ~= "duplicate" then
+				return nil, refund.code or "unknown", refund.message or "source refund outcome is unresolved"
+			end
+			local rejected, reject_code, reject_error = mark("rejected", "rejected", "recipient credit was durably aborted and source funds refunded")
+			if rejected == nil or rejected.phase ~= "rejected" then
+				return nil, reject_code or "unknown", reject_error or "source refund committed but saga rejection checkpoint is unresolved"
+			end
+			return rejected, "rejected"
+		end
+
+		-- Recovery of a previously authorized compensation must happen before any
+		-- attempt to perform the recipient credit again.
+		if saga.phase == "refund_pending" then
+			local refunded, refund_code, refund_error = refund_source()
+			if refunded ~= nil then
+				local result = copy(refunded)
+				result.code = "rejected"
+				return result
+			end
+			return outcome(refund_code or "unknown", "refund_pending", refund_error)
+		end
+
+		if saga.phase == "requested" then
+			local sender_data, read_error = profile_data(sender)
+			if type(sender_data) ~= "table" then return outcome("fenced", "requested", read_error) end
+			if not finite(sender_data[balance_field]) or sender_data[balance_field] < amount then
+				local rejected, reject_code, reject_error = mark("rejected", "rejected", "insufficient available balance")
+				if rejected ~= nil and rejected.phase == "rejected" then
+					local result = copy(rejected); result.code = "rejected"; return result
 				end
-				local marked, code = mark("credit_pending", "reconciliation_required", "recipient credit and source refund are unresolved")
-				return { code = if marked then "reconciliation_required" else code, transfer_id = id }
+				return outcome(reject_code or "unknown", "requested", reject_error or "rejection checkpoint unresolved")
 			end
-			saga = mark("credited", "pending")
-			if type(saga) ~= "table" or saga.phase ~= "credited" then return { code = "unknown", transfer_id = id, message = "recipient credit committed; saga update unresolved" } end
+			local reserve = transaction_run(sender,
+				"rv2:transfer:" .. digest(id) .. ":reserve",
+				{ transfer_id = id, amount = amount, leg = "reserve", sender_id = sender_id },
+				function(current)
+					if type(current) ~= "table" then error("source profile data must be a table") end
+					local next_data = copy(current)
+					local escrow = next_data[escrow_field] or {}
+					if type(escrow) ~= "table" then error("source escrow namespace malformed") end
+					if escrow[id] ~= nil then
+						if type(escrow[id]) ~= "table" or escrow[id].amount ~= amount or escrow[id].transfer_id ~= id then
+							error("source escrow amount/identity conflict")
+						end
+						return next_data
+					end
+					if not finite(next_data[balance_field]) or next_data[balance_field] < amount then
+						error("insufficient balance during atomic reservation")
+					end
+					next_data[balance_field] -= amount
+					escrow[id] = { transfer_id = id, amount = amount, state = "reserved" }
+					next_data[escrow_field] = escrow
+					return next_data
+				end)
+			if reserve.code ~= "committed" and reserve.code ~= "duplicate" then
+				if reserve.code == "invalid" and string.find(string.lower(tostring(reserve.message or "")), "insufficient balance", 1, true) then
+					local rejected, reject_code = mark("rejected", "rejected", "insufficient available balance at atomic reservation")
+					if rejected and rejected.phase == "rejected" then
+						local result = copy(rejected); result.code = "rejected"; return result
+					end
+					return outcome(reject_code or "unknown", "requested", "reservation failed and rejection is unresolved")
+				end
+				local _, mark_code = mark("requested", "reconciliation_required", reserve.message or reserve.code)
+				return outcome(reserve.code or mark_code or "unknown", "requested",
+					reserve.message or "reservation outcome is unresolved; retry the same transfer ID")
+			end
+			local reserved, reserved_code, reserved_error = mark("reserved", "pending", nil)
+			if reserved == nil or reserved.phase ~= "reserved" then
+				return outcome(reserved_code or "unknown", "requested", reserved_error or "reservation committed but checkpoint is unresolved")
+			end
+			saga = reserved
 		end
+
+		if saga.phase == "reserved" then
+			local pending, pending_code, pending_error = mark("credit_pending", "pending", nil)
+			if pending == nil or pending.phase ~= "credit_pending" then
+				return outcome(pending_code or "unknown", "reserved", pending_error or "credit phase checkpoint unresolved")
+			end
+			saga = pending
+		end
+
+		if saga.phase == "credit_pending" then
+			if not valid_profile(recipient) then
+				local marked, code, message = mark("credit_pending", "reconciliation_required", "recipient profile is not active")
+				return outcome(code or "fenced", "credit_pending", message or "recipient profile is not active; no refund attempted")
+			end
+			local credit = transaction_run(recipient,
+				"rv2:transfer:" .. digest(id) .. ":credit",
+				{ transfer_id = id, amount = amount, leg = "credit", recipient_id = recipient_id },
+				function(current)
+					if type(current) ~= "table" then error("recipient profile data must be a table") end
+					local next_data = copy(current)
+					local aborts = next_data[abort_field] or {}
+					local decisions = next_data[decision_field] or {}
+					local received = next_data[received_field] or {}
+					if type(aborts) ~= "table" or type(decisions) ~= "table" or type(received) ~= "table" then
+						error("recipient transfer receipt/decision namespace malformed")
+					end
+					local abort = aborts[id]
+					local decision = decisions[id]
+					if abort ~= nil then
+						if type(abort) ~= "table" or abort.amount ~= amount or abort.transfer_id ~= id
+							or (decision ~= nil and (type(decision) ~= "table" or decision.state ~= "aborted" or decision.amount ~= amount))
+						then error("recipient credit was durably aborted or abort marker conflicts") end
+						error("recipient credit is fenced by the durable transfer-abort marker")
+					end
+					if decision ~= nil then
+						if type(decision) ~= "table" or decision.amount ~= amount then error("recipient transfer decision amount conflict") end
+						if decision.state == "aborted" then error("recipient credit is fenced by the durable transfer-abort decision") end
+						if decision.state ~= "credited" then error("recipient transfer decision has an unsupported state") end
+					end
+					if received[id] ~= nil then
+						if received[id] ~= amount then error("transfer receipt amount conflict") end
+						if decision == nil then
+							decisions[id] = { state = "credited", transfer_id = id, amount = amount, decided_at = os.time() }
+							next_data[decision_field] = decisions
+						end
+						return next_data
+					end
+					if not finite(next_data[balance_field]) then error("recipient balance missing or invalid") end
+					next_data[balance_field] += amount
+					received[id] = amount
+					decisions[id] = { state = "credited", transfer_id = id, amount = amount, decided_at = os.time() }
+					next_data[received_field] = received
+					next_data[decision_field] = decisions
+					return next_data
+				end)
+			if credit.code == "committed" or credit.code == "duplicate" then
+				local marked, mark_code, mark_error = mark("credited", "pending", nil)
+				if marked == nil or marked.phase ~= "credited" then
+					return outcome(mark_code or "unknown", "credit_pending", mark_error or "recipient credit committed but saga checkpoint is unresolved")
+				end
+				saga = marked
+			else
+				-- A recipient-key transaction linearizes either its credit receipt or
+				-- this abort marker. A later/retried credit must inspect the marker inside
+				-- the same profile-key transform before changing the balance.
+				local decided_at = os.time()
+				local resolved = transaction_run(recipient,
+					"rv2:transfer:" .. digest(id) .. ":resolve-credit",
+					{ transfer_id = id, amount = amount, leg = "resolve-credit", recipient_id = recipient_id },
+					function(current)
+						if type(current) ~= "table" then error("recipient profile data must be a table") end
+						local next_data = copy(current)
+						local received = next_data[received_field] or {}
+						local decisions = next_data[decision_field] or {}
+						local aborts = next_data[abort_field] or {}
+						if type(received) ~= "table" or type(decisions) ~= "table" or type(aborts) ~= "table" then
+							error("recipient transfer decision namespaces malformed")
+						end
+						local existing_receipt = received[id]
+						local existing_decision = decisions[id]
+						local existing_abort = aborts[id]
+						if existing_receipt ~= nil and existing_receipt ~= amount then error("recipient receipt amount conflict") end
+						if existing_decision ~= nil and (type(existing_decision) ~= "table" or existing_decision.amount ~= amount
+							or (existing_decision.state ~= "credited" and existing_decision.state ~= "aborted"))
+						then error("recipient decision conflict") end
+						if existing_abort ~= nil and (type(existing_abort) ~= "table" or existing_abort.amount ~= amount or existing_abort.transfer_id ~= id) then
+							error("recipient abort marker conflict")
+						end
+						if existing_receipt ~= nil then
+							if existing_abort ~= nil or (existing_decision ~= nil and existing_decision.state ~= "credited") then
+								error("recipient has inconsistent credit and abort records")
+							end
+							decisions[id] = existing_decision or {
+								state = "credited", transfer_id = id, amount = amount, decided_at = decided_at,
+							}
+						elseif existing_decision ~= nil then
+							if existing_decision.state == "credited" then error("credited decision has no matching receipt") end
+							if existing_abort == nil then error("aborted decision has no matching abort marker") end
+						elseif existing_abort ~= nil then
+							decisions[id] = { state = "aborted", transfer_id = id, amount = amount, decided_at = decided_at }
+						else
+							aborts[id] = { transfer_id = id, amount = amount, decided_at = decided_at }
+							decisions[id] = { state = "aborted", transfer_id = id, amount = amount, decided_at = decided_at }
+							next_data[abort_field] = aborts
+						end
+						next_data[decision_field] = decisions
+						return next_data
+					end)
+
+				-- An unknown resolver response is not proof of abort. Leave funds in
+				-- escrow; a later invocation retries the same stable resolver operation.
+				if resolved.code ~= "committed" and resolved.code ~= "duplicate" then
+					local _, mark_code = mark("credit_pending", "reconciliation_required",
+						resolved.message or ("credit=" .. tostring(credit.code) .. "; resolver=" .. tostring(resolved.code)))
+					return outcome("reconciliation_required", "credit_pending",
+						resolved.message or ("credit result " .. tostring(credit.code) .. " and recipient decision unresolved; source refund prohibited (" .. tostring(mark_code) .. ")"))
+				end
+				local decision, decision_error = confirm_credit_decision()
+				if decision == "credited" then
+					local marked, code, message = mark("credited", "pending", nil)
+					if marked == nil or marked.phase ~= "credited" then
+						return outcome(code or "unknown", "credit_pending", message or "credited decision confirmed but saga checkpoint is unresolved")
+					end
+					saga = marked
+				elseif decision == "aborted" then
+					local marked, code, message = mark("refund_pending", "reconciliation_required",
+						"recipient key durably fenced further credit; source compensation pending")
+					if marked == nil or marked.phase ~= "refund_pending" then
+						return outcome(code or "unknown", "credit_pending", message or "abort proven but refund checkpoint is unresolved")
+					end
+					local refunded, refund_code, refund_error = refund_source()
+					if refunded ~= nil then
+						local result = copy(refunded); result.code = "rejected"; return result
+					end
+					return outcome(refund_code or "unknown", "refund_pending", refund_error or "source refund is not yet confirmed")
+				else
+					local _, code, message = mark("credit_pending", "reconciliation_required", decision_error)
+					return outcome("reconciliation_required", "credit_pending",
+						decision_error or message or ("recipient decision is unresolved (" .. tostring(code) .. "); source refund prohibited"))
+				end
+			end
+		end
+
+		if saga.phase == "refund_pending" then
+			local refunded, refund_code, refund_error = refund_source()
+			if refunded ~= nil then
+				local result = copy(refunded)
+				result.code = "rejected"
+				return result
+			end
+			return outcome(refund_code or "unknown", "refund_pending", refund_error or "source refund is unresolved")
+		end
+
 		if saga.phase == "credited" then
-			local settle = transaction_run(sender, "rv2:transfer:" .. digest(id) .. ":settle", { transfer_id = id, amount = amount, leg = "settle" }, function(current)
-				local next_data = copy(current); local escrow = next_data[escrow_field] or {}
-				if not escrow[id] then return next_data end
-				if escrow[id].amount ~= amount then error("escrow amount mismatch") end
-				escrow[id] = nil; next_data[escrow_field] = escrow
-				return next_data
-			end)
+			local settle = transaction_run(sender,
+				"rv2:transfer:" .. digest(id) .. ":settle",
+				{ transfer_id = id, amount = amount, leg = "settle", sender_id = sender_id },
+				function(current)
+					if type(current) ~= "table" then error("source profile data must be a table") end
+					local next_data = copy(current)
+					local settled = next_data[settled_field] or {}
+					if type(settled) ~= "table" then error("settled-transfer ledger malformed") end
+					if settled[id] ~= nil then
+						if settled[id] ~= amount then error("settled transfer amount conflict") end
+						return next_data
+					end
+					local escrow = next_data[escrow_field] or {}
+					if type(escrow) ~= "table" then error("source escrow namespace malformed") end
+					local held = escrow[id]
+					if type(held) ~= "table" or held.amount ~= amount or held.transfer_id ~= id then
+						error("source escrow is missing or inconsistent; settlement cannot be proven")
+					end
+					escrow[id] = nil
+					next_data[escrow_field] = escrow
+					settled[id] = amount
+					next_data[settled_field] = settled
+					return next_data
+				end)
 			if settle.code ~= "committed" and settle.code ~= "duplicate" then
-				local marked, code = mark("credited", "reconciliation_required", "recipient credited but source escrow settlement unresolved")
-				return { code = if marked then "reconciliation_required" else code, transfer_id = id }
+				local _, code, message = mark("credited", "reconciliation_required", "recipient credited but source escrow settlement unresolved")
+				return outcome(code or settle.code or "unknown", "credited", message or settle.message or "source settlement outcome unresolved")
 			end
-			local finished, finish_code = mark("settled", "settled")
-			return { code = if finished then "settled" else finish_code or "unknown", phase = "settled", transfer_id = id }
+			local finished, finish_code, finish_error = mark("settled", "settled", nil)
+			if finished == nil or finished.phase ~= "settled" then
+				return outcome(finish_code or "unknown", "credited", finish_error or "settlement committed but terminal saga checkpoint is unresolved")
+			end
+			local result = copy(finished)
+			result.code = "settled"
+			return result
 		end
+
 		return self:GetStatus(id)
 	end
+
+	function api:RecoverAsync(id, sender, recipient, transfer_options)
+		if not valid_text(id, 128) then return { code = "invalid" } end
+		local status = self:GetStatus(id)
+		if status.code == "not_found" then return status end
+		if status.code == "unknown" or status.code == "conflict" or status.code == "invalid" then return status end
+		if type(status.amount) ~= "number" or not finite(status.amount) or type(status.sender_id) ~= "string"
+			or type(status.recipient_id) ~= "string" or type(status.balance_field) ~= "string"
+		then
+			return { code = "corrupt", message = "saga is missing its durable transfer identity" }
+		end
+		transfer_options = copy(transfer_options or {})
+		if transfer_options.sender_id ~= nil and transfer_options.sender_id ~= status.sender_id then
+			return { code = "conflict", message = "sender ID differs from the durable saga request" }
+		end
+		if transfer_options.recipient_id ~= nil and transfer_options.recipient_id ~= status.recipient_id then
+			return { code = "conflict", message = "recipient ID differs from the durable saga request" }
+		end
+		if transfer_options.balance_field ~= nil and transfer_options.balance_field ~= status.balance_field then
+			return { code = "conflict", message = "balance field differs from the durable saga request" }
+		end
+		transfer_options.sender_id = status.sender_id
+		transfer_options.recipient_id = status.recipient_id
+		transfer_options.balance_field = status.balance_field
+		return self:TransferAsync(id, sender, recipient, status.amount, transfer_options)
+	end
+
 	return api
 end
 
