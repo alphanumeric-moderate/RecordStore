@@ -265,6 +265,43 @@ export type Options = {
 }
 
 
+export type RuntimeOptions = {
+	revision: number?,
+	runtime_profile: string?,
+	server_role: string?,
+	adaptive_runtime_enabled: boolean?,
+	adaptive_sample_interval: number?,
+	adaptive_min_queue_poll_interval: number?,
+	adaptive_max_queue_poll_interval: number?,
+	adaptive_min_concurrent_requests: number?,
+	adaptive_max_concurrent_requests: number?,
+	adaptive_read_budget_floor: number?,
+	adaptive_write_budget_floor: number?,
+	adaptive_queue_budget_share: number?,
+	adaptive_hysteresis_seconds: number?,
+	runtime_policy_refresh_interval: number?,
+	critical_request_reserve: number?,
+	runtime_policy_provider: (() -> { [string]: unknown })?,
+}
+
+type RuntimePolicy = {
+	revision: number,
+	runtime_profile: string,
+	server_role: string,
+	adaptive_runtime_enabled: boolean,
+	adaptive_sample_interval: number,
+	adaptive_min_queue_poll_interval: number,
+	adaptive_max_queue_poll_interval: number,
+	adaptive_min_concurrent_requests: number,
+	adaptive_max_concurrent_requests: number,
+	adaptive_read_budget_floor: number,
+	adaptive_write_budget_floor: number,
+	adaptive_queue_budget_share: number,
+	adaptive_hysteresis_seconds: number,
+	runtime_policy_refresh_interval: number,
+	critical_request_reserve: number,
+}
+
 type Tombstone = {
 	deleted_at: number,
 	generation: number,
@@ -492,6 +529,7 @@ type InternalState = {
 	last_saved: DurableSnapshot?,
 	change_sequence: number,
 	saved_change_sequence: number,
+	dirty_since_unix: number,
 	durable_lease_until: number,
 }
 
@@ -619,6 +657,47 @@ local mock_update_failure_message: string? = nil
 local mock_update_response_lost_count = 0
 local mock_update_response_lost_message: string? = nil
 
+local runtime_options: RuntimePolicy = {
+	revision = 1,
+	runtime_profile = "balanced",
+	server_role = "standard",
+	adaptive_runtime_enabled = false,
+	adaptive_sample_interval = 5,
+	adaptive_min_queue_poll_interval = 3,
+	adaptive_max_queue_poll_interval = 30,
+	adaptive_min_concurrent_requests = 1,
+	adaptive_max_concurrent_requests = DEFAULT_MAX_CONCURRENT_REQUESTS,
+	adaptive_read_budget_floor = 1,
+	adaptive_write_budget_floor = 1,
+	adaptive_queue_budget_share = 0.2,
+	adaptive_hysteresis_seconds = 15,
+	runtime_policy_refresh_interval = 30,
+	critical_request_reserve = 1,
+}
+local runtime_policy_provider: (() -> { [string]: unknown })? = nil
+local runtime_effective_concurrent_requests = DEFAULT_MAX_CONCURRENT_REQUESTS
+local runtime_next_policy_refresh = 0
+local runtime_refresh_in_flight = false
+local runtime_budget_read: number? = nil
+local runtime_budget_write: number? = nil
+local runtime_next_growth_at = 0
+local runtime_queue_tokens = DEFAULT_MAX_CONCURRENT_REQUESTS * 0.2
+local runtime_queue_tokens_updated = 0
+local runtime_metrics = {
+	reads = 0,
+	writes = 0,
+	failures = 0,
+	throttles = 0,
+	budget_rejections = 0,
+	queue_admitted = 0,
+	queue_rejected = 0,
+	no_op_saves = 0,
+	read_latency_ewma_ms = 0,
+	write_latency_ewma_ms = 0,
+	last_error = "",
+	last_policy_error = "",
+}
+
 local close_internal: (state: InternalState, shutdown: boolean) -> (ResultCode, string?)
 local complete_deferred_takeover: (state: InternalState) -> ()
 local process_queue_internal: (state: InternalState, max_messages: number) -> (ResultCode, string?)
@@ -647,6 +726,264 @@ end
 local function now_local(): number
 	return os.clock()
 end
+
+
+local function mark_dirty(state: InternalState)
+	if state.change_sequence == state.saved_change_sequence then
+		state.dirty_since_unix = now_unix()
+	end
+	mark_dirty(state)
+end
+
+local function mark_saved(state: InternalState, sequence: number)
+	state.saved_change_sequence = sequence
+	if state.change_sequence == sequence then
+		state.dirty_since_unix = 0
+	end
+end
+
+local function valid_runtime_policy(candidate: RuntimePolicy): (boolean, string?)
+	if candidate.runtime_profile ~= "balanced" and candidate.runtime_profile ~= "latency"
+		and candidate.runtime_profile ~= "throughput" and candidate.runtime_profile ~= "conservative"
+	then
+		return false, "runtime_profile must be balanced, latency, throughput or conservative"
+	end
+	if type(candidate.server_role) ~= "string" or candidate.server_role == "" or #candidate.server_role > 64 then
+		return false, "server_role must be 1 to 64 characters"
+	end
+	if type(candidate.adaptive_runtime_enabled) ~= "boolean" then return false, "adaptive_runtime_enabled must be boolean" end
+	local numeric_values = {
+		candidate.revision, candidate.adaptive_sample_interval,
+		candidate.adaptive_min_queue_poll_interval, candidate.adaptive_max_queue_poll_interval,
+		candidate.adaptive_min_concurrent_requests, candidate.adaptive_max_concurrent_requests,
+		candidate.adaptive_read_budget_floor, candidate.adaptive_write_budget_floor,
+		candidate.adaptive_queue_budget_share, candidate.adaptive_hysteresis_seconds,
+		candidate.runtime_policy_refresh_interval, candidate.critical_request_reserve,
+	}
+	for _, value in ipairs(numeric_values) do
+		if type(value) ~= "number" or not math.isfinite(value) then return false, "runtime numeric fields must be finite" end
+	end
+	if candidate.revision < 1 or math.floor(candidate.revision) ~= candidate.revision then return false, "revision must be a positive integer" end
+	if candidate.adaptive_sample_interval < 1 or candidate.adaptive_sample_interval > 60 then return false, "adaptive_sample_interval must be 1 to 60 seconds" end
+	if candidate.adaptive_min_queue_poll_interval < 0.25 or candidate.adaptive_max_queue_poll_interval > 300
+		or candidate.adaptive_min_queue_poll_interval > candidate.adaptive_max_queue_poll_interval
+	then
+		return false, "queue poll interval bounds must be ordered and between 0.25 and 300 seconds"
+	end
+	if candidate.adaptive_min_concurrent_requests < 1 or candidate.adaptive_max_concurrent_requests > 64
+		or math.floor(candidate.adaptive_min_concurrent_requests) ~= candidate.adaptive_min_concurrent_requests
+		or math.floor(candidate.adaptive_max_concurrent_requests) ~= candidate.adaptive_max_concurrent_requests
+		or candidate.adaptive_min_concurrent_requests > candidate.adaptive_max_concurrent_requests
+	then
+		return false, "concurrency limits must be ordered integers between 1 and 64"
+	end
+	if candidate.critical_request_reserve < 1 or math.floor(candidate.critical_request_reserve) ~= candidate.critical_request_reserve
+		or candidate.adaptive_min_concurrent_requests + candidate.critical_request_reserve > candidate.adaptive_max_concurrent_requests
+	then
+		return false, "critical_request_reserve must be positive and fit below maximum concurrency"
+	end
+	if candidate.adaptive_read_budget_floor < 0 or candidate.adaptive_write_budget_floor < 0
+		or math.floor(candidate.adaptive_read_budget_floor) ~= candidate.adaptive_read_budget_floor
+		or math.floor(candidate.adaptive_write_budget_floor) ~= candidate.adaptive_write_budget_floor
+	then
+		return false, "read/write budget floors must be non-negative integers"
+	end
+	if candidate.adaptive_queue_budget_share < 0 or candidate.adaptive_queue_budget_share > 1 then return false, "adaptive_queue_budget_share must be between 0 and 1" end
+	if candidate.adaptive_hysteresis_seconds < 1 or candidate.adaptive_hysteresis_seconds > 300 then return false, "adaptive_hysteresis_seconds must be 1 to 300 seconds" end
+	if candidate.runtime_policy_refresh_interval < 5 or candidate.runtime_policy_refresh_interval > 3600 then return false, "runtime_policy_refresh_interval must be 5 to 3600 seconds" end
+	return true, nil
+end
+
+local RUNTIME_POLICY_FIELDS: { [string]: boolean } = {
+	revision = true, runtime_profile = true, server_role = true, adaptive_runtime_enabled = true,
+	adaptive_sample_interval = true, adaptive_min_queue_poll_interval = true,
+	adaptive_max_queue_poll_interval = true, adaptive_min_concurrent_requests = true,
+	adaptive_max_concurrent_requests = true, adaptive_read_budget_floor = true,
+	adaptive_write_budget_floor = true, adaptive_queue_budget_share = true,
+	adaptive_hysteresis_seconds = true, runtime_policy_refresh_interval = true,
+	critical_request_reserve = true,
+}
+
+local function merge_runtime_policy(patch: { [string]: unknown }, base: RuntimePolicy, from_provider: boolean): (RuntimePolicy?, string?)
+	local candidate = table.clone(base)
+	for key, value in pairs(patch) do
+		if key == "runtime_policy_provider" then
+			if from_provider then return nil, "runtime provider may not replace itself" end
+			continue
+		end
+		if not RUNTIME_POLICY_FIELDS[key] then return nil, "unsupported runtime policy field: " .. tostring(key) end
+		if key == "revision" then
+			if type(value) ~= "number" then return nil, "revision must be numeric" end
+			candidate.revision = value
+		elseif key == "runtime_profile" then
+			if type(value) ~= "string" then return nil, "runtime_profile must be a string" end
+			candidate.runtime_profile = value
+		elseif key == "server_role" then
+			if type(value) ~= "string" then return nil, "server_role must be a string" end
+			candidate.server_role = value
+		elseif key == "adaptive_runtime_enabled" then
+			if type(value) ~= "boolean" then return nil, "adaptive_runtime_enabled must be boolean" end
+			candidate.adaptive_runtime_enabled = value
+		elseif key == "adaptive_sample_interval" then
+			if type(value) ~= "number" then return nil, key .. " must be numeric" end
+			candidate.adaptive_sample_interval = value
+		elseif key == "adaptive_min_queue_poll_interval" then
+			if type(value) ~= "number" then return nil, key .. " must be numeric" end
+			candidate.adaptive_min_queue_poll_interval = value
+		elseif key == "adaptive_max_queue_poll_interval" then
+			if type(value) ~= "number" then return nil, key .. " must be numeric" end
+			candidate.adaptive_max_queue_poll_interval = value
+		elseif key == "adaptive_min_concurrent_requests" then
+			if type(value) ~= "number" then return nil, key .. " must be numeric" end
+			candidate.adaptive_min_concurrent_requests = value
+		elseif key == "adaptive_max_concurrent_requests" then
+			if type(value) ~= "number" then return nil, key .. " must be numeric" end
+			candidate.adaptive_max_concurrent_requests = value
+		elseif key == "adaptive_read_budget_floor" then
+			if type(value) ~= "number" then return nil, key .. " must be numeric" end
+			candidate.adaptive_read_budget_floor = value
+		elseif key == "adaptive_write_budget_floor" then
+			if type(value) ~= "number" then return nil, key .. " must be numeric" end
+			candidate.adaptive_write_budget_floor = value
+		elseif key == "adaptive_queue_budget_share" then
+			if type(value) ~= "number" then return nil, key .. " must be numeric" end
+			candidate.adaptive_queue_budget_share = value
+		elseif key == "adaptive_hysteresis_seconds" then
+			if type(value) ~= "number" then return nil, key .. " must be numeric" end
+			candidate.adaptive_hysteresis_seconds = value
+		elseif key == "runtime_policy_refresh_interval" then
+			if type(value) ~= "number" then return nil, key .. " must be numeric" end
+			candidate.runtime_policy_refresh_interval = value
+		elseif key == "critical_request_reserve" then
+			if type(value) ~= "number" then return nil, key .. " must be numeric" end
+			candidate.critical_request_reserve = value
+		end
+	end
+	if from_provider and candidate.revision <= base.revision then return nil, "runtime policy revision must increase" end
+	local valid, message = valid_runtime_policy(candidate)
+	if not valid then return nil, message end
+	return candidate, nil
+end
+
+local function apply_runtime_policy(patch: { [string]: unknown }, from_provider: boolean): (boolean, string?)
+	local candidate, message = merge_runtime_policy(patch, runtime_options, from_provider)
+	if candidate == nil then
+		runtime_metrics.last_policy_error = tostring(message)
+		return false, message
+	end
+	runtime_options = candidate
+	runtime_effective_concurrent_requests = math.clamp(
+		runtime_effective_concurrent_requests,
+		runtime_options.adaptive_min_concurrent_requests + runtime_options.critical_request_reserve,
+		runtime_options.adaptive_max_concurrent_requests
+	)
+	runtime_queue_tokens = math.min(
+		runtime_queue_tokens,
+		math.max(1, runtime_options.adaptive_max_concurrent_requests * runtime_options.adaptive_queue_budget_share * 2)
+	)
+	runtime_metrics.last_policy_error = ""
+	return true, nil
+end
+
+local function request_is_critical(state: InternalState?): boolean
+	return state ~= nil and (state.state == "saving" or state.state == "releasing" or state.shutdown)
+end
+
+local function request_budget(request_type: Enum.DataStoreRequestType): number?
+	local ok, budget = pcall(function()
+		return DataStoreService:GetRequestBudgetForRequestType(request_type)
+	end)
+	if not ok or type(budget) ~= "number" or not math.isfinite(budget) then return nil end
+	if request_type == Enum.DataStoreRequestType.StandardRead then
+		runtime_budget_read = budget
+	elseif request_type == Enum.DataStoreRequestType.StandardWrite then
+		runtime_budget_write = budget
+	end
+	return budget
+end
+
+local function consume_runtime_queue_token(): boolean
+	local now = now_local()
+	local elapsed = math.max(0, now - runtime_queue_tokens_updated)
+	local rate = runtime_options.adaptive_max_concurrent_requests * runtime_options.adaptive_queue_budget_share
+	local capacity = math.max(1, rate * 2)
+	runtime_queue_tokens = math.min(capacity, runtime_queue_tokens + elapsed * rate)
+	runtime_queue_tokens_updated = now
+	if runtime_options.adaptive_queue_budget_share == 0 or runtime_queue_tokens < 1 then
+		runtime_metrics.queue_rejected += 1
+		return false
+	end
+	runtime_queue_tokens -= 1
+	runtime_metrics.queue_admitted += 1
+	return true
+end
+
+local function observe_runtime_request(kind: string, success: boolean, message: string?, duration_ms: number)
+	if kind == "read" then
+		runtime_metrics.reads += 1
+		runtime_metrics.read_latency_ewma_ms = if runtime_metrics.read_latency_ewma_ms == 0 then duration_ms else runtime_metrics.read_latency_ewma_ms * 0.8 + duration_ms * 0.2
+	else
+		runtime_metrics.writes += 1
+		runtime_metrics.write_latency_ewma_ms = if runtime_metrics.write_latency_ewma_ms == 0 then duration_ms else runtime_metrics.write_latency_ewma_ms * 0.8 + duration_ms * 0.2
+	end
+	if success then
+		runtime_next_growth_at = math.max(runtime_next_growth_at, now_local() + runtime_options.adaptive_hysteresis_seconds)
+		return
+	end
+	runtime_metrics.failures += 1
+	runtime_metrics.last_error = string.sub(string.gsub(tostring(message or "unknown request error"), "%c", " "), 1, 200)
+	local normalized = string.lower(tostring(message or ""))
+	local throttled = string.find(normalized, "thrott", 1, true) ~= nil
+		or string.find(normalized, "request limit", 1, true) ~= nil
+		or string.find(normalized, "rate limit", 1, true) ~= nil
+		or string.find(normalized, "429", 1, true) ~= nil
+	if throttled then
+		runtime_metrics.throttles += 1
+		if runtime_options.adaptive_runtime_enabled then
+			runtime_effective_concurrent_requests = math.max(
+				runtime_options.adaptive_min_concurrent_requests + runtime_options.critical_request_reserve,
+				runtime_effective_concurrent_requests - 1
+			)
+			runtime_next_growth_at = now_local() + runtime_options.adaptive_hysteresis_seconds
+		end
+	elseif runtime_options.adaptive_runtime_enabled and now_local() >= runtime_next_growth_at
+		and runtime_effective_concurrent_requests < runtime_options.adaptive_max_concurrent_requests
+	then
+		runtime_effective_concurrent_requests += 1
+		runtime_next_growth_at = now_local() + runtime_options.adaptive_hysteresis_seconds
+	end
+end
+
+local function refresh_runtime_policy(now: number)
+	if runtime_policy_provider == nil or runtime_refresh_in_flight or now < runtime_next_policy_refresh then return end
+	runtime_next_policy_refresh = now + runtime_options.runtime_policy_refresh_interval
+	runtime_refresh_in_flight = true
+	local provider = runtime_policy_provider
+	task.spawn(function()
+		local ok, result = pcall(provider)
+		if ok and type(result) == "table" then
+			apply_runtime_policy(result, true)
+		else
+			runtime_metrics.last_policy_error = string.sub(string.gsub(tostring(result or "runtime policy provider failed"), "%c", " "), 1, 200)
+		end
+		runtime_refresh_in_flight = false
+	end)
+end
+
+local function effective_queue_poll_interval(requested: number): number
+	if not runtime_options.adaptive_runtime_enabled then return requested end
+	local interval = math.clamp(requested, runtime_options.adaptive_min_queue_poll_interval, runtime_options.adaptive_max_queue_poll_interval)
+	if (runtime_budget_read ~= nil and runtime_budget_read < runtime_options.adaptive_read_budget_floor)
+		or (runtime_budget_write ~= nil and runtime_budget_write < runtime_options.adaptive_write_budget_floor)
+	then
+		return runtime_options.adaptive_max_queue_poll_interval
+	end
+	if runtime_effective_concurrent_requests < runtime_options.adaptive_max_concurrent_requests then
+		return math.min(runtime_options.adaptive_max_queue_poll_interval, interval * 1.5)
+	end
+	return interval
+end
+
 
 local function resolve_operation_deadline(operation_deadline: number?): (number?, string?)
 	local duration = operation_deadline
@@ -1699,22 +2036,19 @@ local function enqueue_change_observation(state: InternalState, old_value: unkno
 end
 
 local function budget_available(request_type: Enum.DataStoreRequestType): boolean?
-	local ok, budget = pcall(function()
-		return DataStoreService:GetRequestBudgetForRequestType(request_type)
-	end)
-	if not ok or type(budget) ~= "number" then
-		return nil
-	end
-	return budget >= 1
+	local budget = request_budget(request_type)
+	return if budget == nil then nil else budget >= 1
 end
 
-local function acquire_slot(deadline: number): boolean
-	while active_requests >= DEFAULT_MAX_CONCURRENT_REQUESTS and now_local() < deadline do
+local function acquire_slot(deadline: number, critical: boolean): boolean
+	local limit = runtime_effective_concurrent_requests
+	if not critical then limit = math.max(1, limit - runtime_options.critical_request_reserve) end
+	while active_requests >= limit and now_local() < deadline do
 		task.wait(0.05)
+		limit = runtime_effective_concurrent_requests
+		if not critical then limit = math.max(1, limit - runtime_options.critical_request_reserve) end
 	end
-	if active_requests >= DEFAULT_MAX_CONCURRENT_REQUESTS then
-		return false
-	end
+	if active_requests >= limit then return false end
 	active_requests += 1
 	return true
 end
@@ -1724,23 +2058,30 @@ local function release_slot()
 end
 
 local function acquire_request(state: InternalState?, deadline: number, update: boolean, request_type: Enum.DataStoreRequestType?): boolean
-	if not acquire_slot(deadline) then
-		return false
+	local critical = request_is_critical(state)
+	if runtime_options.adaptive_runtime_enabled then
+		local request_budget_value = if request_type ~= nil then request_budget(request_type) else nil
+		local read_budget = if request_type == nil then request_budget(Enum.DataStoreRequestType.StandardRead) else request_budget_value
+		local write_budget = if request_type == nil and update then request_budget(Enum.DataStoreRequestType.StandardWrite) else nil
+		if not critical and ((read_budget ~= nil and read_budget < runtime_options.adaptive_read_budget_floor)
+			or (write_budget ~= nil and write_budget < runtime_options.adaptive_write_budget_floor))
+		then
+			runtime_metrics.budget_rejections += 1
+			return false
+		end
+		if state ~= nil and state.queue_busy and not consume_runtime_queue_token() then return false end
 	end
+	if not acquire_slot(deadline, critical) then return false end
 	local wait_seconds = if state ~= nil then state.options.budget_wait or DEFAULT_BUDGET_WAIT else DEFAULT_BUDGET_WAIT
 	local wait_deadline = math.min(deadline, now_local() + wait_seconds)
 	while now_local() < wait_deadline do
 		if request_type ~= nil then
 			local available = budget_available(request_type)
-			if available ~= false then
-				return true
-			end
+			if available ~= false then return true end
 		else
 			local read_available = budget_available(Enum.DataStoreRequestType.StandardRead)
 			local write_available = if update then budget_available(Enum.DataStoreRequestType.StandardWrite) else true
-			if read_available ~= false and write_available ~= false then
-				return true
-			end
+			if read_available ~= false and write_available ~= false then return true end
 		end
 		task.wait(0.05)
 	end
@@ -1835,10 +2176,12 @@ local function backend_get(backend: Backend, use_cache: boolean, deadline: numbe
 	if not acquire_request(request_state, deadline, false, Enum.DataStoreRequestType.StandardRead) then
 		return nil, nil, "budget", "read request deadline exceeded"
 	end
+	local started_at = now_local()
 	local ok, raw, key_info = pcall(function()
 		return store:GetAsync(backend.key, options)
 	end)
 	release_slot()
+	observe_runtime_request("read", ok, if ok then nil else tostring(raw), (now_local() - started_at) * 1000)
 	if not ok then
 		return nil, nil, "unknown", tostring(raw)
 	end
@@ -1965,6 +2308,7 @@ local function backend_update(backend: Backend, transform: UpdateTransform, dead
 	if not acquire_request(request_state, deadline, true, nil) then
 		return nil, nil, "budget", "update request deadline exceeded"
 	end
+	local started_at = now_local()
 	local ok, result, key_info = pcall(function()
 		return store:UpdateAsync(backend.key, function(raw, key_info)
 			local info = backend_info_from_key_info(key_info)
@@ -1973,6 +2317,7 @@ local function backend_update(backend: Backend, transform: UpdateTransform, dead
 		end)
 	end)
 	release_slot()
+	observe_runtime_request("write", ok, if ok then nil else tostring(result), (now_local() - started_at) * 1000)
 	if not ok then
 		return nil, nil, "unknown", tostring(result)
 	end
@@ -3834,6 +4179,13 @@ local function save_internal(state: InternalState, reason: string?, operation_de
 		state.save_requested = true
 		return "busy", (if state.queue_busy then "durable queue is being processed" else "record already has a durable operation in flight")
 	end
+	if reason == "autosave" and state.change_sequence == state.saved_change_sequence
+		and not state.save_requested and state.last_saved ~= nil
+	then
+		state.next_autosave = now_local() + (state.options.autosave_interval or DEFAULT_AUTOSAVE_INTERVAL)
+		runtime_metrics.no_op_saves += 1
+		return "saved", nil
+	end
 	local token = state.token
 	if token == nil then
 		return "fenced", "session token is missing"
@@ -4013,7 +4365,7 @@ local function save_internal(state: InternalState, reason: string?, operation_de
 	state.last_observed = now_unix()
 	if not local_changed_during_save then
 		update_local_from_envelope(state, confirmed, confirmed_info)
-		state.saved_change_sequence = captured_change_sequence
+		mark_saved(state, captured_change_sequence)
 	else
 		state.save_requested = true
 		state.next_autosave = now_local()
@@ -4452,7 +4804,7 @@ track_external_data_mutation = function(state: InternalState)
 	if public_record_table ~= nil then
 		public_record_table.Data = state.data
 	end
-	state.change_sequence += 1
+	mark_dirty(state)
 	local operation_id = HttpService:GenerateGUID(false)
 	state.current_operation_id = operation_id
 	enqueue_change_observation(state, old_data, current_data, operation_id, "direct_data_mutation")
@@ -4655,7 +5007,7 @@ local function set_user_ids(self: Record, user_ids: { number }): (ResultCode, st
 	end
 	local old_user_ids = state.user_ids
 	state.user_ids = normalized
-	state.change_sequence += 1
+	mark_dirty(state)
 	local operation_id = HttpService:GenerateGUID(false)
 	state.current_operation_id = operation_id
 	enqueue_change_observation(state, old_user_ids, normalized, operation_id, "user_ids")
@@ -4728,7 +5080,7 @@ local function set_metadata(self: Record, metadata: Metadata): (ResultCode, stri
 	end
 	local old_metadata = state.metadata
 	state.metadata = copied
-	state.change_sequence += 1
+	mark_dirty(state)
 	local operation_id = HttpService:GenerateGUID(false)
 	state.current_operation_id = operation_id
 	enqueue_change_observation(state, old_metadata, copied, operation_id, "metadata")
@@ -4785,7 +5137,7 @@ local function update_metadata(self: Record, callback: (Metadata) -> Metadata): 
 	end
 	local old_metadata = state.metadata
 	state.metadata = copied
-	state.change_sequence += 1
+	mark_dirty(state)
 	local operation_id = HttpService:GenerateGUID(false)
 	state.current_operation_id = operation_id
 	enqueue_change_observation(state, old_metadata, copied, operation_id, "metadata")
@@ -4874,7 +5226,7 @@ local function update(self: Record, callback: (JsonValue?) -> JsonValue?): (Resu
 	state.data = copied
 	state.public_data_source = copy_value(state.data)
 	self.Data = state.data
-	state.change_sequence += 1
+	mark_dirty(state)
 	local operation_id = HttpService:GenerateGUID(false)
 	state.current_operation_id = operation_id
 	enqueue_change_observation(state, old_data, copied, operation_id, "update")
@@ -4985,7 +5337,7 @@ local function reconcile(self: Record, template: JsonValue): (ResultCode, string
 	state.public_data_source = copy_value(state.data)
 	self.Data = state.data
 	if changed == true then
-		state.change_sequence += 1
+		mark_dirty(state)
 		local operation_id = HttpService:GenerateGUID(false)
 		state.current_operation_id = operation_id
 		enqueue_change_observation(state, old_data, next_value, operation_id, "reconcile")
@@ -5365,7 +5717,7 @@ local function transaction_internal(
 				and backend_metadata_matches(info, returned)
 			then
 				update_local_from_envelope(state, returned, info)
-				state.saved_change_sequence = state.change_sequence
+				mark_saved(state, state.change_sequence)
 				state.last_saved = make_durable_snapshot(returned, info, "transaction")
 				state.last_observed = now_unix()
 				state.busy = false
@@ -6303,7 +6655,7 @@ local function delete_record(self: Record): (ResultCode, string?)
 		return "unknown", last_error or "delete outcome is unresolved"
 	end
 	state.last_saved = make_durable_snapshot(confirmed, confirmed_info, "delete")
-	state.saved_change_sequence = state.change_sequence
+	mark_saved(state, state.change_sequence)
 	state.data = nil
 	state.public_data_source = nil
 	state.token = nil
@@ -6926,6 +7278,7 @@ local function open_internal(state: InternalState, default_data: JsonValue?, rec
 		state.last_saved = make_durable_snapshot(confirmed, confirmed_info, "open")
 		state.change_sequence = 0
 		state.saved_change_sequence = 0
+		state.dirty_since_unix = 0
 		state.busy = false
 		state.state = "active"
 		state.next_autosave = now_local() + (state.options.autosave_interval or DEFAULT_AUTOSAVE_INTERVAL) * (0.9 + math.random() * 0.2)
@@ -7295,7 +7648,7 @@ close_internal = function(state: InternalState, shutdown: boolean): (ResultCode,
 	end
 	update_local_from_envelope(state, confirmed, confirmed_info)
 	state.last_saved = make_durable_snapshot(confirmed, confirmed_info, "close")
-	state.saved_change_sequence = state.change_sequence
+	mark_saved(state, state.change_sequence)
 	state.busy = false
 	state.state = "closed"
 	state.durable_lease_until = 0
@@ -7371,6 +7724,8 @@ local function stats(self: Record): { [string]: number | string? }
 		handoff_published = if state.handoff_published then 1 else 0,
 		change_sequence = state.change_sequence,
 		saved_change_sequence = state.saved_change_sequence,
+		dirty_since_unix = state.dirty_since_unix,
+		dirty_age_seconds = if state.change_sequence ~= state.saved_change_sequence and state.dirty_since_unix > 0 then math.max(0, now_unix() - state.dirty_since_unix) else 0,
 		dirty = if state.change_sequence ~= state.saved_change_sequence then 1 else 0,
 	}
 end
@@ -7474,6 +7829,7 @@ local function make_record(name: string, scope: string, key: string, options: Op
 		last_saved = nil,
 		change_sequence = 0,
 		saved_change_sequence = 0,
+		dirty_since_unix = 0,
 		durable_lease_until = 0,
 	}
 	local record: Record = {
@@ -7543,6 +7899,7 @@ local function start_scheduler()
 	scheduler_started = true
 	task.spawn(function()
 		while not closing do
+			refresh_runtime_policy(now_local())
 			for record in active_records do
 				local state = private[record]
 				if state ~= nil and state.state == "active" then
@@ -7585,7 +7942,7 @@ local function start_scheduler()
 						and (state.queue_hint or now >= state.next_queue_poll)
 					then
 						state.queue_hint = false
-						state.next_queue_poll = now + (state.options.queue_poll_interval or DEFAULT_QUEUE_POLL_INTERVAL)
+						state.next_queue_poll = now + effective_queue_poll_interval(state.options.queue_poll_interval or DEFAULT_QUEUE_POLL_INTERVAL)
 						task.spawn(function()
 							process_queue_internal(state, 4)
 							sync_public(record)
@@ -7925,6 +8282,48 @@ end
 
 function RecordStore.enqueue_async(name: string, scope: string, key: string, message_type: string, data: JsonValue?, queue_store_name: string?, operation_deadline: number?): (ResultCode, string?)
 	return enqueue_static(name, scope, key, message_type, data, false, queue_store_name, operation_deadline)
+end
+
+
+function RecordStore.configure_runtime(config: RuntimeOptions): (ResultCode, string?)
+	if type(config) ~= "table" then return "invalid", "runtime config must be a table" end
+	if scheduler_started or next(records) ~= nil then
+		return "busy", "configure_runtime must be called before the first RecordStore record is created"
+	end
+	local policy_patch: { [string]: unknown } = {}
+	local provider: (() -> { [string]: unknown })? = nil
+	for key, value in pairs(config :: { [string]: unknown }) do
+		if key == "runtime_policy_provider" then
+			if value ~= nil and type(value) ~= "function" then return "invalid", "runtime_policy_provider must be a function" end
+			provider = value :: (() -> { [string]: unknown })?
+		else
+			policy_patch[key] = value
+		end
+	end
+	local candidate, message = merge_runtime_policy(policy_patch, runtime_options, false)
+	if candidate == nil then return "invalid", message end
+	runtime_options = candidate
+	runtime_policy_provider = provider
+	runtime_effective_concurrent_requests = runtime_options.adaptive_max_concurrent_requests
+	runtime_next_policy_refresh = now_local() + runtime_options.runtime_policy_refresh_interval
+	runtime_queue_tokens = runtime_options.adaptive_max_concurrent_requests * runtime_options.adaptive_queue_budget_share
+	runtime_queue_tokens_updated = now_local()
+	runtime_metrics.last_policy_error = ""
+	return "success", nil
+end
+
+function RecordStore.get_runtime_stats(): { [string]: unknown }
+	return {
+		policy = table.clone(runtime_options),
+		effective_concurrent_requests = runtime_effective_concurrent_requests,
+		active_requests = active_requests,
+		read_budget = runtime_budget_read,
+		write_budget = runtime_budget_write,
+		queue_tokens = runtime_queue_tokens,
+		metrics = table.clone(runtime_metrics),
+		next_policy_refresh = runtime_next_policy_refresh,
+		policy_provider_configured = runtime_policy_provider ~= nil,
+	}
 end
 
 function RecordStore.new(name: string, scope: string, key: string, options: Options): Record
