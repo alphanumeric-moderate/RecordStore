@@ -15,7 +15,7 @@ local RESERVED = "__recordstore_v2_"
 
 local resolved_task_api = false
 local cached_task_api = nil
-local function spawn_scheduled(callback)
+local function task_api()
 	if not resolved_task_api then
 		resolved_task_api = true
 		local global_ok, global_value = pcall(function() return task end)
@@ -28,7 +28,17 @@ local function spawn_scheduled(callback)
 			end
 		end
 	end
-	if cached_task_api ~= nil then cached_task_api.spawn(callback) else callback() end
+	return cached_task_api
+end
+local function spawn_scheduled(callback)
+	local api = task_api()
+	if api ~= nil then api.spawn(callback) else callback() end
+end
+local function delay_scheduled(seconds, callback)
+	local api = task_api()
+	if api == nil or type(api.delay) ~= "function" then return false end
+	api.delay(seconds, callback)
+	return true
 end
 
 local function finite(value)
