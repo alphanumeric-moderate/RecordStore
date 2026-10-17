@@ -282,6 +282,9 @@ function MailboxV2.new(store: unknown, owner_value: Owner, options_value: Option
 		error("store must implement GetAsync and UpdateAsync", 2)
 	end
 	local options = table.clone(options_value or {}) :: Options
+	if type(options.encode) ~= "function" then
+		error("options.encode must provide the exact serialized representation used by the DataStore adapter", 2)
+	end
 	options.max_segments = options.max_segments or DEFAULT_MAX_SEGMENTS
 	options.segment_max_messages = options.segment_max_messages or DEFAULT_SEGMENT_MAX_MESSAGES
 	options.max_payload_bytes = options.max_payload_bytes or DEFAULT_MAX_PAYLOAD_BYTES
@@ -329,15 +332,16 @@ function MailboxV2._now(self: Mailbox): number
 end
 
 function MailboxV2._encode_size(self: Mailbox, value: unknown): (number?, string?)
-	local serialized: string
+	if self.options.encode == nil then
+		return nil, "a production-compatible encoded-size callback is required"
+	end
 	local success, result = pcall(function()
-		return if self.options.encode ~= nil then self.options.encode(value) else canonical(value)
+		return (self.options.encode :: (unknown) -> string)(value)
 	end)
 	if not success or type(result) ~= "string" then
 		return nil, "value is not serializable"
 	end
-	serialized = result
-	return #serialized, nil
+	return #result, nil
 end
 
 function MailboxV2._get(self: Mailbox, key: string): (unknown, string?)
@@ -352,8 +356,13 @@ end
 
 function MailboxV2._update(self: Mailbox, key: string, transform: (unknown) -> unknown): (unknown, string?)
 	local success, value = pcall(function()
-		return self.store:UpdateAsync(key, function(raw: unknown, _key_info: unknown?)
-			return transform(raw)
+		return self.store:UpdateAsync(key, function(raw: unknown, key_info: any)
+			local next_value = transform(raw)
+			if key_info ~= nil then
+				-- Preserve existing DataStore user IDs and metadata across queue-key mutations.
+				return next_value, key_info:GetUserIds(), key_info:GetMetadata()
+			end
+			return next_value
 		end)
 	end)
 	if not success then
@@ -1048,10 +1057,25 @@ function MailboxV2._resume_reservation(self: Mailbox, route: string, initial_ent
 		if not same_owner(current_record.owner, self.owner) or current_record.request_text ~= request_text then
 			return ok("conflict", route, nil, "canonical route collision or different exact request")
 		end
-		if TERMINAL[tostring(current_record.state)] or current_record.state == "ready" or current_record.state == "claimed" or current_record.state == "acknowledging" then
-			local snapshot = self:_record_snapshot(current_record)
+		if TERMINAL[tostring(current_record.state)] then
+			-- The canonical terminal state is the durable producer receipt.
 			self:_set_registry_entry(route, token, nil, true)
-			return ok("duplicate", route, snapshot, nil)
+			return ok("duplicate", route, self:_record_snapshot(current_record), nil)
+		end
+		if current_record.state == "ready" or current_record.state == "claimed" or current_record.state == "acknowledging" then
+			local current_locator = as_dict(current_record.locator)
+			local same_locator = current_locator ~= nil
+				and current_locator.slot == locator.slot
+				and current_locator.generation == locator.generation
+				and current_record.placement_generation == placement
+			if not same_locator or not self:_contains_index_row("active", locator, route, placement) then
+				return ok("unknown", route, self:_record_snapshot(current_record), "accepted-state receipt has no verified matching index row; registry retained")
+			end
+			local cleared, clear_error = self:_set_registry_entry(route, token, nil, true)
+			if clear_error ~= nil or cleared ~= nil then
+				return ok("duplicate", route, self:_record_snapshot(current_record), nil)
+			end
+			return ok("unknown", route, self:_record_snapshot(current_record), "registry clear outcome is unknown")
 		end
 	end
 
