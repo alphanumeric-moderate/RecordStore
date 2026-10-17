@@ -533,6 +533,13 @@ type InternalState = {
 	durable_lease_until: number,
 }
 
+export type RecordIdentity = {
+	store_name: string,
+	scope: string,
+	profile_key: string,
+	user_ids: { number },
+}
+
 export type Record = {
 	Data: JsonValue?,
 	State: SessionState,
@@ -546,6 +553,7 @@ export type Record = {
 	Open: (self: Record, default_data: JsonValue?, recreate: boolean?) -> (ResultCode, string?),
 	Get: (self: Record) -> JsonValue?,
 	GetKey: (self: Record) -> string,
+	GetIdentity: (self: Record) -> RecordIdentity,
 	GetState: (self: Record) -> SessionState,
 	GetRevision: (self: Record) -> number,
 	GetGeneration: (self: Record) -> number,
@@ -4906,6 +4914,19 @@ local function get_key(self: Record): string
 	return if state ~= nil then state.key else self.Key
 end
 
+local function get_identity(self: Record): RecordIdentity
+	local state = private[self]
+	if state == nil then
+		return { store_name = "", scope = "", profile_key = self.Key, user_ids = {} }
+	end
+	return {
+		store_name = state.name,
+		scope = state.scope,
+		profile_key = state.key,
+		user_ids = clone_user_ids(state.user_ids),
+	}
+end
+
 local function get_state(self: Record): SessionState
 	local state = private[self]
 	return if state ~= nil then state.state else self.State
@@ -7845,6 +7866,7 @@ local function make_record(name: string, scope: string, key: string, options: Op
 		Open = open,
 		Get = get_data,
 		GetKey = get_key,
+		GetIdentity = get_identity,
 		GetState = get_state,
 		GetRevision = get_revision,
 		GetGeneration = get_generation,
