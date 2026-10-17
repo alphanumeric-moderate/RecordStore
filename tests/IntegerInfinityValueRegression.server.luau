@@ -3,7 +3,7 @@
 -- It verifies the NumberValue-backed path that PlayerDataCore uses for integer infinities.
 
 local ServerScriptService = game:GetService("ServerScriptService")
-local IntegerInfinityValue = require(ServerScriptService:WaitForChild("IntegerInfinityValue"))
+local IntegerInfinityValue = require(ServerScriptService.IntegerInfinityValue)
 
 local value = IntegerInfinityValue.new("Kills", math.huge)
 assert(value.Value == math.huge, "positive infinity was not preserved by NumberValue")
