@@ -1378,7 +1378,21 @@ local function new_erasure(store, families, options)
 	end
 	function coordinator:IsErased(user_id)
 		local status = self:GetStatus(user_id)
-		return status.status == "planned" or status.status == "in_progress" or status.status == "completed", status
+		if type(status) ~= "table" then return nil, { code = "unknown", message = "erasure status is not a table" } end
+		if status.code == "not_found" then return false, status end
+		if status.code == "unknown" or status.code == "corrupt" or status.code == "conflict" then
+			return nil, status
+		end
+		if status.user_id ~= user_id or not valid_text(status.erasure_id, 96) or not valid_text(status.status, 32) then
+			return nil, { code = "corrupt", message = "erasure status identity or state is invalid" }
+		end
+		if status.status == "planned" or status.status == "in_progress" or status.status == "completed" then
+			return true, status
+		end
+		if status.status == "cancelled" then return false, status end
+		-- Unknown states, blocked operations, or future schema revisions must not
+		-- be interpreted as permission to recreate user-associated data.
+		return nil, { code = "unsupported", message = "erasure state is unresolved or unsupported", state = status.status }
 	end
 	return coordinator
 end
