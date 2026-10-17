@@ -1452,7 +1452,7 @@ function V2.new(record_store, mailbox_module, options)
 	options = options or {}
 	if type(record_store) ~= "table" or type(record_store.new) ~= "function" then error("RecordStoreV2 requires RecordStore", 2) end
 	if type(mailbox_module) ~= "table" or type(mailbox_module.new) ~= "function" then error("RecordStoreV2 requires RecordStoreMailboxV2", 2) end
-	if type(record_store.configure_runtime) ~= "function" or type(record_store.get_runtime_stats) ~= "function" then
+	if type(record_store.apply_runtime_policy) ~= "function" or type(record_store.get_runtime_stats) ~= "function" then
 		error("RecordStoreV2 requires the shared RecordStore runtime governor APIs", 2)
 	end
 	local runtime_governor = new_governor(options.runtime)
@@ -1491,7 +1491,7 @@ function V2.new(record_store, mailbox_module, options)
 	-- This facade delegates policy application/snapshots to that governor instead of creating a
 	-- second request-admission loop inside V2.
 	api.ApplyRuntimePolicy = function(policy)
-		return record_store.configure_runtime(policy)
+		return record_store.apply_runtime_policy(policy)
 	end
 	api.GetRuntimeSnapshot = function()
 		return record_store.get_runtime_stats()

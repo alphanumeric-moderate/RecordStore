@@ -45,10 +45,27 @@ local status, status_code, status_message = record:GetDurabilityStatus()
 assert(status_code == "success", tostring(status_message))
 assert(status ~= nil and status.max_dirty_age_seconds == 120,
 	"Record durability status did not use the shared V2-applied runtime policy")
+
+local live_revision = next_revision + 1
+local live_apply_code, live_apply_message = V2.ApplyRuntimePolicy({
+	revision = live_revision,
+	max_dirty_age_seconds = 90,
+})
+assert(live_apply_code == "success", tostring(live_apply_message))
+local live_status, live_status_code, live_status_message = record:GetDurabilityStatus()
+assert(live_status_code == "success", tostring(live_status_message))
+assert(live_status ~= nil and live_status.max_dirty_age_seconds == 90,
+	"runtime policy update did not affect an already-open Record")
+local stale_code = V2.ApplyRuntimePolicy({
+	revision = next_revision,
+	max_dirty_age_seconds = 120,
+})
+assert(stale_code == "invalid", "stale runtime policy revision was accepted")
+
 local snapshot_after_open = V2.GetRuntimeSnapshot()
 assert(snapshot_after_open.active_requests == 0, "runtime request counter leaked after Open")
-assert(snapshot_after_open.policy.revision == next_revision,
-	"creating a Record replaced or reset the shared runtime policy")
+assert(snapshot_after_open.policy.revision == live_revision,
+	"runtime snapshot did not retain the newest applied policy revision")
 
 local change_code = record:Update(function(current)
 	local next_data = table.clone(current)
@@ -59,7 +76,7 @@ assert(change_code == "success", "Record update failed after runtime policy appl
 local save_code, save_message = record:Save("v2-runtime-policy")
 assert(save_code == "success" or save_code == "saved", tostring(save_message))
 local final_snapshot = V2.GetRuntimeSnapshot()
-assert(final_snapshot.policy.revision == next_revision and final_snapshot.active_requests == 0,
+assert(final_snapshot.policy.revision == live_revision and final_snapshot.active_requests == 0,
 	"runtime snapshot did not remain consistent after profile persistence")
 
 print("[PASS] RecordStoreV2 runtime policy delegates to shared RecordStore gate.")

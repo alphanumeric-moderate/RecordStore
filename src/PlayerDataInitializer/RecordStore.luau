@@ -9556,6 +9556,25 @@ function RecordStore.configure_runtime(config: RuntimeOptions): (ResultCode, str
 	return "success", nil
 end
 
+function RecordStore.apply_runtime_policy(config: RuntimeOptions): (ResultCode, string?)
+	if type(config) ~= "table" then
+		return "invalid", "runtime policy must be a table"
+	end
+	local patch: { [string]: unknown } = {}
+	for key, value in pairs(config :: { [string]: unknown }) do
+		if key == "runtime_policy_provider" then
+			return "invalid", "runtime_policy_provider can only be set by configure_runtime before Record creation"
+		end
+		patch[key] = value
+	end
+	local applied, message = apply_runtime_policy(patch, true)
+	if not applied then return "invalid", message end
+	runtime_next_policy_refresh = now_local() + runtime_options.runtime_policy_refresh_interval
+	runtime_next_budget_sample = math.min(runtime_next_budget_sample, now_local())
+	runtime_queue_tokens_updated = now_local()
+	return "success", nil
+end
+
 function RecordStore.get_runtime_stats(): { [string]: unknown }
 	return {
 		policy = table.clone(runtime_options),
