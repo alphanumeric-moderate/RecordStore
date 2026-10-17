@@ -304,10 +304,16 @@ do
 	end)
 	expect_code(delayed_claim, "unknown", "claim response leaves insufficient verified lease")
 	assert(handler_calls == 0, "handler ran without a sufficient verified claim lease margin")
+	local persisted_claim = store.values[enqueued.message_id]
+	assert(type(persisted_claim) == "table" and type(persisted_claim.claim_token) == "string",
+		"delayed claim did not preserve its durable fencing token")
+	local stale_claim_token = persisted_claim.claim_token
 
 	advance(200)
 	local recovered = mailbox:RecoverAsync()
 	expect_code(recovered, "success", "recover expired uncertain claim")
+	local stale_ack = mailbox:_complete_claim(enqueued.message_id, stale_claim_token)
+	expect_code(stale_ack, "conflict", "stale claim token fenced after lease recovery")
 	advance(500)
 	local retried = mailbox:ProcessNextAsync(function(payload, message)
 		handler_calls += 1
