@@ -112,6 +112,51 @@ local blocked_maintenance = guarded_v2.ScheduleMaintenance("maintenance-owner", 
 end)
 assert(blocked_maintenance.code == "disabled", "maintenance scheduling bypassed the prepared rollout gate")
 
+local accelerator_registered = 0
+local mailbox_wakeup_bound = 0
+local fake_accelerator = {
+	Register = function(_self, _owner, _callback)
+		accelerator_registered += 1
+		return true
+	end,
+}
+local fake_wakeup_mailbox = {
+	ProcessNextAsync = function() return { code = "empty" } end,
+	BindWakeups = function()
+		mailbox_wakeup_bound += 1
+		return true
+	end,
+}
+local wakeup_bound, wakeup_error = guarded_v2.BindMailboxWakeups(
+	fake_accelerator, "wakeup-owner", fake_wakeup_mailbox, function() end, 1
+)
+assert(wakeup_bound == false and wakeup_error ~= nil,
+	"BindMailboxWakeups did not preserve its false/message return contract when rollout denied it")
+assert(accelerator_registered == 0 and mailbox_wakeup_bound == 0,
+	"denied mailbox wakeup registration still changed accelerator/mailbox state")
+
+local compactor_next_page_calls = 0
+local compactor_persist_calls = 0
+local compactor = guarded_v2.Maintenance.NewCompactor({
+	next_page = function()
+		compactor_next_page_calls += 1
+		return nil, nil, true
+	end,
+	inspect = function() return "retain" end,
+	persist_progress = function()
+		compactor_persist_calls += 1
+		return true
+	end,
+})
+local blocked_compaction = compactor:RunStep(1, 1)
+assert(type(blocked_compaction) == "table" and blocked_compaction.code == "disabled",
+	"compactor ran while rollout was still prepared")
+local resume_allowed, resume_error = compactor:Resume(0)
+assert(resume_allowed == false and resume_error ~= nil,
+	"compactor Resume did not preserve its boolean/message return contract when blocked")
+assert(compactor_next_page_calls == 0 and compactor_persist_calls == 0,
+	"blocked compactor invoked its work or checkpoint callbacks")
+
 local no_guard_constructed = pcall(function()
 	return MailboxV2.new(MailboxV2.MockStore(), {
 		store_name = "RolloutTest",
