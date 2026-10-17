@@ -287,7 +287,7 @@ end
 do
 	local mailbox, store, advance = make_mailbox({
 		lease_ms = 1000,
-		clock_skew_grace_ms = 0,
+		clock_skew_grace_ms = 1,
 		retry_base_ms = 100,
 		retry_max_ms = 1000,
 	})
