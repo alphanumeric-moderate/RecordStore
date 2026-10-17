@@ -599,6 +599,17 @@ local function new_governor(options)
 	return governor
 end
 
+local runtime_governors_by_record_store = setmetatable({}, { __mode = "k" })
+
+local function shared_runtime_governor(record_store, options)
+	local governor = runtime_governors_by_record_store[record_store]
+	if governor == nil then
+		governor = new_governor(options)
+		runtime_governors_by_record_store[record_store] = governor
+	end
+	return governor
+end
+
 local function path_diff(left, right, options)
 	options = options or {}
 	local max_nodes = math.clamp(math.floor(options.max_nodes or 256), 1, 2048)
@@ -1455,7 +1466,7 @@ function V2.new(record_store, mailbox_module, options)
 	if type(record_store.apply_runtime_policy) ~= "function" or type(record_store.get_runtime_stats) ~= "function" then
 		error("RecordStoreV2 requires the shared RecordStore runtime governor APIs", 2)
 	end
-	local runtime_governor = new_governor(options.runtime)
+	local runtime_governor = shared_runtime_governor(record_store, options.runtime)
 	local api = {
 		Version = 2,
 		DeliveryGuarantee = "at-least-once",
@@ -1466,7 +1477,10 @@ function V2.new(record_store, mailbox_module, options)
 		Transactions = {},
 		Inbox = new_inbox(),
 		Outbox = new_outbox(),
-		RuntimeGovernor = { new = new_governor },
+		RuntimeGovernor = {
+			new = new_governor,
+			get_shared = function() return runtime_governor end,
+		},
 		Tracing = { new = new_tracer },
 		Migrations = { new = new_migrations },
 		ProfileDoctor = new_doctor(record_store),

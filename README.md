@@ -332,6 +332,8 @@ templates, writer fences, dependency clearance, and generation-aware deletion/re
 mixed-version rollout protocol and these integration guarantees are release gates, not results of
 adding helper APIs.
 
+The V2 advanced candidate scheduler is shared by V2 facades that wrap the same core RecordStore module. It remains a local scheduling model, not the production selector for every mailbox, outbox, and maintenance operation; the core RecordStore request gate remains authoritative for shared request admission.
+
 The authoritative section-by-section design map is
 [`docs/superpowers/specs/2026-10-17-recordstore-v2-implementation-matrix.md`](docs/superpowers/specs/2026-10-17-recordstore-v2-implementation-matrix.md).
 It separates code presence from compilation, failure-test, benchmark and Roblox acceptance status.

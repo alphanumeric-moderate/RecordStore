@@ -7,12 +7,14 @@ local MailboxV2 = require("../src/PlayerDataInitializer/RecordStoreMailboxV2")
 local V2Module = require("../src/PlayerDataInitializer/RecordStoreV2")
 
 local now_ms = 1_800_000_000_000
-local V2 = V2Module.new(RecordStore, MailboxV2, {
-	runtime = {
-		now_ms = function() return now_ms end,
-		now_unix = function() return math.floor(now_ms / 1000) end,
-	},
-})
+local runtime_options = {
+	now_ms = function() return now_ms end,
+	now_unix = function() return math.floor(now_ms / 1000) end,
+}
+local V2 = V2Module.new(RecordStore, MailboxV2, { runtime = runtime_options })
+local V2SecondFacade = V2Module.new(RecordStore, MailboxV2)
+assert(V2.RuntimeGovernor.get_shared() == V2SecondFacade.RuntimeGovernor.get_shared(),
+	"multiple V2 facades created independent server-local advanced governors")
 
 local before = V2.GetRuntimeSnapshot()
 assert(type(before) == "table" and type(before.policy) == "table",
