@@ -154,11 +154,14 @@ local concurrent_family = family(true, function(user_id)
 end)
 concurrent_family.redact_or_delete_if_generation = function(item, user_id, erasure_id)
 	delete_calls += 1
+	local outer_first_action = false
 	if item.key:find("_first", 1, true) and not nested_started then
 		nested_started = true
+		outer_first_action = true
 		local nested = concurrent_coordinator:ExecuteAsync(user_id, erasure_id, 2)
 		assert(nested.code == "committed", "nested worker failed to finish the immutable erasure plan")
 	end
+	if outer_first_action then return "unknown", "late ambiguous action response after another worker completed" end
 	return "deleted"
 end
 concurrent_coordinator = V2.Erasure.new(concurrent_store, { concurrent_family }, {
