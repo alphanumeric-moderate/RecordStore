@@ -12,12 +12,19 @@ type Owner = {
 	profile_key: string,
 	user_id: number?,
 }
+type ActiveRecordLike = {
+	GetIdentity: (self: ActiveRecordLike) -> Dict,
+	IsOpen: (self: ActiveRecordLike) -> boolean,
+	GetState: (self: ActiveRecordLike) -> string,
+	Stats: (self: ActiveRecordLike) -> Dict,
+}
 type StoreAdapter = {
 	GetAsync: (self: StoreAdapter, key: string) -> unknown,
 	UpdateAsync: (self: StoreAdapter, key: string, transform: (unknown, unknown?) -> (unknown, { number }?, Dict?)) -> unknown,
 	RemoveAsync: ((self: StoreAdapter, key: string) -> ())?,
 }
 type Options = {
+	active_record: ActiveRecordLike?,
 	now_ms: (() -> number)?,
 	guid: (() -> string)?,
 	encode: ((unknown) -> string)?,
@@ -1637,6 +1644,8 @@ function MailboxV2.ProcessNextAsync(self: Mailbox, handler: (unknown, Dict) -> (
 	if type(handler) ~= "function" then
 		return ok("invalid", nil, nil, "handler must be a function")
 	end
+	local session_code, session_error = verify_active_record(self)
+	if session_code ~= "success" then return ok(session_code, nil, nil, session_error) end
 	local recovery = self:RecoverAsync()
 	if recovery.code ~= "success" and recovery.code ~= "empty" then
 		return recovery
@@ -1668,6 +1677,12 @@ function MailboxV2.ProcessNextAsync(self: Mailbox, handler: (unknown, Dict) -> (
 		local route = tostring(candidate.Id)
 		local record, claim_result = self:_claim(route)
 		if record ~= nil then
+			local session_code_after_claim, session_error_after_claim = verify_active_record(self)
+			if session_code_after_claim ~= "success" then
+				local released = self:_retry_claim(route, tostring(record.claim_token), "active Record guard changed before handler start: " .. tostring(session_error_after_claim))
+				if released.code ~= "retry_scheduled" and released.code ~= "expired" and released.code ~= "dead_lettered" then return released end
+				return ok(session_code_after_claim, route, nil, session_error_after_claim)
+			end
 			local snapshot = self:_record_snapshot(record)
 			local call_ok, handler_result, handler_error = pcall(handler, clone_json(record.payload), snapshot)
 			if call_ok and handler_result ~= false then
