@@ -297,6 +297,7 @@ local function new_inbox()
 		if batch_material == nil then return { code = "invalid", message = material_error } end
 		local receipt_key = BATCH_RECEIPT_PREFIX .. batch_id
 		local batch_received_at = if finite(options.now_unix) then options.now_unix else os.time()
+		local max_receipts = math.clamp(math.floor(options.max_receipts or MAX_INBOX_RECEIPTS), 1, MAX_INBOX_RECEIPTS)
 		local invocation_token = digest(batch_id .. ":" .. tostring(os.clock()) .. ":" .. tostring(math.random()))
 		local before_data, before_error = record_data(record)
 		if type(before_data) ~= "table" then return { code = "unknown", message = before_error or "active profile data unavailable" } end
@@ -323,6 +324,13 @@ local function new_inbox()
 				return data
 			end
 			local count = key_count(receipts)
+			local capacity_needed = 1 -- this immutable batch result consumes one bounded receipt slot
+			for _, message in ipairs(normalized) do
+				if receipts[message.message_id] == nil then capacity_needed += 1 end
+			end
+			if count + capacity_needed > max_receipts then
+				error("inbox receipt capacity reached; message/batch retention pruning is required")
+			end
 			local batch_applied, batch_duplicates = 0, 0
 			for _, message in ipairs(normalized) do
 				local prior = receipts[message.message_id]
@@ -332,9 +340,6 @@ local function new_inbox()
 					end
 					batch_duplicates += 1
 				else
-					if count >= (options.max_receipts or MAX_INBOX_RECEIPTS) then
-						error("inbox receipt capacity reached; retention pruning is required")
-					end
 					-- Do not expose the inbox's internal receipt map to user reducers.
 					local reducer_input = copy(data)
 					reducer_input[receipts_field] = nil
@@ -373,7 +378,8 @@ local function new_inbox()
 			result.code = "unknown"
 			result.message = after_error or "durable batch receipt cannot be verified"
 			result.applied, result.duplicates = 0, 0
-		elseif result.code == "committed" and batch_result.operation_attempt == invocation_token and prior_batch == nil then
+		elseif batch_result.operation_attempt == invocation_token and prior_batch == nil then
+			if result.code ~= "committed" then result.code = "committed_reconciled" end
 			result.applied = batch_result.applied
 			result.duplicates = batch_result.duplicates
 		else
