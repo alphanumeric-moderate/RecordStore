@@ -1288,7 +1288,14 @@ local function saga_coordinator(store, options)
 		if saga.phase == "requested" then
 			local sender_data, read_error = profile_data(sender)
 			if type(sender_data) ~= "table" then return outcome("fenced", "requested", read_error) end
-			if not finite(sender_data[balance_field]) or sender_data[balance_field] < amount then
+			local existing_escrow = sender_data[escrow_field]
+			local held = if type(existing_escrow) == "table" then existing_escrow[id] else nil
+			if held ~= nil and (type(held) ~= "table" or held.amount ~= amount or held.transfer_id ~= id) then
+				return outcome("conflict", "requested", "existing source escrow conflicts with the stable transfer request")
+			end
+			-- A previous reserve may have committed while its saga checkpoint response
+			-- was lost. Never reject merely because the already-reserved balance is low.
+			if held == nil and (not finite(sender_data[balance_field]) or sender_data[balance_field] < amount) then
 				local rejected, reject_code, reject_error = mark("rejected", "rejected", "insufficient available balance")
 				if rejected ~= nil and rejected.phase == "rejected" then
 					local result = copy(rejected); result.code = "rejected"; return result
