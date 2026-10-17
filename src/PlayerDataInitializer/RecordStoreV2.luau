@@ -2474,51 +2474,146 @@ end
 
 local function new_read_coalescer(fetch, options)
 	options = options or {}
-	local values, inflight = {}, {}
-	local service = { hits = 0, misses = 0, coalesced = 0, evictions = 0 }
-	local ttl, maximum = options.ttl_seconds or 1, math.clamp(math.floor(options.max_entries or 128), 1, 2048)
+	if type(fetch) ~= "function" then error("read coalescer requires a fetch function", 2) end
+	local inflight = {}
+	local total_waiters = 0
+	local maximum = if finite(options.max_entries) then math.clamp(math.floor(options.max_entries), 1, 2048) else 128
+	local maximum_waiters_per_key = if finite(options.max_waiters_per_key)
+		then math.clamp(math.floor(options.max_waiters_per_key), 1, 256) else 32
+	local maximum_total_waiters = if finite(options.max_total_waiters)
+		then math.clamp(math.floor(options.max_total_waiters), 1, 4096) else 256
+	local waiter_timeout_seconds = if finite(options.waiter_timeout_seconds)
+		then math.clamp(options.waiter_timeout_seconds, 0.01, 60) else 5
+	local service = {
+		hits = 0, misses = 0, coalesced = 0, evictions = 0,
+		timeouts = 0, rejected = 0,
+	}
+
+	local function entry_count()
+		local count = 0
+		for _ in pairs(inflight) do count += 1 end
+		return count
+	end
+
+	local function finish_waiter(waiter, value, message, source)
+		if waiter.done then return false end
+		waiter.done = true
+		waiter.value = value
+		waiter.message = message
+		waiter.source = source
+		local flight = waiter.flight
+		if flight.waiters[waiter] then
+			flight.waiters[waiter] = nil
+			flight.waiter_count -= 1
+			total_waiters -= 1
+		end
+		if waiter.waiting then
+			local scheduler = task_api()
+			if scheduler ~= nil then scheduler.spawn(waiter.thread) end
+		end
+		return true
+	end
+
 	function service:GetAsync(key, fence_key)
-		if not valid_text(key, 256) then return nil, "invalid key" end
+		if not valid_text(key, 256) then return nil, "invalid key", "invalid" end
 		local cache_key = tostring(fence_key or "") .. "\0" .. key
-		local now = os.clock()
-		local cached = values[cache_key]
-		if cached and cached.expires > now then self.hits += 1; return copy(cached.value), nil, "cache" end
 		local active = inflight[cache_key]
-		if active then
+		if active ~= nil then
+			if active.waiter_count >= maximum_waiters_per_key or total_waiters >= maximum_total_waiters then
+				self.rejected += 1
+				return nil, "read-coalescer waiter capacity reached", "capacity"
+			end
+			local scheduler = task_api()
+			local thread = coroutine.running()
+			if scheduler == nil or type(scheduler.spawn) ~= "function"
+				or type(scheduler.delay) ~= "function" or type(thread) ~= "thread"
+			then
+				self.rejected += 1
+				return nil, "cannot wait for an in-flight read without a yieldable task scheduler", "unsupported"
+			end
+			local waiter = { flight = active, thread = thread, waiting = false, done = false }
+			active.waiters[waiter] = true
+			active.waiter_count += 1
+			total_waiters += 1
 			self.coalesced += 1
-			if active.event then active.event.Event:Wait(); local result = values[cache_key]; return result and copy(result.value) or nil, active.message end
-			return nil, "in-flight waiter signal unavailable"
+			waiter.waiting = true
+			local delay_ok = delay_scheduled(waiter_timeout_seconds, function()
+				if finish_waiter(waiter, nil, "read-coalescer waiter deadline exceeded", "timeout") then
+					self.timeouts += 1
+				end
+			end)
+			if not delay_ok then
+				waiter.waiting = false
+				if active.waiters[waiter] then
+					active.waiters[waiter] = nil
+					active.waiter_count -= 1
+					total_waiters -= 1
+				end
+				waiter.done = true
+				self.rejected += 1
+				return nil, "task scheduler cannot enforce a read-coalescer waiter deadline", "unsupported"
+			end
+			if not waiter.done then coroutine.yield() end
+			waiter.waiting = false
+			if waiter.source == "timeout" then return nil, waiter.message, "timeout" end
+			if waiter.value == nil then return nil, waiter.message, "coalesced" end
+			local copied, value = pcall(copy, waiter.value)
+			if not copied then return nil, tostring(value), "invalid" end
+			return value, waiter.message, "coalesced"
 		end
-		self.misses += 1
-		local event
-		if Instance and type(Instance.new) == "function" then
-			local ok, object = pcall(Instance.new, "BindableEvent")
-			if ok and object and object.Event and type(object.Fire) == "function" then event = object end
+
+		if entry_count() >= maximum then
+			self.rejected += 1
+			return nil, "read-coalescer in-flight key capacity reached", "capacity"
 		end
-		local flight = { event = event }
+		local flight = { waiters = {}, waiter_count = 0, done = false, value = nil, message = nil }
 		inflight[cache_key] = flight
+		self.misses += 1
+
 		local result, message = io_call(fetch, key)
 		if result ~= nil then
-			values[cache_key] = { value = copy(result), expires = now + ttl }
-			local size = 0; for _ in pairs(values) do size += 1 end
-			while size > maximum do
-				local oldest, expires
-				for candidate, row in pairs(values) do if expires == nil or row.expires < expires then oldest, expires = candidate, row.expires end end
-				if not oldest then break end
-				values[oldest] = nil; self.evictions += 1; size -= 1
+			local copied, value = pcall(copy, result)
+			if copied then
+				flight.value = value
+			else
+				flight.message = "fetched value could not be cloned: " .. tostring(value)
 			end
-		else flight.message = message or "fetch returned nil" end
-		inflight[cache_key] = nil
-		if event then event:Fire(); event:Destroy() end
-		if result == nil then return nil, message end
-		return copy(result), nil, "fetch"
+		else
+			flight.message = message
+		end
+		flight.done = true
+		if inflight[cache_key] == flight then inflight[cache_key] = nil end
+
+		local waiting = {}
+		for waiter in pairs(flight.waiters) do table.insert(waiting, waiter) end
+		for _, waiter in ipairs(waiting) do
+			finish_waiter(waiter, flight.value, flight.message, "coalesced")
+		end
+
+		if flight.value == nil then return nil, flight.message, "fetch" end
+		local copied, value = pcall(copy, flight.value)
+		if not copied then return nil, tostring(value), "invalid" end
+		return value, nil, "fetch"
 	end
-	function service:Invalidate(key, fence_key) values[tostring(fence_key or "") .. "\0" .. key] = nil; return true end
-	function service:Clear() table.clear(values); return true end
-	function service:Stats() return { entries = key_count(values), hits = self.hits, misses = self.misses, coalesced = self.coalesced, evictions = self.evictions } end
+
+	-- Compatibility no-ops: this object intentionally retains no completed result.
+	function service:Invalidate(_key, _fence_key) return true end
+	function service:Clear() return true end
+	function service:Stats()
+		return {
+			entries = entry_count(),
+			hits = self.hits,
+			misses = self.misses,
+			coalesced = self.coalesced,
+			evictions = self.evictions,
+			waiters = total_waiters,
+			timeouts = self.timeouts,
+			rejected = self.rejected,
+			completed_cache_entries = 0,
+		}
+	end
 	return service
 end
-
 local function new_maintenance()
 	local service = {}
 	function service.AssessPayload(value, maximum_bytes)
