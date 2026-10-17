@@ -530,11 +530,19 @@ function MailboxV2._reclaim_slot(self: Mailbox, kind: string): boolean
 							break
 						end
 						if kind == "active" then
-							if record.state ~= "acknowledged" and record.state ~= "dead_lettered" and record.state ~= "discarded" and record.state ~= "expired" then
+							local active_locator = as_dict(record.locator)
+							local row_is_stale = record.placement_generation ~= row.placement_generation
+								or active_locator == nil
+								or active_locator.slot ~= locator.slot
+								or active_locator.generation ~= locator.generation
+							if not row_is_stale and record.state ~= "acknowledged" and record.state ~= "dead_lettered" and record.state ~= "discarded" and record.state ~= "expired" then
 								safe = false
 								break
 							end
-						elseif record.state ~= "dead_lettered" and record.state ~= "discarded" then
+						elseif record.state == "replaying"
+							or (record.state == "dead_lettered" and record.dlq_placement_generation == row.placement_generation)
+						then
+							-- Retain the DLQ row until discard/retention or replay completion is verified.
 							safe = false
 							break
 						end
@@ -851,6 +859,9 @@ function MailboxV2._record_snapshot(self: Mailbox, record: Dict): Dict
 		Priority = record.priority,
 		EffectOutcome = record.effect_outcome,
 		LastError = record.last_error,
+		CapacityBlocked = record.capacity_blocked == true,
+		LeaseUntil = record.locked_until,
+		PlacementGeneration = record.placement_generation,
 		DeadLetteredAt = record.dead_lettered_at,
 	}
 end
@@ -869,11 +880,18 @@ function MailboxV2._append_at_locator(self: Mailbox, kind: string, locator: Loca
 		return "unknown", manifest_error
 	end
 	local manifest_slot = locate_slot(manifest, locator.slot)
-	if manifest_slot == nil or manifest_slot.generation ~= locator.generation or manifest_slot.state ~= "open" then
-		local key = locator.key
-		local previous, previous_error = self:_get(key)
+	if manifest_slot == nil or manifest_slot.generation ~= locator.generation then
+		return "unknown", "segment locator generation is no longer authoritative"
+	end
+	if manifest_slot.state ~= "open" then
+		local previous, previous_error = self:_get(locator.key)
 		local segment = as_dict(previous)
-		if previous_error == nil and segment ~= nil and segment.generation == locator.generation and has_row(segment, tostring(row.route), row.placement_generation :: number) then
+		if previous_error == nil and segment ~= nil
+			and segment.generation == locator.generation
+			and same_owner(segment.owner, self.owner)
+			and has_row(segment, tostring(row.route), row.placement_generation :: number)
+			and (manifest_slot.state == "sealed" or manifest_slot.state == "draining")
+		then
 			return "appended", nil
 		end
 		return "full", nil
@@ -925,7 +943,8 @@ function MailboxV2._append_at_locator(self: Mailbox, kind: string, locator: Loca
 end
 
 function MailboxV2._append_index(self: Mailbox, kind: string, row: Dict): (Locator?, string?)
-	for _attempt = 1, (self.options.max_segments :: number) + 2 do
+	local slot_limit = if kind == "active" then self.options.max_segments :: number else self.options.dlq_max_segments :: number
+	for _attempt = 1, slot_limit + 2 do
 		local locator, open_error = self:_open_segment(kind)
 		if locator == nil then
 			return nil, open_error
@@ -1047,7 +1066,7 @@ function MailboxV2._resume_reservation(self: Mailbox, route: string, initial_ent
 				message_type = request.message_type,
 				payload = clone_json(request.payload),
 				priority = request.priority,
-				available_at = request.available_at,
+				available_at = if is_finite(request.available_at) then request.available_at else entry.created_at,
 				expires_at = request.expires_at,
 				created_at = entry.created_at,
 				updated_at = preparing_now,
@@ -1068,7 +1087,7 @@ function MailboxV2._resume_reservation(self: Mailbox, route: string, initial_ent
 			local next_record = clone_dict(current)
 			next_record.locator = { slot = locator.slot, generation = locator.generation }
 			next_record.placement_generation = placement
-			next_record.updated_at = self:_now()
+			next_record.updated_at = preparing_now
 			return next_record
 		end
 		return current
@@ -1093,6 +1112,7 @@ function MailboxV2._resume_reservation(self: Mailbox, route: string, initial_ent
 			return ok(if status == "full" then "capacity" else "unknown", route, nil, index_error or "canonical index row is unresolved")
 		end
 	end
+	local ready_now = self:_now()
 	local ready, ready_error = self:_update_message(route, function(current)
 		if current == nil or not same_owner(current.owner, self.owner) or current.request_text ~= request_text then
 			return current
@@ -1111,7 +1131,7 @@ function MailboxV2._resume_reservation(self: Mailbox, route: string, initial_ent
 		end
 		local next_record = clone_dict(current)
 		next_record.state = "ready"
-		next_record.updated_at = self:_now()
+		next_record.updated_at = ready_now
 		return next_record
 	end)
 	if ready_error ~= nil then
@@ -1161,7 +1181,7 @@ function MailboxV2.EnqueueAsync(self: Mailbox, message_type: string, payload: un
 		message_type = message_type,
 		payload = clone_json(payload),
 		priority = priority,
-		available_at = available_at,
+		available_at = options.available_at,
 		expires_at = expires_at,
 	}
 	local request_text = canonical(request)
@@ -1343,13 +1363,14 @@ function MailboxV2._finish_dead_letter(self: Mailbox, route: string): Result
 		reservation_token = record.dead_letter_token or route,
 	})
 	if locator == nil then
+		local blocked_at = self:_now()
 		local current, _ = self:_update_message(route, function(raw)
 			if raw == nil or raw.state ~= "dead_lettering" then
 				return raw
 			end
 			local next_record = clone_dict(raw)
 			next_record.capacity_blocked = true
-			next_record.updated_at = self:_now()
+			next_record.updated_at = blocked_at
 			return next_record
 		end)
 		return ok(if string.find(index_error or "", "capacity", 1, true) then "capacity" else "unknown", route, current, index_error)
@@ -1645,6 +1666,7 @@ function MailboxV2.RecoverAsync(self: Mailbox): Result
 				if locator == nil then
 					return ok("unknown", route, nil, append_error)
 				end
+				local recovered_at = self:_now()
 				local ready, ready_error = self:_update_message(route, function(current)
 					if current == nil or current.state ~= "replaying" or current.replay_operation_id ~= replay_token then
 						return current
@@ -1653,7 +1675,7 @@ function MailboxV2.RecoverAsync(self: Mailbox): Result
 					next_record.state = "ready"
 					next_record.placement_generation = generation
 					next_record.locator = { slot = locator.slot, generation = locator.generation }
-					next_record.updated_at = self:_now()
+					next_record.updated_at = recovered_at
 					next_record.claim_token = nil
 					next_record.locked_until = 0
 					return next_record
@@ -1686,6 +1708,7 @@ function MailboxV2.RecoverAsync(self: Mailbox): Result
 				if locator == nil then
 					return ok("unknown", route, nil, append_error)
 				end
+				local recovered_at = self:_now()
 				local ready, ready_error = self:_update_message(route, function(current)
 					if current == nil or current.state ~= "replaying" or current.replay_operation_id ~= replay_token then
 						return current
@@ -1694,7 +1717,7 @@ function MailboxV2.RecoverAsync(self: Mailbox): Result
 					next_record.state = "ready"
 					next_record.placement_generation = generation
 					next_record.locator = { slot = locator.slot, generation = locator.generation }
-					next_record.updated_at = self:_now()
+					next_record.updated_at = recovered_at
 					next_record.claim_token = nil
 					next_record.locked_until = 0
 					return next_record
@@ -1798,8 +1821,8 @@ function MailboxV2.ReplayDeadLetterAsync(self: Mailbox, message_id: string, oper
 		next_record.locator = { slot = locator.slot, generation = locator.generation }
 		next_record.claim_token = nil
 		next_record.locked_until = 0
-		next_record.available_at = self:_now()
-		next_record.updated_at = self:_now()
+		next_record.available_at = replay_now
+		next_record.updated_at = replay_now
 		return next_record
 	end)
 	if ready_error ~= nil or ready == nil or ready.state ~= "ready" then
