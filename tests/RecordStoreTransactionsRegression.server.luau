@@ -72,12 +72,21 @@ assert(transform_error == "validation", "a throwing transaction transform did no
 assert(record:Get().coins == 100, "failed transaction transform changed profile data")
 
 -- Unflushed ordinary edits must not be silently overwritten by a transaction.
+local before_dirty_stats = record:Stats()
+local before_dirty_sequence = before_dirty_stats.change_sequence
 local update_result, update_message = record:Update(function(current)
 	local next_data = table.clone(current)
 	next_data.note = "changed locally"
 	return next_data
 end)
 assert(update_result == "success", tostring(update_message))
+local after_dirty_stats = record:Stats()
+assert(after_dirty_stats.change_sequence == before_dirty_sequence + 1,
+	"one public Update must advance exactly one dirty generation")
+assert(after_dirty_stats.saved_change_sequence == before_dirty_stats.saved_change_sequence,
+	"an unsaved Update incorrectly advanced the durable generation")
+assert(after_dirty_stats.dirty == 1 and after_dirty_stats.dirty_since_unix > 0,
+	"an unsaved Update did not expose dirty state and its start timestamp")
 local dirty_transaction = record:TransactAsync("tx-while-dirty", "dirty-profile", increment("coins", 1))
 assert(dirty_transaction == "busy", "transaction did not reject unflushed ordinary profile edits")
 local save_result, save_message = record:Save("transaction-regression")

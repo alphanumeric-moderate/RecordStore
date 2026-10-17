@@ -780,7 +780,7 @@ local function mark_dirty(state: InternalState)
 	if state.change_sequence == state.saved_change_sequence then
 		state.dirty_since_unix = now_unix()
 	end
-	mark_dirty(state)
+	state.change_sequence += 1
 end
 
 local function mark_saved(state: InternalState, sequence: number)
