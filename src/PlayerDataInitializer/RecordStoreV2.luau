@@ -1174,7 +1174,7 @@ end
 local function new_erasure(store, families, options)
 	options = options or {}
 	families = families or {}
-	local all_templates, by_name = {}, {}
+	local all_templates, by_name, template_signatures = {}, {}, {}
 	for _, family in ipairs(families) do
 		if not valid_text(family.name, 48) or by_name[family.name] then error("erasure families need unique names", 2) end
 		by_name[family.name] = family
@@ -1182,11 +1182,19 @@ local function new_erasure(store, families, options)
 		if #templates == 0 then error("each erasure family must declare at least one RTBF template", 2) end
 		for _, template in ipairs(templates) do
 			if type(template) ~= "table" then error("RTBF template must be table", 2) end
+			if not valid_text(template.name, 50) or not valid_text(template.key, 50)
+				or (template.scope ~= nil and not valid_text(template.scope, 50))
+			then
+				error("RTBF templates require bounded DataStore name/key and optional bounded scope", 2)
+			end
 			local matchable = false
 			for _, field in ipairs({ "name", "scope", "key" }) do
 				if type(template[field]) == "string" and string.find(template[field], "{user_id}", 1, true) then matchable = true end
 			end
 			if not matchable then error("RTBF template must place {user_id} in name, scope, or key", 2) end
+			local signature = template.name .. "\0" .. tostring(template.scope or "") .. "\0" .. template.key
+			if template_signatures[signature] then error("duplicate RTBF key-family template", 2) end
+			template_signatures[signature] = true
 			table.insert(all_templates, { family = family.name, template = copy(template) })
 			if #all_templates > MAX_ERASURE_TEMPLATES then error("RTBF templates exceed 100-template limit", 2) end
 		end
@@ -1196,7 +1204,15 @@ local function new_erasure(store, families, options)
 	function coordinator:RenderTemplates(user_id)
 		if not finite(user_id) or user_id < 1 or math.floor(user_id) ~= user_id then return nil, "invalid UserId" end
 		local result = {}
-		for _, entry in ipairs(all_templates) do table.insert(result, { family = entry.family, template = render_template(entry.template, user_id) }) end
+		for _, entry in ipairs(all_templates) do
+			local rendered = render_template(entry.template, user_id)
+			if not valid_text(rendered.name, 50) or not valid_text(rendered.key, 50)
+				or (rendered.scope ~= nil and not valid_text(rendered.scope, 50))
+			then
+				return nil, "rendered RTBF template violates a DataStore name, scope or key bound"
+			end
+			table.insert(result, { family = entry.family, template = rendered })
+		end
 		return result, nil
 	end
 	function coordinator:PlanAsync(user_id, erasure_id)
@@ -1236,7 +1252,8 @@ local function new_erasure(store, families, options)
 				end
 			end
 		end
-		local rendered = self:RenderTemplates(user_id)
+		local rendered, render_error = self:RenderTemplates(user_id)
+		if rendered == nil then return { code = "invalid", message = render_error or "RTBF templates could not be rendered safely" } end
 		local template_ok = if type(options.verify_templates) == "function" then io_call(options.verify_templates, user_id, rendered) else false
 		local verified = #self.families > 0
 		for _, row in pairs(coverage) do if row.status ~= "coverage_verified_by_integrator" then verified = false end end
