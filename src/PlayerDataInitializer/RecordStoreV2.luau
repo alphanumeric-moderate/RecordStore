@@ -182,13 +182,27 @@ local function request_material(value)
 	return material, nil
 end
 
-local function transaction_run(record, operation_id, request, reducer, mode, events)
+local function reserved_equal(left, right)
+	local left_ok, left_material = pcall(canonical, left)
+	if not left_ok then return false end
+	local right_ok, right_material = pcall(canonical, right)
+	return right_ok and left_material == right_material
+end
+
+local function transaction_run(record, operation_id, request, reducer, mode, events, allowed_reserved_fields)
 	if type(record) ~= "table" then return { code = "invalid", message = "record is required" } end
 	if not valid_text(operation_id, 128) then return { code = "invalid", message = "operation_id must be 1 to 128 bytes" } end
 	if type(reducer) ~= "function" then return { code = "invalid", message = "reducer must be a pure non-yielding function" } end
 	local material, material_error = request_material(request)
 	if not material then return { code = "invalid", message = material_error } end
 	local fingerprint = digest(material)
+	local allowed = {}
+	for _, field in ipairs(allowed_reserved_fields or {}) do
+		if not valid_text(field, 128) or string.sub(field, 1, #RESERVED) ~= RESERVED then
+			return { code = "invalid", message = "internal reserved-field allowlist is malformed" }
+		end
+		allowed[field] = true
+	end
 	local fn = if mode == "inbox" then record.ApplyInboxAsync elseif mode == "outbox" then record.CommitWithOutboxAsync else record.TransactAsync
 	if type(fn) ~= "function" then return { code = "invalid", message = "record lacks the requested transaction API" } end
 	local function transform(data)
@@ -201,7 +215,25 @@ local function transaction_run(record, operation_id, request, reducer, mode, eve
 			end
 		end
 		local next_data, reducer_error = pure(reducer, data, request)
-		if next_data == nil then error("v2 reducer rejected request: " .. tostring(reducer_error or "returned nil")) end
+		if type(next_data) ~= "table" then error("v2 reducer rejected request: " .. tostring(reducer_error or "returned nil")) end
+		-- Internal sidecars and tombstones survive every consumer transaction.
+		-- Only the owning built-in operation may change its named reserved field.
+		if type(data) == "table" then
+			for key, before in pairs(data) do
+				if type(key) == "string" and string.sub(key, 1, #RESERVED) == RESERVED
+					and not allowed[key] and not reserved_equal(before, next_data[key])
+				then
+					error("v2 reducer attempted to modify a reserved RecordStore field: " .. key)
+				end
+			end
+		end
+		for key, after in pairs(next_data) do
+			if type(key) == "string" and string.sub(key, 1, #RESERVED) == RESERVED
+				and not allowed[key] and (type(data) ~= "table" or data[key] == nil)
+			then
+				error("v2 reducer attempted to create a reserved RecordStore field: " .. key)
+			end
+		end
 		return next_data
 	end
 	local code, message
