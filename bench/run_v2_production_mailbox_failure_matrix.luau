@@ -106,6 +106,8 @@ for _ = 1, 3 do
 			return next_data
 		end)
 		assert(update_code == "success", tostring(update_message))
+		local save_code, save_message = active_record:Save("live-mailbox-handler")
+		assert(save_code == "success" or save_code == "saved", tostring(save_message))
 		return true
 	end)
 	assert(result.code == "processed", "live mailbox could not process a prepared message: " .. tostring(result.code) .. " / " .. tostring(result.error))
