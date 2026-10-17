@@ -2030,6 +2030,9 @@ function MailboxV2.GetStatsAsync(self: Mailbox): (Dict, Result)
 		active_capacity = (self.options.max_segments :: number) * (self.options.segment_max_messages :: number),
 		dlq_index_capacity = (self.options.dlq_max_segments :: number) * (self.options.dlq_segment_max_messages :: number),
 		preparation_capacity = (self.options.preparation_shard_count :: number) * (self.options.preparation_max_entries_per_shard :: number),
+		wakeups_enabled = self.options.wakeups ~= nil,
+		wakeups_published = self.wakeup_published,
+		wakeup_publish_errors = self.wakeup_publish_errors,
 		rtbf_keyed_by_user_id = self.owner.user_id ~= nil,
 	}, ok("success", nil, nil, nil)
 end
