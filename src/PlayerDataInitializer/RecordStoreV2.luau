@@ -2853,6 +2853,15 @@ function V2.new(record_store, mailbox_module, options)
 			return original(...)
 		end
 	end
+	local function guard_boolean_method(target, method_name, operation)
+		if type(target) ~= "table" or type(target[method_name]) ~= "function" then return end
+		local original = target[method_name]
+		target[method_name] = function(...)
+			local blocked = activation_block(operation)
+			if blocked ~= nil then return false, blocked.message end
+			return original(...)
+		end
+	end
 	local function guard_methods(target, method_map)
 		for method_name, operation in pairs(method_map) do guard_result_method(target, method_name, operation) end
 	end
@@ -2905,7 +2914,15 @@ function V2.new(record_store, mailbox_module, options)
 	guard_factory(api.Erasure, "new", { PlanAsync = "erase_plan", ExecuteAsync = "erase_execute" })
 	guard_factory(api.Projections, "new", { ApplyAsync = "projection", RebuildAsync = "projection", ReserveUnique = "projection" })
 	guard_factory(api.Tracing, "new", { FlushAsync = "trace_flush" })
-	guard_factory(api.Maintenance, "NewCompactor", { RunStep = "maintenance", Resume = "maintenance" })
+	local new_compactor = api.Maintenance.NewCompactor
+	api.Maintenance.NewCompactor = function(...)
+		-- Creating an in-memory compactor is safe during freeze; its stateful
+		-- methods must check the gate with their native return shapes.
+		local compactor = new_compactor(...)
+		guard_result_method(compactor, "RunStep", "maintenance")
+		guard_boolean_method(compactor, "Resume", "maintenance")
+		return compactor
+	end
 
 	local receipt_factory = api.ReceiptProcessor.new
 	api.ReceiptProcessor.new = function(config)
@@ -2939,7 +2956,7 @@ function V2.new(record_store, mailbox_module, options)
 	guard_status_method("ApplySchedulerPolicy", "policy")
 	guard_result_method(api, "ScheduleOutboxDispatch", "dispatch")
 	guard_result_method(api, "ScheduleMaintenance", "maintenance")
-	guard_result_method(api, "BindMailboxWakeups", "configure")
+	guard_boolean_method(api, "BindMailboxWakeups", "configure")
 
 	local raw_mailbox_new = api.Mailbox.new
 	api.Mailbox.new = function(store, owner, mailbox_options)
