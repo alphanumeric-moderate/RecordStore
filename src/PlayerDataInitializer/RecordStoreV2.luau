@@ -12,6 +12,24 @@ local MAX_ERASURE_TEMPLATES = 100
 local MAX_ERASURE_ITEMS = 512
 local RESERVED = "__recordstore_v2_"
 
+local resolved_task_api = false
+local cached_task_api = nil
+local function spawn_scheduled(callback)
+	if not resolved_task_api then
+		resolved_task_api = true
+		local global_ok, global_value = pcall(function() return task end)
+		if global_ok and type(global_value) == "table" and type(global_value.spawn) == "function" then
+			cached_task_api = global_value
+		else
+			local module_ok, module_value = pcall(require, "@lune/task")
+			if module_ok and type(module_value) == "table" and type(module_value.spawn) == "function" then
+				cached_task_api = module_value
+			end
+		end
+	end
+	if cached_task_api ~= nil then cached_task_api.spawn(callback) else callback() end
+end
+
 local function finite(value)
 	return type(value) == "number" and value == value and value ~= math.huge and value ~= -math.huge
 end
@@ -1721,7 +1739,7 @@ function V2.new(record_store, mailbox_module, options)
 	local function kick_dispatcher()
 		if dispatcher_running then return end
 		dispatcher_running = true
-		task.spawn(function()
+		spawn_scheduled(function()
 			while true do
 				local item = runtime_governor:TakeNext()
 				if item == nil then break end
