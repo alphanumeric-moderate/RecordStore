@@ -2,6 +2,7 @@
 -- Verifies RecordStoreV2 delegates runtime policy to the one shared core RecordStore gate.
 -- This tests configuration/reporting contracts only, not adaptive performance or live quotas.
 local Shim = require("./RobloxShim")
+local task = require("@lune/task")
 local RecordStore = Shim.load_isolated("v2-runtime-governor")
 local MailboxV2 = require("../src/PlayerDataInitializer/RecordStoreMailboxV2")
 local V2Module = require("../src/PlayerDataInitializer/RecordStoreV2")
@@ -180,6 +181,68 @@ shared_governor:Observe("write", true, 1, nil, 100)
 assert(shared_governor:Stats().circuits.write.state == "closed",
 	"successful half-open probe did not close its circuit")
 assert(shared_governor:Release(half_open_ticket), "half-open probe ticket did not release")
+
+local scheduled_outbox_commit, scheduled_outbox_message = record:CommitWithOutboxAsync(
+	"scheduled-outbox-commit",
+	"scheduled-outbox-request",
+	function(current) return table.clone(current) end,
+	{
+		{
+			EventId = "scheduled-outbox-event",
+			DestinationStoreName = "V2ScheduledDestination",
+			DestinationScope = "global",
+			DestinationProfileKey = "scheduled-recipient",
+			MessageType = "scheduled-reward",
+			Data = { coins = 4 },
+		},
+	}
+)
+assert(scheduled_outbox_commit == "success", tostring(scheduled_outbox_message))
+local scheduled_outbox_result = nil
+local scheduled_outbox_submitted = V2.ScheduleOutboxDispatch(
+	"scheduled-outbox-owner",
+	record,
+	function(event)
+		assert(event.EventId == "scheduled-outbox-event", "scheduler selected an unexpected outbox event")
+		return true, "scheduled-outbox-destination-receipt"
+	end,
+	1,
+	1,
+	function(result) scheduled_outbox_result = result end,
+	{ lane = "background" }
+)
+assert(scheduled_outbox_submitted.code == "accepted", "outbox dispatch did not enter the shared selector")
+for _ = 1, 100 do
+	if scheduled_outbox_result ~= nil then break end
+	task.wait(0.01)
+end
+assert(type(scheduled_outbox_result) == "table" and scheduled_outbox_result.code == "committed"
+	and scheduled_outbox_result.dispatched == 1,
+	"scheduled outbox dispatch did not complete through the shared selector")
+local scheduled_maintenance_result = nil
+local scheduled_maintenance = V2.ScheduleMaintenance(
+	"maintenance-owner",
+	"prune-receipts-chunk-1",
+	function(maintenance_id)
+		return { code = "committed", maintenance_id = maintenance_id, cursor = 1 }
+	end,
+	{
+		lane = "background",
+		on_complete = function(result) scheduled_maintenance_result = result end,
+	}
+)
+assert(scheduled_maintenance.code == "accepted", "bounded maintenance chunk did not enter the shared selector")
+for _ = 1, 100 do
+	if scheduled_maintenance_result ~= nil then break end
+	task.wait(0.01)
+end
+assert(type(scheduled_maintenance_result) == "table"
+	and scheduled_maintenance_result.code == "committed"
+	and scheduled_maintenance_result.cursor == 1,
+	"bounded maintenance chunk did not complete through the shared selector")
+local dispatch_stats = V2.GetSchedulerDispatchStats()
+assert(dispatch_stats.accepted >= 2 and dispatch_stats.dispatched >= 2,
+	"shared scheduler did not account for outbox and maintenance work")
 
 print("[PASS] RecordStoreV2 runtime policy and advanced adapter admission hooks.")
 Shim.close()
