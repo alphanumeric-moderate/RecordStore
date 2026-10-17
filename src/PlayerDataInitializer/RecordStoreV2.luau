@@ -1093,6 +1093,65 @@ local function new_doctor(record_store)
 		if options.include_candidate == true then result.candidate = copy(proposed) end
 		return result
 	end
+	function doctor.DeleteIfGenerationAsync(record, item, user_id, erasure_id)
+		if type(record) ~= "table" or type(record.EraseAsync) ~= "function"
+			or type(record.GetIdentity) ~= "function" or type(record.Stats) ~= "function"
+		then
+			return { code = "unsupported", message = "a RecordStore Record with EraseAsync, GetIdentity and Stats is required" }
+		end
+		if type(item) ~= "table" or item.exists == false
+			or not valid_text(item.store_name, 50) or type(item.scope) ~= "string" or #item.scope > 50
+			or not valid_text(item.key, 50) or not finite(item.generation)
+			or math.floor(item.generation) ~= item.generation or item.generation < 1
+			or not finite(user_id) or user_id < 1 or math.floor(user_id) ~= user_id
+			or not valid_text(erasure_id, 96)
+		then
+			return { code = "invalid", message = "generation-safe profile erasure requires an existing key, exact store/scope/key, generation, UserId and erasure ID" }
+		end
+		local stats = record_stats(record)
+		local identity_ok, identity = pcall(function() return record:GetIdentity() end)
+		if not identity_ok or type(identity) ~= "table" then
+			return { code = "unknown", message = "Record identity could not be verified" }
+		end
+		if identity.store_name ~= item.store_name or identity.scope ~= item.scope or identity.profile_key ~= item.key then
+			return { code = "conflict", message = "Record identity differs from the inventoried DataStore target" }
+		end
+		if stats.state == "tombstoned" and stats.generation == item.generation + 1 then
+			return { code = "deleted", generation = stats.generation, idempotent = true }
+		end
+		if stats.state ~= "active" then
+			return { code = if stats.state == "unknown" then "unknown" else "fenced",
+				message = "profile must be actively owned to perform generation-fenced erasure" }
+		end
+		if stats.generation ~= item.generation then
+			return { code = "conflict", message = "profile generation changed after the authoritative erasure inventory" }
+		end
+		if item.revision ~= nil and stats.revision ~= item.revision then
+			return { code = "conflict", message = "profile revision changed after the inventory snapshot" }
+		end
+		local call_ok, delete_code, delete_message = pcall(record.EraseAsync, record, {
+			store_name = item.store_name,
+			scope = item.scope,
+			profile_key = item.key,
+			expected_generation = item.generation,
+			expected_revision = item.revision,
+			user_id = user_id,
+			erasure_id = erasure_id,
+		})
+		if not call_ok then
+			return { code = "unknown", message = "generation-fenced erasure failed: " .. tostring(delete_code) }
+		end
+		local after = record_stats(record)
+		if delete_code == "deleted" and after.state == "tombstoned" and after.generation == item.generation + 1 then
+			return { code = "deleted", generation = after.generation, user_ids_cleared = true, metadata_cleared = true }
+		end
+		if after.state == "tombstoned" and after.generation == item.generation + 1 then
+			return { code = "deleted", generation = after.generation, idempotent = true, user_ids_cleared = true, metadata_cleared = true }
+		end
+		return { code = if delete_code == "unknown" then "unknown" else normalize_result(delete_code, delete_message).code,
+			message = delete_message or "erasure tombstone generation was not confirmed" }
+	end
+
 	function doctor.Restore(record, historical_data, expected_revision, restore_id, operator_id, reason, options)
 		options = options or {}
 		if type(historical_data) ~= "table" or not valid_text(restore_id, 96) or not valid_text(operator_id, 96) or not valid_text(reason, 512) then return { code = "invalid", message = "restore needs historical data, restore ID, operator ID and reason" } end
