@@ -7,6 +7,12 @@
       "RecordStore": {
         "$path": "src/PlayerDataInitializer/RecordStore.luau"
       },
+      "RecordStoreMailboxV2": {
+        "$path": "src/PlayerDataInitializer/RecordStoreMailboxV2.luau"
+      },
+      "RecordStoreMailboxV2Regression": {
+        "$path": "tests/RecordStoreMailboxV2Regression.server.luau"
+      },
       "IntegerInfinityValue": {
         "$path": "src/PlayerDataInitializer/IntegerInfinityValue.luau"
       },
