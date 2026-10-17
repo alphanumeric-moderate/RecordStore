@@ -45,6 +45,9 @@
       },
       "PlayerDataSetRegression": {
         "$path": "tests/PlayerDataSetRegression.server.luau"
+      },
+      "RecordStoreTransactionsRegression": {
+        "$path": "tests/RecordStoreTransactionsRegression.server.luau"
       }
     },
     "ReplicatedStorage": {
