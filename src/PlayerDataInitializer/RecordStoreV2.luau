@@ -7,6 +7,7 @@ local MAX_REQUEST_BYTES = 16384
 local MAX_BATCH_ITEMS = 16
 local MAX_INBOX_RECEIPTS = 128
 local MAX_INBOX_RECEIPT_BYTES = 4096
+local BATCH_RECEIPT_PREFIX = "__recordstore_v2_batch_receipt__:"
 local MAX_TRACE_EVENTS = 2048
 local MAX_ERASURE_TEMPLATES = 100
 local MAX_ERASURE_ITEMS = 512
@@ -262,6 +263,9 @@ local function normalize_message(item)
 	local payload = if item.payload ~= nil then item.payload else item.Payload
 	local version = item.payload_version or item.PayloadVersion or item.version or 1
 	if not valid_text(id, 256) then return nil, "message_id must be 1..256 bytes" end
+	if string.sub(id, 1, #BATCH_RECEIPT_PREFIX) == BATCH_RECEIPT_PREFIX then
+		return nil, "message_id uses a reserved inbox batch-receipt prefix"
+	end
 	if not valid_text(kind, 100) then return nil, "message_type must be 1..100 bytes" end
 	if not finite(version) or math.floor(version) ~= version or version < 1 then return nil, "payload version must be a positive integer" end
 	local material, message = request_material({ message_id = id, message_type = kind, payload_version = version, payload = payload })
@@ -289,44 +293,94 @@ local function new_inbox()
 		end
 		if total_bytes > MAX_REQUEST_BYTES then return { code = "capacity", message = "batch request material exceeds the bounded receipt budget" } end
 		local request = { batch_id = batch_id, items = normalized }
+		local batch_material, material_error = request_material(request)
+		if batch_material == nil then return { code = "invalid", message = material_error } end
+		local receipt_key = BATCH_RECEIPT_PREFIX .. batch_id
 		local batch_received_at = if finite(options.now_unix) then options.now_unix else os.time()
-		local applied, duplicates = 0, 0
+		local invocation_token = digest(batch_id .. ":" .. tostring(os.clock()) .. ":" .. tostring(math.random()))
+		local before_data, before_error = record_data(record)
+		if type(before_data) ~= "table" then return { code = "unknown", message = before_error or "active profile data unavailable" } end
+		local before_receipts = before_data[RESERVED .. "inbox_receipts"]
+		if before_receipts ~= nil and type(before_receipts) ~= "table" then
+			return { code = "corrupt", message = "inbox receipt namespace is malformed" }
+		end
+		local prior_batch = if type(before_receipts) == "table" then before_receipts[receipt_key] else nil
+		if prior_batch ~= nil and (type(prior_batch) ~= "table" or prior_batch.canonical_request ~= batch_material) then
+			return { code = "conflict", message = "batch_id was reused with different exact request material" }
+		end
+
 		local result = transaction_run(record, "rv2:inbox:" .. digest(batch_id), request, function(current)
 			if type(current) ~= "table" then error("inbox batching requires table profile data") end
 			local data = copy(current)
-			local receipts = data[RESERVED .. "inbox_receipts"] or {}
+			local receipts_field = RESERVED .. "inbox_receipts"
+			local receipts = data[receipts_field] or {}
 			if type(receipts) ~= "table" then error("inbox receipt namespace is malformed") end
+			local existing_batch = receipts[receipt_key]
+			if existing_batch ~= nil then
+				if type(existing_batch) ~= "table" or existing_batch.canonical_request ~= batch_material then
+					error("batch_id reused with different exact request material")
+				end
+				return data
+			end
 			local count = key_count(receipts)
-			applied, duplicates = 0, 0
+			local batch_applied, batch_duplicates = 0, 0
 			for _, message in ipairs(normalized) do
 				local prior = receipts[message.message_id]
 				if prior then
-					if type(prior) ~= "table" or prior.canonical_request ~= message.canonical_request then error("message_id reused with different exact request material") end
-					duplicates += 1
+					if type(prior) ~= "table" or prior.canonical_request ~= message.canonical_request then
+						error("message_id reused with different exact request material")
+					end
+					batch_duplicates += 1
 				else
-					if count >= (options.max_receipts or MAX_INBOX_RECEIPTS) then error("inbox receipt capacity reached; retention pruning is required") end
-					local changed, reducer_error = pure(reducer, data, copy(message.payload), copy(message))
+					if count >= (options.max_receipts or MAX_INBOX_RECEIPTS) then
+						error("inbox receipt capacity reached; retention pruning is required")
+					end
+					-- Do not expose the inbox's internal receipt map to user reducers.
+					local reducer_input = copy(data)
+					reducer_input[receipts_field] = nil
+					local changed, reducer_error = pure(reducer, reducer_input, copy(message.payload), copy(message))
 					if type(changed) ~= "table" then error("inbox reducer rejected item: " .. tostring(reducer_error)) end
 					data = changed
-					receipts = data[RESERVED .. "inbox_receipts"] or receipts
-					if type(receipts) ~= "table" then error("reducer corrupted reserved inbox receipt namespace") end
+					receipts = receipts
+					data[receipts_field] = receipts
 					receipts[message.message_id] = {
 						canonical_request = message.canonical_request,
 						message_type = message.message_type,
 						payload_version = message.payload_version,
 						received_at = batch_received_at,
 					}
-					data[RESERVED .. "inbox_receipts"] = receipts
+					data[receipts_field] = receipts
 					count += 1
-					applied += 1
+					batch_applied += 1
 				end
 			end
-			data[RESERVED .. "inbox_receipts"] = receipts
+			receipts[receipt_key] = {
+				canonical_request = batch_material,
+				applied = batch_applied,
+				duplicates = batch_duplicates,
+				count = #normalized,
+				operation_attempt = invocation_token,
+				received_at = batch_received_at,
+			}
+			data[receipts_field] = receipts
 			return data
 		end, "inbox", nil, { RESERVED .. "inbox_receipts" })
 		result.batch_id = batch_id
-		result.applied = if result.code == "committed" then applied else 0
-		result.duplicates = duplicates
+		local after_data, after_error = record_data(record)
+		local after_receipts = if type(after_data) == "table" then after_data[RESERVED .. "inbox_receipts"] else nil
+		local batch_result = if type(after_receipts) == "table" then after_receipts[receipt_key] else nil
+		if type(batch_result) ~= "table" or batch_result.canonical_request ~= batch_material then
+			result.code = "unknown"
+			result.message = after_error or "durable batch receipt cannot be verified"
+			result.applied, result.duplicates = 0, 0
+		elseif result.code == "committed" and batch_result.operation_attempt == invocation_token and prior_batch == nil then
+			result.applied = batch_result.applied
+			result.duplicates = batch_result.duplicates
+		else
+			if result.code == "committed" then result.code = "duplicate" end
+			result.applied = 0
+			result.duplicates = #normalized
+		end
 		result.count = #normalized
 		return result
 	end
