@@ -2,6 +2,7 @@
 -- Drives RecordStoreMailboxV2 through RecordStoreV2DataStoreAdapter and the real core request gate,
 -- backed by the deterministic per-key DataStore model. This is not live Roblox service evidence.
 local Shim = require("./RobloxShim")
+local task = require("@lune/task")
 local Fake = Shim.FakeDataStore
 local HttpService = game:GetService("HttpService")
 local RecordStore = Shim.load_isolated("live-mailbox-server")
@@ -159,6 +160,50 @@ assert(takeover.claim_token ~= first_token, "takeover reused the stale claim tok
 local stale_renewal = mailbox:RenewClaimAsync(lease_message.message_id, first_token)
 assert(stale_renewal.code == "lease_lost", "stale worker renewed a claim after another worker took ownership")
 
+-- A callback that yields longer than the configured lease remains alive only
+-- while its own claim can be renewed; the cancellation context is cooperative.
+local yielding_mailbox = MailboxV2.new(adapter, owner, {
+	active_record = active_record,
+	sender_job_id = "yielding-mailbox-server",
+	now_ms = function() return os.clock() * 1000 end,
+	guid = guid,
+	encode = function(value) return HttpService:JSONEncode(value) end,
+	max_segments = 4,
+	segment_max_messages = 4,
+	preparation_shard_count = 4,
+	preparation_max_entries_per_shard = 8,
+	lease_ms = 90,
+	lease_renewal_horizon_ms = 360,
+	clock_skew_grace_ms = 10,
+	max_attempts = 3,
+	retry_base_ms = 10,
+	retry_max_ms = 100,
+	allow_unattested_activation = true,
+})
+local yielding_message = yielding_mailbox:EnqueueAsync("yielding-handler", { coins = 0 }, {
+	idempotency_key = "mailbox-yielding-handler",
+})
+assert(yielding_message.code == "accepted", tostring(yielding_message.error))
+local observed_context = nil
+local handler_finished_after_yield = false
+local yielding_result = yielding_mailbox:ProcessNextAsync(function(_payload, _snapshot, context)
+	observed_context = context
+	task.wait(0.12)
+	handler_finished_after_yield = true
+	assert(context ~= nil and context.is_cancelled() == false,
+		"claim was cancelled despite successful heartbeat renewal")
+	local explicit_renewal = context.renew_lease_async()
+	assert(explicit_renewal.code == "renewed", "handler context could not explicitly renew its own claim")
+	return true
+end)
+assert(handler_finished_after_yield, "yielding handler did not finish")
+assert(observed_context ~= nil, "handler did not receive its cooperative cancellation context")
+assert(yielding_result.code == "processed",
+	"yielding handler did not finish under bounded heartbeat renewal: " .. tostring(yielding_result.error))
+local yielded_delivery, yielded_status = yielding_mailbox:GetDeliveryAsync(yielding_message.message_id)
+assert(yielded_status.code == "success" and yielded_delivery ~= nil and yielded_delivery.State == "acknowledged",
+	"yielding handler's renewed claim did not reach terminal acknowledgement")
+
 active_record:Close()
-print("[PASS] V2 production mailbox: shared request gate, idempotent submission, ambiguous reservations, ack recovery.")
+print("[PASS] V2 production mailbox: shared request gate, idempotent submission, ambiguous reservation/ack, stale claim fencing and yielding-handler renewal.")
 Shim.close()
