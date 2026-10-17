@@ -289,6 +289,7 @@ local function new_inbox()
 		end
 		if total_bytes > MAX_REQUEST_BYTES then return { code = "capacity", message = "batch request material exceeds the bounded receipt budget" } end
 		local request = { batch_id = batch_id, items = normalized }
+		local batch_received_at = if finite(options.now_unix) then options.now_unix else os.time()
 		local applied, duplicates = 0, 0
 		local result = transaction_run(record, "rv2:inbox:" .. digest(batch_id), request, function(current)
 			if type(current) ~= "table" then error("inbox batching requires table profile data") end
@@ -313,7 +314,7 @@ local function new_inbox()
 						canonical_request = message.canonical_request,
 						message_type = message.message_type,
 						payload_version = message.payload_version,
-						received_at = if finite(options.now_unix) then options.now_unix else os.time(),
+						received_at = batch_received_at,
 					}
 					data[RESERVED .. "inbox_receipts"] = receipts
 					count += 1
@@ -322,7 +323,7 @@ local function new_inbox()
 			end
 			data[RESERVED .. "inbox_receipts"] = receipts
 			return data
-		end, "inbox")
+		end, "inbox", nil, { RESERVED .. "inbox_receipts" })
 		result.batch_id = batch_id
 		result.applied = if result.code == "committed" then applied else 0
 		result.duplicates = duplicates
@@ -351,7 +352,7 @@ local function new_inbox()
 			for index = 1, pruned do receipts[eligible[index]] = nil end
 			data[RESERVED .. "inbox_receipts"] = receipts
 			return data
-		end)
+		end, nil, nil, { RESERVED .. "inbox_receipts" })
 	end
 	return service
 end
@@ -931,7 +932,7 @@ local function new_migrations()
 				if step.validate then local valid, validation_error = pure(step.validate, next_data); if valid ~= true then error("migration validation rejected: " .. tostring(validation_error)) end end
 				next_data[field] = step.to_version
 				return next_data
-			end)
+			end, nil, nil, { field })
 			self.local_status[operation_id] = { code = result.code, message = result.message, migration_id = step.id, revision = step.revision }
 			if result.code ~= "committed" and result.code ~= "duplicate" then result.completed_steps = completed; result.current_version = step.from_version; return result end
 			completed += 1
@@ -1010,6 +1011,7 @@ local function new_doctor(record_store)
 		local historical_ok, historical_text = pcall(canonical, historical_data)
 		if not historical_ok then return { code = "invalid", message = tostring(historical_text) } end
 		local request = { kind = "guarded_restore", restore_id = restore_id, operator_id = operator_id, reason = reason, expected_revision = expected_revision, historical_digest = digest(historical_text) }
+		local restored_at = os.time()
 		local result = transaction_run(record, "rv2:restore:" .. digest(restore_id), request, function(current)
 			if type(current) ~= "table" then error("restore requires table profile") end
 			-- The external erasure lookup above is advisory and can race a write.
@@ -1020,16 +1022,17 @@ local function new_doctor(record_store)
 			if tombstone ~= nil and tombstone ~= false then
 				error("restore is blocked by the durable profile erasure tombstone")
 			end
-			local merged = {}
-			for key, value in pairs(current) do if type(key) ~= "string" or not string.find(key, "^" .. RESERVED, 1) then merged[key] = copy(value) end end
-			for key, value in pairs(historical_data) do if type(key) ~= "string" or not string.find(key, "^" .. RESERVED, 1) then merged[key] = copy(value) end end
+			local merged = copy(current)
+			for key, value in pairs(historical_data) do
+				if type(key) ~= "string" or not string.find(key, "^" .. RESERVED, 1) then merged[key] = copy(value) end
+			end
 			local audit = merged[RESERVED .. "repair_audit"] or {}
 			if type(audit) ~= "table" then audit = {} end
-			table.insert(audit, { restore_id = restore_id, operator_id = operator_id, reason = reason, before_revision = expected_revision, at_unix = os.time(), result = "requested" })
+			table.insert(audit, { restore_id = restore_id, operator_id = operator_id, reason = reason, before_revision = expected_revision, at_unix = restored_at, result = "requested" })
 			while #audit > 32 do table.remove(audit, 1) end
 			merged[RESERVED .. "repair_audit"] = audit
 			return merged
-		end)
+		end, nil, nil, { RESERVED .. "repair_audit" })
 		result.restore_id = restore_id
 		return result
 	end
@@ -1295,7 +1298,7 @@ local function saga_coordinator(store, options)
 					refunds[id] = amount
 					next_data[refunds_field] = refunds
 					return next_data
-				end)
+				end, nil, nil, { escrow_field, refunds_field })
 			if refund.code ~= "committed" and refund.code ~= "duplicate" then
 				return nil, refund.code or "unknown", refund.message or "source refund outcome is unresolved"
 			end
@@ -1356,7 +1359,7 @@ local function saga_coordinator(store, options)
 					escrow[id] = { transfer_id = id, amount = amount, state = "reserved" }
 					next_data[escrow_field] = escrow
 					return next_data
-				end)
+				end, nil, nil, { escrow_field })
 			if reserve.code ~= "committed" and reserve.code ~= "duplicate" then
 				if reserve.code == "invalid" and string.find(string.lower(tostring(reserve.message or "")), "insufficient balance", 1, true) then
 					local rejected, reject_code = mark("rejected", "rejected", "insufficient available balance at atomic reservation")
@@ -1430,7 +1433,7 @@ local function saga_coordinator(store, options)
 					next_data[received_field] = received
 					next_data[decision_field] = decisions
 					return next_data
-				end)
+				end, nil, nil, { received_field, decision_field })
 			if credit.code == "committed" or credit.code == "duplicate" then
 				local marked, mark_code, mark_error = mark("credited", "pending", nil)
 				if marked == nil or marked.phase ~= "credited" then
@@ -1483,7 +1486,7 @@ local function saga_coordinator(store, options)
 						end
 						next_data[decision_field] = decisions
 						return next_data
-					end)
+					end, nil, nil, { decision_field, abort_field })
 
 				-- An unknown resolver response is not proof of abort. Leave funds in
 				-- escrow; a later invocation retries the same stable resolver operation.
@@ -1553,7 +1556,7 @@ local function saga_coordinator(store, options)
 					settled[id] = amount
 					next_data[settled_field] = settled
 					return next_data
-				end)
+				end, nil, nil, { escrow_field, settled_field })
 			if settle.code ~= "committed" and settle.code ~= "duplicate" then
 				local _, code, message = mark("credited", "reconciliation_required", "recipient credited but source escrow settlement unresolved")
 				return outcome(code or settle.code or "unknown", "credited", message or settle.message or "source settlement outcome unresolved")
@@ -1629,6 +1632,7 @@ local function new_receipt_processor(config)
 			end
 			local revision = product.revision or "1"
 			local request = { receipt_id = id, user_id = user_id, product_id = product_id, product_revision = revision }
+			local granted_at = os.time()
 			local result = transaction_run(record, "rv2:purchase:" .. digest(id), request, function(current)
 				if type(current) ~= "table" then error("purchase profile data must be a table") end
 				local data = copy(current); local field = RESERVED .. "purchase_receipts"
@@ -1643,10 +1647,10 @@ local function new_receipt_processor(config)
 				if type(granted_data) ~= "table" then error("purchase grant rejected: " .. tostring(grant_error)) end
 				receipts = granted_data[field] or receipts
 				if type(receipts) ~= "table" then error("grant reducer corrupted purchase receipt namespace") end
-				receipts[id] = { user_id = user_id, product_id = product_id, revision = revision, granted_at = os.time() }
+				receipts[id] = { user_id = user_id, product_id = product_id, revision = revision, granted_at = granted_at }
 				granted_data[field] = receipts
 				return granted_data
-			end)
+			end, nil, nil, { RESERVED .. "purchase_receipts" })
 			if result.code == "committed" or result.code == "duplicate" then return granted end
 			if type(config.on_unresolved) == "function" then pcall(config.on_unresolved, id, result) end
 			return retry
