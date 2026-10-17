@@ -1,6 +1,7 @@
 --!strict
 local HttpService = game:GetService("HttpService")
 local ServerScriptService = game:GetService("ServerScriptService")
+local RecordStore = require(ServerScriptService:WaitForChild("RecordStore"))
 local MailboxV2 = require(ServerScriptService:WaitForChild("RecordStoreMailboxV2"))
 
 local now_ms = 1_000_000
@@ -15,7 +16,14 @@ local owner = {
 	profile_key = "player-987654321",
 	user_id = 987654321,
 }
+local active_record = RecordStore.Mock.new(owner.store_name, owner.scope, owner.profile_key, {
+	schema_version = 1,
+	user_ids = { owner.user_id },
+})
+local open_code, open_error = active_record:Open({})
+assert(open_code == "created" or open_code == "loaded", tostring(open_code) .. " " .. tostring(open_error))
 local options = {
+	active_record = active_record,
 	now_ms = function(): number
 		return now_ms
 	end,
@@ -49,4 +57,5 @@ assert(calls == 1, "ack recovery invoked handler again")
 local delivery, status = mailbox:GetDeliveryAsync(first.message_id)
 assert(status.code == "success", status.error)
 assert(delivery ~= nil and delivery.State == "acknowledged", "acknowledgement was not recovered")
+active_record:Close()
 print("[PASS] RecordStoreMailboxV2 Studio boundary regression.")
