@@ -247,16 +247,17 @@ do
 	assert(#queue == 1, "pre-commit retry created multiple logical messages")
 end
 
--- If the reservation commit succeeds but its response is lost, the persisted
--- preparation must remain discoverable and recoverable by a fresh mailbox object.
+-- If the reservation commit succeeds but its response is lost, recovery may
+-- confirm it by read-back in the same call. The accepted state must survive a fresh
+-- mailbox object, and retrying the same request must not create another message.
 do
 	local mailbox, store = make_mailbox()
 	store:FailNextUpdate("after")
 	local interrupted = mailbox:EnqueueAsync("prepare_recovery", { value = 22 }, {
 		idempotency_key = "prepare-after-commit",
 	})
-	expect_code(interrupted, "unknown", "preparation response lost after commit")
-	assert(type(interrupted.message_id) == "string", "uncertain enqueue omitted its stable route")
+	expect_code(interrupted, "accepted", "reservation response loss reconciled by read-back")
+	assert(type(interrupted.message_id) == "string", "confirmed enqueue omitted its stable route")
 	local fresh_mailbox = MailboxV2.new(store, {
 		store_name = "MailboxV2_Test",
 		scope = "global",
@@ -267,19 +268,15 @@ do
 		guid = function() return "restart-guid" end,
 		encode = function(value) return serde.encode("json", value) end,
 	})
-	local preparing, preparing_result = fresh_mailbox:GetDeliveryAsync(interrupted.message_id)
-	expect_code(preparing_result, "preparing", "preparation status after restart")
-	assert(preparing ~= nil and preparing.State == "preparing",
-		"committed preparation was reported absent after response loss")
+	local delivery, delivery_result = fresh_mailbox:GetDeliveryAsync(interrupted.message_id)
+	expect_code(delivery_result, "success", "preparation status after restart")
+	assert(delivery ~= nil and delivery.State == "ready",
+		"committed preparation was not complete and discoverable after response loss")
 	local retried = fresh_mailbox:EnqueueAsync("prepare_recovery", { value = 22 }, {
 		idempotency_key = "prepare-after-commit",
 	})
-	expect_code(retried, "accepted", "resume committed preparation after restart")
-	assert(retried.message_id == interrupted.message_id, "restart recovery changed the reserved message ID")
-	local duplicate = fresh_mailbox:EnqueueAsync("prepare_recovery", { value = 22 }, {
-		idempotency_key = "prepare-after-commit",
-	})
-	expect_code(duplicate, "duplicate", "deduplicate recovered preparation")
+	expect_code(retried, "duplicate", "retry after response-loss reconciliation")
+	assert(retried.message_id == interrupted.message_id, "restart retry changed the reserved message ID")
 	local queue, queue_result = fresh_mailbox:GetQueueAsync()
 	expect_code(queue_result, "success", "queue after preparation restart recovery")
 	assert(#queue == 1, "restart recovery created multiple logical messages")
