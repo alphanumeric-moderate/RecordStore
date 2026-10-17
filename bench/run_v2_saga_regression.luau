@@ -6,7 +6,7 @@ local Fake = Shim.FakeDataStore
 local RecordStore = Shim.load_isolated("saga-regression")
 local V2Module = require("../src/PlayerDataInitializer/RecordStoreV2")
 local MailboxV2 = require("../src/PlayerDataInitializer/RecordStoreMailboxV2")
-local V2 = V2Module.new(RecordStore, MailboxV2)
+local V2 = V2Module.new(RecordStore, MailboxV2, { allow_unattested_activation = true })
 
 local now_ms = 1_800_000_000_000
 Fake:Reset()
