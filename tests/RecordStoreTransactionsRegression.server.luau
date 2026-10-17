@@ -223,6 +223,24 @@ local dispatched_after_reopen, after_reopen_code, after_reopen_message = record:
 end, 1)
 assert(dispatched_after_reopen == 1 and after_reopen_code == "success", tostring(after_reopen_message))
 
+-- An injected backend uncertainty is not reported as a committed transaction.
+-- The mock's injected failure occurs before persistence, so this case checks that
+-- RecordStore does not invent a receipt or mutate data after a known no-write fixture.
+local uncertain_record = make_record("before-commit-unknown", { coins = 0 })
+RecordStore.Mock.set_update_failures(1, "unknown", "injected failure before persistence")
+local uncertain_result = uncertain_record:TransactAsync(
+	"tx-unknown",
+	"unknown:grant:5",
+	increment("coins", 5)
+)
+assert(uncertain_result == "unknown", "unresolved backend result was not reported as unknown")
+local uncertain_raw = RecordStore.Mock.get_record_raw(STORE, SCOPE, "before-commit-unknown")
+assert(uncertain_raw.data.coins == 0, "mock pre-commit failure changed persisted profile data")
+assert(
+	uncertain_raw.inbox_receipts == nil or uncertain_raw.inbox_receipts["tx-unknown"] == nil,
+	"mock pre-commit failure persisted a transaction receipt"
+)
+
 -- Receipt capacity must abort the next profile mutation instead of partially applying it.
 local capacity_record = make_record("receipt-capacity", { count = 0 })
 for index = 1, 128 do
