@@ -90,12 +90,27 @@ local invalid_scheduler_code = V2.ApplySchedulerPolicy({
 	unsupported_field = true,
 })
 assert(invalid_scheduler_code == "invalid", "advanced scheduler policy accepted an unknown field")
+local invalid_burst_code = V2.ApplySchedulerPolicy({
+	revision = scheduler_before.policy.revision + 1,
+	high_burst = 0,
+})
+assert(invalid_burst_code == "invalid", "advanced scheduler policy accepted an out-of-range high_burst")
+local invalid_budget_code = V2.ApplySchedulerPolicy({
+	revision = scheduler_before.policy.revision + 1,
+	minimum_budget = -1,
+})
+assert(invalid_budget_code == "invalid", "advanced scheduler policy accepted a negative minimum budget")
 local reject_revision = scheduler_before.policy.revision + 1
 local reject_code, reject_message = V2.ApplySchedulerPolicy({
 	revision = reject_revision,
 	mode = "reject_noncritical",
 })
 assert(reject_code == "success", tostring(reject_message))
+local stale_scheduler_code = V2.ApplySchedulerPolicy({
+	revision = reject_revision,
+	mode = "normal",
+})
+assert(stale_scheduler_code == "invalid", "advanced scheduler accepted a repeated policy revision")
 local before_fake_gets = Shim.FakeDataStore:Stats().calls.get
 local admitted, admission_message = pcall(function()
 	adapter:GetAsync("should-be-rejected")
@@ -113,6 +128,21 @@ local completed_before = shared_governor:Stats().stats.completed
 adapter:GetAsync("admitted-after-recovery")
 assert(shared_governor:Stats().stats.completed == completed_before + 1,
 	"successful adapter request did not release its governor ticket")
+
+local completed_before_fault = shared_governor:Stats().stats.completed
+local errors_before_fault = shared_governor:Stats().stats.errors
+Shim.FakeDataStore:ScheduleFault("get", "V2RuntimeGovernorProbe", "global", "injected-read-failure", "before")
+local failed_read_ok = pcall(function()
+	adapter:GetAsync("injected-read-failure")
+end)
+assert(not failed_read_ok, "injected live-backend read failure was hidden by the adapter")
+local governor_after_fault = shared_governor:Stats()
+assert(governor_after_fault.stats.completed == completed_before_fault + 1,
+	"failed adapter request did not release its governor ticket")
+assert(governor_after_fault.stats.errors == errors_before_fault + 1,
+	"failed adapter request was not observed by the advanced governor")
+assert((governor_after_fault.classes.messaging or 0) == 0,
+	"failed adapter request leaked the messaging work-class counter")
 
 print("[PASS] RecordStoreV2 runtime policy and advanced adapter admission hooks.")
 Shim.close()

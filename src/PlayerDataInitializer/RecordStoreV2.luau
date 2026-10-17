@@ -370,11 +370,31 @@ local function new_governor(options)
 		if policy.mode ~= "normal" and policy.mode ~= "reject_noncritical" and policy.mode ~= "bounded_buffer" and policy.mode ~= "read_only" then return false, "invalid degraded mode" end
 		if policy.revision < 1 or math.floor(policy.revision) ~= policy.revision then return false, "revision must be positive integer" end
 		if policy.max_in_flight < 1 or policy.max_in_flight > 256 or math.floor(policy.max_in_flight) ~= policy.max_in_flight then return false, "invalid max_in_flight" end
-		if policy.critical_reserve < 0 or policy.critical_reserve >= policy.max_in_flight then return false, "invalid critical_reserve" end
+		if policy.critical_reserve < 0 or policy.critical_reserve >= policy.max_in_flight
+			or math.floor(policy.critical_reserve) ~= policy.critical_reserve
+		then
+			return false, "critical_reserve must be an integer below max_in_flight"
+		end
 		if policy.queue_capacity < 1 or policy.queue_capacity > 8192 or math.floor(policy.queue_capacity) ~= policy.queue_capacity then return false, "invalid queue_capacity" end
 		if policy.max_batch < 1 or policy.max_batch > 16 or math.floor(policy.max_batch) ~= policy.max_batch then return false, "invalid max_batch" end
 		if policy.batch_window_ms < 0 or policy.batch_window_ms > 50 or policy.batch_latency_ceiling_ms < 1 or policy.batch_latency_ceiling_ms > 500 then return false, "invalid batch latency policy" end
-		if policy.retry_token_capacity < 1 or policy.retry_token_capacity > 256 or policy.retry_tokens_per_second < 0 or policy.retry_tokens_per_second > 128 then return false, "invalid retry policy" end
+		if policy.high_burst < 1 or policy.high_burst > 64 or math.floor(policy.high_burst) ~= policy.high_burst then
+			return false, "high_burst must be an integer from 1 to 64"
+		end
+		if policy.minimum_budget < 0 or policy.minimum_budget > 100000 or math.floor(policy.minimum_budget) ~= policy.minimum_budget then
+			return false, "minimum_budget must be an integer from 0 to 100000"
+		end
+		if policy.retry_token_capacity < 1 or policy.retry_token_capacity > 256 or math.floor(policy.retry_token_capacity) ~= policy.retry_token_capacity
+			or policy.retry_tokens_per_second < 0 or policy.retry_tokens_per_second > 128
+		then
+			return false, "invalid retry policy"
+		end
+		if policy.circuit_threshold < 1 or policy.circuit_threshold > 100 or math.floor(policy.circuit_threshold) ~= policy.circuit_threshold then
+			return false, "circuit_threshold must be an integer from 1 to 100"
+		end
+		if policy.circuit_cooldown_ms < 100 or policy.circuit_cooldown_ms > 600000 or math.floor(policy.circuit_cooldown_ms) ~= policy.circuit_cooldown_ms then
+			return false, "circuit_cooldown_ms must be an integer from 100 to 600000"
+		end
 		return true, nil
 	end
 	function governor:SetPolicy(patch)
