@@ -199,6 +199,8 @@ type ReadFlight = {
 	message: string?,
 }
 local in_flight_reads: { [string]: ReadFlight } = {}
+local MAX_IN_FLIGHT_READ_KEYS = 256
+local MAX_IN_FLIGHT_READ_WAITERS = 64
 
 export type HistoryEntry = {
 	Version: string,
@@ -4507,6 +4509,9 @@ function RecordStore.read_async(name: string, scope: string, key: string, operat
 	local identity = tostring(#name) .. ":" .. name .. tostring(#scope) .. ":" .. scope .. tostring(#key) .. ":" .. key
 	local current = in_flight_reads[identity]
 	if current ~= nil and not current.done then
+		if #current.waiters >= MAX_IN_FLIGHT_READ_WAITERS then
+			return read_async_uncached(name, scope, key, operation_deadline, nil)
+		end
 		local event_ok, event = pcall(function() return Instance.new("BindableEvent") end)
 		if not event_ok or event == nil then
 			-- Coalescing is an optimization only. If waiter signaling is unavailable, perform a normal read.
@@ -4531,9 +4536,26 @@ function RecordStore.read_async(name: string, scope: string, key: string, operat
 		return clone_read_snapshot(current.snapshot), current.code, current.message
 	end
 
+	local flight_count = 0
+	for _ in pairs(in_flight_reads) do flight_count += 1 end
+	if flight_count >= MAX_IN_FLIGHT_READ_KEYS then
+		return read_async_uncached(name, scope, key, operation_deadline, nil)
+	end
 	local flight: ReadFlight = { waiters = {}, done = false, snapshot = nil, code = "unknown", message = "read did not produce a result" }
 	in_flight_reads[identity] = flight
-	local snapshot, code, message = read_async_uncached(name, scope, key, operation_deadline, nil)
+	local call_ok, snapshot_or_error, code_or_nil, message_or_nil = pcall(function()
+		return read_async_uncached(name, scope, key, operation_deadline, nil)
+	end)
+	local snapshot: Snapshot? = nil
+	local code: ResultCode = "unknown"
+	local message: string? = nil
+	if call_ok then
+		snapshot = snapshot_or_error :: Snapshot?
+		code = code_or_nil :: ResultCode
+		message = message_or_nil :: string?
+	else
+		message = tostring(snapshot_or_error)
+	end
 	flight.snapshot = clone_read_snapshot(snapshot)
 	flight.code = code
 	flight.message = message
