@@ -1,7 +1,7 @@
 --!nocheck
--- Minimal Roblox engine shim so RecordStore can run under Lune (https://lune-org.github.io/docs)
--- for CodSpeed benchmarks. Only the services used by the RecordStore.Mock backend are
--- implemented; live DataStore/MessagingService calls are not available here.
+-- Roblox engine shim for Lune benchmarks and deterministic live-backend contract tests.
+-- DataStoreService uses AtomicFakeDataStore for per-key atomic transforms, history, budgets and faults.
+-- MessagingService remains unavailable; this is not a replacement for live Roblox Studio/service tests.
 
 local datetime = require("@lune/datetime")
 local fs = require("@lune/fs")

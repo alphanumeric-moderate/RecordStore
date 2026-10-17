@@ -24,7 +24,8 @@ local function new_record(module, key)
 	return module.new(STORE, SCOPE, key, {
 		schema_version = 1,
 		retry_attempts = 2,
-		lease_duration = 2,
+		lease_duration = 10,
+		lease_renewal = 1,
 		operation_deadline = 5,
 		user_ids = { USER_ID },
 		metadata = { fixture = "actual-live-backend" },
@@ -147,7 +148,7 @@ group("10 another server sees contention without gaining authority", function()
 	assert(wait_code == "locked" or wait_code == "retry_exhausted", tostring(wait_message))
 	assert(wait_result.Outcome == "competing_session_observed", "contender did not report the live durable lease")
 	assert(contender:GetState() ~= "active", "contender acquired the session prematurely")
-	now_ms += 4_000
+	now_ms += 30_000
 	local acquired, acquired_code, acquired_message = contender:WaitForSessionAsync(nil, {
 		max_wait_seconds = 5,
 		max_attempts = 1,

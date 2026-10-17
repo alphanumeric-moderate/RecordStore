@@ -1665,7 +1665,7 @@ Important limitations remain explicit:
 - Strict non-nil `ordering_key` continues to be rejected, as required by the initial design contract. Priority is advisory selection among eligible work.
 - Cross-profile changes remain sagas; arbitrary external effects remain at-least-once. RTBF completeness requires application-verified templates and inventory, writer fencing, dependency clearance and generation-aware deletion/redaction.
 - The compatibility bridge, old-writer drain, fully exercised rollback protocol, end-to-end tracing coverage, and integration of every advanced scheduling/performance policy remain incomplete or unverified.
-- The deterministic simulator and existing fault scripts are infrastructure only for this phase. The full 70-group matrix, crash/state-machine acceptance, real Roblox Studio/service tests, and mixed-version rollout rehearsal have **not** been run.
+- A deterministic DataStore-shaped fake now drives a new 10-scenario harness through `RecordStore.new` (the live-backend code path) for acquisition, metadata, ambiguous open/save writes, transform replay, version reads, contention and stale-owner fencing. The harness is registered in the regression workflow but has **not** run. The full 70-group matrix, crash/state-machine acceptance, real Roblox Studio/service tests, and mixed-version rollout rehearsal have **not** been run.
 
 ### Benchmark-first scope
 
