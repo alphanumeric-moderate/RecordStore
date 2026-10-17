@@ -6389,6 +6389,12 @@ local function enqueue(self: Record, message_type: string, data: JsonValue?, enq
 		if result.code == "capacity" then return "capacity", result.message end
 		if result.code == "conflict" then return "conflict", result.message end
 		if result.code == "invalid" then return "invalid", result.message end
+		if result.code == "corrupt" then return "corrupt", result.message end
+		if result.code == "not_found" then return "not_found", result.message end
+		if result.code == "fenced" then return "fenced", result.message end
+		if result.code == "busy" or result.code == "preparing" or result.code == "retry_scheduled" then
+			return "busy", result.message or "V2 mailbox operation is still in progress"
+		end
 		if result.code == "retryable" then return "budget", result.message end
 		if result.code == "unknown" then return "unknown", result.message end
 		return "unknown", "unmapped V2 mailbox result: " .. tostring(result.code)
