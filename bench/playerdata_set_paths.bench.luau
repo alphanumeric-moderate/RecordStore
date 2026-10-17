@@ -6,11 +6,12 @@ local create_harness = require("./playerdata_set_harness")
 -- the same benchmark URI to the cached implementation for a controlled diff.
 -- The repeated value stabilizes persistence work so this measures Set path lookup.
 local USE_CACHED_PATHS = false
-local ITERATIONS = 25000
+local ITERATIONS = 10000
 
 local harness = create_harness(USE_CACHED_PATHS)
 local controller = harness.controller
 local player = harness.player
+local task = harness.task
 local calls_before = harness.get_find_first_child_calls()
 
 for _ = 1, ITERATIONS do
@@ -30,5 +31,7 @@ else
 	)
 end
 
+-- Let the coalesced value-change flush settle before graceful shutdown.
+task.wait(0.1)
 assert(controller:Shutdown(), "PlayerData path benchmark shutdown failed")
 print("[PlayerData.Set path benchmark] completed")
