@@ -39,6 +39,7 @@ local function family(verified, inventory)
 			{ name = "PlayerData", scope = "global", key = "Player_{user_id}" },
 		},
 		templates_verified = verified,
+		inventory_verified = verified,
 		inventory = inventory or function(user_id)
 			return { { key = "Player_" .. tostring(user_id), generation = 1 } }
 		end,
@@ -98,5 +99,37 @@ assert(verified_result.code == "committed", "verified erasure did not finish: " 
 assert(delete_calls == 1, "verified erasure did not perform exactly the one planned action")
 assert(fence_calls >= 1, "verified erasure did not fence writers before deleting")
 
-print("[PASS] Erasure coverage gating, bounded inventory, writer fence and generation-aware callback contracts.")
+local deleted_before_resume = delete_calls
+local multi_item_family = family(true, function(user_id)
+	return {
+		{ key = "Player_" .. tostring(user_id) .. "_one", generation = 1 },
+		{ key = "Player_" .. tostring(user_id) .. "_two", generation = 2 },
+	}
+end)
+local resumable = V2.Erasure.new(new_store(), { multi_item_family }, {
+	verify_templates = function(_user_id, rendered) return type(rendered) == "table" and #rendered == 1 end,
+})
+local resumable_plan = resumable:PlanAsync(114, "erasure-resume")
+assert(resumable_plan.rtbf_coverage_verified == true, "resumable fixture coverage was not verified")
+local first_step = resumable:ExecuteAsync(114, "erasure-resume", 1)
+assert(first_step.code == "incomplete" and first_step.cursor == 1, "bounded erasure step did not checkpoint progress")
+local repeated_plan = resumable:PlanAsync(114, "erasure-resume")
+assert(repeated_plan.cursor == 1, "repeating PlanAsync reset the immutable erasure cursor")
+local final_step = resumable:ExecuteAsync(114, "erasure-resume", 1)
+assert(final_step.code == "committed", "resumable erasure did not complete after its checkpoint")
+assert(delete_calls == deleted_before_resume + 2, "resumed erasure did not perform one action per immutable plan entry")
+
+local no_dependency_family = family(true)
+no_dependency_family.dependencies_clear = nil
+local dependency_guard = V2.Erasure.new(new_store(), { no_dependency_family }, {
+	verify_templates = function(_user_id, rendered) return type(rendered) == "table" and #rendered == 1 end,
+})
+local no_dependency_plan = dependency_guard:PlanAsync(115, "erasure-missing-dependency-proof")
+assert(no_dependency_plan.rtbf_coverage_verified == true, "fixture plan should isolate the missing dependency adapter")
+local deleted_before_guard = delete_calls
+local dependency_result = dependency_guard:ExecuteAsync(115, "erasure-missing-dependency-proof", 1)
+assert(dependency_result.code == "unsupported", "missing dependency proof did not fail closed")
+assert(delete_calls == deleted_before_guard, "erasure deleted a record without dependency-clearance proof")
+
+print("[PASS] Erasure coverage gating, bounded inventory, immutable checkpoints, writer fencing and generation-aware deletion.")
 Shim.close()
