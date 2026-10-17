@@ -647,6 +647,16 @@ export type RecordIdentity = {
 	user_ids: { number },
 }
 
+export type EraseOptions = {
+	store_name: string,
+	scope: string,
+	profile_key: string,
+	expected_generation: number,
+	expected_revision: number?,
+	user_id: number,
+	erasure_id: string,
+}
+
 export type Record = {
 	Data: JsonValue?,
 	State: SessionState,
@@ -704,6 +714,7 @@ export type Record = {
 	DiscardDeadLetterAsync: (self: Record, message_id: string, lock_token: string) -> (ResultCode, string?),
 	Close: (self: Record) -> (ResultCode, string?),
 	Delete: (self: Record) -> (ResultCode, string?),
+	EraseAsync: (self: Record, options: EraseOptions) -> (ResultCode, string?),
 	Stats: (self: Record) -> { [string]: number | string? },
 }
 
@@ -7324,10 +7335,37 @@ local function close_record(self: Record): (ResultCode, string?)
 	return result, message
 end
 
-local function delete_record(self: Record): (ResultCode, string?)
+local function delete_record(self: Record, erase_options: EraseOptions?): (ResultCode, string?)
 	local state = private[self]
 	if state == nil then
 		return "invalid", "record does not exist"
+	end
+	if erase_options ~= nil then
+		if not math.isfinite(erase_options.expected_generation) or math.floor(erase_options.expected_generation) ~= erase_options.expected_generation
+			or not math.isfinite(erase_options.user_id) or erase_options.user_id < 1 or math.floor(erase_options.user_id) ~= erase_options.user_id
+			or type(erase_options.erasure_id) ~= "string" or erase_options.erasure_id == "" or #erase_options.erasure_id > 96
+			or type(erase_options.store_name) ~= "string" or erase_options.store_name == "" or #erase_options.store_name > 50
+			or type(erase_options.scope) ~= "string" or #erase_options.scope > 50
+			or type(erase_options.profile_key) ~= "string" or erase_options.profile_key == "" or #erase_options.profile_key > 50
+			or (erase_options.expected_revision ~= nil and (not math.isfinite(erase_options.expected_revision)
+				or math.floor(erase_options.expected_revision) ~= erase_options.expected_revision or erase_options.expected_revision < 0))
+		then
+			return "invalid", "erasure needs bounded target identity, stable erasure ID, UserId and observed generation"
+		end
+		if state.name ~= erase_options.store_name or state.scope ~= erase_options.scope or state.key ~= erase_options.profile_key then
+			return "conflict", "erasure target does not match the open Record's exact DataStore identity"
+		end
+		if state.generation ~= erase_options.expected_generation
+			or (erase_options.expected_revision ~= nil and state.revision ~= erase_options.expected_revision)
+		then
+			return "conflict", "Record generation or expected revision changed after the erasure inventory snapshot"
+		end
+		if #state.user_ids > 1 then
+			return "conflict", "shared/multi-user Records require an application-specific per-user redaction callback"
+		end
+		if #state.user_ids == 1 and state.user_ids[1] ~= erase_options.user_id then
+			return "conflict", "Record UserIds do not match the erasure subject"
+		end
 	end
 	if state.retired then
 		return "invalid", "record has been retired"
@@ -7355,6 +7393,8 @@ local function delete_record(self: Record): (ResultCode, string?)
 	local generation = state.generation
 	local next_generation = generation + 1
 	local target_revision = state.revision + 1
+	local target_user_ids = if erase_options ~= nil then {} else clone_user_ids(state.user_ids)
+	local target_metadata = if erase_options ~= nil then {} else clone_metadata(state.metadata)
 	local write_id = HttpService:GenerateGUID(false)
 	state.current_operation_id = write_id
 	local deadline = now_local() + (state.options.operation_deadline or DEFAULT_OPERATION_DEADLINE)
@@ -7390,7 +7430,15 @@ local function delete_record(self: Record): (ResultCode, string?)
 				and envelope.revision == target_revision
 			then
 				decision = "success"
-				return envelope, envelope.user_ids, (if info ~= nil then info.RawMetadata else make_backend_metadata(state.metadata, envelope))
+				return envelope, target_user_ids, make_backend_metadata(target_metadata, envelope)
+			end
+			if erase_options ~= nil and (
+				envelope.fencing_generation ~= erase_options.expected_generation
+				or (erase_options.expected_revision ~= nil and envelope.revision ~= erase_options.expected_revision)
+			) then
+				decision = "conflict"
+				decision_message = "durable profile generation/revision changed after the erasure inventory snapshot"
+				return nil, nil, nil
 			end
 			if envelope.schema_version > state.options.schema_version then
 				decision = "future_schema"
@@ -7427,7 +7475,7 @@ local function delete_record(self: Record): (ResultCode, string?)
 				created_at = envelope.created_at,
 				updated_at = transform_time,
 				data = nil,
-				user_ids = clone_user_ids(state.user_ids),
+				user_ids = clone_user_ids(target_user_ids),
 				tombstone = {
 					deleted_at = transform_time,
 					generation = next_generation,
@@ -7443,7 +7491,7 @@ local function delete_record(self: Record): (ResultCode, string?)
 				decision_message = envelope_error
 				return nil, nil, nil
 			end
-			return next_envelope, state.user_ids, make_backend_metadata(state.metadata, next_envelope)
+			return next_envelope, target_user_ids, make_backend_metadata(target_metadata, next_envelope)
 		end, deadline, state)
 		if result_code ~= nil then
 			decision = result_code
