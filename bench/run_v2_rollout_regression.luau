@@ -3,6 +3,7 @@
 -- Uses deterministic storage; does not establish real mixed-version writer drain.
 local Shim = require("./RobloxShim")
 local serde = require("@lune/serde")
+local task = require("@lune/task")
 local RecordStore = Shim.load_isolated("rollout-regression")
 local V2Module = require("../src/PlayerDataInitializer/RecordStoreV2")
 local MailboxV2 = require("../src/PlayerDataInitializer/RecordStoreMailboxV2")
@@ -56,6 +57,32 @@ local permitted, denied_message = rollout:CanUseAsync("rollout-main", "enqueue")
 assert(permitted == false and string.find(denied_message, "prepared", 1, true) ~= nil,
 	"prepared rollout unexpectedly authorized enqueue")
 
+local guarded_v2 = V2Module.new(RecordStore, MailboxV2, {
+	activation_guard = function(operation) return rollout:ActivationGuard("rollout-main", operation) end,
+})
+local gate_record = { transaction_calls = 0, dispatch_calls = 0 }
+function gate_record:TransactAsync(_operation_id, _fingerprint, _transform, _material)
+	self.transaction_calls += 1
+	return "success", nil
+end
+function gate_record:DispatchOutboxBatchAsync(dispatcher, _batch_size)
+	self.dispatch_calls += 1
+	local accepted, receipt = dispatcher({ EventId = "frozen-drain-event", Data = { coins = 1 } })
+	assert(accepted == true and receipt == "frozen-drain-receipt", "frozen drain dispatcher rejected its event")
+	return 1, "success", nil
+end
+local blocked_transaction = guarded_v2.Transactions.Run(
+	gate_record, "tx-before-activation", { kind = "guard-test" }, function(current) return current end
+)
+assert(blocked_transaction.code == "disabled" and gate_record.transaction_calls == 0,
+	"V2 transaction entrypoint bypassed the prepared rollout gate")
+local blocked_inbox = guarded_v2.Inbox.ApplyAsync(nil, "pre-activation-message", { kind = "coins" }, function(current) return current end)
+assert(blocked_inbox.code == "disabled", "V2 inbox entrypoint bypassed the prepared rollout gate")
+local blocked_maintenance = guarded_v2.ScheduleMaintenance("maintenance-owner", "pre-activation", function()
+	return { code = "committed" }
+end)
+assert(blocked_maintenance.code == "disabled", "maintenance scheduling bypassed the prepared rollout gate")
+
 local no_guard_constructed = pcall(function()
 	return MailboxV2.new(MailboxV2.MockStore(), {
 		store_name = "RolloutTest",
@@ -94,6 +121,11 @@ local duplicate_activation = rollout:ActivateAsync("rollout-main", "activate-mai
 assert(duplicate_activation.code == "duplicate", "activation retry was not idempotent")
 local accepted = mailbox:EnqueueAsync("reward", { coins = 3 }, { idempotency_key = "post-activation" })
 assert(accepted.code == "accepted", "active rollout did not authorize mailbox enqueue: " .. tostring(accepted.error))
+local allowed_transaction = guarded_v2.Transactions.Run(
+	gate_record, "tx-after-activation", { kind = "guard-test" }, function(current) return current end
+)
+assert(allowed_transaction.code == "committed" and gate_record.transaction_calls == 1,
+	"active rollout did not authorize the guarded V2 transaction entrypoint")
 
 local frozen = rollout:FreezeAsync("rollout-main", "freeze-main-1")
 assert(frozen.code == "committed" and frozen.phase == "frozen", "rollout freeze failed")
@@ -102,6 +134,37 @@ assert(rollout:CanUseAsync("rollout-main", "process") == true, "frozen rollout b
 assert(rollout:CanUseAsync("rollout-main", "renew_claim") == true, "frozen rollout blocked claim renewal")
 local frozen_enqueue = mailbox:EnqueueAsync("reward", { coins = 4 }, { idempotency_key = "frozen" })
 assert(frozen_enqueue.code == "disabled", "mailbox bypassed freeze for new writes")
+local frozen_transaction = guarded_v2.Transactions.Run(
+	gate_record, "tx-during-freeze", { kind = "guard-test" }, function(current) return current end
+)
+assert(frozen_transaction.code == "disabled" and gate_record.transaction_calls == 1,
+	"freeze did not block new V2 transactions")
+local maintenance_during_freeze = guarded_v2.ScheduleMaintenance("maintenance-owner", "during-freeze", function()
+	return { code = "committed" }
+end)
+assert(maintenance_during_freeze.code == "disabled", "freeze did not block new maintenance")
+
+local drain_result = nil
+local scheduled_drain = guarded_v2.ScheduleOutboxDispatch(
+	"outbox-owner",
+	gate_record,
+	function(event)
+		assert(event.EventId == "frozen-drain-event", "wrong outbox event drained during freeze")
+		return true, "frozen-drain-receipt"
+	end,
+	2,
+	1,
+	function(result) drain_result = result end,
+	{ lane = "background" }
+)
+assert(scheduled_drain.code == "accepted", "freeze blocked scheduling of already-accepted outbox work")
+for _ = 1, 100 do
+	if drain_result ~= nil then break end
+	task.wait(0.01)
+end
+assert(type(drain_result) == "table" and drain_result.code == "committed" and drain_result.dispatched == 1
+	and gate_record.dispatch_calls == 1,
+	"frozen rollout did not allow existing outbox work to drain through the shared selector")
 
 local rollback = rollout:BeginRollbackAsync("rollout-main", "rollback-main-1")
 assert(rollback.code == "committed" and rollback.phase == "rollback_pending", "rollback did not start from frozen state")
@@ -110,6 +173,11 @@ assert(rollout:CanUseAsync("rollout-main", "enqueue") == false, "rollback reopen
 local rolled_back = rollout:CompleteRollbackAsync("rollout-main", "rollback-main-1")
 assert(rolled_back.code == "committed" and rolled_back.phase == "rolled_back", "rollback completion attestation failed")
 assert(rollout:CanUseAsync("rollout-main", "process") == false, "rolled-back deployment still authorized V2 processing")
+local rolled_back_transaction = guarded_v2.Transactions.Run(
+	gate_record, "tx-after-rollback", { kind = "guard-test" }, function(current) return current end
+)
+assert(rolled_back_transaction.code == "disabled" and gate_record.transaction_calls == 1,
+	"completed rollback still authorized V2 transactions")
 
 local conflicting = rollout:PrepareAsync("rollout-main", "different-matrix")
 assert(conflicting.code == "conflict", "rollout ID was allowed to change the compatibility matrix")
