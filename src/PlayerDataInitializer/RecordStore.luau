@@ -6354,6 +6354,21 @@ local function enqueue(self: Record, message_type: string, data: JsonValue?, enq
 	if state.state ~= "active" then return "fenced", "record is not actively owned" end
 	if state.takeover_requested then return "closing", "session takeover has been requested" end
 	if state.mailbox_v2 ~= nil then
+		local owner_ok, owner = pcall(function()
+			return (state.mailbox_v2 :: any):GetOwner()
+		end)
+		if not owner_ok or type(owner) ~= "table" then
+			return "fenced", "bound V2 mailbox owner could not be verified"
+		end
+		local owner_fields = owner :: { [string]: unknown }
+		if owner_fields.store_name ~= state.name or owner_fields.scope ~= state.scope or owner_fields.profile_key ~= state.key then
+			return "fenced", "bound V2 mailbox identity changed after binding"
+		end
+		if owner_fields.user_id ~= nil then
+			local found = false
+			for _, user_id in ipairs(state.user_ids) do if user_id == owner_fields.user_id then found = true; break end end
+			if not found then return "fenced", "bound V2 mailbox UserId no longer matches persisted Record UserIds" end
+		end
 		local call_ok, result = pcall(function()
 			return (state.mailbox_v2 :: any):EnqueueAsync(message_type, data, enqueue_options)
 		end)
