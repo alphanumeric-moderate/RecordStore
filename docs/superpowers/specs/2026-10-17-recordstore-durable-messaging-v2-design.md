@@ -1640,30 +1640,35 @@ This section supersedes any less precise statement elsewhere in the document. It
 The design is improved, but v2 is **not implementation-ready for production activation** until the P0 items above have concrete protocols and executable tests. Close each blocker with an implementation PR, failure-injection coverage and relevant Studio tests. Then rerun the full 70-group matrix against the real production-path code plus the fake-service harness. CodSpeed measurements establish local CPU/wall-time behavior only for their instrumented workload; they do not prove Roblox DataStore latency, delivery or quota behavior.
 
 
-## 32. PR #35 feature-first implementation status
+## 32. PR #35 implementation coverage and verification status
 
-PR #35 adds an opt-in implementation layer for the roadmap: bounded inbox batch application with
-per-message exact request receipts; bounded repeated outbox and transaction-receipt cleanup;
-persisted exact request material on transaction receipts; a versioned local request governor,
-critical save/release reserve, work-class caps, retry tokens, circuit breakers, backpressure modes,
-batch sizing, due-time scheduling, owner fairness, priority/dependency handling, lease-renewal lane,
-shadow selection, deterministic schedule replay hooks, durability-age lower-bound reporting and
-contention diagnostics; Marketplace receipt processing; declared sequential application-schema
-migrations and dry-run preview; transfer saga reserve/credit/settle/compensation; Profile Doctor,
-redacted diff, repair preview, and expected-revision guarded restore; callback-driven RTBF inventory,
-writer fences and generation-aware deletion; versioned eventual projections, rebuild, and unique
-reservations; redacted tracing with optional durable flush; in-flight read coalescing; payload sizing
-and versioned codec checks; and resumable budgeted compaction callbacks.
+PR #35 now contains opt-in implementation surfaces for most of the feature categories in this design. This still does **not** mean every section's complete protocol or release acceptance requirement is fulfilled. The auditable section-by-section inventory is
+[`docs/superpowers/specs/2026-10-17-recordstore-v2-implementation-matrix.md`](./2026-10-17-recordstore-v2-implementation-matrix.md).
 
-A separate deterministic simulator module supplies a virtual clock, per-key UpdateAsync mock,
-pre-commit and commit-then-error injections, repeated transform execution, request budgets, lossy /
-duplicating / delayed / reordered messaging hints, server crash/restart controls, and trace capture.
-In this feature-first pass the simulator is compiled by the successful-path benchmark but its fault
-controls are not exercised. Failure-injection scripts remain in the later verification pass.
+### Core persistence and messaging integration added
 
-This is a feature implementation, not a release-readiness declaration. Cross-key transfer remains a
-saga, projections are eventual, strict `ordering_key` remains unsupported, and user-key erasure is
-only complete when the integrating game verifies complete RTBF template coverage, writer fencing,
-dependency clearance and generation-safe physical deletion for every user-associated key family.
-The 70-group adversarial matrix, deterministic crash acceptance, real Roblox Studio/service runs,
-mixed-version rollout rehearsal, and production operational acceptance remain intentionally deferred.
+- The existing core RecordStore request gate exposes a server-global, revisioned runtime configuration with named `balanced`, `latency`, `throughput` and `conservative` presets, periodic read/write budget sampling, corresponding read/write budget floors, work-class admission caps, a protected critical save/release reserve, queue backpressure, adaptive concurrency and telemetry. Adaptive behavior remains opt-in.
+- Core records expose stable store/scope/profile-key/UserId identity. Mailbox processing requires an active Record bound to the same identity, checks the session both before claim work and immediately before invoking a handler, and fails closed on a mismatch, takeover or conflicting operation.
+- The new `RecordStoreV2DataStoreAdapter` routes mailbox DataStore reads and updates through the shared core request gate, validates key length and preserves key UserIds/metadata. It deliberately does not expose unconditional physical deletion.
+- The optional `RecordStoreV2Acceleration` uses a fixed set of shard topics, bounded local candidates, advisory MessagingService wake-ups, optional TTL-bounded MemoryStore hints and a polling fallback. Hints are not durable receipts or authorization to execute.
+- Transactional outbox dispatch now has a bounded batch API: destination calls reuse stable event IDs and selected outcomes are committed with one source-profile sidecar update.
+- The public `RecordStore.read_async` path now coalesces same-key concurrent reads without retaining a post-completion cache, bounds the in-flight key/waiter set, gives waiters a deadline and clones each returned snapshot. Calls with custom legacy decoders bypass coalescing.
+- Dirty-generation tracking is visible in Record stats and durability-age reporting; a clean autosave can skip a redundant durable write. No-op/dirty-state correctness is not assumed without the later regression pass.
+
+### Feature surfaces present but not fully accepted
+
+The branch includes the segmented mailbox/DLQ and preparation protocol; transactional inbox/receipts/outbox; purchase-receipt handling; declared-revision schema migrations; transfer/escrow saga; Profile Doctor and guarded restore; adapter-driven erasure; projections and unique reservations; bounded tracing; payload/codec helpers; and resumable compaction callbacks. A standalone governor/scheduler model also exposes due scheduling, fairness, retry tokens, priority/dependency handling and replay/shadow hooks. These features have not all been wired into every core production path, and the model scheduler is not evidence that every policy controls every live operation.
+
+Important limitations remain explicit:
+
+- The existing core `Record:EnqueueAsync`/queue path has not been replaced by, or automatically bridged into, the opt-in V2 mailbox API. Applications must opt in to the V2 API and use the documented adapter/session binding.
+- Strict non-nil `ordering_key` continues to be rejected, as required by the initial design contract. Priority is advisory selection among eligible work.
+- Cross-profile changes remain sagas; arbitrary external effects remain at-least-once. RTBF completeness requires application-verified templates and inventory, writer fencing, dependency clearance and generation-aware deletion/redaction.
+- The compatibility bridge, old-writer drain, fully exercised rollback protocol, end-to-end tracing coverage, and integration of every advanced scheduling/performance policy remain incomplete or unverified.
+- The deterministic simulator and existing fault scripts are infrastructure only for this phase. The full 70-group matrix, crash/state-machine acceptance, real Roblox Studio/service tests, and mixed-version rollout rehearsal have **not** been run.
+
+### Benchmark-first scope
+
+The CodSpeed configuration adds successful-path workloads for V2 services, the actual core request gate/read coalescer, grouped outbox dispatch and fixed-shard wake-up acceleration. The current PR head has not yet received a verified fresh CodSpeed run in this pass; therefore benchmark outcomes and regressions remain unknown. Lune/Mock results do not establish live Roblox service latency or quota behavior.
+
+V2 remains opt-in and **not production-ready** until the P0 blockers in Section 31 are closed by concrete protocol implementation, executable failure-injection tests and relevant Roblox Studio/service acceptance evidence.
