@@ -12,8 +12,8 @@ local runtime_options = {
 	now_ms = function() return now_ms end,
 	now_unix = function() return math.floor(now_ms / 1000) end,
 }
-local V2 = V2Module.new(RecordStore, MailboxV2, { runtime = runtime_options })
-local V2SecondFacade = V2Module.new(RecordStore, MailboxV2)
+local V2 = V2Module.new(RecordStore, MailboxV2, { runtime = runtime_options, allow_unattested_activation = true })
+local V2SecondFacade = V2Module.new(RecordStore, MailboxV2, { allow_unattested_activation = true })
 assert(V2.RuntimeGovernor.get_shared() == V2SecondFacade.RuntimeGovernor.get_shared(),
 	"multiple V2 facades created independent server-local advanced governors")
 
