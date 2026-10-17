@@ -9,6 +9,7 @@ for _, path in {
 	"src/PlayerDataInitializer/PlayerDataCore.luau",
 	"src/PlayerDataInitializer/RecordStoreMailboxV2.luau",
 	"tests/RecordStoreMailboxV2Regression.server.luau",
+	"tests/RecordStoreTransactionsRegression.server.luau",
 	"bench/mailbox_v2_regression.bench.luau",
 	"bench/mailbox_v2.bench.luau",
 	"src/PlayerDataInitializer/IntegerInfinityValue.luau",
@@ -93,4 +94,5 @@ assert(not invalid_options_ok, "invalid decimal precision was accepted")
 Shim.run_script("tests/RecordStore_OpenCorrupt_CompatibilityRegression.server.luau")
 Shim.run_script("tests/RecordStore_NonFiniteNumbersRegression.server.luau")
 Shim.run_script("tests/RecordStore_CodeNumRegression.server.luau")
+Shim.run_script("tests/RecordStoreTransactionsRegression.server.luau")
 Shim.close()
