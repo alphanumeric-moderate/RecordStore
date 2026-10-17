@@ -2357,7 +2357,8 @@ local function new_rollout(store, options)
 			return true, manifest.phase, copy(manifest)
 		end
 		local drain_operations = {
-			process = true, recover = true, renew_claim = true, acknowledge = true, reconcile = true, dispatch = true,
+			process = true, recover = true, renew_claim = true, acknowledge = true, reconcile = true,
+			dispatch = true, erase_execute = true,
 		}
 		if (manifest.phase == "frozen" or manifest.phase == "rollback_pending") and drain_operations[operation] then
 			return true, manifest.phase, copy(manifest)
@@ -2778,6 +2779,11 @@ function V2.new(record_store, mailbox_module, options)
 			return { code = "invalid", message = "maintenance lane is unsupported" }
 		end
 		return enqueue_scheduled_callback(owner, lane, "maintenance:" .. maintenance_id, function()
+			local blocked = activation_block("maintenance")
+			if blocked ~= nil then
+				if type(schedule_options.on_complete) == "function" then schedule_options.on_complete(copy(blocked)) end
+				return
+			end
 			local result = callback(maintenance_id)
 			if type(schedule_options.on_complete) == "function" then
 				local completed, callback_error = pcall(schedule_options.on_complete, copy(result))
@@ -2868,10 +2874,34 @@ function V2.new(record_store, mailbox_module, options)
 		PruneBatches = "maintenance",
 		PruneTransactionReceiptsBatches = "maintenance",
 	})
-	guard_methods(api.ProfileDoctor, { Restore = "restore", DeleteIfGenerationAsync = "erase" })
+	guard_methods(api.ProfileDoctor, { Restore = "restore", DeleteIfGenerationAsync = "erase_execute" })
 	guard_factory(api.Migrations, "new", { MigrateAsync = "migrate" })
-	guard_factory(api.Sagas, "new", { TransferAsync = "saga", RecoverAsync = "recover" })
-	guard_factory(api.Erasure, "new", { PlanAsync = "erase", ExecuteAsync = "erase" })
+	local raw_saga_factory = api.Sagas.new
+	api.Sagas.new = function(...)
+		local service = raw_saga_factory(...)
+		local transfer = service.TransferAsync
+		local recover = service.RecoverAsync
+		local recovery_threads = setmetatable({}, { __mode = "k" })
+		service.TransferAsync = function(...)
+			local thread = coroutine.running()
+			local operation = if thread ~= nil and recovery_threads[thread] then "recover" else "saga"
+			local blocked = activation_block(operation)
+			if blocked ~= nil then return blocked end
+			return transfer(...)
+		end
+		service.RecoverAsync = function(...)
+			local blocked = activation_block("recover")
+			if blocked ~= nil then return blocked end
+			local thread = coroutine.running()
+			if thread ~= nil then recovery_threads[thread] = true end
+			local results = table.pack(pcall(recover, ...))
+			if thread ~= nil then recovery_threads[thread] = nil end
+			if not results[1] then return { code = "unknown", message = "saga recovery failed: " .. tostring(results[2]) } end
+			return table.unpack(results, 2, results.n)
+		end
+		return service
+	end
+	guard_factory(api.Erasure, "new", { PlanAsync = "erase_plan", ExecuteAsync = "erase_execute" })
 	guard_factory(api.Projections, "new", { ApplyAsync = "projection", RebuildAsync = "projection", ReserveUnique = "projection" })
 	guard_factory(api.Tracing, "new", { FlushAsync = "trace_flush" })
 	guard_factory(api.Maintenance, "new_compactor", { RunStep = "maintenance", Resume = "maintenance" })
