@@ -726,10 +726,12 @@ local runtime_external_in_flight: { [string]: number } = {
 local runtime_breakers: { [string]: { failures: number, open_until: number, probe_in_flight: boolean } } = {
 	read = { failures = 0, open_until = 0, probe_in_flight = false },
 	write = { failures = 0, open_until = 0, probe_in_flight = false },
+	service = { failures = 0, open_until = 0, probe_in_flight = false },
 }
 local runtime_metrics = {
 	reads = 0,
 	writes = 0,
+	service_calls = 0,
 	failures = 0,
 	throttles = 0,
 	budget_rejections = 0,
@@ -738,6 +740,7 @@ local runtime_metrics = {
 	no_op_saves = 0,
 	read_latency_ewma_ms = 0,
 	write_latency_ewma_ms = 0,
+	service_latency_ewma_ms = 0,
 	last_error = "",
 	last_policy_error = "",
 }
@@ -1022,6 +1025,9 @@ local function observe_runtime_request(kind: string, success: boolean, message: 
 	if kind == "read" then
 		runtime_metrics.reads += 1
 		runtime_metrics.read_latency_ewma_ms = if runtime_metrics.read_latency_ewma_ms == 0 then duration_ms else runtime_metrics.read_latency_ewma_ms * 0.8 + duration_ms * 0.2
+	elseif kind == "service" then
+		runtime_metrics.service_calls += 1
+		runtime_metrics.service_latency_ewma_ms = if runtime_metrics.service_latency_ewma_ms == 0 then duration_ms else runtime_metrics.service_latency_ewma_ms * 0.8 + duration_ms * 0.2
 	else
 		runtime_metrics.writes += 1
 		runtime_metrics.write_latency_ewma_ms = if runtime_metrics.write_latency_ewma_ms == 0 then duration_ms else runtime_metrics.write_latency_ewma_ms * 0.8 + duration_ms * 0.2
@@ -8763,6 +8769,7 @@ function RecordStore.get_runtime_stats(): { [string]: unknown }
 		circuits = {
 			read = table.clone(runtime_breakers.read),
 			write = table.clone(runtime_breakers.write),
+			service = table.clone(runtime_breakers.service),
 		},
 		work_class_in_flight = table.clone(runtime_external_in_flight),
 		work_class_limits = {
@@ -8779,8 +8786,8 @@ function RecordStore.run_runtime_request(
 	operation_deadline: number?,
 	work_class: string?
 ): (unknown, ResultCode?, string?)
-	if kind ~= "read" and kind ~= "write" and kind ~= "update" then
-		return nil, "invalid", "kind must be read, write or update"
+	if kind ~= "read" and kind ~= "write" and kind ~= "update" and kind ~= "service" then
+		return nil, "invalid", "kind must be read, write, update or service"
 	end
 	if type(callback) ~= "function" then return nil, "invalid", "callback must be a function" end
 	local class = work_class or "interactive"
@@ -8799,6 +8806,30 @@ function RecordStore.run_runtime_request(
 	if runtime_options.adaptive_runtime_enabled and class == "messaging" and not consume_runtime_queue_token() then
 		runtime_metrics.budget_rejections += 1
 		return nil, "budget", "shared runtime governor rejected messaging work under its bounded retry/wake budget"
+	end
+	if kind == "service" then
+		if runtime_degraded_reject(nil, true) then
+			runtime_metrics.budget_rejections += 1
+			return nil, "budget", "shared runtime governor rejected external service work in degraded mode"
+		end
+		local breaker_ok = runtime_breaker_admit("service")
+		if not breaker_ok then
+			runtime_metrics.budget_rejections += 1
+			return nil, "budget", "shared runtime service circuit is open"
+		end
+		if not acquire_slot(deadline :: number, false) then
+			runtime_breaker_cancel_probe("service")
+			runtime_metrics.budget_rejections += 1
+			return nil, "budget", "shared runtime service concurrency reserve is exhausted"
+		end
+		runtime_external_in_flight[class] += 1
+		local service_started = now_local()
+		local service_ok, service_result = pcall(callback)
+		release_slot()
+		runtime_external_in_flight[class] = math.max(0, runtime_external_in_flight[class] - 1)
+		observe_runtime_request("service", service_ok, if service_ok then nil else tostring(service_result), (now_local() - service_started) * 1000)
+		if not service_ok then return nil, "unknown", tostring(service_result) end
+		return service_result, nil, nil
 	end
 	if runtime_options.adaptive_runtime_enabled and class == "maintenance"
 		and active_requests >= math.max(1, runtime_effective_concurrent_requests - runtime_options.critical_request_reserve - 1)
