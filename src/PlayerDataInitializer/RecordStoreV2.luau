@@ -190,13 +190,16 @@ local function reserved_equal(left, right)
 	return right_ok and left_material == right_material
 end
 
-local function transaction_run(record, operation_id, request, reducer, mode, events, allowed_reserved_fields)
+local function transaction_run(record, operation_id, request, reducer, mode, events, allowed_reserved_fields, erasure_mode)
 	if type(record) ~= "table" then return { code = "invalid", message = "record is required" } end
 	if not valid_text(operation_id, 128) then return { code = "invalid", message = "operation_id must be 1 to 128 bytes" } end
 	if type(reducer) ~= "function" then return { code = "invalid", message = "reducer must be a pure non-yielding function" } end
 	local material, material_error = request_material(request)
 	if not material then return { code = "invalid", message = material_error } end
 	local fingerprint = digest(material)
+	if erasure_mode ~= nil and erasure_mode ~= "fence" and erasure_mode ~= "redact" then
+		return { code = "invalid", message = "unsupported internal erasure mode" }
+	end
 	local allowed = {}
 	for _, field in ipairs(allowed_reserved_fields or {}) do
 		if not valid_text(field, 128) or string.sub(field, 1, #RESERVED) ~= RESERVED then
@@ -211,12 +214,43 @@ local function transaction_run(record, operation_id, request, reducer, mode, eve
 		-- An out-of-key IsErased lookup is advisory and may race this transform.
 		if type(data) == "table" then
 			local tombstone = data[RESERVED .. "erasure_tombstone"]
-			if tombstone ~= nil and tombstone ~= false then
-				error("v2 profile mutation is blocked by the durable erasure tombstone")
+			if tombstone ~= nil and tombstone ~= false and erasure_mode == nil then
+				error("v2 profile mutation is blocked by the durable profile erasure tombstone")
 			end
 		end
 		local next_data, reducer_error = pure(reducer, data, request)
 		if type(next_data) ~= "table" then error("v2 reducer rejected request: " .. tostring(reducer_error or "returned nil")) end
+		if erasure_mode ~= nil then
+			local key = RESERVED .. "erasure_tombstone"
+			local marker = next_data[key]
+			if type(data) ~= "table" or type(marker) ~= "table" or marker.version ~= 1
+				or marker.user_id == nil or not valid_text(marker.erasure_id, 96)
+				or not finite(marker.profile_revision) or marker.profile_revision < 0
+			then
+				error("erasure operation must preserve a valid durable profile tombstone")
+			end
+			local original = data[key]
+			if original ~= nil and original ~= false then
+				if type(original) ~= "table" or original.version ~= 1
+					or original.user_id ~= marker.user_id or original.erasure_id ~= marker.erasure_id
+				then error("erasure operation cannot replace or clear a different tombstone") end
+			end
+			if erasure_mode == "redact" then
+				for field in pairs(next_data) do
+					if field ~= key then error("redaction must retain only the durable tombstone") end
+				end
+			else
+				for field, before in pairs(data) do
+					if field ~= key and not reserved_equal(before, next_data[field]) then
+						error("tombstone installation may not change profile values")
+					end
+				end
+				for field in pairs(next_data) do
+					if field ~= key and data[field] == nil then error("tombstone installation may not create profile values") end
+				end
+			end
+			return next_data
+		end
 		-- Internal sidecars and tombstones survive every consumer transaction.
 		-- Only the owning built-in operation may change its named reserved field.
 		if type(data) == "table" then
