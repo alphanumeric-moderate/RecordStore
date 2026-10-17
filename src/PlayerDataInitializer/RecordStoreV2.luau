@@ -2944,12 +2944,18 @@ function V2.new(record_store, mailbox_module, options)
 	local raw_mailbox_new = api.Mailbox.new
 	api.Mailbox.new = function(store, owner, mailbox_options)
 		local configured = copy(mailbox_options or {})
-		if type(configured.activation_guard) ~= "function" and not configured.allow_unattested_activation then
-			if type(activation_guard) == "function" then
-				configured.activation_guard = activation_guard
-			elseif allow_unattested_activation then
-				configured.allow_unattested_activation = true
+		if type(activation_guard) == "function" then
+			-- A child mailbox may not replace or disable the facade's authoritative
+			-- gate with a caller-supplied function or test bypass.
+			if configured.allow_unattested_activation == true then
+				error("a guarded V2 facade does not allow mailbox-level activation bypass", 2)
 			end
+			configured.activation_guard = activation_guard
+		elseif allow_unattested_activation then
+			configured.activation_guard = nil
+			configured.allow_unattested_activation = true
+		else
+			error("V2 mailbox cannot be created without an authoritative activation guard", 2)
 		end
 		return raw_mailbox_new(store, owner, configured)
 	end
