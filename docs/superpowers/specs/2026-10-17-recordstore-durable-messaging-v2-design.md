@@ -685,6 +685,18 @@ The regression test must fail against the old implementation for the reason it c
 43. **No global server-priority assumption**: competing servers with different roles/budgets, lost and delayed hints, server death and replacement, stale role policy and background-only worker failure; any eligible healthy server can still recover/claim according to durable CAS/fencing.
 44. **Priority performance trade-offs**: compare enabled/disabled and multiple priority mixes with equal input volume; record queue wait by lane, scan amplification, request counts, critical-save p95 and background starvation under high load; no benefit is claimed from synthetic scheduling tests alone.
 
+
+45. **Cost-aware deficit round robin**: one high-cost owner versus many low-cost owners, missing/corrupt cost hints, conservative fallback, oversized legal work, cost-model revision and budget changes; large work eventually gets service without starving small work or critical persistence.
+46. **Deadline slack and service-age behavior**: urgent bursts, negative slack, no deadline estimate, expiry at claim boundary, overdue policy, starvation promotion and throttled service; SLO metadata never changes expires_at or lease authority.
+47. **Lease renewal under scheduler pressure**: expiry-margin ordering, slow UpdateAsync, throttle burst, old token renewal after takeover, maximum renewal horizon and critical-save contention; expired/replaced claims cannot revive.
+48. **Due-time wheel recovery**: server restart, dropped wakeup, stale heap entry, same bucket burst, clock skew, delayed retry and queue empty for long intervals; polling always rediscovers due accepted messages within the documented reconciliation bounds.
+49. **Adaptive batch window semantics**: sparse traffic max-wait, high backlog hard item/byte caps, batch-size changes, caller-defined atomic batch boundaries, partial outbox fan-out and uncertain destination result; unrelated business transactions never merge.
+50. **Retry-token/congestion control**: many simultaneous throttles, synchronized retries, token exhaustion, service recovery burst, hot permanently failing key, unknown result and poison message; retry controls delay work but never discard or falsely complete it.
+51. **Workflow priority inheritance**: ready predecessor boost, cycle rejection, boost expiry, terminal/unknown predecessor, unrelated workflow fairness and per-workflow cap; inheritance never skips dependencies or triggers premature compensation.
+52. **Shadow scheduler non-interference**: shadow enabled/disabled, trace overflow, scheduler error, missing candidates and policy rollback; the shadow path performs no claim/write/publish and never changes production selection.
+53. **Scheduling policy comparisons**: same deterministic inputs across FIFO, weighted fairness, DRR, deadline-aware, and batched policies; report queueing p95/p99, request amplification, starvation, memory, and critical save/release regressions.
+54. **Combined overload stress**: high-priority flood plus due-time burst, lease renewals, retries, outbox fan-out and maintenance at low budgets; verify per-class bounds, critical reserve, no accepted-work loss and recovery after budget restoration.
+
 33. **Durability SLO and dirty-state visibility**: nested mutation, direct-mutable-table tracking gap, successful commit versus unknown write, age threshold crossing, repeated alert coalescing, no DataStore write per alert and accurate unavailable/estimated status.
 34. **Unified outcome/retry policy**: inject definitive failure, commit-then-error, fenced session, schema conflict and capacity result for each API family; verify that unknown outcomes are reconciled by the same stable operation ID and never converted to presumed failure.
 35. **Degraded mode and backpressure**: write outage, prolonged dirty age, bounded-buffer item/byte/age limit, queue saturation, mode recovery, shutdown and critical reserve pressure; confirm optional work is rejected visibly and critical intents are not falsely acknowledged.
@@ -828,6 +840,10 @@ The design is implementable only when tests and runtime evidence demonstrate all
 - Secondary indexes are eventually consistent, rebuildable and never substitute for authoritative validation; operation tracing is bounded and adds no mandatory separate write per hot-path event.
 - Each performance optimization has a baseline, target metric, representative CodSpeed workload, correctness tests, rollback/disable path where practical, and no claim of real service improvement from mocks alone.
 
+
+
+- Advanced scheduling remains feature-gated until shadow/replay reports and workload-specific benchmarks demonstrate service fairness, correct ordering and no unacceptable critical persistence regression.
+- Lease renewal, retry pressure, delayed wakeups and batch-formation policies preserve the canonical message state machine; local timers/cost estimates/shadow decisions are never authoritative.
 
 - The priority matrix is reflected in implementation ordering: simulator/outcome contracts and bounded durability/backpressure controls precede purchase, transfer, migration automation, erasure and projections.
 - Durability snapshots expose age/revision/uncertain-write limitations and cannot claim clean state when mutation tracking is incomplete.
@@ -1407,7 +1423,125 @@ Report both gains and regressions: request count per completed message, index sc
 - Reprioritization, if approved later, requires a separate versioned operation and crash tests; it is not implied by the initial `priority` field.
 - Disabling priority must preserve message identity, queue state, ordering contracts, retry/expiry semantics and accepted work.
 
-## 29. Final adversarial audit: remaining risks and required controls
+
+## 29. Advanced scheduling designs with correctness and performance gates
+
+This section extends the priority lanes in section 28. These are distinct scheduler algorithms and operating modes, not promises of lower latency. Add them incrementally; begin with mechanisms that protect durable work and budget fairness, then consider higher-complexity optimizations only when traces establish a bottleneck.
+
+### 29.1 Cost-aware deficit round robin across owners and work classes
+
+**Problem:** round-robin by item count is unfair when one scheduled item costs one read while another entails an UpdateAsync, a larger payload, several outbox destinations or a costly bounded handler. A hot profile can dominate request budgets despite receiving only the same number of turns as other profiles.
+
+**Design:** use deficit round robin (DRR) over owner/work-class lanes. Each visit earns a bounded quantum of estimated work units; an item is selected only when its estimated cost fits the available deficit, with deficit carried forward to avoid permanently starving a larger but legal item. Use a multi-dimensional estimate where helpful, for example estimated StandardRead units, StandardWrite units, bytes/serialization work and handler concurrency slots. UpdateAsync commonly consumes both read and write budget, so do not price it as write-only.
+
+Cost models come from instrumented operation classes and representative measurements, not payload claims supplied by callers. When estimates are absent or uncertain, use a conservative configured estimate. Keep hard caps for bytes, handler duration and concurrent operations so a single large item cannot monopolize memory or a worker. The estimate guides selection; the canonical protocol decides correctness and actual service budgets remain external constraints.
+
+Pair with the shared governor's separate read/write admission, per-owner caps, critical persistence reserve and typed backpressure. Measure request units per completed operation, per-owner service share, large-item wait, head-of-line blocking and p95 critical-save latency. Reject this complexity if ordinary weighted fair scheduling gives equivalent results.
+
+### 29.2 Deadline slack and age-aware service
+
+**Problem:** strict FIFO can leave time-sensitive work waiting behind a large backlog, while pure priority can starve ordinary messages. A message expiry timestamp alone is not a scheduling policy and must not be turned into a hard completion promise.
+
+**Design:** support optional server-authoritative `service_class`/SLO metadata separate from `expires_at`. Compute an observational slack estimate from deadline/SLO, current queue age and a conservative service-time estimate. Prefer eligible work with lower slack only within its allowed priority/ordering lane and under a bounded urgent-work budget. Promote old work using bounded aging so age eventually matters even when new urgent tasks keep arriving.
+
+The scheduler must distinguish:
+- `available_at`: earliest time at which work may be attempted;
+- `expires_at`: deadline after which a handler must not newly start;
+- service objective/deadline: an advisory scheduling target, not proof the DataStore or handler will finish by that time;
+- claim lease expiry: ownership/fencing state, not message expiry or a service objective.
+
+Never change one timestamp to impersonate another. If the work is already in-flight, do not cancel an UpdateAsync or claim completion has been prevented. When estimated slack is negative, return/emit an overdue status and apply the documented expire-or-process policy; do not silently discard it.
+
+Pair with per-lane latency histograms, oldest eligible age, conservative tail-latency estimates and starvation monitoring. Benchmark eligible-to-claim p50/p95/p99, overdue count and background service share under stable and overloaded request budgets. Do not market a hard deadline guarantee from a best-effort scheduler.
+
+### 29.3 Lease-renewal deadline lane
+
+**Problem:** yielding handlers and long-running internal workflows can lose a claim when renewal waits behind ordinary scans, fan-out and maintenance. An expired claim must be recoverable, but avoidable expiry wastes work and increases duplicates.
+
+**Design:** schedule renewal attempts by **remaining safe lease margin**, not merely the handler's static priority. Estimate the time needed for a renewal attempt using a conservative tail-latency value and local queue delay. Put renewals with low safety margin in a bounded urgent lane, with a reserved concurrency slot but a strict per-claim renewal cap. Renew only if the canonical message still has the same claim token and session generation. Stop renewing on cancellation, session loss or terminal state.
+
+No scheduler can guarantee renewal while the service is unavailable. If the claim is already expired/replaced, renewal must fail the fencing check rather than resurrecting it. Do not renew forever for a stuck handler: use the declared handler deadline, cooperative cancellation and bounded renewal horizon. Renewal has no permission to extend message `expires_at`.
+
+Pair with measurement of renewal lateness, expired-claim takeover rate, duplicate executions after lease loss, write amplification from renewals and critical profile save latency. Test under low budget and slow service responses as well as simulated fast CPU. The reserved slot is an internal scheduler reserve, not a Roblox-guaranteed DataStore quota.
+
+### 29.4 Due-time wheel and delayed-work wake scheduler
+
+**Problem:** polling and scanning records that are not yet eligible wastes requests and increases pressure as retry backlogs grow. Repeatedly scanning the same future `available_at` set does not move work closer to execution.
+
+**Design:** use a bounded server-local min-heap/timing wheel to schedule next wake-ups for already-discovered messages and delayed retries. Bucket wakeups by time window, coalesce repeated owner wakeups and cap heap entries. Rebuild candidates from bounded durable index pages after restart. Persisted `available_at` and the canonical message record remain authoritative; the local wheel is disposable derived state.
+
+A missing, dropped, expired or stale timer entry must never make accepted work permanently invisible. Keep a periodic reconciliation poll with a strict maximum idle-poll interval and a progress cursor. Under overload, coalesce timer events and scan only bounded pages, but never scan the entire DataStore keyspace to reconstruct one missed entry.
+
+An optional durable due-time index may be considered later only if measurements show the local wheel and current segments are insufficient; it requires its own append/cleanup lifecycle and can increase request amplification. Do not add a second persistent write per message simply to avoid a bounded in-memory wakeup.
+
+Pair with tests/benchmarks for empty queues, many delayed retries, bursty due-time cohorts, restart/rebuild, clock skew, dropped hints and stale timer entries. Track reads per eligible message, scans per idle hour, lateness after `available_at`, memory use and oldest eligible age. Keep wall-clock correctness based on the existing timestamp and skew-grace contract.
+
+### 29.5 Adaptive batch-formation window with a latency ceiling
+
+**Problem:** a fixed batch threshold may be efficient under a large backlog but impose needless latency at low traffic. Conversely, sending every item separately can amplify profile-envelope writes and destination calls.
+
+**Design:** for APIs that already explicitly promise batch semantics, form a batch until the first of these limits is reached: item count, encoded bytes, service-budget headroom, or a configured maximum wait. Adjust within strict hard bounds based on backlog and oldest-item age. Low backlog uses a short window; high backlog may wait for more items only while every included operation remains within its own eligibility/deadline constraints.
+
+Do not automatically merge separate business transactions into one all-or-none transaction. For `ApplyInboxBatchAsync`, the caller's explicit batch is the atomic unit; scheduler tuning can control when a caller-submitted batch runs but cannot silently expand it with unrelated messages. For outbox dispatch, batching may group independent destination submissions only where each event retains its own idempotent identity and outcome. A partial fan-out must be resumable per event.
+
+Pair with CodSpeed batch sizes 1/4/8/16 and multiple wait windows, under sparse and bursty traffic. Measure request count per event, p50/p95 queue wait, average batch utilization, bytes/request, budget throttles and partial-failure recovery. Select a policy from the latency-throughput curve; do not assume larger batches are always faster.
+
+### 29.6 Congestion-aware retry lanes and retry tokens
+
+**Problem:** a service outage can convert every waiting task into a retry storm. Independent exponential backoff per item may still synchronize retries, while an uncertain commit cannot safely be treated like a known failure.
+
+**Design:** classify attempts into at least: definitive transient non-commit, throttling, permanent validation/authorization failure, conflict/fencing, and unknown commit outcome. Use bounded retry tokens per server/work class and optional per-owner/key cooldowns to restrict how much retry traffic competes with fresh critical work. Apply jittered delays and coalesce wakeups so many retry deadlines do not align. Persist the canonical next eligibility time before considering a failed item rescheduled; unknown outcomes must be reconciled by the same stable operation ID rather than blindly rerun as a new operation.
+
+Retry budgets control admission and timing, not terminal correctness. They must not erase or lower attempts, change the user's expiry policy, auto-promote poison work or mark an accepted message complete. Once the retry budget is exhausted, defer visibly or move to the existing bounded DLQ policy according to configured limits; never silently drop.
+
+Pair with per-error-class retry counts, request amplification during incidents, recovery time after budget restoration and fresh-work versus retry-work share. Test throttle bursts, commit-then-error, many simultaneous due times, a permanently failing hot key and a service that recovers suddenly. Use jitter and bounded concurrency to avoid a recovery thundering herd.
+
+### 29.7 Dependency-aware workflow scheduling with bounded priority inheritance
+
+**Problem:** a high-priority workflow can be blocked by a required earlier step scheduled as low priority, while blindly promoting an entire saga can let one workflow dominate the system.
+
+**Design:** let the workflow coordinator expose the currently ready steps and explicit predecessor relationships. A ready predecessor that blocks a time-sensitive, higher-priority workflow step may receive a temporary **scheduling-only inherited urgency**. The inheritance is derived from durable workflow state, bounded by a maximum boost and duration, and never changes the step's persisted business identity, idempotency key or terminal semantics.
+
+Only a ready, valid predecessor can be boosted; a missing, failed, unknown-outcome or fenced dependency must be reconciled through the workflow state machine before downstream work proceeds. Validate the dependency graph against cycles when a workflow is created. Inheritance expires automatically when the dependent step finishes, is cancelled or becomes terminal. It cannot be used to override profile ownership, reorder steps within a declared serial sequence, compensate an unknown result or skip a required step.
+
+Pair with workflow critical-path wait, blocked-step age, boost rate and per-workflow resource caps. Benchmark with many small workflows and one deep/large workflow, measuring completion p95, unrelated-work starvation and extra read/write requests. Keep this opt-in for workflow users and omit it from ordinary mailbox messages.
+
+### 29.8 Shadow scheduler, replay and gradual activation
+
+**Problem:** scheduling algorithms are difficult to validate from throughput alone. A new rule may appear faster while starving a lane, changing ordering or overloading critical persistence.
+
+**Design:** add a test/diagnostic mode where the current scheduler makes the real decision and an alternate scheduler computes a **shadow recommendation** from the same observed eligible candidates. The shadow path must not claim messages, write DataStore state, publish hints or mutate ordering. Record only bounded redacted decision summaries: selected lane, estimated cost, age/slack, candidate count, predicted decision and reason category.
+
+Replay captured synthetic traces through deterministic virtual time and injected budgets to compare FIFO/weighted/DRR/deadline policies. Production shadow sampling must be opt-in, bounded and low-overhead; no arbitrary user payload is required in the trace. Gradual activation is a local runtime-policy revision and canary cohort, never a separate global server leader. Roll back scheduling policy without rewriting message records.
+
+Pair with a deterministic metric report comparing queue delay by class, starvation bounds, critical-save p95, request amplification, and predicted versus actual completion. Shadow agreement is not correctness proof; the fault simulator and public-behavior tests remain the authority. Promotion from shadow to active scheduling requires explicit review and a kill switch.
+
+### 29.9 Scheduling feature order
+
+1. **First:** lease-renewal deadline lane, retry-token/backoff control and bounded fair work classes. These protect accepted work and critical profile persistence under congestion.
+2. **Next:** cost-aware DRR and due-time wake scheduling, after request-cost and scan-amplification baselines exist.
+3. **Then:** bounded adaptive batch windows for already-opted-in batch APIs.
+4. **Later/opt-in:** deadline-slack selection and workflow priority inheritance, only where an application has explicit SLO/workflow requirements.
+5. **Before default activation of any complex policy:** run the shadow scheduler, replayed traces and priority/fairness fault tests.
+
+Do not implement every algorithm at once. Start with weighted fairness and a critical reserve; use measured queue wait and request-cost evidence to decide which extension solves a real bottleneck.
+
+### 29.10 Scheduling performance acceptance
+
+For each candidate algorithm, compare against the simplest viable scheduler on an identical input trace and runner. Capture:
+
+- completed operations per second and DataStore request cost per completed operation;
+- p50/p95/p99 queueing delay per owner, priority lane and work class;
+- oldest eligible item age, late/expired item count and starvation interval;
+- claim-renewal lateness, expired claims and duplicate-handler recovery;
+- critical profile save/release p95 and maximum dirty-data age;
+- read/write budget observations, throttle/error classes and retry amplification;
+- batch utilization, encoded bytes, scan amplification and peak local scheduler memory.
+
+Simulation measures scheduling/codec CPU; wall-time and Roblox service behavior are separate. Do not use mocked request latency as evidence for live DataStore latency. An optimization is accepted only when it improves its target objective without violating ordering, durability, per-owner fairness, lease fencing or critical persistence bounds. A lower average latency does not compensate for an unbounded starvation tail.
+
+
+## 30. Final adversarial audit: remaining risks and required controls
 
 This section is the final review checklist, not evidence that the future implementation has passed it.
 
