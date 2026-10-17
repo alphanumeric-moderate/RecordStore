@@ -7481,8 +7481,8 @@ local function delete_record(self: Record, erase_options: EraseOptions?): (Resul
 					generation = next_generation,
 				},
 				session = nil,
-				inbox_receipts = envelope.inbox_receipts or {},
-				outbox = envelope.outbox or {},
+				inbox_receipts = if erase_options ~= nil then {} else (envelope.inbox_receipts or {}),
+				outbox = if erase_options ~= nil then {} else (envelope.outbox or {}),
 				write_id = write_id,
 			}
 			local valid_envelope, envelope_error = validate_envelope(next_envelope)
