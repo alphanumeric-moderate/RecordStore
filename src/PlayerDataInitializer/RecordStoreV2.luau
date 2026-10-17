@@ -2341,7 +2341,7 @@ local function new_rollout(store, options)
 			read = true, enqueue = true, process = true, recover = true, renew_claim = true,
 			acknowledge = true, reconcile = true, replay = true, discard = true, maintenance = true,
 			dispatch = true, transact = true, inbox = true, purchase = true, saga = true,
-			erase = true, projection = true, migrate = true, restore = true, policy = true,
+			erase_plan = true, erase_execute = true, projection = true, migrate = true, restore = true, policy = true,
 			trace_flush = true, configure = true,
 		}
 		if not valid_text(operation, 32) or not known_operations[operation] then return false, "operation is invalid or unsupported" end
