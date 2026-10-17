@@ -7566,6 +7566,40 @@ local function delete_record(self: Record, erase_options: EraseOptions?): (Resul
 	return "deleted", nil
 end
 
+local function erase_record(self: Record, options: EraseOptions): (ResultCode, string?)
+	local state = private[self]
+	if state == nil then return "invalid", "record does not exist" end
+	if type(options) ~= "table"
+		or not math.isfinite(options.expected_generation)
+		or math.floor(options.expected_generation) ~= options.expected_generation
+		or not math.isfinite(options.user_id)
+		or options.user_id < 1 or math.floor(options.user_id) ~= options.user_id
+		or type(options.erasure_id) ~= "string" or options.erasure_id == "" or #options.erasure_id > 96
+	then
+		return "invalid", "EraseAsync requires a stable erasure ID, UserId and observed generation"
+	end
+	if state.name ~= options.store_name or state.scope ~= options.scope or state.key ~= options.profile_key then
+		return "conflict", "erasure target does not match the Record's exact DataStore identity"
+	end
+	if state.state == "tombstoned" and state.generation == options.expected_generation + 1 then
+		-- Idempotent reconciliation when the tombstone committed but the caller lost the response.
+		return "deleted", nil
+	end
+	if state.generation ~= options.expected_generation then
+		return "conflict", "Record generation changed after the erasure inventory snapshot"
+	end
+	local code, message = delete_record(self, options)
+	if code == "deleted" and state.state == "tombstoned"
+		and state.generation == options.expected_generation + 1
+	then
+		return "deleted", nil
+	end
+	if state.state == "tombstoned" and state.generation == options.expected_generation + 1 then
+		return "deleted", nil
+	end
+	return code, message
+end
+
 verify_snapshot_write = function(state: InternalState, write_id: string, token: string, generation: number, revision: number, operation_deadline: number): (boolean, Envelope?, BackendInfo?)
 	local deadline = math.min(operation_deadline, now_local() + 5)
 	local raw, info, result_code = backend_get(state.backend, false, deadline, state)
@@ -9159,6 +9193,7 @@ local function make_record(name: string, scope: string, key: string, options: Op
 		DiscardDeadLetterAsync = discard_dead_letter,
 		Close = close_record,
 		Delete = delete_record,
+		EraseAsync = erase_record,
 		Stats = stats,
 	}
 	state.public_record = record
