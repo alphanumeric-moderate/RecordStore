@@ -1714,6 +1714,37 @@ function V2.new(record_store, mailbox_module, options)
 	api.ShouldSave = function(record) return new_maintenance().ShouldSave(record_stats(record)) end
 	api.RenderErasureTemplate = render_template
 	api.Acceleration = options.acceleration_module
+	local dispatch_metrics = { accepted = 0, rejected = 0, dispatched = 0, callback_errors = 0, last_error = nil }
+	local dispatch_callbacks = {}
+	local dispatch_sequence = 0
+	local dispatcher_running = false
+	local function kick_dispatcher()
+		if dispatcher_running then return end
+		dispatcher_running = true
+		task.spawn(function()
+			while true do
+				local item = runtime_governor:TakeNext()
+				if item == nil then break end
+				local callback = dispatch_callbacks[item.id]
+				dispatch_callbacks[item.id] = nil
+				if callback ~= nil then
+					local callback_ok, callback_error = pcall(callback)
+					if callback_ok then
+						dispatch_metrics.dispatched += 1
+					else
+						dispatch_metrics.callback_errors += 1
+						dispatch_metrics.last_error = text_error(callback_error, 200)
+					end
+				end
+				runtime_governor:MarkCompleted(item.id)
+			end
+			dispatcher_running = false
+			-- Recheck after releasing the single dispatcher; enqueue never drops
+			-- durable mailbox work, and later polling remains the liveness fallback.
+			if runtime_governor:Stats().queue_items > 0 then kick_dispatcher() end
+		end)
+	end
+	api.GetSchedulerDispatchStats = function() return copy(dispatch_metrics) end
 	api.BindMailboxWakeups = function(accelerator, owner, mailbox, handler, max_messages_per_wake)
 		if type(accelerator) ~= "table" or type(accelerator.Register) ~= "function" then
 			return false, "an initialized RecordStoreV2Acceleration instance is required"
@@ -1724,14 +1755,34 @@ function V2.new(record_store, mailbox_module, options)
 		if type(handler) ~= "function" then return false, "handler must be a function" end
 		local owner_text, owner_error = request_material(owner)
 		if owner_text == nil then return false, owner_error or "mailbox owner is not canonicalizable" end
+		local owner_digest = digest(owner_text)
 		local limit = math.clamp(math.floor(max_messages_per_wake or 4), 1, 32)
 		local bound, bind_error = mailbox:BindWakeups(accelerator)
 		if not bound then return false, bind_error end
-		return accelerator:Register(owner_text, function()
-			for _ = 1, limit do
-				local result = mailbox:ProcessNextAsync(handler)
-				if type(result) ~= "table" or result.code ~= "processed" then break end
+		return accelerator:Register(owner_text, function(reason)
+			dispatch_sequence += 1
+			local job_id = "rv2w:" .. tostring(dispatch_sequence)
+			local due_now = if options.runtime ~= nil and type(options.runtime.now_ms) == "function"
+				then options.runtime.now_ms() else os.clock() * 1000
+			local accepted = runtime_governor:Enqueue({
+				id = job_id,
+				owner_id = owner_digest,
+				lane = "normal",
+				due_at_ms = due_now,
+				wake_reason = if valid_text(reason, 32) then reason else "unknown",
+			})
+			if type(accepted) ~= "table" or accepted.code ~= "accepted" then
+				dispatch_metrics.rejected += 1
+				return
 			end
+			dispatch_callbacks[job_id] = function()
+				for _ = 1, limit do
+					local result = mailbox:ProcessNextAsync(handler)
+					if type(result) ~= "table" or result.code ~= "processed" then break end
+				end
+			end
+			dispatch_metrics.accepted += 1
+			kick_dispatcher()
 		end)
 	end
 	return api
