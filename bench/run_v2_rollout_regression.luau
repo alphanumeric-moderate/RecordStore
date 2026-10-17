@@ -2,6 +2,7 @@
 -- Verifies durable rollout gating, phase fencing, evidence requirements and rollback.
 -- Uses deterministic storage; does not establish real mixed-version writer drain.
 local Shim = require("./RobloxShim")
+local serde = require("@lune/serde")
 local RecordStore = Shim.load_isolated("rollout-regression")
 local V2Module = require("../src/PlayerDataInitializer/RecordStoreV2")
 local MailboxV2 = require("../src/PlayerDataInitializer/RecordStoreMailboxV2")
@@ -62,7 +63,7 @@ local mailbox = MailboxV2.new(mailbox_store, {
 	profile_key = "player-rollout",
 	user_id = 778899,
 }, {
-	encode = function(value) return Shim.JSONEncode(value) end,
+	encode = function(value) return serde.encode("json", value) end,
 	guid = function() return "rollout-mailbox-guid" end,
 	activation_guard = function(operation) return rollout:ActivationGuard("rollout-main", operation) end,
 })
