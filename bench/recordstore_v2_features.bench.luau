@@ -2,6 +2,7 @@
 -- Successful-path benchmark of opt-in v2 services only; no injected failures or safety scenarios.
 local fs = require("@lune/fs")
 local luau = require("@lune/luau")
+local serde = require("@lune/serde")
 local Shim = require("./RobloxShim")
 local RecordStore = Shim.load()
 local MailboxV2 = luau.load(fs.readFile("src/PlayerDataInitializer/RecordStoreMailboxV2.luau"), { debugName = "RecordStoreMailboxV2" })()
@@ -55,6 +56,22 @@ local function run_transactions_and_workflows()
 			Data = { amount = 1 },
 		},
 	}), "committed")
+	local destination_store = MailboxV2.MockStore()
+	local destination = MailboxV2.new(destination_store, {
+		store_name = "V2_FeatureBench",
+		scope = "global",
+		profile_key = "target",
+	}, {
+		guid = function() return "bench-destination-guid" end,
+		encode = function(value) return serde.encode("json", value) end,
+	})
+	local dispatch = V2.Outbox.DispatchBatches(source, function(event)
+		local accepted = destination:EnqueueAsync(event.MessageType, event.Data, {
+			idempotency_key = event.EventId,
+		})
+		return accepted.code == "accepted" or accepted.code == "duplicate", accepted.message_id
+	end, 8, 4)
+	expect(dispatch, "committed")
 
 	local migrations = V2.Migrations.new()
 	assert(migrations:Register("V2_FeatureBench", 0, 1, "bench-migration-0-1", "rev1", function(data)
