@@ -56,6 +56,19 @@ local permitted, denied_message = rollout:CanUseAsync("rollout-main", "enqueue")
 assert(permitted == false and string.find(denied_message, "prepared", 1, true) ~= nil,
 	"prepared rollout unexpectedly authorized enqueue")
 
+local no_guard_constructed = pcall(function()
+	return MailboxV2.new(MailboxV2.MockStore(), {
+		store_name = "RolloutTest",
+		scope = "global",
+		profile_key = "player-no-guard",
+		user_id = 778898,
+	}, {
+		encode = function(value) return serde.encode("json", value) end,
+	})
+end)
+assert(no_guard_constructed == false,
+	"mailbox constructor allowed V2 activation without a durable guard or explicit test bypass")
+
 local mailbox_store = MailboxV2.MockStore()
 local mailbox = MailboxV2.new(mailbox_store, {
 	store_name = "RolloutTest",
