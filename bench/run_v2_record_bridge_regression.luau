@@ -38,6 +38,22 @@ local record = RecordStore.Mock.new(STORE, SCOPE, "player-bridge", {
 local opened, open_message = record:Open({ coins = 0 })
 assert(opened == "created" or opened == "loaded", tostring(open_message))
 
+-- A Record bridge must reject a producer-only mailbox before queue migration.
+local detached_mailbox = MailboxV2.new(MailboxV2.MockStore(), {
+	store_name = STORE,
+	scope = SCOPE,
+	profile_key = "player-bridge",
+	user_id = USER_ID,
+}, {
+	encode = function(value) return serde.encode("json", value) end,
+	now_ms = function() return 1_000_000 end,
+	guid = function() return "detached-bridge-guid" end,
+})
+local detached_bind, detached_bind_message = record:BindMailboxV2Async(detached_mailbox)
+assert(detached_bind == "conflict", "bridge must reject a mailbox without this active Record")
+assert(string.find(detached_bind_message or "", "exact active Record", 1, true) ~= nil,
+	"producer-only binding failure did not explain the active Record requirement")
+
 -- The binder must not strand already-persisted legacy queue entries in the old backend.
 local legacy_enqueue, legacy_message = record:EnqueueAsync("legacy", { value = 1 })
 assert(legacy_enqueue == "enqueued", tostring(legacy_message))

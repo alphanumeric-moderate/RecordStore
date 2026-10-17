@@ -6506,12 +6506,13 @@ local function bind_mailbox_v2(self: Record, mailbox: unknown): (ResultCode, str
 	end
 	local ok, owner = pcall(function() return (mailbox :: any):GetOwner() end)
 	if not ok or type(owner) ~= "table" then return "invalid", "mailbox owner identity could not be read" end
-	if type((mailbox :: any).GetActiveRecord) == "function" then
-		local active_ok, active_record = pcall(function() return (mailbox :: any):GetActiveRecord() end)
-		if not active_ok then return "invalid", "mailbox active Record binding could not be inspected" end
-		if active_record ~= nil and active_record ~= self then
-			return "conflict", "mailbox processing is bound to a different Record instance"
-		end
+	if type((mailbox :: any).GetActiveRecord) ~= "function" then
+		return "invalid", "V2 mailbox must expose GetActiveRecord and bind processing to this Record"
+	end
+	local active_ok, active_record = pcall(function() return (mailbox :: any):GetActiveRecord() end)
+	if not active_ok then return "invalid", "mailbox active Record binding could not be inspected" end
+	if active_record ~= self then
+		return "conflict", "V2 mailbox must be bound to this exact active Record instance"
 	end
 	local owner_fields = owner :: { [string]: unknown }
 	if owner_fields.store_name ~= state.name or owner_fields.scope ~= state.scope or owner_fields.profile_key ~= state.key then
@@ -6762,6 +6763,18 @@ local function bind_mailbox_v2_async(self: Record, mailbox: unknown): (ResultCod
 	if state.state ~= "active" then return "fenced", "V2 mailbox binding requires an active Record" end
 	if state.takeover_requested then return "closing", "session takeover has been requested" end
 	if state.mailbox_v2 ~= nil then return bind_mailbox_v2(self, mailbox) end
+	if type(mailbox) ~= "table"
+		or type((mailbox :: any).GetOwner) ~= "function"
+		or type((mailbox :: any).GetActiveRecord) ~= "function"
+		or type((mailbox :: any).EnqueueAsync) ~= "function"
+	then
+		return "invalid", "mailbox must expose GetOwner, GetActiveRecord and EnqueueAsync"
+	end
+	local active_ok, active_record = pcall(function() return (mailbox :: any):GetActiveRecord() end)
+	if not active_ok then return "invalid", "mailbox active Record binding could not be inspected" end
+	if active_record ~= self then
+		return "conflict", "V2 mailbox must be bound to this exact active Record instance"
+	end
 	if state.mailbox_v2_binding or state.queue_busy or state.busy then
 		return "busy", "Record has another operation in flight; V2 mailbox binding was not attempted"
 	end

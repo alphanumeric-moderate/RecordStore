@@ -78,6 +78,7 @@ local function run_transactions_and_workflows()
 		scope = "global",
 		profile_key = "target",
 	}, {
+		active_record = target,
 		encode = function(value) return serde.encode("json", value) end,
 	})
 	local bind_code, bind_message = target:BindMailboxV2Async(bridge_mailbox)
