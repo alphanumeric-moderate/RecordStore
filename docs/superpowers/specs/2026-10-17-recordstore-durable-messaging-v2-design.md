@@ -237,7 +237,7 @@ A per-message canonical record costs more keys and service calls than one large 
 
 Roblox DataStore key names are limited to 50 characters. Define and test a stable key codec for every route, message, segment, idempotency, and DLQ key. Include store/scope/owner identity in the stored value, not only in the key name.
 
-- Use a versioned deterministic route codec with fixed-length keys no longer than 50 characters. Example families are `m2i-<32-hex-digest>` for idempotent message keys/public IDs, `m2g-<32-hex-guid>` for new non-idempotent message keys/public IDs, and `m2l-<32-hex-digest>` for migrated-message storage routes. To make `m2g-` keys 36 characters, normalize a generated GUID to 32 lowercase hex characters by removing its hyphens before adding the prefix. `m2l-` is a storage route, not the preserved legacy public ID. Also use separate fixed-length prefixes such as `mf2-<32-hex-digest>` for manifests, `si2-<32-hex-digest>` for segment indexes, `di2-<32-hex-digest>` for DLQ indexes and `wf2-<32-hex-digest>` for workflow records. Each digest covers a versioned, length-prefixed tuple containing the full owner plus that record's partition/slot/generation or workflow identity. The idempotency digest covers store, scope, profile key and producer key. Document the exact pure-Luau digest algorithm and fixed test vectors; do not assume Roblox provides a built-in cryptographic hash. Every encoded key in every record family must have a test asserting its actual length is at most 50 characters.
+- Use a versioned deterministic route codec with fixed-length keys no longer than 50 characters. Example families are `m2i-<32-hex-digest>` for idempotent message keys/public IDs, `m2g-<32-hex-guid>` for new non-idempotent message keys/public IDs, and `m2l-<32-hex-digest>` for migrated-message storage routes. To make `m2g-` keys 36 characters, normalize a generated GUID to 32 lowercase hex characters by removing its hyphens before adding the prefix. `m2l-` is a storage route, not the preserved legacy public ID. Also use separate fixed-length prefixes such as `mf2-<32-hex-digest>` for manifests, `si2-<32-hex-digest>` for segment indexes, `di2-<32-hex-digest>` for DLQ indexes and `wf2-<32-hex-digest>` for workflow records. Each digest covers a versioned, length-prefixed tuple containing the full owner plus that record's partition/slot/generation or workflow identity. The idempotency digest covers store, scope, profile key and producer key. Document the exact pure-Luau digest algorithm and fixed test vectors; do not assume Roblox provides a built-in cryptographic hash. Every encoded key in every record family must have a test asserting its actual length is at most 50 characters. For status reads, `get_delivery_async(store_name, scope, profile_key, message_id)` derives an `m2l-` route from the owner tuple plus `message_id` when it detects a migrated legacy ID; otherwise v2 message IDs address their own canonical record keys.
 - On every read/update, compare the complete stored owner, producer key (when present), public message ID, record-family identity and exact canonical request to the requested values. Segment and manifest records additionally validate the complete partition/slot/generation tuple. Hash matches only route to a candidate; they never prove identity.
 - An idempotent message's record key is derived from a versioned digest of the full length-prefixed owner tuple plus producer key, so the same logical submission maps directly to its canonical message record without a second receipt lookup. A submission without an idempotency key uses a generated ID and cannot deduplicate an ambiguous retry.
 - If two inputs map to the same routing key but differ in full identity or request, fail closed with an explicit route-collision/conflict result. Never read, mutate, or overwrite the other owner's record.
@@ -249,7 +249,7 @@ Roblox DataStore key names are limited to 50 characters. Define and test a stabl
 Initial values are benchmark candidates, not production claims:
 
 - one partition by default; partition count is immutable after activation;
-- at most 32 message IDs per active segment;
+- at most 32 canonical message record keys per active segment;
 - at most 250,000 encoded bytes per segment index, even though it contains only IDs;
 - at most 64 live segment slots per partition initially; slots can be reclaimed out of order after all entries are terminal or stale, so a delayed old item does not pin all later completed slots;
 - each reused slot gets a strictly increasing generation encoded into its segment key; generations never wrap or reuse an old key;
@@ -257,7 +257,7 @@ Initial values are benchmark candidates, not production claims:
 - retain the current 60-second claim lease and 10-second polling defaults until queue-specific measurements justify changes;
 - deduplication and dead-letter retention must be explicit. Never expire a dedup receipt before the advertised idempotency window.
 
-The number of message IDs per segment is not the same as maximum pending backlog. Segments may be reclaimed only after every referenced message is terminal or safely re-routed and the segment is sealed. Deleting a segment key is not the acknowledgement of any message in it.
+The number of record keys per segment is not the same as maximum pending backlog. Segments may be reclaimed only after every referenced message is terminal or safely re-routed and the segment is sealed. Deleting a segment key is not the acknowledgement of any message in it.
 
 ### 4.4 Segment rollover and append protocol
 
@@ -271,7 +271,7 @@ The segment index is a discovery aid; the canonical message record is both the m
 6. Retarget a preparing message only after the previous segment is confirmed sealed and the index pair is confirmed absent. Increment the placement generation. Stale writers to an old generation see a sealed or missing key and cannot append. Workers require the index generation to match the canonical message locator.
 7. After verifying the matching index entry, promote the canonical message from `preparing` to `ready` with a CAS that checks the expected locator and placement generation. The index entry references the canonical storage key, while status APIs return the stored public message ID. Only `ready` messages can be claimed. Return `accepted` only after this state is verified; an ambiguous response remains `unknown` until the canonical record is reconciled.
 8. If the server stops before the canonical record and index are both verified, the caller must retry with the same idempotency key to resume. If the index exists but the message remains `preparing`, reconciliation promotes it to ready only after validating owner, exact request, index entry and placement generation. If the canonical record exists but no index entry was committed, the submission was not reported as accepted; the idempotent retry resumes the same record.
-9. An index row is deliverable only when owner, slot, segment generation, message ID and placement generation match the canonical message. Duplicate or stale rows are skipped. Claim is a CAS on the canonical message record.
+9. An index row is deliverable only when owner, slot, segment generation, canonical record key, canonical record locator and placement generation match. For new v2 messages the public message ID equals the canonical key; for migrated legacy messages the stored public ID may differ from the `m2l-` route. Duplicate or stale rows are skipped. Claim is a CAS on the canonical message record.
 
 Slot lifecycle:
 
@@ -312,7 +312,7 @@ If the handler effect committed but the state never reached `acknowledging`, red
 
 **Dead-lettering:**
 1. Persist `dead_lettering` on the canonical message under the current token.
-2. Append the message ID and terminal generation to the independent DLQ index idempotently.
+2. Append the canonical message record key and terminal generation to the independent DLQ index idempotently.
 3. Persist `dead_lettered` on the canonical message.
 4. Recovery repeats the same transitions idempotently. `dead_lettering` is never eligible for user handler execution, and the canonical record remains queryable as the producer's outcome receipt.
 
@@ -533,7 +533,7 @@ Every accelerator has an off switch and a polling-only fallback. Removing Memory
 
 ### 9.1 Independent DLQ
 
-Dead letters are canonical message records plus a separately segmented DLQ index. A dead-letter append is idempotent by message ID and terminal generation. No active segment size calculation may include historical DLQ records.
+Dead letters are canonical message records plus a separately segmented DLQ index. A dead-letter append is idempotent by canonical message record key and terminal generation; the API exposes the record's public message ID. No active segment size calculation may include historical DLQ records.
 
 Expose module-level `RecordStore.list_dead_letters_async(store_name, scope, profile_key, cursor, page_size)` plus Record convenience methods:
 - paginated `ListDeadLettersAsync(cursor, page_size)`;
@@ -545,7 +545,7 @@ A large DLQ is inspected page by page; no API silently materializes an unbounded
 
 ### 9.2 Replay safety
 
-Replay is a new delivery generation of the same logical message ID. It atomically reserves a replay token on the canonical record, appends a new segment index entry with a larger placement generation, then transitions back to ready. The old segment row becomes stale and is ignored. Repeated replay requests with the same replay operation ID return the same outcome; a different replay request while one is pending conflicts.
+Replay is a new delivery generation of the same logical message. It atomically reserves a replay token on the canonical record, appends its canonical storage key to a new segment index entry with a larger placement generation, then transitions back to ready. The public message ID stays stable across replay. The old segment row becomes stale and is ignored. Repeated replay requests with the same replay operation ID return the same outcome; a different replay request while one is pending conflicts.
 
 Before replay, validate the message type and payload schema against the currently registered decoder/migration. Allow a dry-run validation result that shows the intended upgraded payload without changing durable state. Unknown future schemas remain quarantined; never force-rewrite them to an older guessed shape.
 
