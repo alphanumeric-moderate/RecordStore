@@ -184,6 +184,39 @@ local dependency_result = dependency_guard:ExecuteAsync(115, "erasure-missing-de
 assert(dependency_result.code == "unsupported", "missing dependency proof did not fail closed")
 assert(delete_calls == deleted_before_guard, "erasure deleted a record without dependency-clearance proof")
 
+local restore_tombstone_key = "__recordstore_v2_erasure_tombstone"
+local restore_record = {
+	data = {
+		Coins = 5,
+		[restore_tombstone_key] = { erasure_id = "restore-race", generation = 2 },
+	},
+}
+function restore_record:Get() return clone(self.data) end
+function restore_record:Stats() return { state = "active", revision = 1 } end
+function restore_record:TransactAsync(_operation_id, _fingerprint, transform, _canonical_request)
+	local ok, next_data = pcall(transform, self.data)
+	if not ok then return "validation", tostring(next_data) end
+	self.data = next_data
+	return "success", nil
+end
+local restore_result = V2.ProfileDoctor.Restore(
+	restore_record,
+	{ Coins = 999, RestoredField = true },
+	1,
+	"restore-after-erasure-fence",
+	"operator-test",
+	"verify that profile-key tombstones win",
+	{
+		subject_user_id = 118,
+		is_erased = function() return false end,
+	}
+)
+assert(restore_result.code ~= "committed" and restore_result.code ~= "success",
+	"historical restore bypassed the durable profile-key erasure tombstone")
+assert(restore_record.data.Coins == 5, "blocked restore still replaced profile data")
+assert(restore_record.data[restore_tombstone_key] ~= nil,
+	"blocked restore removed the durable erasure tombstone")
+
 local absent = V2.Erasure.new(new_store(), {}, {})
 local absent_result, absent_status = absent:IsErased(117)
 assert(absent_result == false and absent_status.code == "not_found",
