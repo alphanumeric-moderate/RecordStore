@@ -5095,17 +5095,13 @@ local function prepare_outbox_inputs(
 end
 
 local function validate_envelope_for_transaction(envelope: Envelope): (boolean, string?)
-	local encoded_ok, encoded_message = pcall(function()
-		return validate_serialized_size(encode_envelope_for_storage(envelope))
+	local encoded_ok, stored_or_error = pcall(function()
+		return encode_envelope_for_storage(envelope)
 	end)
 	if not encoded_ok then
-		return false, tostring(encoded_message)
+		return false, tostring(stored_or_error)
 	end
-	local valid, message = validate_serialized_size(encode_envelope_for_storage(envelope))
-	if not valid then
-		return false, message
-	end
-	return true, nil
+	return validate_serialized_size(stored_or_error :: JsonValue)
 end
 
 local function transaction_internal(
@@ -5236,12 +5232,6 @@ local function transaction_internal(
 			if envelope.revision ~= expected_revision then
 				decision = "conflict"
 				decision_message = "durable revision changed before transaction commit"
-				return nil, nil, nil
-			end
-			if #{} > 0 then
-				-- Keeps this transform visibly free of consumer callbacks and yielding work.
-				decision = "validation"
-				decision_message = "invalid transaction state"
 				return nil, nil, nil
 			end
 			local receipts_copy = clone_inbox_receipts(envelope.inbox_receipts)
@@ -5526,15 +5516,21 @@ local function update_profile_sidecars(
 end
 
 local function transaction(self: Record, operation_id: string, request_fingerprint: string, transform: TransactionTransform): (ResultCode, string?)
-	return transaction_internal(private[self], operation_id, request_fingerprint, transform, nil)
+	local state = private[self]
+	if state == nil then return "invalid", "record does not exist" end
+	return transaction_internal(state, operation_id, request_fingerprint, transform, nil)
 end
 
 local function apply_inbox(self: Record, operation_id: string, request_fingerprint: string, transform: TransactionTransform): (ResultCode, string?)
-	return transaction_internal(private[self], operation_id, request_fingerprint, transform, nil)
+	local state = private[self]
+	if state == nil then return "invalid", "record does not exist" end
+	return transaction_internal(state, operation_id, request_fingerprint, transform, nil)
 end
 
 local function commit_with_outbox(self: Record, operation_id: string, request_fingerprint: string, transform: TransactionTransform, events: { OutboxEventInput }): (ResultCode, string?)
-	return transaction_internal(private[self], operation_id, request_fingerprint, transform, events)
+	local state = private[self]
+	if state == nil then return "invalid", "record does not exist" end
+	return transaction_internal(state, operation_id, request_fingerprint, transform, events)
 end
 
 local function get_outbox(self: Record, max_items: number?): ({ OutboxEvent }, ResultCode, string?)
@@ -5603,6 +5599,8 @@ end
 
 local function dispatch_outbox(self: Record, dispatcher: OutboxDispatcher, max_items: number?): (number, ResultCode, string?)
 	if type(dispatcher) ~= "function" then return 0, "invalid", "dispatcher must be a function" end
+	local state = private[self]
+	if state == nil then return 0, "invalid", "record does not exist" end
 	local events, read_code, read_message = get_outbox(self, max_items)
 	if read_code ~= "success" then return 0, read_code, read_message end
 	local dispatched = 0
@@ -5627,12 +5625,14 @@ local function dispatch_outbox(self: Record, dispatcher: OutboxDispatcher, max_i
 end
 
 local function prune_transaction_receipts(self: Record, committed_before_unix: number, max_items: number?): (number, ResultCode, string?)
+	local state = private[self]
+	if state == nil then return 0, "invalid", "record does not exist" end
 	if not math.isfinite(committed_before_unix) then return 0, "invalid", "committed_before_unix must be finite" end
 	local limit = max_items or 16
 	if not math.isfinite(limit) or math.floor(limit) ~= limit or limit < 1 or limit > 32 then
 		return 0, "invalid", "max_items must be an integer from 1 to 32"
 	end
-	return update_profile_sidecars(private[self], "receipt_prune", function(receipts, outbox, _now)
+	return update_profile_sidecars(state, "receipt_prune", function(receipts, outbox, _now)
 		local keys: { string } = {}
 		for operation_id, receipt in receipts do
 			if receipt.committed_at < committed_before_unix then table.insert(keys, operation_id) end
@@ -5646,12 +5646,14 @@ local function prune_transaction_receipts(self: Record, committed_before_unix: n
 end
 
 local function prune_outbox(self: Record, dispatched_before_unix: number, max_items: number?): (number, ResultCode, string?)
+	local state = private[self]
+	if state == nil then return 0, "invalid", "record does not exist" end
 	if not math.isfinite(dispatched_before_unix) then return 0, "invalid", "dispatched_before_unix must be finite" end
 	local limit = max_items or 16
 	if not math.isfinite(limit) or math.floor(limit) ~= limit or limit < 1 or limit > 32 then
 		return 0, "invalid", "max_items must be an integer from 1 to 32"
 	end
-	return update_profile_sidecars(private[self], "outbox_prune", function(receipts, outbox, _now)
+	return update_profile_sidecars(state, "outbox_prune", function(receipts, outbox, _now)
 		local keys: { string } = {}
 		for event_id, event in outbox do
 			if event.state == "dispatched" and event.created_at < dispatched_before_unix then table.insert(keys, event_id) end
@@ -7469,6 +7471,13 @@ local function make_record(name: string, scope: string, key: string, options: Op
 		Update = update,
 		Reconcile = reconcile,
 		Save = save,
+		TransactAsync = transaction,
+		ApplyInboxAsync = apply_inbox,
+		CommitWithOutboxAsync = commit_with_outbox,
+		GetOutboxAsync = get_outbox,
+		DispatchOutboxAsync = dispatch_outbox,
+		PruneTransactionReceiptsAsync = prune_transaction_receipts,
+		PruneOutboxAsync = prune_outbox,
 		MessageAsync = message,
 		EnqueueAsync = enqueue,
 		ProcessQueueAsync = process_queue,
