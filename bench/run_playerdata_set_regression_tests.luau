@@ -8,6 +8,22 @@ local saved_records = harness.saved_records
 local task = harness.task
 local get_find_first_child_calls = harness.get_find_first_child_calls
 
+local record_options = harness.get_record_options()
+assert(record_options ~= nil, "PlayerDataCore did not create a RecordStore session")
+
+assert(record_options.autosave_interval == 90, "unexpected autosave interval")
+assert(record_options.lease_duration == 180, "unexpected session lease duration")
+assert(record_options.lease_renewal == 60, "unexpected session lease renewal interval")
+assert(record_options.operation_deadline == 20, "unexpected operation deadline")
+assert(record_options.retry_attempts == 5, "unexpected operation retry count")
+assert(record_options.shutdown_deadline == 25, "unexpected shutdown deadline")
+assert(record_options.shutdown_attempts == 2, "unexpected shutdown attempt count")
+assert(record_options.budget_wait == 2, "unexpected DataStore budget wait")
+assert(
+	record_options.lease_duration > record_options.lease_renewal + record_options.operation_deadline,
+	"lease duration must exceed renewal interval plus operation deadline"
+)
+
 local path_lookups_before_set = get_find_first_child_calls()
 local success, message = controller.Set(player, "kills", 12500124)
 assert(success, message)
