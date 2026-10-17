@@ -349,7 +349,11 @@ local dirty_seen = setmetatable({}, { __mode = "k" })
 
 local function new_governor(options)
 	options = options or {}
-	local function now_ms() return if type(options.now_ms) == "function" then options.now_ms() else os.clock() * 1000 end end
+	local selection_now_override: number? = nil
+	local function now_ms()
+		if selection_now_override ~= nil then return selection_now_override end
+		return if type(options.now_ms) == "function" then options.now_ms() else os.clock() * 1000
+	end
 	local governor = {
 		policy = {
 			revision = 1, mode = "normal", max_in_flight = 32, critical_reserve = 4,
@@ -569,7 +573,7 @@ local function new_governor(options)
 		if #high > 0 and self.high_streak < self.policy.high_burst then candidates = high
 		elseif #regular > 0 then
 			candidates = regular
-			for _, row in ipairs(background) do if now - row.item.enqueued_at_ms >= 10000 then candidates = background break end end
+			for _, row in ipairs(background) do if now - row.item.enqueued_at_ms >= (self.aging_threshold_ms or 10000) then candidates = background break end end
 		elseif #background > 0 then candidates = background else candidates = high end
 		local best, best_score
 		for _, row in ipairs(candidates or {}) do
@@ -583,6 +587,97 @@ local function new_governor(options)
 		end
 		return best
 	end
+
+	function governor:SelectCandidates(candidates, owner_id, observed_now_ms, priority_aging_ms)
+		if type(candidates) ~= "table" or #candidates > 4096 then
+			return nil, "candidate list must be a table with at most 4096 entries"
+		end
+		if type(owner_id) ~= "string" or owner_id == "" or not finite(observed_now_ms) then
+			return nil, "candidate selection needs owner identity and a finite observation time"
+		end
+		local age_limit = priority_aging_ms or 60000
+		if not finite(age_limit) or age_limit < 1 or age_limit > 3600000 then
+			return nil, "priority_aging_ms must be between 1 and 3600000"
+		end
+		local owner_key = digest(owner_id)
+		local original_by_id = {}
+		local queue = {}
+		local seen_routes = {}
+		for index, value in ipairs(candidates) do
+			local candidate = if type(value) == "table" then value else nil
+			local route = if candidate ~= nil then candidate.Id else nil
+			if type(route) ~= "string" or route == "" then
+				return nil, ("candidate %d has no stable string Id"):format(index)
+			end
+			local identity = digest(route)
+			if original_by_id[identity] ~= nil and original_by_id[identity].Id ~= route then
+				return nil, "candidate route digest collision"
+			end
+			if original_by_id[identity] == nil then
+				local lane = tostring(candidate.Priority or "normal")
+				if lane ~= "high" and lane ~= "normal" and lane ~= "background" then lane = "normal" end
+				local created_at = if finite(candidate.CreatedAt) then candidate.CreatedAt else observed_now_ms
+				local due_at = if finite(candidate.AvailableAt) then candidate.AvailableAt else created_at
+				local deadline = if finite(candidate.ExpiresAt) then candidate.ExpiresAt else nil
+				original_by_id[identity] = candidate
+				table.insert(queue, {
+					id = identity,
+					owner_id = owner_key,
+					lane = lane,
+					cost = 1,
+					enqueued_at_ms = created_at,
+					due_at_ms = due_at,
+					deadline_ms = deadline,
+					-- Expired durable messages must still reach _claim so the mailbox can
+					-- commit the terminal "expired" transition. Expiry remains authoritative there.
+					dependencies = {},
+				})
+			else
+				seen_routes[route] = true
+			end
+		end
+		local shadow = {
+			queue = queue,
+			completed = {},
+			known = {},
+			owner_finish = copy(self.owner_finish),
+			high_streak = self.high_streak,
+			policy = self.policy,
+			aging_threshold_ms = age_limit,
+		}
+		local previous_override = selection_now_override
+		selection_now_override = observed_now_ms
+		local ok, ordered_or_error = pcall(function()
+			local ordered = {}
+			while #shadow.queue > 0 do
+				local index = choose_index(shadow)
+				if index == nil then break end
+				local item = table.remove(shadow.queue, index)
+				local original = original_by_id[item.id]
+				if original ~= nil then table.insert(ordered, original) end
+				if item.lane == "high" then shadow.high_streak += 1 else shadow.high_streak = 0 end
+				local weight = if item.lane == "high" then 4 elseif item.lane == "background" then 1 else 2
+				shadow.owner_finish[item.owner_id] = (shadow.owner_finish[item.owner_id] or 0) + (item.cost or 1) / weight
+			end
+			return ordered
+		end)
+		selection_now_override = previous_override
+		if not ok then return nil, tostring(ordered_or_error) end
+		return ordered_or_error, nil
+	end
+
+	function governor:MarkSelected(candidate, owner_id)
+		if type(candidate) ~= "table" or type(candidate.Id) ~= "string" or type(owner_id) ~= "string" or owner_id == "" then
+			return false, "candidate selection receipt is invalid"
+		end
+		local lane = tostring(candidate.Priority or "normal")
+		if lane ~= "high" then self.high_streak = 0 else self.high_streak += 1 end
+		local weight = if lane == "high" then 4 elseif lane == "background" then 1 else 2
+		local owner_key = digest(owner_id)
+		self.owner_finish[owner_key] = (self.owner_finish[owner_key] or 0) + 1 / weight
+		return true, nil
+	end
+
 	function governor:TakeNext()
 		local now = now_ms()
 		for index = #self.queue, 1, -1 do
@@ -1561,7 +1656,17 @@ function V2.new(record_store, mailbox_module, options)
 		OrderingContract = "strict ordering_key is not enabled; priority is a hint among eligible messages",
 		Canonicalize = canonical,
 		Fingerprint = function(value) local ok, material = pcall(canonical, value); return if ok then digest(material) else nil end end,
-		Mailbox = { new = function(store, owner, mailbox_options) return mailbox_module.new(store, owner, mailbox_options) end },
+		Mailbox = {
+			new = function(store, owner, mailbox_options)
+				local merged_options = {}
+				if mailbox_options ~= nil then
+					if type(mailbox_options) ~= "table" then error("mailbox_options must be a table", 2) end
+					merged_options = table.clone(mailbox_options)
+				end
+				if merged_options.runtime_governor == nil then merged_options.runtime_governor = runtime_governor end
+				return mailbox_module.new(store, owner, merged_options)
+			end,
+		},
 		Transactions = {},
 		Inbox = new_inbox(),
 		Outbox = new_outbox(),

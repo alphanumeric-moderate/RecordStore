@@ -28,6 +28,7 @@ type WakeupAdapter = {
 }
 type Options = {
 	active_record: ActiveRecordLike?,
+	runtime_governor: any?,
 	wakeups: WakeupAdapter?,
 	sender_job_id: string?,
 	now_ms: (() -> number)?,
@@ -298,6 +299,12 @@ function MailboxV2.new(store: unknown, owner_value: Owner, options_value: Option
 		error("store must implement GetAsync and UpdateAsync", 2)
 	end
 	local options = table.clone(options_value or {}) :: Options
+	if options.runtime_governor ~= nil then
+		local scheduler = options.runtime_governor :: any
+		if type(scheduler) ~= "table" or type(scheduler.SelectCandidates) ~= "function" or type(scheduler.MarkSelected) ~= "function" then
+			error("options.runtime_governor must provide SelectCandidates and MarkSelected", 2)
+		end
+	end
 	if type(options.encode) ~= "function" then
 		error("options.encode must provide the exact serialized representation used by the DataStore adapter", 2)
 	end
@@ -1761,21 +1768,31 @@ local function process_next_internal(self: Mailbox, handler: (unknown, Dict) -> 
 		return ok("empty", nil, nil, nil)
 	end
 	local now = self:_now()
-	local rank = { high = 1, normal = 2, background = 3 }
-	table.sort(queue, function(left, right)
-		local left_rank = rank[tostring(left.Priority)] or 2
-		local right_rank = rank[tostring(right.Priority)] or 2
-		if now - (left.CreatedAt :: number) >= (self.options.priority_aging_ms :: number) then
-			left_rank = math.max(1, left_rank - 1)
+	local scheduler = self.options.runtime_governor
+	if scheduler ~= nil then
+		local select_ok, selected_queue, select_error = pcall(function()
+			return (scheduler :: any):SelectCandidates(queue, self.owner_text, now, self.options.priority_aging_ms)
+		end)
+		if not select_ok then return ok("unknown", nil, nil, "advanced candidate selection failed: " .. tostring(selected_queue)) end
+		if type(selected_queue) ~= "table" then
+			return ok("unknown", nil, nil, "advanced candidate selection failed: " .. tostring(select_error))
 		end
-		if now - (right.CreatedAt :: number) >= (self.options.priority_aging_ms :: number) then
-			right_rank = math.max(1, right_rank - 1)
-		end
-		if left_rank ~= right_rank then
-			return left_rank < right_rank
-		end
-		return (left.CreatedAt :: number) < (right.CreatedAt :: number)
-	end)
+		queue = selected_queue :: { Dict }
+	else
+		local rank = { high = 1, normal = 2, background = 3 }
+		table.sort(queue, function(left, right)
+			local left_rank = rank[tostring(left.Priority)] or 2
+			local right_rank = rank[tostring(right.Priority)] or 2
+			if now - (left.CreatedAt :: number) >= (self.options.priority_aging_ms :: number) then
+				left_rank = math.max(1, left_rank - 1)
+			end
+			if now - (right.CreatedAt :: number) >= (self.options.priority_aging_ms :: number) then
+				right_rank = math.max(1, right_rank - 1)
+			end
+			if left_rank ~= right_rank then return left_rank < right_rank end
+			return (left.CreatedAt :: number) < (right.CreatedAt :: number)
+		end)
+	end
 	for _, candidate in queue do
 		local route = tostring(candidate.Id)
 		local record, claim_result = self:_claim(route)
@@ -1785,6 +1802,12 @@ local function process_next_internal(self: Mailbox, handler: (unknown, Dict) -> 
 				local released = self:_retry_claim(route, tostring(record.claim_token), "active Record guard changed before handler start: " .. tostring(session_error_after_claim))
 				if released.code ~= "retry_scheduled" and released.code ~= "expired" and released.code ~= "dead_lettered" then return released end
 				return ok(session_code_after_claim, route, nil, session_error_after_claim)
+			end
+			if self.options.runtime_governor ~= nil then
+				-- Scheduler bookkeeping is advisory; durable claim/session authority remains authoritative.
+				pcall(function()
+					(self.options.runtime_governor :: any):MarkSelected(candidate, self.owner_text)
+				end)
 			end
 			local snapshot = self:_record_snapshot(record)
 			local call_ok, handler_result, handler_error = pcall(handler, clone_json(record.payload), snapshot)

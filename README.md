@@ -332,6 +332,8 @@ templates, writer fences, dependency clearance, and generation-aware deletion/re
 mixed-version rollout protocol and these integration guarantees are release gates, not results of
 adding helper APIs.
 
+Mailboxes created through `V2.Mailbox.new(store, owner, options)` receive the shared advanced candidate selector unless an explicit `runtime_governor` option is supplied. It orders currently eligible candidates without mutating durable state, using due time, priority lane, age/deadline urgency and owner-fairness state; fairness counters advance only after a successful durable claim and active-session check. Direct calls to `RecordStoreMailboxV2.new` remain compatible and keep the legacy local sorter unless explicitly passed the governor.
+
 The V2 advanced governor is shared by V2 facades that wrap the same core RecordStore module. It applies class admission, request observation, per-kind read/write budget checks, and circuit decisions to V2 DataStore-adapter calls before the core request gate makes the final admission decision. Half-open probes are not reserved until the budget and class caps permit a request. Its `options.runtime` values seed the governor only when it is first created for a core module; use `V2.ApplySchedulerPolicy({ revision = currentRevision + 1, ... })` for later updates. Unknown fields and out-of-range values are rejected. It remains a local scheduling model, not the production selector for every mailbox, outbox, and maintenance operation; the core RecordStore request gate remains authoritative for shared request admission.
 
 The authoritative section-by-section design map is

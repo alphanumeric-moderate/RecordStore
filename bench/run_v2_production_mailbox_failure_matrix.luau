@@ -7,6 +7,7 @@ local HttpService = game:GetService("HttpService")
 local RecordStore = Shim.load_isolated("live-mailbox-server")
 local MailboxV2 = require("../src/PlayerDataInitializer/RecordStoreMailboxV2")
 local Adapter = require("../src/PlayerDataInitializer/RecordStoreV2DataStoreAdapter")
+local V2Module = require("../src/PlayerDataInitializer/RecordStoreV2")
 
 local now_ms = 1_800_000_000_000
 local guid_counter = 0
@@ -44,7 +45,10 @@ local open_code, open_message = active_record:Open({ processed_coins = 0 })
 assert(open_code == "created" or open_code == "loaded", tostring(open_message))
 
 local adapter = Adapter.new(RecordStore, MAILBOX_STORE, SCOPE, 5, Fake)
-local mailbox = MailboxV2.new(adapter, owner, {
+local V2 = V2Module.new(RecordStore, MailboxV2, {
+	runtime = { now_ms = function() return now_ms end },
+})
+local mailbox = V2.Mailbox.new(adapter, owner, {
 	active_record = active_record,
 	sender_job_id = "live-mailbox-server",
 	now_ms = function() return now_ms end,
@@ -134,6 +138,74 @@ assert(handler_calls == 1, "recovery re-executed an already acknowledged handler
 local profile_snapshot = RecordStore.read_async(PROFILE_STORE, SCOPE, owner.profile_key)
 assert(profile_snapshot ~= nil and profile_snapshot.data.processed_coins == 60,
 	"mailbox handler profile effects did not persist exactly once per test message")
+-- The V2.Mailbox factory injects the same governor used by the core adapter hook.
+local SCHEDULER_STORE = "RecordStoreV2MailboxScheduling"
+local SCHEDULER_PROFILE = "mailbox-scheduler-owner"
+local scheduler_owner = {
+	store_name = PROFILE_STORE,
+	scope = SCOPE,
+	profile_key = SCHEDULER_PROFILE,
+	user_id = USER_ID,
+}
+local scheduler_record = RecordStore.new(PROFILE_STORE, SCOPE, SCHEDULER_PROFILE, {
+	schema_version = 1,
+	retry_attempts = 2,
+	lease_duration = 10,
+	lease_renewal = 1,
+	operation_deadline = 5,
+	user_ids = { USER_ID },
+	messaging_enabled = false,
+	takeover_enabled = false,
+	autosave_interval = 3600,
+	queue_poll_interval = 3600,
+})
+local scheduler_open, scheduler_open_message = scheduler_record:Open({ processed_coins = 0 })
+assert(scheduler_open == "created" or scheduler_open == "loaded", tostring(scheduler_open_message))
+local scheduler_adapter = Adapter.new(RecordStore, SCHEDULER_STORE, SCOPE, 5, Fake)
+local scheduler_mailbox = V2.Mailbox.new(scheduler_adapter, scheduler_owner, {
+	active_record = scheduler_record,
+	sender_job_id = "live-mailbox-scheduler",
+	now_ms = function() return now_ms end,
+	guid = guid,
+	encode = function(value) return HttpService:JSONEncode(value) end,
+	max_segments = 4,
+	segment_max_messages = 4,
+	preparation_shard_count = 4,
+	preparation_max_entries_per_shard = 8,
+	lease_ms = 30000,
+	clock_skew_grace_ms = 1000,
+	max_attempts = 3,
+	retry_base_ms = 10,
+	retry_max_ms = 100,
+})
+local scheduler_policy, scheduler_policy_message = V2.ApplySchedulerPolicy({
+	revision = V2.RuntimeGovernor.get_shared():Stats().policy.revision + 1,
+	high_burst = 1,
+})
+assert(scheduler_policy == "success", tostring(scheduler_policy_message))
+for _, spec in ipairs({
+	{ type = "high-first", priority = "high" },
+	{ type = "high-second", priority = "high" },
+	{ type = "normal-lane", priority = "normal" },
+}) do
+	local enqueued = scheduler_mailbox:EnqueueAsync(spec.type, { label = spec.type }, {
+		idempotency_key = "scheduler-" .. spec.type,
+		priority = spec.priority,
+	})
+	assert(enqueued.code == "accepted", tostring(enqueued.error))
+end
+local actual_order = {}
+for _ = 1, 3 do
+	local processed = scheduler_mailbox:ProcessNextAsync(function(payload)
+		table.insert(actual_order, payload.label)
+		return true
+	end)
+	assert(processed.code == "processed", "advanced selector failed to process an eligible message: " .. tostring(processed.code))
+end
+assert(actual_order[1] == "high-first" and actual_order[2] == "normal-lane" and actual_order[3] == "high-second",
+	"V2 production candidate selector did not enforce the configured high-lane burst")
+scheduler_record:Close()
+
 local stats = Fake:Stats()
 assert(stats.calls.update > 0 and stats.calls.get > 0, "mailbox path bypassed the deterministic DataStore backend")
 active_record:Close()
