@@ -2,7 +2,7 @@
 
 - Date: 2026-10-17
 - Status: Revised design; supersedes the earlier design wherever they conflict
-- Scope: durable mailbox, message processing, transactional outbox/inbox, and recoverable workflows
+- Scope: durable mailbox, message processing, transactional outbox/inbox, recoverable workflows, server-local dynamic configuration and measured acceleration
 - Related PRs: #31 (configuration/observer design), #32 (initial durable-messaging design)
 
 ## Executive decision
@@ -13,7 +13,8 @@ Build a durable messaging subsystem that is more than a replacement for `Profile
 2. **Transactional outbox/inbox**: atomically commit profile-data changes with outbound intent, and atomically apply inbound message effects to one profile key with a deduplication receipt.
 3. **Recoverable sagas**: compose idempotent per-profile steps for transfers and other multi-record workflows without pretending that multiple DataStore keys form a transaction.
 4. **Operator-grade delivery tooling**: delivery receipts/status, transition history, schema-aware replay, paginated dead-letter inspection, health diagnostics, and bounded repair.
-5. **Optional acceleration**: MemoryStore and MessagingService may wake workers or provide hints; they never own correctness.
+5. **Optional acceleration**: MemoryStore and sharded MessagingService wake-ups, local candidate caching, explicit inbox batches, grouped outbox cleanup, fair lanes and typed circuit breakers may reduce waste and latency; they never own correctness.
+6. **Server-local adaptive governor**: one controller coordinates every Record in a server and adjusts only bounded scheduling/concurrency knobs from request budgets, observed latency and throttling. Versioned runtime policy snapshots and server profiles cannot weaken persistence invariants.
 
 The previous proposal placed full message objects, active state, and dead letters in segmented envelopes. This revision separates the **canonical message record** from the **append-only segment index**. Claims, retries, acknowledgements, and terminal transitions update one message key rather than rewriting the segment. This reduces write amplification and makes cross-key recovery state explicit.
 
@@ -29,7 +30,7 @@ Do not call arbitrary handlers exactly-once. RecordStore can provide a stronger,
 
 ### 1.2 Atomicity boundary
 
-Roblox DataStore `UpdateAsync` is atomic for the key being updated; it does not create a transaction across multiple keys. Any protocol that touches a manifest, segment, receipt, message record, profile record, dead-letter index, or saga record must persist intermediate states and recover them idempotently.
+Roblox DataStore `UpdateAsync` is atomic for the key being updated; it does not create a transaction across multiple keys. Any protocol that touches a manifest, segment index, canonical message record, profile envelope, dead-letter index, or saga record must persist intermediate states and recover them idempotently. Submission idempotency is stored in the canonical message record; inbox/commit receipts are stored with the profile envelope rather than in independent receipt keys.
 
 Inside every `UpdateAsync` transform:
 
@@ -49,8 +50,8 @@ New APIs return a typed result in addition to preserving existing result-code me
 - `duplicate`: the producer key matched an existing submission with the same exact canonical request;
 - `conflict`: the same producer key was reused for a different request, owner, or incompatible protocol state;
 - `capacity`: no durable space is available and no message was accepted;
-- `retryable`: no final conclusion was reached and the same operation key may be retried;
-- `unknown`: the caller must not infer commit or non-commit; retry with the same idempotency key if one was supplied. Without a key, do not blindly retry an irreversible operation;
+- `retryable`: the attempt is known not to have committed, so retry with the same operation key is safe;
+- `unknown`: the attempt may or may not have committed and could not be reconciled. Query by the returned `message_id` or retry with the same idempotency key. Without either, do not blindly retry an irreversible operation;
 - `processed`, `acknowledged`, `retry_scheduled`, `dead_lettered`, and `discarded`: durable lifecycle states, not publish results.
 
 A successful MessagingService publish means only that publish succeeded. A MemoryStore enqueue means only that an ephemeral hint was recorded. Neither proves that a durable message exists or that a handler completed.
@@ -78,6 +79,7 @@ The unique value is the combination of capabilities below. Statements about Prof
 | Multi-profile workflow/saga recovery | No equivalent documented public workflow API found | Optional saga coordinator that resumes idempotent steps and compensations |
 | Schema-aware message validation and safe dead-letter replay | No equivalent documented queue/replay API found | Versioned payload codecs, validation-before-replay, replay audit and operator-controlled retention |
 | Queue/outbox/inbox health snapshots | ProfileStore exposes critical-state/error signals for its profile operations | RecordStore adds bounded, explicitly approximate queue and workflow diagnostics without using metrics for correctness |
+| Server-local adaptive configuration and policy introspection | No equivalent documented public runtime governor API found | Shared budget-aware scheduler, versioned validated policy snapshots, server roles/profiles, last-known-good fallback and explainable effective settings |
 
 Primary comparison references:
 - ProfileStore README: https://github.com/MadStudioRoblox/ProfileStore/blob/main/README.md
