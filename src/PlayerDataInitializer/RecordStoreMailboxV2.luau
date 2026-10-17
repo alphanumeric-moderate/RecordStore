@@ -1631,6 +1631,7 @@ function MailboxV2.ProcessNextAsync(self: Mailbox, handler: (unknown, Dict) -> (
 end
 
 function MailboxV2.RecoverAsync(self: Mailbox): Result
+	local capacity_blocked_preparations = 0
 	for shard = 1, (self.options.preparation_shard_count :: number) do
 		local raw, read_error = self:_get(self:_registry_key(shard))
 		if read_error ~= nil then
@@ -1653,7 +1654,13 @@ function MailboxV2.RecoverAsync(self: Mailbox): Result
 					if entry ~= nil then
 						local result = self:_resume_reservation(route, entry)
 						if result.code ~= "accepted" and result.code ~= "duplicate" then
-							return result
+							local latest_entry, entry_error = self:_get_registry_entry(route)
+							if result.code == "unknown" and entry_error == nil and latest_entry ~= nil and latest_entry.capacity_blocked == true then
+								-- Capacity-blocked preparation remains durable, but cannot stall already-ready work.
+								capacity_blocked_preparations += 1
+							else
+								return result
+							end
 						end
 					end
 				end
@@ -1755,7 +1762,7 @@ function MailboxV2.RecoverAsync(self: Mailbox): Result
 			end
 		end
 	end
-	return ok("success", nil, nil, nil)
+	return ok("success", nil, if capacity_blocked_preparations > 0 then { capacity_blocked_preparations = capacity_blocked_preparations } else nil, nil)
 end
 
 function MailboxV2.GetDeadLettersAsync(self: Mailbox, cursor: string?, page_size: number?): ({ Dict }, string?, Result)
