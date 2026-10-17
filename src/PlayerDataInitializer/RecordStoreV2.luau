@@ -1452,6 +1452,10 @@ function V2.new(record_store, mailbox_module, options)
 	options = options or {}
 	if type(record_store) ~= "table" or type(record_store.new) ~= "function" then error("RecordStoreV2 requires RecordStore", 2) end
 	if type(mailbox_module) ~= "table" or type(mailbox_module.new) ~= "function" then error("RecordStoreV2 requires RecordStoreMailboxV2", 2) end
+	if type(record_store.configure_runtime) ~= "function" or type(record_store.get_runtime_stats) ~= "function" then
+		error("RecordStoreV2 requires the shared RecordStore runtime governor APIs", 2)
+	end
+	local runtime_governor = new_governor(options.runtime)
 	local api = {
 		Version = 2,
 		DeliveryGuarantee = "at-least-once",
@@ -1483,8 +1487,21 @@ function V2.new(record_store, mailbox_module, options)
 		if result.code == "capacity" then return { action = "backpressure", reason = "no partial acceptance implied" } end
 		return { action = "stop", reason = "conflict, validation, fencing, or unsupported state needs resolution" }
 	end
-	api.GetDurabilitySLO = function(record, threshold) return new_governor(options.runtime):GetDurabilitySLO(record, threshold) end
-	api.GetContentionDiagnostics = function(record) return new_governor(options.runtime):GetContentionDiagnostics(record) end
+	-- The core RecordStore module owns the one server-local request governor shared by all Records.
+	-- This facade delegates policy application/snapshots to that governor instead of creating a
+	-- second request-admission loop inside V2.
+	api.ApplyRuntimePolicy = function(policy)
+		return record_store.configure_runtime(policy)
+	end
+	api.GetRuntimeSnapshot = function()
+		return record_store.get_runtime_stats()
+	end
+	api.GetDurabilitySLO = function(record, threshold)
+		return runtime_governor:GetDurabilitySLO(record, threshold)
+	end
+	api.GetContentionDiagnostics = function(record)
+		return runtime_governor:GetContentionDiagnostics(record)
+	end
 	api.ShouldSave = function(record) return new_maintenance().ShouldSave(record_stats(record)) end
 	api.RenderErasureTemplate = render_template
 	api.Acceleration = options.acceleration_module

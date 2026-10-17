@@ -12,6 +12,7 @@ for _, path in {
 	"src/PlayerDataInitializer/RecordStoreV2Simulator.luau",
 	"bench/AtomicFakeDataStore.luau",
 	"bench/run_v2_production_path_failure_matrix.luau",
+	"bench/run_v2_runtime_governor_regression.luau",
 	"tests/RecordStoreMailboxV2Regression.server.luau",
 	"tests/RecordStoreTransactionsRegression.server.luau",
 	"bench/mailbox_v2_regression.bench.luau",
