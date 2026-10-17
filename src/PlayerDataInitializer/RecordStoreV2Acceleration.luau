@@ -59,10 +59,13 @@ type State = typeof(setmetatable({} :: {
 	guid: (() -> string)?,
 	running: boolean,
 	connections: { Connection },
+	subscribed_shards: { [number]: boolean },
+	poller_started: boolean,
 	registrations: { [string]: Registration },
 	registration_order: { string },
 	poll_cursor: number,
 	pending: { [string]: Pending },
+	pending_count: number,
 	running_callbacks: { [string]: boolean },
 	metrics: { [string]: number | string },
 }, Acceleration))
@@ -136,7 +139,7 @@ local function queue_candidate(self: State, owner_digest: string, reason: string
 		pending.updated_at_ms = self.now_ms()
 		self.metrics.coalesced_hints += 1
 	else
-		if (function() local count = 0; for _ in pairs(self.pending) do count += 1 end; return count end)() >= self.max_candidates then
+		if self.pending_count >= self.max_candidates then
 			local oldest, oldest_at = nil, nil
 			for identity, candidate in pairs(self.pending) do
 				if not self.running_callbacks[identity] and (oldest_at == nil or candidate.updated_at_ms < oldest_at) then
@@ -145,6 +148,7 @@ local function queue_candidate(self: State, owner_digest: string, reason: string
 			end
 			if oldest ~= nil then
 				self.pending[oldest] = nil
+				self.pending_count = math.max(0, self.pending_count - 1)
 				self.metrics.candidate_evictions += 1
 			else
 				self.metrics.candidate_drops += 1
@@ -152,6 +156,7 @@ local function queue_candidate(self: State, owner_digest: string, reason: string
 			end
 		end
 		self.pending[owner_digest] = { reason = reason, event_id = event_id, updated_at_ms = self.now_ms() }
+		self.pending_count += 1
 	end
 	if self.running_callbacks[owner_digest] then return end
 
@@ -161,7 +166,10 @@ local function queue_candidate(self: State, owner_digest: string, reason: string
 			local candidate = self.pending[owner_digest]
 			if candidate == nil then break end
 			self.pending[owner_digest] = nil
-			local ok, message = pcall(registration.callback, candidate.reason, registration.identity_digest)
+			self.pending_count = math.max(0, self.pending_count - 1)
+			local current_registration = self.registrations[owner_digest]
+			if current_registration == nil then break end
+			local ok, message = pcall(current_registration.callback, candidate.reason, current_registration.identity_digest)
 			if ok then
 				self.metrics.callbacks += 1
 			else
@@ -240,10 +248,13 @@ function Acceleration.new(config: Config?): State
 		guid = config.guid,
 		running = false,
 		connections = {},
+		subscribed_shards = {},
+		poller_started = false,
 		registrations = {},
 		registration_order = {},
 		poll_cursor = 1,
 		pending = {},
+		pending_count = 0,
 		running_callbacks = {},
 		metrics = {
 			published_hints = 0,
@@ -301,7 +312,14 @@ function Acceleration.Unregister(self: State, owner_identity: string): boolean
 	if not valid_text(owner_identity, MAX_IDENTITY_BYTES) then return false end
 	local owner_digest = digest(owner_identity)
 	self.registrations[owner_digest] = nil
-	self.pending[owner_digest] = nil
+	if self.pending[owner_digest] ~= nil then
+		self.pending[owner_digest] = nil
+		self.pending_count = math.max(0, self.pending_count - 1)
+	end
+	for index = #self.registration_order, 1, -1 do
+		if self.registration_order[index] == owner_digest then table.remove(self.registration_order, index) end
+	end
+	if self.poll_cursor > #self.registration_order then self.poll_cursor = 1 end
 	return true
 end
 
@@ -376,46 +394,52 @@ function Acceleration.ProbeHint(self: State, owner_identity: string): (boolean, 
 end
 
 function Acceleration.Start(self: State): (boolean, string?)
-	if self.running then return true, nil end
 	self.running = true
 	local failures = 0
 	for shard = 1, self.shard_count do
-		local expected_shard = shard
-		local ok, connection = pcall(function()
-			return self.messaging_service:SubscribeAsync(topic_for(self, expected_shard), function(message)
-				local payload = if type(message) == "table" then (message :: Dict).Data else nil
-				receive(self, payload, expected_shard)
+		if not self.subscribed_shards[shard] then
+			local expected_shard = shard
+			local ok, connection = pcall(function()
+				return self.messaging_service:SubscribeAsync(topic_for(self, expected_shard), function(message)
+					local payload = if type(message) == "table" then (message :: Dict).Data else nil
+					receive(self, payload, expected_shard)
+				end)
 			end)
-		end)
-		if ok and connection ~= nil then
-			table.insert(self.connections, connection :: Connection)
-		else
-			failures += 1
-			self.metrics.last_error = string.sub(string.gsub(tostring(connection), "%c", " "), 1, 200)
-		end
-	end
-	task.spawn(function()
-		while self.running do
-			task.wait(self.poll_interval_seconds)
-			if not self.running then break end
-			local count = #self.registration_order
-			if count == 0 then continue end
-			local delivered = 0
-			local examined = 0
-			while examined < count and delivered < self.max_poll_callbacks_per_tick do
-				if self.poll_cursor > count then self.poll_cursor = 1 end
-				local owner_digest = self.registration_order[self.poll_cursor]
-				self.poll_cursor += 1
-				examined += 1
-				if self.registrations[owner_digest] ~= nil then
-					queue_candidate(self, owner_digest, "poll", nil)
-					self.metrics.poll_callbacks += 1
-					delivered += 1
-				end
+			if ok and connection ~= nil then
+				self.subscribed_shards[shard] = true
+				table.insert(self.connections, connection :: Connection)
+			else
+				failures += 1
+				self.metrics.last_error = string.sub(string.gsub(tostring(connection), "%c", " "), 1, 200)
 			end
 		end
-	end)
-	return failures == 0, if failures == 0 then nil else ("%d shard subscriptions failed; polling fallback remains active"):format(failures)
+	end
+	if not self.poller_started then
+		self.poller_started = true
+		task.spawn(function()
+			while self.running do
+				task.wait(self.poll_interval_seconds)
+				if not self.running then break end
+				local count = #self.registration_order
+				if count == 0 then continue end
+				local delivered = 0
+				local examined = 0
+				while examined < count and delivered < self.max_poll_callbacks_per_tick do
+					if self.poll_cursor > count then self.poll_cursor = 1 end
+					local owner_digest = self.registration_order[self.poll_cursor]
+					self.poll_cursor += 1
+					examined += 1
+					if self.registrations[owner_digest] ~= nil then
+						queue_candidate(self, owner_digest, "poll", nil)
+						self.metrics.poll_callbacks += 1
+						delivered += 1
+					end
+				end
+			end
+			self.poller_started = false
+		end)
+	end
+	return failures == 0, if failures == 0 then nil else ("%d shard subscriptions failed; polling fallback remains active; call Start again to retry subscriptions"):format(failures)
 end
 
 function Acceleration.Stop(self: State)
@@ -424,6 +448,7 @@ function Acceleration.Stop(self: State)
 		pcall(function() connection:Disconnect() end)
 	end
 	table.clear(self.connections)
+	table.clear(self.subscribed_shards)
 end
 
 function Acceleration.Stats(self: State): { [string]: unknown }
