@@ -192,6 +192,14 @@ local function transaction_run(record, operation_id, request, reducer, mode, eve
 	local fn = if mode == "inbox" then record.ApplyInboxAsync elseif mode == "outbox" then record.CommitWithOutboxAsync else record.TransactAsync
 	if type(fn) ~= "function" then return { code = "invalid", message = "record lacks the requested transaction API" } end
 	local function transform(data)
+		-- Erasure fencing must share the atomic profile-key mutation boundary.
+		-- An out-of-key IsErased lookup is advisory and may race this transform.
+		if type(data) == "table" then
+			local tombstone = data[RESERVED .. "erasure_tombstone"]
+			if tombstone ~= nil and tombstone ~= false then
+				error("v2 profile mutation is blocked by the durable erasure tombstone")
+			end
+		end
 		local next_data, reducer_error = pure(reducer, data, request)
 		if next_data == nil then error("v2 reducer rejected request: " .. tostring(reducer_error or "returned nil")) end
 		return next_data
