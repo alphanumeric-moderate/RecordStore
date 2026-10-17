@@ -204,10 +204,9 @@ The layout consists of:
 
 1. **Constant-bounded manifest** per owner and partition: protocol version, full owner identity, immutable partition count, activation/migration state, a fixed-size segment-slot table, per-slot generation/state/current segment key, and a scan hint. The table is capped at the configured maximum (initially 64); it never grows with message count.
 2. **Append-only segment index**: bounded entries containing message ID plus placement generation, not payload, retry state, or dead-letter history. Appending is idempotent; message processing never rewrites this index entry. Segment keys include both slot and generation so a reused slot cannot alias an older segment.
-3. **Canonical message record**: one DataStore key per message ID. It owns payload, schema version, current lifecycle state, retry scheduling, attempt counters, claim token/expiry, current segment locator and generation, idempotency-receipt reference, correlation IDs, terminal reason and bounded transition history.
-4. **Submission receipt**: maps an owner-scoped producer idempotency key to one stable message ID and canonical request identity. It stores reservation/acceptance state, placement generation and timestamps. The exact request representation remains available for the configured deduplication window, so a hash collision cannot silently equate two payloads.
-5. **Independent dead-letter index**: separately segmented IDs for messages in dead-letter state. The canonical message record retains the payload/error needed for inspection and replay. A growing DLQ cannot consume active-segment capacity.
-6. **Profile-local inbox and outbox fields**: bounded sidecars in the profile envelope, so the data mutation and its corresponding inbox receipt/outbox intent can be committed in a single UpdateAsync. These fields require a versioned profile-envelope migration and explicit rollout gating.
+3. **Canonical message record and producer receipt**: one DataStore key per logical message. When an idempotency key is supplied, derive the message route/ID deterministically from the complete owner identity plus producer key, and store the full owner, original key, exact canonical request, payload, schema version, lifecycle state, retry schedule, attempts, claim token/expiry, current segment locator/generation, correlation IDs, terminal reason and bounded transition history in that same record. This record is both the message and the producer's durable receipt; there is no separate producer-receipt key to keep synchronized. Without a producer key, use a generated message ID and document that an ambiguous whole-call retry can create a second logical message.
+4. **Independent dead-letter index**: separately segmented IDs for messages in dead-letter state. The canonical message record retains the payload/error needed for inspection and replay. A growing DLQ cannot consume active-segment capacity.
+5. **Profile-local inbox and outbox fields**: bounded sidecars in the profile envelope, so the data mutation and its corresponding inbox receipt/outbox intent can be committed in a single UpdateAsync. These fields require a versioned profile-envelope migration and explicit rollout gating.
 
 A per-message canonical record costs more keys and service calls than one large queue envelope, but eliminates rewrites of unrelated message payloads on claim/ack and isolates hot-key traffic. CodSpeed and constrained-budget workload evidence must determine usable defaults rather than assuming this is always cheaper.
 
@@ -216,9 +215,10 @@ A per-message canonical record costs more keys and service calls than one large 
 Roblox DataStore key names are limited to 50 characters. Define and test a stable key codec for every route, message, segment, idempotency, and DLQ key. Include store/scope/owner identity in the stored value, not only in the key name.
 
 - Use fixed-length routing digests to fit names. Document the exact deterministic hash implementation; do not assume Roblox provides a cryptographic hash function.
-- On every read/update, compare the complete stored owner and logical ID to the requested values.
-- If two inputs map to the same routing key but differ in full identity, fail closed with an explicit route-collision error. Never read, mutate, or overwrite the other owner's record.
-- Hash collisions must not silently alias idempotency keys. If collision slots are not implemented and verified, the accepted behavior is a safe conflict, not automatic merging.
+- On every read/update, compare the complete stored owner, producer key (when present), message ID and exact canonical request to the requested values.
+- An idempotent message's record key is derived from a deterministic owner fingerprint and producer-key digest, so the same logical submission maps directly to its canonical message record without a second receipt lookup. A submission without an idempotency key uses a generated ID and cannot deduplicate an ambiguous retry.
+- If two inputs map to the same routing key but differ in full identity or request, fail closed with an explicit route-collision/conflict result. Never read, mutate, or overwrite the other owner's record.
+- Digests are routing aids, not proof of equality or authentication. A collision must be detected against the stored full identity and exact canonical request; it must never silently alias idempotency keys. Keep an implementation with fixed test vectors and fit every encoded key within 50 characters.
 - Test maximum-size store, scope and profile keys as well as generated IDs. Verify encoded serialized bytes, not character estimates.
 
 ### 4.3 Boundaries and initial defaults
@@ -238,22 +238,22 @@ The number of message IDs per segment is not the same as maximum pending backlog
 
 ### 4.4 Segment rollover and append protocol
 
-The segment index is a discovery aid; the canonical message record and its receipt decide whether an indexed ID is deliverable. The manifest uses a fixed-size slot table rather than a monotonically contiguous head/tail range. This allows out-of-order slot reclamation when an old delayed item remains pending.
+The segment index is a discovery aid; the canonical message record is both the message and the producer idempotency receipt. The manifest uses a fixed-size slot table rather than a monotonically contiguous head/tail range. This allows out-of-order slot reclamation when an old delayed item remains pending.
 
-1. Reserve a stable message ID and target (slot, generation) in the submission receipt. Generate candidate GUIDs before UpdateAsync; retries reuse the winning ID.
-2. Create the canonical message record in `preparing` state. Repeated creation with the same owner/request is idempotent; a conflict fails closed.
+1. Prepare a stable logical message ID and canonical record key. With an idempotency key, derive the route from owner identity and the key digest; without one, generate a GUID before any UpdateAsync. Store the full owner, producer key, exact canonical request, payload and `preparing` state in one canonical message record. Retrying the same key and exact request reuses this record; a mismatched request/owner fails closed.
+2. The `preparing` record includes the chosen (slot, segment generation, placement generation) locator. Do not allocate a different segment because a read timed out or an append response is ambiguous.
 3. Append (message ID, placement generation) to the selected segment with UpdateAsync. Append requires that the target segment key already exists for the generation published in the manifest. A missing/retired key is rejected rather than implicitly initialized. Repeating the same append returns the existing entry.
-4. If append returns an ambiguous error, do not move the receipt to a different segment. Repeat the idempotent append/verification on the same key until the ID is known present or the deadline returns `unknown`. Never infer absence from a cached GetAsync or timeout.
-5. If the segment is full, seal it with a compare-and-set UpdateAsync. Once sealed, no append is accepted. To allocate a slot, first CAS the manifest slot from `empty` to `allocating` with a strictly new generation; only the winner owns that generation. It then creates and verifies the empty segment key and CASes that same slot/generation from `allocating` to `open`. Recovery can resume an interrupted allocation or retire the unused generation only after proving no receipt references it. Multiple allocators may race, but only the manifest-published generation is valid.
-6. Retarget a preparing receipt/message only after the previous segment is confirmed sealed and the index pair is confirmed absent. Increment the placement generation. Stale writers to an old generation see a sealed or missing key and cannot append. Workers require the index generation to match the canonical message locator.
-7. Once the index entry is present, mark the receipt accepted only if its reservation and placement generation still match. Then promote the canonical message to `ready`. Only `ready` messages can be claimed.
-8. If the server stops mid-protocol, a repeated submission with the same idempotency key or a worker inspecting the indexed preparing entry can resume it. Recovery may finalize a reservation only after verifying the exact owner/request and matching index pair. If there is no index entry and the receipt is not accepted, the request was not reported as accepted; use the same key to resolve an ambiguous submit.
-9. An index row is deliverable only when owner, slot, segment generation, message ID and placement generation match the canonical message. Duplicate or stale rows are skipped. Claim is still a CAS on the canonical message record.
+4. If append returns an ambiguous error, repeat the idempotent append/verification on the same key until the ID is known present or the operation deadline returns `unknown`. Never infer absence from a cached GetAsync or timeout.
+5. If the segment is full, seal it with a compare-and-set UpdateAsync. Once sealed, no append is accepted. To allocate a slot, first CAS the manifest slot from `empty` to `allocating` with a strictly new generation; only the winner owns that generation. It then creates and verifies the empty segment key and CASes that same slot/generation from `allocating` to `open`. Recovery can resume an interrupted allocation or retire the unused generation only after proving no preparing message references it. Multiple allocators may race, but only the manifest-published generation is valid.
+6. Retarget a preparing message only after the previous segment is confirmed sealed and the index pair is confirmed absent. Increment the placement generation. Stale writers to an old generation see a sealed or missing key and cannot append. Workers require the index generation to match the canonical message locator.
+7. After verifying the matching index entry, promote the canonical message from `preparing` to `ready` with a CAS that checks the expected locator and placement generation. Only `ready` messages can be claimed. Return `accepted` only after this state is verified; an ambiguous response remains `unknown` until the canonical record is reconciled.
+8. If the server stops before the canonical record and index are both verified, the caller must retry with the same idempotency key to resume. If the index exists but the message remains `preparing`, reconciliation promotes it to ready only after validating owner, exact request, index entry and placement generation. If the canonical record exists but no index entry was committed, the submission was not reported as accepted; the idempotent retry resumes the same record.
+9. An index row is deliverable only when owner, slot, segment generation, message ID and placement generation match the canonical message. Duplicate or stale rows are skipped. Claim is a CAS on the canonical message record.
 
 Slot lifecycle:
 
 - Slots transition through `empty -> allocating -> open -> sealed -> draining -> empty`. Manifest transitions are compare-and-set operations.
-- A slot can be reclaimed only after a bounded scan proves every index entry terminal or stale. Keep canonical message/receipt tombstones until their idempotency and diagnostic-retention rules permit deletion.
+- A slot can be reclaimed only after a bounded scan proves every index entry terminal or stale and no preparing message references that slot generation. Keep canonical terminal tombstones until their idempotency and diagnostic-retention rules permit deletion.
 - A slot generation is part of the segment key and strictly increases. A segment key is never reinitialized for another generation. Only the allocator may initialize a new segment, and append to a missing generation is rejected; this prevents an old delayed writer from recreating a purged index.
 - Reclaim slots out of order to avoid head-of-line capacity loss. Polling scans the fixed slot table fairly; it does not assume a contiguous range.
 - Accepted messages are not relocated simply because another slot becomes available. Relocation is allowed only while preparing and after the previous segment is sealed and the index pair verified absent.
@@ -281,19 +281,17 @@ Allowed transitions are validated in the canonical message's UpdateAsync transfo
 **Retry:** under the live token, persist `ready`, cleared lock fields, normalized last error, attempt counters and an explicit next `available_at`. Use capped exponential backoff with deterministic/injected jitter. Limit total attempts and delivery age. The next handler must not run before the stored time. At attempt/age limits, transition to `dead_lettering`.
 
 **Acknowledgement:**
-1. Persist `acknowledging` under the current token.
-2. Update the producer receipt to acknowledged if it exists.
-3. Persist the canonical message as acknowledged.
-4. Recovery repeats steps 2-3 idempotently and never invokes the handler for an `acknowledging` message.
+1. Persist `acknowledging` on the canonical message under the current token.
+2. Persist the canonical message as `acknowledged` with the same operation/claim identity.
+3. Recovery repeats step 2 idempotently and never invokes the handler for an `acknowledging` message. Because the canonical message record also serves as the producer receipt, there is no cross-key producer-receipt update.
 
 If the handler effect committed but the state never reached `acknowledging`, redelivery is possible. This is why the atomic inbox pattern is a first-class API.
 
 **Dead-lettering:**
-1. Persist `dead_lettering` under the current token.
+1. Persist `dead_lettering` on the canonical message under the current token.
 2. Append the message ID and terminal generation to the independent DLQ index idempotently.
-3. Update the producer receipt, if any.
-4. Persist `dead_lettered`.
-5. Recovery repeats the same transitions idempotently. `dead_lettering` is never eligible for user handler execution.
+3. Persist `dead_lettered` on the canonical message.
+4. Recovery repeats the same transitions idempotently. `dead_lettering` is never eligible for user handler execution, and the canonical record remains queryable as the producer's outcome receipt.
 
 No DataStore callback may perform any of these transitions by directly calling another key's API inside the transform.
 
@@ -439,9 +437,9 @@ Before replay, validate the message type and payload schema against the currentl
 
 ### 9.3 Retention rules
 
-Retention is separate for completed message payloads, producer receipts, inbox receipts, outbox entries, dead letters and transition history. Defaults are conservative: retain pending work; do not auto-delete dead letters; retain dedup receipts for at least the advertised idempotency window.
+Retention is separate for completed payloads, producer-idempotency tombstones, inbox receipts, outbox entries, dead letters and transition history. The producer idempotency tombstone lives in the canonical message key: payload bytes may be pruned only when the exact canonical request identity needed to resolve duplicate submissions is retained in the tombstone, or when the advertised idempotency window expires. Defaults are conservative: retain pending work; do not auto-delete dead letters; retain dedup identity at least through the advertised idempotency window.
 
-Purge only terminal data that is past its declared retention and no longer referenced by a live index, pending workflow or source outbox. Purge transitions need audit IDs and must be idempotent. A retained receipt whose referenced message has been purged must either retain enough exact request identity to resolve duplicates safely or expire at the same time; never keep a misleading receipt that points to nonexistent data and returns a false success.
+Purge only terminal data that is past its declared retention and no longer referenced by a live index, pending workflow or source outbox. Purge transitions need audit IDs and must be idempotent. Never leave a producer-key tombstone pointing to a nonexistent message or return a false success after payload deletion.
 
 ## 10. Operational observability
 
@@ -488,12 +486,12 @@ Build a deterministic fake DataStore that drives the actual RecordStore producti
 Required test groups:
 
 1. **Canonicalization/idempotency**: nested objects with different insertion order compare equal; arrays/holes/mixed keys are validated; same key/same request returns original ID; same key/different request conflicts; hash/owner collisions fail closed.
-2. **Submission windows**: crash after reservation, message preparation, index append, receipt acceptance, and ready promotion; retry and recovery never lose an accepted message or execute a preparing item.
+2. **Submission windows**: crash after canonical message creation, index append, and ready promotion; retry and recovery never lose a reported-accepted message or execute a preparing item. Same-key retry finds the same canonical message record without a separate receipt-key round trip.
 3. **Ambiguous writes**: UpdateAsync failure before commit versus commit then error; retries hit the same message/segment; no route reassignment while index existence is unknown.
 4. **Rollover races**: many producers fill the final segment concurrently; stale writers to sealed segments are rejected; only one correct manifest tail wins; segment IDs never alias.
 5. **Duplicate index rows**: the same ID appears twice or in a stale old segment; canonical placement generation allows at most one delivery and stale rows are ignored.
 6. **Claim concurrency**: many workers claim one message; one live token wins; lease renewal, expiry, server shutdown and session generation changes fence old workers.
-7. **Acknowledgement**: crash before `acknowledging`, after it, after receipt update, and after terminal update; acknowledged messages never rerun, while pre-ack uncertainty is safely at-least-once.
+7. **Acknowledgement**: crash before `acknowledging`, after it, and after terminal update; acknowledged messages never rerun, while pre-ack uncertainty is safely at-least-once.
 8. **Retry/DLQ**: thrown/rejected/yielding handler, bounded exponential delay, attempt and age caps, DLQ index append crash, duplicate DLQ append and independent active capacity.
 9. **Replay/purge**: repeated replay ID, stale replay token, schema migration failure, future schema quarantine, retention boundaries, active index references, and purge interruption.
 10. **Inbox atomicity**: crash after profile mutation and before mailbox ack; redelivery is duplicate and does not increment balance twice; payload/recipient mismatch conflicts; receipt capacity aborts both mutation and receipt.
@@ -573,7 +571,7 @@ All performance measurements go through CodSpeed. Use Simulation for determinist
 
 The design is implementable only when tests and runtime evidence demonstrate all of the following:
 
-- Repeating the same producer key and exact request returns one logical message ID.
+- Repeating the same producer key and exact request returns one logical message ID using the canonical message record itself as the idempotency receipt, without a separate receipt key.
 - Reusing a producer key for a different request fails closed.
 - An accepted message survives every crash window and is eventually discoverable without relying on notifications.
 - One canonical message record prevents a duplicated/stale index row from creating two concurrent deliveries.
