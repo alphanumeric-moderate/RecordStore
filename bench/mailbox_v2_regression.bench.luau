@@ -282,6 +282,47 @@ do
 	assert(#queue == 1, "restart recovery created multiple logical messages")
 end
 
+-- Verify claim lease margin against the response-time clock, then reclaim the
+-- expired uncertain claim without claiming the prior handler had no side effects.
+do
+	local mailbox, store, advance = make_mailbox({
+		lease_ms = 1000,
+		clock_skew_grace_ms = 0,
+		retry_base_ms = 100,
+		retry_max_ms = 1000,
+	})
+	store.advance_time = advance
+	local enqueued = mailbox:EnqueueAsync("lease_margin", { value = 5 }, {
+		idempotency_key = "lease-margin-delayed-response",
+	})
+	expect_code(enqueued, "accepted", "lease margin fixture enqueue")
+	local handler_calls = 0
+	store:DelayNextUpdateBy(900)
+	local delayed_claim = mailbox:ProcessNextAsync(function()
+		handler_calls += 1
+		return true
+	end)
+	expect_code(delayed_claim, "unknown", "claim response leaves insufficient verified lease")
+	assert(handler_calls == 0, "handler ran without a sufficient verified claim lease margin")
+
+	advance(200)
+	local recovered = mailbox:RecoverAsync()
+	expect_code(recovered, "success", "recover expired uncertain claim")
+	advance(500)
+	local retried = mailbox:ProcessNextAsync(function(payload, message)
+		handler_calls += 1
+		assert(message.Id == enqueued.message_id, "claim retry changed the message identity")
+		assert(payload.value == 5, "claim retry changed the payload")
+		return true
+	end)
+	expect_code(retried, "processed", "process reclaimed claim")
+	assert(handler_calls == 1, "recovered claim invoked the handler an unexpected number of times")
+	local delivery, delivery_result = mailbox:GetDeliveryAsync(enqueued.message_id)
+	expect_code(delivery_result, "success", "recovered claim status")
+	assert(delivery ~= nil and delivery.State == "acknowledged",
+		"recovered claim did not reach an acknowledged terminal state")
+end
+
 -- Exhaustively inject one before-commit and one commit-then-response-loss failure at
 -- each UpdateAsync boundary observed in a successful enqueue. After simulated process
 -- restart, recovery plus an idempotent retry must yield exactly one ready message.
