@@ -238,10 +238,10 @@ function RecordStore.new(name, scope, key, options)
 	return record
 end
 
-local NumberFormatter = luau.load(fs.readFile("src/NumberFormatter.luau"), {
+local NumberFormatter = luau.load(fs.readFile("src/PlayerDataInitializer/NumberFormatter.luau"), {
 	debugName = "NumberFormatter",
 })()
-local IntegerInfinityValue = luau.load(fs.readFile("src/IntegerInfinityValue.luau"), {
+local IntegerInfinityValue = luau.load(fs.readFile("src/PlayerDataInitializer/IntegerInfinityValue.luau"), {
 	debugName = "IntegerInfinityValue",
 	environment = { Instance = Instance },
 })()
@@ -288,7 +288,7 @@ local function mock_typeof(value)
 	return builtin_typeof(value)
 end
 
-local PlayerDataCore = luau.load(fs.readFile("src/PlayerDataCore.luau"), {
+local PlayerDataCore = luau.load(fs.readFile("src/PlayerDataInitializer/PlayerDataCore.luau"), {
 	debugName = "PlayerDataCore",
 	environment = {
 		game = game,

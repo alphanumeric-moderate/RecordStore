@@ -31,7 +31,7 @@ local base_game = {
 local CodeNum = load_module("src/CodeNum.luau", "CodeNum", {
     game = base_game,
 })
-local NumberFormatter = load_module("src/NumberFormatter.luau", "NumberFormatter", {
+local NumberFormatter = load_module("src/PlayerDataInitializer/NumberFormatter.luau", "NumberFormatter", {
     game = base_game,
 })
 
@@ -97,7 +97,7 @@ local CodeNumAPI = {
     end,
 }
 
-local CodeNumValue = load_module("src/CodeNumValue.luau", "CodeNumValue", {
+local CodeNumValue = load_module("src/PlayerDataInitializer/CodeNumValue.luau", "CodeNumValue", {
     game = game,
     script = { Parent = { NumberFormatter = NumberFormatter } },
     Instance = Instance,

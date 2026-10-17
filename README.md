@@ -6,14 +6,11 @@ RecordStore is a server-side Roblox Luau persistence module.
 
 ## Install in Roblox Studio
 
-1. Copy `src/RecordStore.luau` into `ServerScriptService` as a **ModuleScript** named `RecordStore`.
-2. Require it from server scripts:
+The Rojo projects map `src/PlayerDataInitializer` to a Script named `ServerScriptService.PlayerDataInitializer`. Its child ModuleScripts are `PlayerData`, `PlayerDataCore`, `RecordStore`, `IntegerInfinityValue`, `NumberFormatter`, and `CodeNumValue`. The separate `ReplicatedStorage.CodeNum` module is included for CodeNum-backed fields.
 
-   ```lua
-   local RecordStore = require(game:GetService("ServerScriptService"):WaitForChild("RecordStore"))
-   ```
+Use `default.project.json` for the standard setup. The initializer starts the shared controller and registers `BindToClose` shutdown handling. Use exactly one initializer.
 
-3. Use a separate test place or Studio session for compatibility testing. Do not place the regression Script in a production server by accident.
+For manual Studio installation, create a Script named `PlayerDataInitializer` in `ServerScriptService`, put the modules listed above directly under it, and put `CodeNum` in `ReplicatedStorage`. Use a separate test place or Studio session for compatibility testing.
 
 ## Non-finite numeric values
 
@@ -48,27 +45,27 @@ assert(math.isnan(record:Get().not_a_number))
 
 The repository also includes:
 
-- `src/PlayerDataCore.luau`: a configurable player session, leaderstats, persistence, retry, and shutdown controller.
-- `src/IntegerInfinityValue.luau`: a `NumberValue` factory that rounds finite values to integers while preserving positive infinity, negative infinity, and NaN. The default `kills` field uses this type so non-finite values are not silently replaced with zero.
-- `src/NumberFormatter.luau`: a display formatter for native Luau numbers. Formatting never changes stored values.
-- `src/CodeNumValue.luau`: an adapter for your CodeNum module. It persists CodeNum's own versioned `encode`/`decode` JSON format and provides `get`/`set` helpers for a replicated StringValue backing instance.
-- `examples/PlayerData.server.luau`: a standard Script that starts the controller and shuts it down from `BindToClose`.
+- `src/PlayerDataInitializer/PlayerDataCore.luau`: a configurable player session, leaderstats, persistence, retry, and shutdown controller.
+- `src/PlayerDataInitializer/IntegerInfinityValue.luau`: a `NumberValue` factory that rounds finite values to integers while preserving positive infinity, negative infinity, and NaN. The default `kills` field uses this type so non-finite values are not silently replaced with zero.
+- `src/PlayerDataInitializer/NumberFormatter.luau`: a display formatter for native Luau numbers. Formatting never changes stored values.
+- `src/PlayerDataInitializer/CodeNumValue.luau`: an adapter for your CodeNum module. It persists CodeNum's own versioned `encode`/`decode` JSON format and provides `get`/`set` helpers for a replicated StringValue backing instance.
+- `src/PlayerDataInitializer/init.server.luau`: a standard Script that starts the controller and shuts it down from `BindToClose`.
 
 ### PlayerData.Set API
 
-The Rojo project maps `src/PlayerData.luau` to a shared `ServerScriptService.PlayerData` ModuleScript.
-Use the included `examples/PlayerData.server.luau` Script (mapped as `PlayerDataInitializer` in
+The Rojo project maps `src/PlayerDataInitializer/PlayerData.luau` to a shared `ServerScriptService.PlayerDataInitializer.PlayerData` ModuleScript.
+Use the included `src/PlayerDataInitializer/init.server.luau` Script (mapped as `PlayerDataInitializer` in
 `examples.project.json`) to start the controller and shut it down safely. Gameplay Scripts require the
 same ModuleScript, so they share one controller and persistence queue.
 
-When building with default.project.json, add one Script under ServerScriptService to initialize it:
+The `PlayerDataInitializer` Script initializes the shared controller from its child `PlayerData` ModuleScript:
 
 ```lua
-local PlayerData = require(script.Parent:WaitForChild("PlayerData"))
-PlayerData:Start()
+local player_data = require(script:WaitForChild("PlayerData"))
+assert(player_data:Start(), "PlayerData controller already started or is shutting down")
 
 game:BindToClose(function()
-	PlayerData:Shutdown()
+	player_data:Shutdown()
 end)
 ```
 
@@ -77,7 +74,7 @@ do not add a second initializer when using that project.
 
 ```lua
 local ServerScriptService = game:GetService("ServerScriptService")
-local PlayerData = require(ServerScriptService:WaitForChild("PlayerData"))
+local PlayerData = require(ServerScriptService:WaitForChild("PlayerDataInitializer"):WaitForChild("PlayerData"))
 
 -- All keys are the lowercase keys in CONFIG.data, not the displayed leaderboard labels.
 local ok, message = PlayerData.Set(player, "kills", 12500124)
@@ -111,25 +108,25 @@ gameplay actions and authorization on the server before changing protected field
 Use the formatter directly when you only need display text:
 
 ```lua
-local NumberFormatter = require(game:GetService("ServerScriptService"):WaitForChild("NumberFormatter"))
+local NumberFormatter = require(game:GetService("ServerScriptService"):WaitForChild("PlayerDataInitializer"):WaitForChild("NumberFormatter"))
 
 print(NumberFormatter.format(1_250)) -- 1.25K
 print(NumberFormatter.format(1_000_000_000_000)) -- 1T
 ```
 
-The default `PlayerDataCore` configuration abbreviates `Kills` using `define_leaderstat("kills", "Kills", { decimals = 2 })`. Large values display as `1K`, `1.25M`, `1B`, `1T`, `1Qa`, and so on. Other numeric leaderstats can opt in by passing `{ decimals = 2 }` as the third argument to `define_leaderstat` in `src/PlayerDataCore.luau`.
+The default `PlayerDataCore` configuration abbreviates `Kills` using `define_leaderstat("kills", "Kills", { decimals = 2 })`. Large values display as `1K`, `1.25M`, `1B`, `1T`, `1Qa`, and so on. Other numeric leaderstats can opt in by passing `{ decimals = 2 }` as the third argument to `define_leaderstat` in `src/PlayerDataInitializer/PlayerDataCore.luau`.
 
 A formatted leaderboard entry is a display-only `StringValue`. Its numeric backing value is placed at `player.PlayerDataValues.kills`, and that backing value remains the value persisted by PlayerDataCore. Gameplay scripts must update `player.PlayerDataValues.kills.Value` instead of `player.leaderstats.Kills.Value`, because the leaderboard entry contains text. The `PlayerDataValues` folder name is reserved by this feature.
 
 To opt out for a particular entry, omit the third argument, for example `define_leaderstat("kills", "Kills")`.
 
-The default Rojo project maps the server-side ModuleScripts and `ReplicatedStorage.CodeNum`, but does **not** include the example server Script. To build the project with the example Script included:
+Both the default and example Rojo projects include `PlayerDataInitializer` and map its child modules. The regression-test project deliberately does not include the active initializer, preventing test-place startup from opening real player sessions. To build the separate example place:
 
 ```sh
 rojo build examples.project.json -o RecordStore-PlayerDataExample.rbxlx
 ```
 
-The included `PlayerDataCore` example uses the store name `PlayerData_Test1`. Change `CONFIG.store_name` in `src/PlayerDataCore.luau` before using it for a live production dataset. Review the config's keys, defaults, schema version, and leaderboard values before publishing.
+The included `PlayerDataCore` example uses the store name `PlayerData_Test1`. Change `CONFIG.store_name` in `src/PlayerDataInitializer/PlayerDataCore.luau` before using it for a live production dataset. Review the config's keys, defaults, schema version, and leaderboard values before publishing.
 
 ### CodeNum support
 
@@ -137,7 +134,7 @@ PlayerDataCore's optional `CodeNumValue` field stores values in your CodeNum mod
 
 The repository includes CodeNum 0.2.0-preview.1 at `src/CodeNum.luau`. Both `default.project.json` and `tests.project.json` map it to `ReplicatedStorage.CodeNum`, so the Rojo projects no longer require a separate CodeNum ModuleScript. The public codec API is `encode(value)`, `decode(serialized)`, and `toString(value)`.
 
-Configure a field and optional leaderboard entry in `src/PlayerDataCore.luau`:
+Configure a field and optional leaderboard entry in `src/PlayerDataInitializer/PlayerDataCore.luau`:
 
 ```lua
 -- In CONFIG.data:
@@ -152,7 +149,7 @@ The leaderboard uses a display-only `StringValue`; its serialized backing value 
 ```lua
 local ServerScriptService = game:GetService("ServerScriptService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local CodeNumValue = require(ServerScriptService:WaitForChild("CodeNumValue"))
+local CodeNumValue = require(ServerScriptService:WaitForChild("PlayerDataInitializer"):WaitForChild("CodeNumValue"))
 local CodeNum = require(ReplicatedStorage:WaitForChild("CodeNum"))
 
 local cash = player.PlayerDataValues:WaitForChild("cash")
