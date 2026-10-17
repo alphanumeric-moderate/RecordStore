@@ -3,6 +3,9 @@ $schema: https://raw.githubusercontent.com/CodSpeedHQ/codspeed/refs/heads/main/s
 # RecordStore benchmarks, executed with Lune (standalone Luau runtime) through
 # bench/RobloxShim.luau, which provides the Roblox APIs used by RecordStore.Mock.
 benchmarks:
+  - name: "MailboxV2 end-to-end enqueue, claim, and acknowledgement"
+    exec: lune run bench/mailbox_v2.bench.luau
+
   - name: "session lifecycle (create/update/save/close/reopen)"
     exec: lune run bench/session_lifecycle.bench.luau
 
