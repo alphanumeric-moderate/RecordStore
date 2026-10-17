@@ -1021,7 +1021,7 @@ local function encode_non_finite_numbers(
 	value: JsonValue
 ): (JsonValue, { NonFiniteNumberMarker })
 	local markers: { NonFiniteNumberMarker } = {}
-	local path: { string | number } = table.create(64)
+	local path: { NonFinitePathSegment } = {}
 
 	local function encode(current: JsonValue, depth: number): (JsonValue, boolean)
 		if depth > 64 then
@@ -1042,15 +1042,8 @@ local function encode_non_finite_numbers(
 				kind = "negative_infinity"
 			end
 
-			local marker_path: { NonFinitePathSegment } = table.create(#path)
-			for path_index = 1, #path do
-				local segment_key = path[path_index]
-				marker_path[path_index] = if type(segment_key) == "string"
-					then { kind = "string", key = segment_key }
-					else { kind = "number", key = segment_key :: number }
-			end
 			markers[#markers + 1] = {
-				path = marker_path,
+				path = table.clone(path),
 				kind = kind,
 			}
 			return 0, true
@@ -1077,7 +1070,9 @@ local function encode_non_finite_numbers(
 				error("value contains mixed table keys")
 			end
 
-			path[#path + 1] = if is_dictionary_key then key :: string else key :: number
+			path[#path + 1] = if is_dictionary_key
+				then { kind = "string", key = key :: string }
+				else { kind = "number", key = key :: number }
 			local encoded_child, child_changed = encode(child, depth + 1)
 			path[#path] = nil
 
