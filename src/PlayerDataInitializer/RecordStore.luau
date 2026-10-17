@@ -285,6 +285,9 @@ export type RuntimeOptions = {
 	revision: number?,
 	runtime_profile: string?,
 	server_role: string?,
+	degraded_mode: string?,
+	circuit_threshold: number?,
+	circuit_cooldown_seconds: number?,
 	adaptive_runtime_enabled: boolean?,
 	adaptive_sample_interval: number?,
 	adaptive_min_queue_poll_interval: number?,
@@ -304,6 +307,9 @@ type RuntimePolicy = {
 	revision: number,
 	runtime_profile: string,
 	server_role: string,
+	degraded_mode: string,
+	circuit_threshold: number,
+	circuit_cooldown_seconds: number,
 	adaptive_runtime_enabled: boolean,
 	adaptive_sample_interval: number,
 	adaptive_min_queue_poll_interval: number,
@@ -688,6 +694,9 @@ local runtime_options: RuntimePolicy = {
 	revision = 1,
 	runtime_profile = "balanced",
 	server_role = "standard",
+	degraded_mode = "normal",
+	circuit_threshold = 5,
+	circuit_cooldown_seconds = 15,
 	adaptive_runtime_enabled = false,
 	adaptive_sample_interval = 5,
 	adaptive_min_queue_poll_interval = 3,
@@ -713,6 +722,10 @@ local runtime_queue_tokens = DEFAULT_MAX_CONCURRENT_REQUESTS * 0.2
 local runtime_queue_tokens_updated = 0
 local runtime_external_in_flight: { [string]: number } = {
 	interactive = 0, messaging = 0, migration = 0, maintenance = 0, tracing = 0,
+}
+local runtime_breakers: { [string]: { failures: number, open_until: number, probe_in_flight: boolean } } = {
+	read = { failures = 0, open_until = 0, probe_in_flight = false },
+	write = { failures = 0, open_until = 0, probe_in_flight = false },
 }
 local runtime_metrics = {
 	reads = 0,
@@ -783,6 +796,16 @@ local function valid_runtime_policy(candidate: RuntimePolicy): (boolean, string?
 		return false, "server_role must be 1 to 64 characters"
 	end
 	if type(candidate.adaptive_runtime_enabled) ~= "boolean" then return false, "adaptive_runtime_enabled must be boolean" end
+	if candidate.degraded_mode ~= "normal" and candidate.degraded_mode ~= "reject_noncritical" and candidate.degraded_mode ~= "read_only" then
+		return false, "degraded_mode must be normal, reject_noncritical or read_only"
+	end
+	if type(candidate.circuit_threshold) ~= "number" or not math.isfinite(candidate.circuit_threshold)
+		or candidate.circuit_threshold < 1 or candidate.circuit_threshold > 100
+		or math.floor(candidate.circuit_threshold) ~= candidate.circuit_threshold
+	then return false, "circuit_threshold must be an integer from 1 to 100" end
+	if type(candidate.circuit_cooldown_seconds) ~= "number" or not math.isfinite(candidate.circuit_cooldown_seconds)
+		or candidate.circuit_cooldown_seconds < 1 or candidate.circuit_cooldown_seconds > 300
+	then return false, "circuit_cooldown_seconds must be between 1 and 300" end
 	local numeric_values = {
 		candidate.revision, candidate.adaptive_sample_interval,
 		candidate.adaptive_min_queue_poll_interval, candidate.adaptive_max_queue_poll_interval,
@@ -826,7 +849,8 @@ local function valid_runtime_policy(candidate: RuntimePolicy): (boolean, string?
 end
 
 local RUNTIME_POLICY_FIELDS: { [string]: boolean } = {
-	revision = true, runtime_profile = true, server_role = true, adaptive_runtime_enabled = true,
+	revision = true, runtime_profile = true, server_role = true, degraded_mode = true,
+	circuit_threshold = true, circuit_cooldown_seconds = true, adaptive_runtime_enabled = true,
 	adaptive_sample_interval = true, adaptive_min_queue_poll_interval = true,
 	adaptive_max_queue_poll_interval = true, adaptive_min_concurrent_requests = true,
 	adaptive_max_concurrent_requests = true, adaptive_read_budget_floor = true,
@@ -884,6 +908,15 @@ local function merge_runtime_policy(patch: { [string]: unknown }, base: RuntimeP
 		elseif key == "server_role" then
 			if type(value) ~= "string" then return nil, "server_role must be a string" end
 			candidate.server_role = value
+		elseif key == "degraded_mode" then
+			if type(value) ~= "string" then return nil, "degraded_mode must be a string" end
+			candidate.degraded_mode = value
+		elseif key == "circuit_threshold" then
+			if type(value) ~= "number" then return nil, "circuit_threshold must be numeric" end
+			candidate.circuit_threshold = value
+		elseif key == "circuit_cooldown_seconds" then
+			if type(value) ~= "number" then return nil, "circuit_cooldown_seconds must be numeric" end
+			candidate.circuit_cooldown_seconds = value
 		elseif key == "adaptive_runtime_enabled" then
 			if type(value) ~= "boolean" then return nil, "adaptive_runtime_enabled must be boolean" end
 			candidate.adaptive_runtime_enabled = value
@@ -993,6 +1026,7 @@ local function observe_runtime_request(kind: string, success: boolean, message: 
 		runtime_metrics.writes += 1
 		runtime_metrics.write_latency_ewma_ms = if runtime_metrics.write_latency_ewma_ms == 0 then duration_ms else runtime_metrics.write_latency_ewma_ms * 0.8 + duration_ms * 0.2
 	end
+	runtime_breaker_complete(kind, success)
 	if success then
 		if runtime_options.adaptive_runtime_enabled and now_local() >= runtime_next_growth_at
 			and runtime_effective_concurrent_requests < runtime_options.adaptive_max_concurrent_requests
@@ -2102,6 +2136,55 @@ local function enqueue_change_observation(state: InternalState, old_value: unkno
 	end)
 end
 
+
+local function runtime_breaker_admit(kind: string): (boolean, string?)
+	local breaker = runtime_breakers[kind]
+	if breaker == nil then return true, nil end
+	local now = now_local()
+	if breaker.open_until > now then
+		return false, ("shared %s circuit is open for %.2f more seconds"):format(kind, breaker.open_until - now)
+	end
+	if breaker.failures >= runtime_options.circuit_threshold then
+		if breaker.probe_in_flight then
+			return false, ("shared %s circuit is waiting for its half-open probe"):format(kind)
+		end
+		breaker.probe_in_flight = true
+	end
+	return true, nil
+end
+
+local function runtime_breaker_cancel_probe(kind: string)
+	local breaker = runtime_breakers[kind]
+	if breaker ~= nil and breaker.failures >= runtime_options.circuit_threshold then
+		breaker.probe_in_flight = false
+	end
+end
+
+local function runtime_breaker_complete(kind: string, success: boolean)
+	local breaker = runtime_breakers[kind]
+	if breaker == nil then return end
+	if success then
+		breaker.failures = 0
+		breaker.open_until = 0
+		breaker.probe_in_flight = false
+		return
+	end
+	breaker.failures += 1
+	breaker.probe_in_flight = false
+	if breaker.failures >= runtime_options.circuit_threshold then
+		breaker.open_until = now_local() + runtime_options.circuit_cooldown_seconds
+	end
+end
+
+local function runtime_degraded_reject(state: InternalState?, update: boolean): boolean
+	local mode = runtime_options.degraded_mode
+	if mode == "normal" then return false end
+	local critical = request_is_critical(state)
+	if mode == "reject_noncritical" then return not critical end
+	if mode == "read_only" then return update and not critical end
+	return false
+end
+
 local function budget_available(request_type: Enum.DataStoreRequestType): boolean?
 	local budget = request_budget(request_type)
 	return if budget == nil then nil else budget >= 1
@@ -2126,6 +2209,16 @@ end
 
 local function acquire_request(state: InternalState?, deadline: number, update: boolean, request_type: Enum.DataStoreRequestType?): boolean
 	local critical = request_is_critical(state)
+	if runtime_degraded_reject(state, update) then
+		runtime_metrics.budget_rejections += 1
+		return false
+	end
+	local circuit_kind = if update then "write" else "read"
+	local circuit_ok = runtime_breaker_admit(circuit_kind)
+	if not circuit_ok then
+		runtime_metrics.budget_rejections += 1
+		return false
+	end
 	if runtime_options.adaptive_runtime_enabled then
 		local read_budget = if request_type == nil or request_type == Enum.DataStoreRequestType.StandardRead
 			then request_budget(Enum.DataStoreRequestType.StandardRead) else nil
@@ -2139,7 +2232,10 @@ local function acquire_request(state: InternalState?, deadline: number, update: 
 		end
 		if state ~= nil and state.queue_busy and not consume_runtime_queue_token() then return false end
 	end
-	if not acquire_slot(deadline, critical) then return false end
+	if not acquire_slot(deadline, critical) then
+		runtime_breaker_cancel_probe(circuit_kind)
+		return false
+	end
 	local wait_seconds = if state ~= nil then state.options.budget_wait or DEFAULT_BUDGET_WAIT else DEFAULT_BUDGET_WAIT
 	local wait_deadline = math.min(deadline, now_local() + wait_seconds)
 	while now_local() < wait_deadline do
@@ -2159,6 +2255,7 @@ local function acquire_request(state: InternalState?, deadline: number, update: 
 		and (not update or budget_available(Enum.DataStoreRequestType.StandardWrite) ~= false)
 	if available == false then
 		release_slot()
+		runtime_breaker_cancel_probe(circuit_kind)
 		return false
 	end
 	return true
@@ -8662,6 +8759,11 @@ function RecordStore.get_runtime_stats(): { [string]: unknown }
 		metrics = table.clone(runtime_metrics),
 		next_policy_refresh = runtime_next_policy_refresh,
 		policy_provider_configured = runtime_policy_provider ~= nil,
+		degraded_mode = runtime_options.degraded_mode,
+		circuits = {
+			read = table.clone(runtime_breakers.read),
+			write = table.clone(runtime_breakers.write),
+		},
 		work_class_in_flight = table.clone(runtime_external_in_flight),
 		work_class_limits = {
 			interactive = runtime_class_limit("interactive"), messaging = runtime_class_limit("messaging"),
