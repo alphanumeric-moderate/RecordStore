@@ -2476,6 +2476,7 @@ local function new_read_coalescer(fetch, options)
 	options = options or {}
 	if type(fetch) ~= "function" then error("read coalescer requires a fetch function", 2) end
 	local inflight = {}
+	local active_reads = 0
 	local total_waiters = 0
 	local maximum = if finite(options.max_entries) then math.clamp(math.floor(options.max_entries), 1, 2048) else 128
 	local maximum_waiters_per_key = if finite(options.max_waiters_per_key)
@@ -2562,15 +2563,20 @@ local function new_read_coalescer(fetch, options)
 			return value, waiter.message, "coalesced"
 		end
 
-		if entry_count() >= maximum then
+		if active_reads >= maximum then
 			self.rejected += 1
-			return nil, "read-coalescer in-flight key capacity reached", "capacity"
+			return nil, "read-coalescer active fetch capacity reached", "capacity"
 		end
-		local flight = { waiters = {}, waiter_count = 0, done = false, value = nil, message = nil }
+		local flight = { waiters = {}, waiter_count = 0, done = false, invalidated = false, value = nil, message = nil }
 		inflight[cache_key] = flight
+		active_reads += 1
 		self.misses += 1
 
 		local result, message = io_call(fetch, key)
+		active_reads -= 1
+		if flight.invalidated then
+			return nil, flight.invalidate_reason or "read invalidated while fetch was in flight", "invalidated"
+		end
 		if result ~= nil then
 			local copied, value = pcall(copy, result)
 			if copied then
@@ -2596,12 +2602,45 @@ local function new_read_coalescer(fetch, options)
 		return value, nil, "fetch"
 	end
 
-	-- Compatibility no-ops: this object intentionally retains no completed result.
-	function service:Invalidate(_key, _fence_key) return true end
-	function service:Clear() return true end
+	-- Invalidation does not cancel a service request already sent to the backend.
+	-- It prevents that old response from reaching the initiating caller or waiters.
+	function service:Invalidate(key, fence_key)
+		if not valid_text(key, 256) then return false, "invalid key" end
+		local cache_key = tostring(fence_key or "") .. "\0" .. key
+		local flight = inflight[cache_key]
+		if flight == nil then return true end
+		flight.invalidated = true
+		flight.invalidate_reason = "read invalidated while fetch was in flight"
+		if inflight[cache_key] == flight then inflight[cache_key] = nil end
+		local waiting = {}
+		for waiter in pairs(flight.waiters) do table.insert(waiting, waiter) end
+		for _, waiter in ipairs(waiting) do
+			finish_waiter(waiter, nil, flight.invalidate_reason, "invalidated")
+		end
+		return true
+	end
+	function service:Clear()
+		local keys = {}
+		for cache_key in pairs(inflight) do table.insert(keys, cache_key) end
+		for _, cache_key in ipairs(keys) do
+			local flight = inflight[cache_key]
+			if flight ~= nil then
+				flight.invalidated = true
+				flight.invalidate_reason = "read invalidated by Clear while fetch was in flight"
+				if inflight[cache_key] == flight then inflight[cache_key] = nil end
+				local waiting = {}
+				for waiter in pairs(flight.waiters) do table.insert(waiting, waiter) end
+				for _, waiter in ipairs(waiting) do
+					finish_waiter(waiter, nil, flight.invalidate_reason, "invalidated")
+				end
+			end
+		end
+		return true
+	end
 	function service:Stats()
 		return {
 			entries = entry_count(),
+			active_reads = active_reads,
 			hits = self.hits,
 			misses = self.misses,
 			coalesced = self.coalesced,
