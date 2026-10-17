@@ -2825,6 +2825,104 @@ function V2.new(record_store, mailbox_module, options)
 			kick_dispatcher()
 		end)
 	end
+	local function activation_block(operation)
+		if allow_unattested_activation then return nil end
+		if type(activation_guard) ~= "function" then
+			return { code = "disabled", message = "no authoritative V2 rollout guard is installed" }
+		end
+		local call_ok, allowed, message = pcall(activation_guard, operation)
+		if not call_ok then
+			return { code = "unknown", message = "rollout guard failed closed: " .. tostring(allowed) }
+		end
+		if allowed ~= true then return { code = "disabled", message = tostring(message or ("rollout denies " .. operation)) } end
+		return nil
+	end
+	local function guard_result_method(target, method_name, operation)
+		if type(target) ~= "table" or type(target[method_name]) ~= "function" then return end
+		local original = target[method_name]
+		target[method_name] = function(...)
+			local blocked = activation_block(operation)
+			if blocked ~= nil then return blocked end
+			return original(...)
+		end
+	end
+	local function guard_methods(target, method_map)
+		for method_name, operation in pairs(method_map) do guard_result_method(target, method_name, operation) end
+	end
+	local function guard_factory(namespace, factory_name, method_map)
+		local original_factory = namespace[factory_name]
+		if type(original_factory) ~= "function" then return end
+		namespace[factory_name] = function(...)
+			local service = original_factory(...)
+			guard_methods(service, method_map)
+			return service
+		end
+	end
+
+	-- Mutation entrypoints share one durable rollout decision. Read-only
+	-- inspection remains available during freeze and after rollback.
+	guard_methods(api.Transactions, { Run = "transact", CommitWithOutbox = "transact" })
+	guard_methods(api.Inbox, { ApplyBatch = "inbox", ApplyAsync = "inbox", Prune = "maintenance" })
+	guard_methods(api.Outbox, {
+		DispatchBatches = "dispatch",
+		PruneBatches = "maintenance",
+		PruneTransactionReceiptsBatches = "maintenance",
+	})
+	guard_methods(api.ProfileDoctor, { Restore = "restore", DeleteIfGenerationAsync = "erase" })
+	guard_factory(api.Migrations, "new", { MigrateAsync = "migrate" })
+	guard_factory(api.Sagas, "new", { TransferAsync = "saga", RecoverAsync = "recover" })
+	guard_factory(api.Erasure, "new", { PlanAsync = "erase", ExecuteAsync = "erase" })
+	guard_factory(api.Projections, "new", { ApplyAsync = "projection", RebuildAsync = "projection", ReserveUnique = "projection" })
+	guard_factory(api.Tracing, "new", { FlushAsync = "trace_flush" })
+	guard_factory(api.Maintenance, "new_compactor", { RunStep = "maintenance", Resume = "maintenance" })
+
+	local receipt_factory = api.ReceiptProcessor.new
+	api.ReceiptProcessor.new = function(config)
+		local processor = receipt_factory(config)
+		if type(processor) == "table" and type(processor.CreateHandler) == "function" then
+			local create_handler = processor.CreateHandler
+			processor.CreateHandler = function(self, default_grant)
+				local handler = create_handler(self, default_grant)
+				local retry = if type(config) == "table" and config.not_processed_yet ~= nil
+					then config.not_processed_yet
+					else if Enum and Enum.ProductPurchaseDecision then Enum.ProductPurchaseDecision.NotProcessedYet else "NotProcessedYet"
+				return function(receipt)
+					local blocked = activation_block("purchase")
+					if blocked ~= nil then return retry end
+					return handler(receipt)
+				end
+			end
+		end
+		return processor
+	end
+
+	local function guard_status_method(method, operation)
+		local original = api[method]
+		api[method] = function(...)
+			local blocked = activation_block(operation)
+			if blocked ~= nil then return blocked.code, blocked.message end
+			return original(...)
+		end
+	end
+	guard_status_method("ApplyRuntimePolicy", "policy")
+	guard_status_method("ApplySchedulerPolicy", "policy")
+	guard_result_method(api, "ScheduleOutboxDispatch", "dispatch")
+	guard_result_method(api, "ScheduleMaintenance", "maintenance")
+	guard_result_method(api, "BindMailboxWakeups", "configure")
+
+	local raw_mailbox_new = api.Mailbox.new
+	api.Mailbox.new = function(store, owner, mailbox_options)
+		local configured = copy(mailbox_options or {})
+		if type(configured.activation_guard) ~= "function" and not configured.allow_unattested_activation then
+			if type(activation_guard) == "function" then
+				configured.activation_guard = activation_guard
+			elseif allow_unattested_activation then
+				configured.allow_unattested_activation = true
+			end
+		end
+		return raw_mailbox_new(store, owner, configured)
+	end
+
 	return api
 end
 
