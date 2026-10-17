@@ -1288,6 +1288,53 @@ function MailboxV2.GetActiveRecord(self: Mailbox): ActiveRecordLike?
 	return self.options.active_record
 end
 
+local function verify_active_record(self: Mailbox): (string, string?)
+	local record = self.options.active_record
+	if record == nil then
+		return "fenced", "an active Record must be configured before processing V2 messages"
+	end
+	local open_ok, is_open = pcall(function() return record:IsOpen() end)
+	if not open_ok or is_open ~= true then
+		return "fenced", "bound Record is not open"
+	end
+	local state_ok, record_state = pcall(function() return record:GetState() end)
+	if not state_ok or record_state ~= "active" then
+		return "fenced", "bound Record is not actively owned"
+	end
+	local identity_ok, identity = pcall(function() return record:GetIdentity() end)
+	if not identity_ok or type(identity) ~= "table" then
+		return "fenced", "bound Record identity could not be verified"
+	end
+	if identity.store_name ~= self.owner.store_name
+		or identity.scope ~= self.owner.scope
+		or identity.profile_key ~= self.owner.profile_key
+	then
+		return "fenced", "bound Record identity does not match the V2 mailbox owner"
+	end
+	local user_ids = identity.user_ids
+	if type(user_ids) ~= "table" then
+		return "fenced", "bound Record UserIds could not be verified"
+	end
+	if self.owner.user_id ~= nil then
+		local found = false
+		for _, user_id in ipairs(user_ids) do
+			if user_id == self.owner.user_id then found = true; break end
+		end
+		if not found then return "fenced", "V2 mailbox UserId does not match the bound Record" end
+	elseif #user_ids > 0 then
+		return "fenced", "V2 mailbox owner must include a UserId for this Record"
+	end
+	local stats_ok, stats = pcall(function() return record:Stats() end)
+	if not stats_ok or type(stats) ~= "table" then
+		return "fenced", "bound Record session state could not be verified"
+	end
+	local takeover_requested = stats.takeover_requested
+	if takeover_requested == true or (type(takeover_requested) == "number" and takeover_requested > 0) then
+		return "closing", "Record session takeover has been requested"
+	end
+	return "success", nil
+end
+
 function MailboxV2.EnqueueAsync(self: Mailbox, message_type: string, payload: unknown, enqueue_options: Dict?): Result
 	if type(message_type) ~= "string" or message_type == "" or #message_type > 100 then
 		return ok("invalid", nil, nil, "message_type must be 1 to 100 bytes")

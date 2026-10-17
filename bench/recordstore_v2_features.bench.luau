@@ -80,7 +80,7 @@ local function run_transactions_and_workflows()
 	}, {
 		encode = function(value) return serde.encode("json", value) end,
 	})
-	local bind_code, bind_message = target:BindMailboxV2(bridge_mailbox)
+	local bind_code, bind_message = target:BindMailboxV2Async(bridge_mailbox)
 	assert(bind_code == "success", tostring(bind_code) .. " " .. tostring(bind_message))
 	local bridge_code = target:EnqueueAsync("bench-bridge", { amount = 2 }, {
 		idempotency_key = "bench-bridge-idempotency",

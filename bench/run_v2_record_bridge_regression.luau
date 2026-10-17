@@ -41,6 +41,20 @@ assert(opened == "created" or opened == "loaded", tostring(open_message))
 -- The binder must not strand already-persisted legacy queue entries in the old backend.
 local legacy_enqueue, legacy_message = record:EnqueueAsync("legacy", { value = 1 })
 assert(legacy_enqueue == "enqueued", tostring(legacy_message))
+-- Processing must be fenced when no active session object is supplied.
+local detached = MailboxV2.new(MailboxV2.MockStore(), {
+	store_name = STORE,
+	scope = SCOPE,
+	profile_key = "detached-owner",
+}, {
+	encode = function(value) return serde.encode("json", value) end,
+	now_ms = function() return 1_000_000 end,
+	guid = function() return "detached-v2-guid" end,
+})
+assert(detached:EnqueueAsync("detached", { value = 1 }, { idempotency_key = "detached-1" }).code == "accepted")
+local detached_process = detached:ProcessNextAsync(function() return true end)
+assert(detached_process.code == "fenced", "V2 worker processed messages without an active Record session")
+
 local legacy_mailbox = MailboxV2.new(MailboxV2.MockStore(), {
 	store_name = STORE,
 	scope = SCOPE,
