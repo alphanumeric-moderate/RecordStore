@@ -274,11 +274,16 @@ local game = {
 		return services[name]
 	end,
 }
+local module_require_counts = { CodeNumValue = 0 }
+
 local function mock_require(target)
 	if target == module_tokens.RecordStore then return RecordStore end
 	if target == module_tokens.IntegerInfinityValue then return IntegerInfinityValue end
 	if target == module_tokens.NumberFormatter then return NumberFormatter end
-	if target == module_tokens.CodeNumValue then return CodeNumValue end
+	if target == module_tokens.CodeNumValue then
+		module_require_counts.CodeNumValue += 1
+		return CodeNumValue
+	end
 	error("unexpected dependency passed to require")
 end
 local function mock_typeof(value)
@@ -299,6 +304,11 @@ local PlayerDataCore = luau.load(fs.readFile("src/PlayerDataInitializer/PlayerDa
 		typeof = mock_typeof,
 	},
 })()
+assert(
+	module_require_counts.CodeNumValue == 0,
+	"PlayerDataCore eagerly required optional CodeNumValue in the default configuration"
+)
+
 local controller = PlayerDataCore.new({
 	Players = Players,
 	RecordStore = RecordStore,
@@ -309,6 +319,10 @@ local controller = PlayerDataCore.new({
 	task = task,
 })
 
+assert(
+	module_require_counts.CodeNumValue == 0,
+	"default PlayerData controller should not load CodeNumValue when the field is unused"
+)
 assert(controller:Start(), "controller failed to start")
 local deadline = os.clock() + 5
 while player:GetAttribute("PlayerDataLoadStatus") ~= "Loaded" and os.clock() < deadline do

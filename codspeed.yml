@@ -23,3 +23,9 @@ benchmarks:
 
   - name: "CodeNumValue format and normalization"
     exec: lune run bench/codenumvalue.bench.luau
+
+  - name: "PlayerData startup with legacy eager CodeNumValue load"
+    exec: lune run bench/playerdata_startup_eager.bench.luau
+
+  - name: "PlayerData startup with lazy optional CodeNumValue load"
+    exec: lune run bench/playerdata_startup_lazy.bench.luau
