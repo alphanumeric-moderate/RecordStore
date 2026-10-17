@@ -2005,6 +2005,7 @@ function MockStore.new()
 		fail_update_call = nil,
 		fail_update_call_mode = nil,
 		delay_next_update_ms = 0,
+		delay_update_key = nil,
 		advance_time = nil,
 		replay_next_update = 0,
 	}, MockStore)
@@ -2039,9 +2040,10 @@ function MockStore:UpdateAsync(key: string, transform: (unknown, unknown?) -> (u
 		self.values[key] = clone_json(proposed)
 	end
 	local result = clone_json(self.values[key])
-	if self.delay_next_update_ms > 0 then
+	if self.delay_next_update_ms > 0 and (self.delay_update_key == nil or self.delay_update_key == key) then
 		local delay_ms = self.delay_next_update_ms
 		self.delay_next_update_ms = 0
+		self.delay_update_key = nil
 		if self.advance_time ~= nil then
 			self.advance_time(delay_ms)
 		end
@@ -2078,6 +2080,15 @@ function MockStore:DelayNextUpdateBy(delay_ms: number)
 	assert(is_finite(delay_ms) and delay_ms >= 0 and delay_ms <= 60_000,
 		"delay_ms must be finite and between 0 and 60000")
 	self.delay_next_update_ms = delay_ms
+	self.delay_update_key = nil
+end
+
+function MockStore:DelayUpdateForKey(key: string, delay_ms: number)
+	assert(type(key) == "string" and key ~= "", "key must be a non-empty string")
+	assert(is_finite(delay_ms) and delay_ms >= 0 and delay_ms <= 60_000,
+		"delay_ms must be finite and between 0 and 60000")
+	self.delay_next_update_ms = delay_ms
+	self.delay_update_key = key
 end
 
 function MailboxV2.MockStore()
