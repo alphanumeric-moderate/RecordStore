@@ -6,7 +6,7 @@ local Fake = Shim.FakeDataStore
 local RecordStore = Shim.load_isolated("erasure-regression")
 local V2Module = require("../src/PlayerDataInitializer/RecordStoreV2")
 local MailboxV2 = require("../src/PlayerDataInitializer/RecordStoreMailboxV2")
-local V2 = V2Module.new(RecordStore, MailboxV2)
+local V2 = V2Module.new(RecordStore, MailboxV2, { allow_unattested_activation = true })
 
 local function clone(value, depth)
 	depth = depth or 0
