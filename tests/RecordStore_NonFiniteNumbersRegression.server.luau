@@ -2,7 +2,8 @@
 -- Regression tests for RecordStore non-finite number persistence.
 -- Uses RecordStore.Mock only; this never reads or writes live DataStore records.
 
-local RecordStore = require(game:GetService("ServerScriptService"):WaitForChild("RecordStore"))
+local ServerScriptService = game:GetService("ServerScriptService")
+local RecordStore = require(ServerScriptService.RecordStore)
 
 local function assert_opened(result, message, expected)
 	assert(result == expected, ("expected %s, got %s: %s"):format(expected, tostring(result), tostring(message)))
