@@ -686,12 +686,16 @@ local runtime_options: RuntimePolicy = {
 local runtime_policy_provider: (() -> { [string]: unknown })? = nil
 local runtime_effective_concurrent_requests = DEFAULT_MAX_CONCURRENT_REQUESTS
 local runtime_next_policy_refresh = 0
+local runtime_next_budget_sample = 0
 local runtime_refresh_in_flight = false
 local runtime_budget_read: number? = nil
 local runtime_budget_write: number? = nil
 local runtime_next_growth_at = 0
 local runtime_queue_tokens = DEFAULT_MAX_CONCURRENT_REQUESTS * 0.2
 local runtime_queue_tokens_updated = 0
+local runtime_external_in_flight: { [string]: number } = {
+	interactive = 0, messaging = 0, migration = 0, maintenance = 0, tracing = 0,
+}
 local runtime_metrics = {
 	reads = 0,
 	writes = 0,
@@ -7981,7 +7985,13 @@ local function start_scheduler()
 	scheduler_started = true
 	task.spawn(function()
 		while not closing do
-			refresh_runtime_policy(now_local())
+			local scheduler_now = now_local()
+			refresh_runtime_policy(scheduler_now)
+			if scheduler_now >= runtime_next_budget_sample then
+				request_budget(Enum.DataStoreRequestType.StandardRead)
+				request_budget(Enum.DataStoreRequestType.StandardWrite)
+				runtime_next_budget_sample = scheduler_now + runtime_options.adaptive_sample_interval
+			end
 			for record in active_records do
 				local state = private[record]
 				if state ~= nil and state.state == "active" then
@@ -8367,6 +8377,19 @@ function RecordStore.enqueue_async(name: string, scope: string, key: string, mes
 end
 
 
+local function runtime_class_limit(work_class: string): number
+	local maximum = runtime_effective_concurrent_requests
+	local foreground_limit = math.max(1, maximum - runtime_options.critical_request_reserve)
+	if work_class == "interactive" then return foreground_limit end
+	if work_class == "messaging" then
+		local desired = math.max(1, math.floor(maximum * runtime_options.adaptive_queue_budget_share * 8))
+		return math.min(foreground_limit, desired)
+	end
+	if work_class == "migration" then return math.max(1, math.floor(maximum * 0.25)) end
+	if work_class == "maintenance" or work_class == "tracing" then return 1 end
+	return foreground_limit
+end
+
 function RecordStore.configure_runtime(config: RuntimeOptions): (ResultCode, string?)
 	if type(config) ~= "table" then return "invalid", "runtime config must be a table" end
 	if scheduler_started or next(records) ~= nil then
@@ -8388,6 +8411,7 @@ function RecordStore.configure_runtime(config: RuntimeOptions): (ResultCode, str
 	runtime_policy_provider = provider
 	runtime_effective_concurrent_requests = runtime_options.adaptive_max_concurrent_requests
 	runtime_next_policy_refresh = now_local() + runtime_options.runtime_policy_refresh_interval
+	runtime_next_budget_sample = now_local()
 	runtime_queue_tokens = math.max(1, runtime_options.adaptive_max_concurrent_requests * runtime_options.adaptive_queue_budget_share * 16)
 	runtime_queue_tokens_updated = now_local()
 	runtime_metrics.last_policy_error = ""
@@ -8405,6 +8429,12 @@ function RecordStore.get_runtime_stats(): { [string]: unknown }
 		metrics = table.clone(runtime_metrics),
 		next_policy_refresh = runtime_next_policy_refresh,
 		policy_provider_configured = runtime_policy_provider ~= nil,
+		work_class_in_flight = table.clone(runtime_external_in_flight),
+		work_class_limits = {
+			interactive = runtime_class_limit("interactive"), messaging = runtime_class_limit("messaging"),
+			migration = runtime_class_limit("migration"), maintenance = runtime_class_limit("maintenance"), tracing = runtime_class_limit("tracing"),
+		},
+		next_budget_sample = runtime_next_budget_sample,
 	}
 end
 
@@ -8426,26 +8456,34 @@ function RecordStore.run_runtime_request(
 	end
 	local deadline, deadline_error = resolve_operation_deadline(operation_deadline)
 	if deadline == nil then return nil, "invalid", deadline_error end
-	if runtime_options.adaptive_runtime_enabled then
-		if class == "messaging" and not consume_runtime_queue_token() then
-			runtime_metrics.budget_rejections += 1
-			return nil, "budget", "shared runtime governor rejected messaging work under its bounded retry/wake budget"
-		end
-		if class == "maintenance" and active_requests >= math.max(1, runtime_effective_concurrent_requests - runtime_options.critical_request_reserve - 1) then
-			runtime_metrics.budget_rejections += 1
-			return nil, "budget", "shared runtime governor deferred maintenance to preserve foreground headroom"
-		end
+	local class_limit = runtime_class_limit(class)
+	if runtime_external_in_flight[class] >= class_limit then
+		runtime_metrics.budget_rejections += 1
+		return nil, "budget", "shared runtime governor reached the " .. class .. " work-class concurrency cap"
 	end
+	if runtime_options.adaptive_runtime_enabled and class == "messaging" and not consume_runtime_queue_token() then
+		runtime_metrics.budget_rejections += 1
+		return nil, "budget", "shared runtime governor rejected messaging work under its bounded retry/wake budget"
+	end
+	if runtime_options.adaptive_runtime_enabled and class == "maintenance"
+		and active_requests >= math.max(1, runtime_effective_concurrent_requests - runtime_options.critical_request_reserve - 1)
+	then
+		runtime_metrics.budget_rejections += 1
+		return nil, "budget", "shared runtime governor deferred maintenance to preserve foreground headroom"
+	end
+	runtime_external_in_flight[class] += 1
 	local request_type = if kind == "read" then Enum.DataStoreRequestType.StandardRead
 		elseif kind == "write" then Enum.DataStoreRequestType.StandardWrite else nil
 	local acquired = acquire_request(nil, deadline :: number, kind ~= "read", request_type)
 	if not acquired then
+		runtime_external_in_flight[class] = math.max(0, runtime_external_in_flight[class] - 1)
 		runtime_metrics.budget_rejections += 1
 		return nil, "budget", "shared runtime request admission was unavailable before the operation deadline"
 	end
 	local started_at = now_local()
 	local ok, result = pcall(callback)
 	release_slot()
+	runtime_external_in_flight[class] = math.max(0, runtime_external_in_flight[class] - 1)
 	observe_runtime_request(if kind == "read" then "read" else "write", ok, if ok then nil else tostring(result), (now_local() - started_at) * 1000)
 	if not ok then return nil, "unknown", tostring(result) end
 	return result, nil, nil
