@@ -264,7 +264,7 @@ Slot lifecycle:
 Canonical message states:
 
 - `preparing`: submission is not yet claimable; index/receipt reconciliation is permitted.
-- `ready`: accepted and eligible after `available_at\).
+- `ready`: accepted and eligible after `available_at`.
 - `claimed`: current claim token and lease fence the worker.
 - `acknowledging`: handler success is recorded; recovery finishes acknowledgement without invoking the handler again.
 - `dead_lettering`: terminal failure is recorded; recovery finishes DLQ indexing without invoking the handler again.
