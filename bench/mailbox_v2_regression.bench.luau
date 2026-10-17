@@ -9,6 +9,22 @@ local chunk = luau.load(source, { debugName = "RecordStoreMailboxV2" })
 local MailboxV2 = chunk()
 
 local USER_ID = 987654321
+local function active_record_for(owner)
+	local ids = if owner.user_id ~= nil then { owner.user_id } else {}
+	return {
+		GetIdentity = function()
+			return {
+				store_name = owner.store_name,
+				scope = owner.scope,
+				profile_key = owner.profile_key,
+				user_ids = ids,
+			}
+		end,
+		IsOpen = function() return true end,
+		GetState = function() return "active" end,
+		Stats = function() return { state = "active", takeover_requested = 0, busy = 0, queue_busy = 0 } end,
+	}
+end
 local function make_mailbox(overrides)
 	local current_time = 1_000_000
 	local guid_counter = 0
@@ -28,12 +44,14 @@ local function make_mailbox(overrides)
 	for key, value in overrides or {} do
 		options[key] = value
 	end
-	local mailbox = MailboxV2.new(store, {
+	local owner = {
 		store_name = "MailboxV2_Test",
 		scope = "global",
 		profile_key = "player-" .. tostring(USER_ID),
 		user_id = USER_ID,
-	}, options)
+	}
+	options.active_record = active_record_for(owner)
+	local mailbox = MailboxV2.new(store, owner, options)
 	return mailbox, store, function(delta)
 		current_time += delta
 	end, function()
@@ -258,12 +276,14 @@ do
 	})
 	expect_code(interrupted, "accepted", "reservation response loss reconciled by read-back")
 	assert(type(interrupted.message_id) == "string", "confirmed enqueue omitted its stable route")
-	local fresh_mailbox = MailboxV2.new(store, {
+	local restart_owner = {
 		store_name = "MailboxV2_Test",
 		scope = "global",
 		profile_key = "player-" .. tostring(USER_ID),
 		user_id = USER_ID,
-	}, {
+	}
+	local fresh_mailbox = MailboxV2.new(store, restart_owner, {
+		active_record = active_record_for(restart_owner),
 		now_ms = function() return 1_000_000 end,
 		guid = function() return "restart-guid" end,
 		encode = function(value) return serde.encode("json", value) end,
@@ -356,12 +376,14 @@ do
 				))
 			assert(type(first.message_id) == "string", "fault-matrix failure omitted stable message identity")
 
-			local restarted = MailboxV2.new(store, {
+			local restart_owner = {
 				store_name = "MailboxV2_Test",
 				scope = "global",
 				profile_key = "player-" .. tostring(USER_ID),
 				user_id = USER_ID,
-			}, {
+			}
+			local restarted = MailboxV2.new(store, restart_owner, {
+				active_record = active_record_for(restart_owner),
 				now_ms = function() return 1_000_000 end,
 				guid = function() return "fault-matrix-restart" end,
 				encode = function(value) return serde.encode("json", value) end,
