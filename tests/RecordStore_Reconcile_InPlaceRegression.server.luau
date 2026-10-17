@@ -1,6 +1,7 @@
 --!strict
 
-local RecordStore = require(game:GetService("ServerScriptService"):WaitForChild("RecordStore"))
+local ServerScriptService = game:GetService("ServerScriptService")
+local RecordStore = require(ServerScriptService.RecordStore)
 
 RecordStore.Mock.reset()
 do
