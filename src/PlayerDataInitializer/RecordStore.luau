@@ -2066,9 +2066,10 @@ end
 local function acquire_request(state: InternalState?, deadline: number, update: boolean, request_type: Enum.DataStoreRequestType?): boolean
 	local critical = request_is_critical(state)
 	if runtime_options.adaptive_runtime_enabled then
-		local request_budget_value = if request_type ~= nil then request_budget(request_type) else nil
-		local read_budget = if request_type == nil then request_budget(Enum.DataStoreRequestType.StandardRead) else request_budget_value
-		local write_budget = if request_type == nil and update then request_budget(Enum.DataStoreRequestType.StandardWrite) else nil
+		local read_budget = if request_type == nil or request_type == Enum.DataStoreRequestType.StandardRead
+			then request_budget(Enum.DataStoreRequestType.StandardRead) else nil
+		local write_budget = if update and (request_type == nil or request_type == Enum.DataStoreRequestType.StandardWrite)
+			then request_budget(Enum.DataStoreRequestType.StandardWrite) else nil
 		if not critical and ((read_budget ~= nil and read_budget < runtime_options.adaptive_read_budget_floor)
 			or (write_budget ~= nil and write_budget < runtime_options.adaptive_write_budget_floor))
 		then
