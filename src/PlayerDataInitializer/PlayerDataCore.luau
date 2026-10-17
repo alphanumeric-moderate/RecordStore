@@ -136,18 +136,20 @@ local function define_leaderstat(
 end
 
 local CONFIG = {
+	-- Retained to preserve the existing dataset; change only as an explicit migration.
 	store_name = "PlayerData_Test1",
 	scope = "global",
 	key_prefix = "Player_",
 
 	schema_version = 1,
 
-	lease_duration = 120,
-	lease_renewal = 40,
-	autosave_interval = 60,
+	-- Tuned for a broad production workload, with a generous lease recovery margin.
+	lease_duration = 180,
+	lease_renewal = 60,
+	autosave_interval = 90,
 
 	retry_attempts = 5,
-	operation_deadline = 10,
+	operation_deadline = 20,
 	load_retry_attempts = 4,
 	load_retry_window = 45,
 	load_retry_base_delay = 0.5,

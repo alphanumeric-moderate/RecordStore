@@ -183,6 +183,7 @@ end
 	table.insert(Players._players, player)
 	
 	local saved_records = {}
+	local captured_record_options = nil
 	local function clone_data(data)
 		local result = {}
 		for key, value in pairs(data) do
@@ -199,6 +200,7 @@ end
 		return "TEST"
 	end
 	function RecordStore.new(name, scope, key, options)
+		captured_record_options = options
 		local storage_key = name .. "|" .. scope .. "|" .. key
 		local record = {
 			Key = key,
@@ -384,6 +386,9 @@ end
 		controller = controller,
 		player = player,
 		saved_records = saved_records,
+		get_record_options = function()
+			return captured_record_options
+		end,
 		task = task,
 		get_find_first_child_calls = function()
 			return find_first_child_calls
