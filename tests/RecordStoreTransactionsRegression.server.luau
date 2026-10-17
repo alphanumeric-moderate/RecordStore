@@ -241,6 +241,29 @@ assert(
 	"mock pre-commit failure persisted a transaction receipt"
 )
 
+-- Model the other critical ambiguity: UpdateAsync commits, then the response is lost.
+-- In this case the operation result is still unknown, but durable data and its receipt
+-- must agree so a later session can deduplicate the same operation ID.
+local committed_unknown_record = make_record("after-commit-unknown", { coins = 0 })
+RecordStore.Mock.set_update_response_losses(1, "injected response loss after persistence")
+local committed_unknown_result = committed_unknown_record:TransactAsync(
+	"tx-commit-response-lost",
+	"unknown:grant:5",
+	increment("coins", 5)
+)
+assert(committed_unknown_result == "unknown",
+	"commit-then-response-loss was incorrectly reported as a confirmed success")
+local committed_unknown_raw = RecordStore.Mock.get_record_raw(STORE, SCOPE, "after-commit-unknown")
+assert(committed_unknown_raw.data.coins == 5,
+	"commit-then-response-loss did not preserve the committed profile mutation")
+local committed_receipt = committed_unknown_raw.inbox_receipts["tx-commit-response-lost"]
+assert(type(committed_receipt) == "table",
+	"commit-then-response-loss persisted the mutation without its transaction receipt")
+assert(committed_receipt.request_fingerprint == "unknown:grant:5",
+	"commit-then-response-loss persisted a receipt for a different request")
+assert(committed_receipt.revision == committed_unknown_raw.revision,
+	"commit-then-response-loss persisted a receipt at a different revision")
+
 -- Receipt capacity must abort the next profile mutation instead of partially applying it.
 local capacity_record = make_record("receipt-capacity", { count = 0 })
 for index = 1, 128 do
@@ -265,11 +288,26 @@ local function expect_retained(count, code, label)
 			:format(label, tostring(count), tostring(code)))
 	end
 end
+
+local function expect_pruned(count, code, label)
+	if count ~= 1 or code ~= "success" then
+		table.insert(retention_failures, ("%s: expected one pruned and success, got count=%s code=%s")
+			:format(label, tostring(count), tostring(code)))
+	end
+end
 local recent_cutoff_ms = DateTime.now().UnixTimestampMillis - 60_000
 local receipt_pruned, receipt_prune_code = record:PruneTransactionReceiptsAsync(recent_cutoff_ms, 1)
 expect_retained(receipt_pruned, receipt_prune_code, "recent transaction receipt retention")
 local outbox_pruned, outbox_prune_code = record:PruneOutboxAsync(recent_cutoff_ms, 1)
 expect_retained(outbox_pruned, outbox_prune_code, "recent outbox event retention")
+
+-- A future millisecond cutoff must make old-enough entries eligible, proving both
+-- the no-op and deletion paths use the same public time unit.
+local future_cutoff_ms = DateTime.now().UnixTimestampMillis + 60_000
+local eligible_receipts, eligible_receipts_code = record:PruneTransactionReceiptsAsync(future_cutoff_ms, 1)
+expect_pruned(eligible_receipts, eligible_receipts_code, "eligible transaction receipt pruning")
+local eligible_outbox, eligible_outbox_code = record:PruneOutboxAsync(future_cutoff_ms, 1)
+expect_pruned(eligible_outbox, eligible_outbox_code, "eligible outbox pruning")
 
 RecordStore.Mock.reset()
 

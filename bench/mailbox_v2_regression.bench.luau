@@ -224,4 +224,65 @@ do
 	assert(status ~= nil and status.State == "ready", "replayed UpdateAsync created an invalid state")
 end
 
-print("[PASS] MailboxV2 idempotency, status lookup, priority, ack recovery, retry/DLQ/replay, expiry uncertainty, capacity recovery, and transform replay.")
+-- A failure before the reservation write must not create a ghost message;
+-- retrying the same request may then create exactly one accepted message.
+do
+	local mailbox, store = make_mailbox()
+	store:FailNextUpdate("before")
+	local interrupted = mailbox:EnqueueAsync("prepare_recovery", { value = 11 }, {
+		idempotency_key = "prepare-before-commit",
+	})
+	expect_code(interrupted, "unknown", "preparation write failed before commit")
+	local retry = mailbox:EnqueueAsync("prepare_recovery", { value = 11 }, {
+		idempotency_key = "prepare-before-commit",
+	})
+	expect_code(retry, "accepted", "retry after pre-commit failure")
+	assert(retry.message_id == interrupted.message_id, "pre-commit retry changed the message route")
+	local duplicate = mailbox:EnqueueAsync("prepare_recovery", { value = 11 }, {
+		idempotency_key = "prepare-before-commit",
+	})
+	expect_code(duplicate, "duplicate", "post-retry preparation deduplication")
+	local queue, queue_result = mailbox:GetQueueAsync()
+	expect_code(queue_result, "success", "queue after pre-commit recovery")
+	assert(#queue == 1, "pre-commit retry created multiple logical messages")
+end
+
+-- If the reservation commit succeeds but its response is lost, the persisted
+-- preparation must remain discoverable and recoverable by a fresh mailbox object.
+do
+	local mailbox, store = make_mailbox()
+	store:FailNextUpdate("after")
+	local interrupted = mailbox:EnqueueAsync("prepare_recovery", { value = 22 }, {
+		idempotency_key = "prepare-after-commit",
+	})
+	expect_code(interrupted, "unknown", "preparation response lost after commit")
+	assert(type(interrupted.message_id) == "string", "uncertain enqueue omitted its stable route")
+	local fresh_mailbox = MailboxV2.new(store, {
+		store_name = "MailboxV2_Test",
+		scope = "global",
+		profile_key = "player-" .. tostring(USER_ID),
+		user_id = USER_ID,
+	}, {
+		now_ms = function() return 1_000_000 end,
+		guid = function() return "restart-guid" end,
+		encode = function(value) return serde.encode("json", value) end,
+	})
+	local preparing, preparing_result = fresh_mailbox:GetDeliveryAsync(interrupted.message_id)
+	expect_code(preparing_result, "preparing", "preparation status after restart")
+	assert(preparing ~= nil and preparing.State == "preparing",
+		"committed preparation was reported absent after response loss")
+	local retried = fresh_mailbox:EnqueueAsync("prepare_recovery", { value = 22 }, {
+		idempotency_key = "prepare-after-commit",
+	})
+	expect_code(retried, "accepted", "resume committed preparation after restart")
+	assert(retried.message_id == interrupted.message_id, "restart recovery changed the reserved message ID")
+	local duplicate = fresh_mailbox:EnqueueAsync("prepare_recovery", { value = 22 }, {
+		idempotency_key = "prepare-after-commit",
+	})
+	expect_code(duplicate, "duplicate", "deduplicate recovered preparation")
+	local queue, queue_result = fresh_mailbox:GetQueueAsync()
+	expect_code(queue_result, "success", "queue after preparation restart recovery")
+	assert(#queue == 1, "restart recovery created multiple logical messages")
+end
+
+print("[PASS] MailboxV2 idempotency, status lookup, priority, ack recovery, retry/DLQ/replay, expiry uncertainty, capacity recovery, transform replay, and preparation failure recovery.")

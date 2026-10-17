@@ -612,6 +612,8 @@ local mock_update_replay_advance_seconds = 0
 local mock_update_failure_count = 0
 local mock_update_failure_code: ResultCode = "budget"
 local mock_update_failure_message: string? = nil
+local mock_update_response_lost_count = 0
+local mock_update_response_lost_message: string? = nil
 
 local close_internal: (state: InternalState, shutdown: boolean) -> (ResultCode, string?)
 local complete_deferred_takeover: (state: InternalState) -> ()
@@ -1939,6 +1941,10 @@ local function backend_update(backend: Backend, transform: UpdateTransform, dead
 		end
 		local next_entry = mock_write_version(entry, value, ids, normalized_metadata, false)
 		store[backend.key] = next_entry
+		if mock_update_response_lost_count > 0 then
+			mock_update_response_lost_count -= 1
+			return nil, nil, "unknown", mock_update_response_lost_message or "injected response loss after UpdateAsync committed"
+		end
 		return copy_value(next_entry.Value), {
 			Version = next_entry.Version,
 			CreatedTime = next_entry.CreatedTime,
@@ -5624,10 +5630,11 @@ local function dispatch_outbox(self: Record, dispatcher: OutboxDispatcher, max_i
 	return dispatched, "success", first_error
 end
 
-local function prune_transaction_receipts(self: Record, committed_before_unix: number, max_items: number?): (number, ResultCode, string?)
+local function prune_transaction_receipts(self: Record, committed_before_ms: number, max_items: number?): (number, ResultCode, string?)
 	local state = private[self]
 	if state == nil then return 0, "invalid", "record does not exist" end
-	if not math.isfinite(committed_before_unix) then return 0, "invalid", "committed_before_unix must be finite" end
+	if not math.isfinite(committed_before_ms) then return 0, "invalid", "committed_before_ms must be finite" end
+	local cutoff_unix = committed_before_ms / 1000
 	local limit = max_items or 16
 	if not math.isfinite(limit) or math.floor(limit) ~= limit or limit < 1 or limit > 32 then
 		return 0, "invalid", "max_items must be an integer from 1 to 32"
@@ -5635,7 +5642,7 @@ local function prune_transaction_receipts(self: Record, committed_before_unix: n
 	return update_profile_sidecars(state, "receipt_prune", function(receipts, outbox, _now)
 		local keys: { string } = {}
 		for operation_id, receipt in receipts do
-			if receipt.committed_at < committed_before_unix then table.insert(keys, operation_id) end
+			if receipt.committed_at < cutoff_unix then table.insert(keys, operation_id) end
 		end
 		table.sort(keys)
 		local remove_count = math.min(limit, #keys)
@@ -5645,10 +5652,11 @@ local function prune_transaction_receipts(self: Record, committed_before_unix: n
 	end)
 end
 
-local function prune_outbox(self: Record, dispatched_before_unix: number, max_items: number?): (number, ResultCode, string?)
+local function prune_outbox(self: Record, dispatched_before_ms: number, max_items: number?): (number, ResultCode, string?)
 	local state = private[self]
 	if state == nil then return 0, "invalid", "record does not exist" end
-	if not math.isfinite(dispatched_before_unix) then return 0, "invalid", "dispatched_before_unix must be finite" end
+	if not math.isfinite(dispatched_before_ms) then return 0, "invalid", "dispatched_before_ms must be finite" end
+	local cutoff_unix = dispatched_before_ms / 1000
 	local limit = max_items or 16
 	if not math.isfinite(limit) or math.floor(limit) ~= limit or limit < 1 or limit > 32 then
 		return 0, "invalid", "max_items must be an integer from 1 to 32"
@@ -5656,7 +5664,7 @@ local function prune_outbox(self: Record, dispatched_before_unix: number, max_it
 	return update_profile_sidecars(state, "outbox_prune", function(receipts, outbox, _now)
 		local keys: { string } = {}
 		for event_id, event in outbox do
-			if event.state == "dispatched" and event.created_at < dispatched_before_unix then table.insert(keys, event_id) end
+			if event.state == "dispatched" and event.created_at < cutoff_unix then table.insert(keys, event_id) end
 		end
 		table.sort(keys)
 		local remove_count = math.min(limit, #keys)
@@ -8125,6 +8133,22 @@ RecordStore.Mock = (function()
 		mock_update_failure_message = message
 	end
 
+	local function mock_set_update_response_losses(count: number, message: string?)
+		if type(count) ~= "number"
+			or not math.isfinite(count)
+			or math.floor(count) ~= count
+			or count < 0
+			or count > 100
+		then
+			error("count must be an integer from 0 to 100", 2)
+		end
+		if message ~= nil and type(message) ~= "string" then
+			error("message must be a string or nil", 2)
+		end
+		mock_update_response_lost_count = count
+		mock_update_response_lost_message = message
+	end
+
 	local function mock_claim_queue_message(record: Record): (MockQueueClaim?, ResultCode, string?)
 		local state = private[record]
 		if state == nil or not state.backend.mock then
@@ -8193,6 +8217,7 @@ RecordStore.Mock = (function()
 		set_test_clock = mock_set_test_clock,
 		set_update_replay = mock_set_update_replay,
 		set_update_failures = mock_set_update_failures,
+		set_update_response_losses = mock_set_update_response_losses,
 		reset = function()
 			local mock_records: { { id: string, record: Record } } = {}
 			for id, record in pairs(records) do
@@ -8231,6 +8256,8 @@ RecordStore.Mock = (function()
 			mock_update_failure_count = 0
 			mock_update_failure_code = "budget"
 			mock_update_failure_message = nil
+			mock_update_response_lost_count = 0
+			mock_update_response_lost_message = nil
 		end,
 	}
 
