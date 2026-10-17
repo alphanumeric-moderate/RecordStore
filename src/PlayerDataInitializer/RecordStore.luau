@@ -886,10 +886,7 @@ local function apply_runtime_policy(patch: { [string]: unknown }, from_provider:
 		runtime_options.adaptive_min_concurrent_requests + runtime_options.critical_request_reserve,
 		runtime_options.adaptive_max_concurrent_requests
 	)
-	runtime_queue_tokens = math.min(
-		runtime_queue_tokens,
-		math.max(1, runtime_options.adaptive_max_concurrent_requests * runtime_options.adaptive_queue_budget_share * 2)
-	)
+	runtime_queue_tokens = math.max(1, runtime_options.adaptive_max_concurrent_requests * runtime_options.adaptive_queue_budget_share * 16)
 	runtime_metrics.last_policy_error = ""
 	return true, nil
 end
@@ -8390,7 +8387,7 @@ function RecordStore.configure_runtime(config: RuntimeOptions): (ResultCode, str
 	runtime_policy_provider = provider
 	runtime_effective_concurrent_requests = runtime_options.adaptive_max_concurrent_requests
 	runtime_next_policy_refresh = now_local() + runtime_options.runtime_policy_refresh_interval
-	runtime_queue_tokens = runtime_options.adaptive_max_concurrent_requests * runtime_options.adaptive_queue_budget_share
+	runtime_queue_tokens = math.max(1, runtime_options.adaptive_max_concurrent_requests * runtime_options.adaptive_queue_budget_share * 16)
 	runtime_queue_tokens_updated = now_local()
 	runtime_metrics.last_policy_error = ""
 	return "success", nil
