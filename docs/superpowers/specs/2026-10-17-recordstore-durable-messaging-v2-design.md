@@ -150,6 +150,23 @@ In one UpdateAsync on the same profile key, apply the reducer result and persist
 
 Serialize this operation through the Record's write gate: stop concurrent local mutators, flush pending local dirty data, then apply the reducer to the current durable envelope. If flushing fails or its outcome is unknown, do not proceed from a stale cache. After commit, rebase the in-memory Record to the committed data/revision before releasing the gate. This API must never discard unsaved local mutations or overwrite a newer snapshot.
 
+### 3.3.1 Bounded inbox batching
+
+Add opt-in `Record:ApplyInboxBatchAsync(messages, reducer)` for several messages targeting the same profile key:
+
+```lua
+local result = record:ApplyInboxBatchAsync(messages, function(current_data, unseen_messages)
+    -- Pure, deterministic reducer over messages in input/delivery order.
+    return apply_messages(current_data, unseen_messages)
+end)
+```
+
+One UpdateAsync applies the combined profile mutation and records inbox receipts for all new message IDs. Matching duplicates are returned as duplicates and excluded from the reducer input. If any ID conflicts with a retained receipt, the full batch aborts without applying any new messages. An invalid reducer result, callback error/yield, owner/session fencing failure or capacity overflow also aborts the entire batch. The result gives an outcome for every input ID.
+
+The batch has strict item and encoded-byte ceilings. Only messages for the same profile and compatible schema/reducer may share a transaction. Preserve delivery order explicitly; do not reorder messages with the same ordering key. Queue acknowledgements begin only after the profile mutation and all receipts are verified durable. A crash after profile commit but before queue acknowledgements is safe: redelivery finds the per-message inbox receipts and does not reapply the data mutations.
+
+This API is opt-in because one batch is one atomic unit: all new items in that batch commit or none do. Automatic batch-size changes must not silently change a caller's intended transaction boundaries. Runtime acceleration may coalesce candidate discovery and scheduling, but it can merge messages into one atomic batch only where the caller explicitly opted into batch semantics.
+
 ### 3.4 Transactional outbox operation
 
 Add a method analogous to:
@@ -414,6 +431,96 @@ Roblox documents MessagingService delivery as best effort and not guaranteed; me
 The canonical message schema should leave room for `available_at`, `expires_at`, `priority`, consumer/type policy, correlation/causation ID and a schema version. Initial support should implement delayed availability and optional expiry before priority scheduling.
 
 Priority lanes and strict ordering should be enabled only after a starvation-proof scheduler is designed and benchmarked. Expired messages must reach a terminal `expired` state with a durable reason, not disappear silently.
+
+
+
+### 8.4 Server-local dynamic configuration
+
+Dynamic configuration is a first-class subsystem, but it is a **bounded runtime overlay**, not a second source of truth for persistence. RecordStore should have one server-local governor shared by all live Record instances, because DataStore budgets, in-flight requests and server pressure are shared within the server. Per-Record controllers would compete with each other and overestimate available capacity.
+
+#### Configuration layers and precedence
+
+Resolve effective settings in this order:
+
+1. **Correctness invariants** compiled into RecordStore: protocol/version checks, owner verification, session/claim fencing, idempotency rules, legal state transitions, minimum retention guarantees and key/value size ceilings. No dynamic or remote policy can weaken these.
+2. **Developer hard bounds** supplied in the RecordStore options.
+3. **Validated versioned policy snapshot** supplied by the experience, if configured.
+4. **Server profile** selected by the developer or `auto`: `latency`, `balanced`, `budget_safe`, or `background`.
+5. **Adaptive local overlay** calculated from this server's observed budgets, latency, throttling and workload.
+
+New `Options` fields should be snake_case and additive: `runtime_profile`, `server_role`, `adaptive_runtime_enabled`, `adaptive_sample_interval`, `adaptive_min_queue_poll_interval`, `adaptive_max_queue_poll_interval`, `adaptive_min_concurrent_requests`, `adaptive_max_concurrent_requests`, `adaptive_read_budget_floor`, `adaptive_write_budget_floor`, `adaptive_queue_budget_share`, `adaptive_hysteresis_seconds`, and `runtime_policy_refresh_interval`. Defaults keep adaptive control disabled or conservative until its benchmarks and Studio acceptance tests pass.
+
+`server_role` is developer-provided (`gameplay`, `hub`, `match`, `background`, `studio_test`, or `custom`). `auto` may observe Studio versus live server, current player count, active Record count, server age, current work and measured service behavior, but it must not guess application semantics from JobId or private/reserved status alone. The same server can host both latency-sensitive profile saves and low-priority maintenance; role is a hint, never a correctness decision.
+
+Add module-level APIs consistent with existing naming:
+- `RecordStore.apply_runtime_policy(revision, policy)`: validate and install an immutable policy snapshot in this server. Repeating the same revision and canonical policy is a no-op; reusing a revision with different contents is a conflict; lower/stale revisions are rejected.
+- `RecordStore.get_runtime_snapshot()`: return the effective settings, bounds, source of each setting, policy revision, controller state, sample time, and a short reason for each adaptive change.
+- An optional `on_runtime_config_changed` observer runs outside all DataStore transforms and cannot block or roll back configuration.
+
+The experience may keep remote policy storage in its own config service or DataStore key. RecordStore should not issue remote config reads on every operation. A local versioned snapshot is refreshed at a jittered, bounded interval; MessagingService is only an invalidation hint; missed hints are recovered by periodic refresh. Keep the last-known-good snapshot when the provider is unavailable. Validate the entire new snapshot before atomically replacing the old one. Unknown schema versions, invalid numbers, unsupported fields, unsafe limits or a stale revision reject the whole snapshot rather than applying a partial config.
+
+#### Signals and adaptation policy
+
+Sample no faster than the configured minimum interval. Inputs include:
+- `DataStoreService:GetRequestBudgetForRequestType(Enum.DataStoreRequestType.StandardRead)` and `StandardWrite`; `UpdateAsync` consumes both read and write budget;
+- recent RecordStore-owned operation latency EWMAs, in-flight count, timeout/uncertain-write rate and classified throttling errors;
+- eligible backlog count/oldest age and retry backlog;
+- optional Heartbeat delay as a weak signal for avoiding extra nonessential work when the server is already overloaded;
+- active record count and player count as context, not a substitute for actual budget readings.
+
+DataStore budgets are observed per server, while some limits are shared across the experience. Therefore a high local budget does not prove the experience-wide budget is healthy; actual throttle responses and operation latency remain feedback signals. Do not infer exact universe-wide capacity from one server's budget.
+
+The controller adapts only scheduling/acceleration knobs that preserve semantics: RecordStore-owned maximum in-flight requests, scan work per tick, idle poll interval within validated bounds, optional prefetch/cache TTL, outbox dispatch concurrency, background maintenance slice size, and batch throughput for APIs whose batch boundaries were explicitly supplied by the caller. It does not alter message IDs, deduplication windows, session or claim-fencing rules, lease expiry for work already claimed, retry attempt limits, payload validation, schema/version migration, terminal states, or dead-letter retention.
+
+Use asymmetric control to avoid oscillation:
+1. On a throttle, low budget reserve, or spike in uncertain writes, reduce noncritical concurrency quickly, stop low-priority scans/maintenance and move background work behind critical persistence operations.
+2. Preserve reserved capacity for profile open/save, session lease renewal/release and bounded shutdown work. Queue, DLQ inspection, compaction and metrics may not consume this reserved share.
+3. Keep durable accepted work pending instead of dropping it. A new send is accepted only after its canonical record and segment index are verified; under budget pressure, return `retryable` or `unknown` and require a retry with the same idempotency key.
+4. Increase concurrency slowly only after several stable samples, adequate budget headroom and no recent throttle/error. Apply hysteresis, cooldowns, per-step change limits and minimum dwell time.
+5. During shutdown, stop new background work, prioritize final profile saves/releases, and finish only work covered by the shutdown deadline. Unfinished queue work stays durable; shutdown never pretends it was delivered.
+6. Emit diagnostics for effective values, clamp decisions and throttle causes without logging user payloads.
+
+Do not call `DataStoreService:SetRateLimitForRequestType()` automatically: it changes the server's request rate limits for that request category, which can affect other scripts using DataStoreService. Integrations that opt into managing those engine-level limits must explicitly delegate ownership of the whole server budget and are out of scope for the default governor.
+
+### 8.5 Acceleration plan
+
+Apply acceleration where it reduces actual Roblox service calls or wasted work. Do not optimize only synthetic CPU time, and do not weaken correctness for lower latency.
+
+**A. Bounded inbox batching**
+- Use the explicit `ApplyInboxBatchAsync` API to apply a bounded set of messages and receipts to one profile in one UpdateAsync. This amortizes profile mutation writes while preserving atomicity for that caller-defined batch.
+- Start with batch sizes of 1, 4, 8 and 16 as benchmark candidates, bounded by encoded payload plus receipt bytes. These are candidates, not defaults.
+- If the batch exceeds the profile envelope or configured size cap, reject that batch without partial effects. Splitting into smaller calls is an explicit caller decision because it changes atomicity boundaries.
+- Acknowledge queue messages only after the durable profile receipt is confirmed; never mark the queue acknowledged based only on a cached in-memory Record value.
+
+**B. Outbox fan-out and grouped cleanup**
+- Dispatch independent outbox events with bounded concurrency under the shared governor, with fairness by target profile and priority class.
+- Each event uses a stable destination idempotency key. A destination-accepted event is safe to retry if the source cleanup update crashes.
+- After verifying destination acceptance for several events, remove/mark those entries in one CAS/update of the source outbox sidecar. Keep events without verified destination receipts pending. One failed event must not cause already-confirmed events to be resent with new IDs.
+- Do not combine separate source data mutations into one implicit transaction. `CommitWithOutboxAsync` preserves one command's explicit atomic boundary.
+
+**C. Wake-up coalescing and bounded topic sharding**
+- Replace one-subscription-per-profile acceleration for the new mailbox with a fixed, configured number of shared wake-up topics per experience/shard. Topic routing is a hint; the payload carries only a compact owner/message/generation reference, never trusted state or game-economy data.
+- Coalesce repeated wake-ups for the same owner in a server-local keyed work map. One notification triggers a bounded scan rather than one request chain per hint.
+- Respect current MessagingService topic/message size and subscription/publish limits. If a shared topic is congested, dropped or unavailable, durable polling remains the recovery path.
+- Avoid creating a topic/subscription for every record; subscription fanout itself can become a resource bottleneck.
+
+**D. Bounded local candidate cache**
+- Cache recently observed segment IDs/slot metadata with a short TTL and cap. Hints invalidate or refresh the cache, but never authorize delivery.
+- Always revalidate current owner, generation, lifecycle state and claim token through the canonical message UpdateAsync before handling.
+- A maximum cache age and mandatory reconciliation poll prevent missed invalidations from suppressing work indefinitely. Stale cache entries may waste a read but may never suppress recovery forever or make an invalid message claimable.
+
+**E. Fair multi-lane scheduling**
+- Separate critical profile persistence and lease work from urgent durable messages, routine messages/outbox fan-out, and maintenance/diagnostics.
+- Use weighted fair scheduling and bounded per-owner slices so a noisy profile or poison message cannot starve other profiles. Preserve ordering for the same configured ordering key.
+- Under pressure, drop only ephemeral hints/cache entries, not accepted durable messages. Delay low-priority work rather than consuming the reserved budget.
+- Keep queue and maintenance concurrency in one shared request governor; do not create independent semaphores per feature that oversubscribe the same DataStore budget.
+
+**F. Typed circuit breaker and retry suppression**
+- Classify invalid payload/schema, permanent authorization/owner conflict, transient service failure, key/experience throttling and uncertain write separately.
+- Open a bounded circuit for repeated transient failures to a service/key, with a half-open probe and cooldown. Do not repeatedly hammer a known-throttled key.
+- Never circuit-break critical final profile save/release into silent success. Return an explicit retryable/unknown outcome and preserve the durable recovery path.
+
+Every accelerator has an off switch and a polling-only fallback. Removing MemoryStore/MessagingService must not require data migration, change message IDs, or weaken delivery semantics.
 
 ## 9. Dead letters, replay and retention
 
