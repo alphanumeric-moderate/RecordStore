@@ -1,323 +1,579 @@
-# RecordStore durable messaging and segmented mailbox v2
+# RecordStore durable messaging v2: correctness-first architecture
 
 - Date: 2026-10-17
-- Status: Design proposal for review; no production-code changes
-- Target: RecordStore queue and messaging subsystem
-- Related work: follow-up to merged PR #31; separate from production-configuration work
+- Status: Revised design; supersedes the earlier design wherever they conflict
+- Scope: durable mailbox, message processing, transactional outbox/inbox, and recoverable workflows
+- Related PRs: #31 (configuration/observer design), #32 (initial durable-messaging design)
 
-## Decision requested
+## Executive decision
 
-Adopt a combined design, not an either/or choice:
+Build a durable messaging subsystem that is more than a replacement for \`ProfileStore:MessageAsync()\`. The design combines:
 
-1. Harden the existing queue's delivery contract and failure recovery (Option A).
-2. Add a versioned, segmented DataStore mailbox with separate dead-letter and idempotency records (Option B, the durable foundation).
-3. Add an optional MemoryStore/MessagingService acceleration path whose state is never authoritative (Option C).
+1. **Correctness-first mailbox**: at-least-once delivery, producer idempotency, per-message authoritative state, append-only bounded segment indexes, persisted retry/backoff, claim fencing, acknowledgement recovery, and an independent dead-letter index.
+2. **Transactional outbox/inbox**: atomically commit profile-data changes with outbound intent, and atomically apply inbound message effects to one profile key with a deduplication receipt.
+3. **Recoverable sagas**: compose idempotent per-profile steps for transfers and other multi-record workflows without pretending that multiple DataStore keys form a transaction.
+4. **Operator-grade delivery tooling**: delivery receipts/status, transition history, schema-aware replay, paginated dead-letter inspection, health diagnostics, and bounded repair.
+5. **Optional acceleration**: MemoryStore and MessagingService may wake workers or provide hints; they never own correctness.
 
-Implement in phases and keep the new layout feature-gated. The current queue remains supported during migration. Do not change production defaults or activate the new queue format until the compatibility reader, migration, rollback protocol, fault tests, and benchmark suite have been reviewed and verified.
+The previous proposal placed full message objects, active state, and dead letters in segmented envelopes. This revision separates the **canonical message record** from the **append-only segment index**. Claims, retries, acknowledgements, and terminal transitions update one message key rather than rewriting the segment. This reduces write amplification and makes cross-key recovery state explicit.
 
-## 1. Current implementation and concrete problems
+No feature described here is implemented by this document. It is a design contract. New layout and envelope fields stay disabled until compatibility, failure-injection, migration, rollback, and live Studio/server acceptance criteria pass.
 
-The current queue implementation lives in **src/PlayerDataInitializer/RecordStore.luau**. Queue implementation version 3 uses the **RecordStoreQueue** DataStore by default and stores a record's active messages and dead letters in one envelope. Defaults are a 10-second poll interval, 60-second processing lease, 100 active messages, 250,000 serialized bytes per envelope, and five attempts.
+## 1. Guarantees and non-goals
 
-The public API includes **Record:MessageAsync()**, **EnqueueAsync()**, **ProcessQueueAsync()**, **GetQueueAsync()**, **GetDeadLettersAsync()**, **ClaimDeadLetterAsync()**, **ReplayDeadLetterAsync()**, **DiscardDeadLetterAsync()**, and **Stats()**. Existing queue handlers are deliberately rejected if they yield. Queue transforms already parse and validate the envelope, generate a claim token before UpdateAsync, and verify outcomes after writes. These are useful foundations, not exactly-once guarantees.
+### 1.1 Delivery guarantee
 
-Material gaps:
+The mailbox provides **at-least-once delivery**. A handler may execute more than once if the process stops after a side effect but before a durable acknowledgement, if a claim expires, or if a service returns an ambiguous result. An acknowledged message must not be offered for execution again by mailbox recovery.
 
-- Every append, claim, acknowledgement, retry, and dead-letter transition rewrites and validates an envelope containing active messages and historical dead letters.
-- Dead letters consume active queue capacity and can prevent enqueue or dead-letter transitions when the envelope reaches its byte limit.
-- EnqueueAsync generates its ID internally. A caller retry after an ambiguous result can create a different ID for the same logical operation.
-- Handler execution and acknowledgement are separate durable operations. A crash after a handler's external side effect but before acknowledgement can cause redelivery.
-- Retry timing is tied to claim-lock expiry rather than an explicit persisted retry schedule.
-- MessagingService is used for hints and transient inter-server messages. Successful publish is not proof of handler execution.
-- Queue inspection has no scalable paginated dead-letter API or queue-specific snapshot of backlog age, expired claims, retry state, and acknowledgement recovery.
+Do not call arbitrary handlers exactly-once. RecordStore can provide a stronger, narrowly-scoped guarantee for a mutation and its deduplication marker committed together to one RecordStore profile key. That is **effectively-once profile mutation within the retained inbox-receipt window**, not exactly-once behavior for web services, other DataStore keys, MessagingService, or arbitrary user code.
 
-## 2. Delivery and API contract
+### 1.2 Atomicity boundary
 
-### 2.1 Delivery guarantees
+Roblox DataStore \`UpdateAsync\` is atomic for the key being updated; it does not create a transaction across multiple keys. Any protocol that touches a manifest, segment, receipt, message record, profile record, dead-letter index, or saga record must persist intermediate states and recover them idempotently.
 
-The durable queue provides **at-least-once delivery**. A message remains eligible for retry until it is durably acknowledged, durably dead-lettered, or explicitly discarded. A handler may execute more than once after a crash, timeout, lease expiry, uncertain DataStore response, or ownership change.
+Inside every \`UpdateAsync\` transform:
 
-RecordStore will not promise exactly-once effects for arbitrary handlers, purchases, transfers, or external systems. Application effects must be idempotent or use a durable application-level ledger. The library will document and test a supported pattern.
+- do not yield;
+- do not call MessagingService, MemoryStore, HTTP or another DataStore;
+- do not dispatch observers, acquire a process mutex, wait on a task, or change scheduler state;
+- do not generate GUIDs or read wall-clock/time-dependent values that would change on retry;
+- do not perform irreversible application side effects.
 
-Distinguish these states:
+Prepare stable IDs and timestamps before calling \`UpdateAsync\`. Transform callbacks supplied by consumers must be pure, deterministic for the same input, and non-yielding because Roblox can invoke a transform more than once.
 
-- **Submitted**: argument and payload validation succeeded.
-- **Enqueued**: the canonical message and its queue index are durably written and verified.
-- **Duplicate submission**: an existing idempotency receipt matches the producer key and exact request; return its original message ID.
-- **Claimed**: a worker owns the persisted claim token and lease.
-- **Retry scheduled**: failure and next eligible time are durably recorded.
-- **Acknowledgement pending**: the handler returned success and a durable acknowledgement transition began, but cleanup/reconciliation may remain.
-- **Acknowledged**: acknowledgement is durable; recovery must not run the handler again for that message.
-- **Dead-lettered**: terminal failure and payload are durably stored outside active queue capacity.
-- **Replay pending, replayed, or discarded**: explicit, recoverable dead-letter transitions.
+### 1.3 Durable results and uncertain outcomes
 
-An **unknown** result means the caller must not infer commit or non-commit. Repeating an enqueue with the same idempotency key is the supported way to resolve an ambiguous submit result. Existing result-code APIs remain compatible; new typed report APIs are additive.
+New APIs return a typed result in addition to preserving existing result-code methods for compatibility. At minimum, distinguish:
 
-### 2.2 Idempotent enqueue
+- \`accepted\`: durable intent and canonical message state were verified;
+- \`duplicate\`: the producer key matched an existing submission with the same exact canonical request;
+- \`conflict\`: the same producer key was reused for a different request, owner, or incompatible protocol state;
+- \`capacity\`: no durable space is available and no message was accepted;
+- \`retryable\`: no final conclusion was reached and the same operation key may be retried;
+- \`unknown\`: the caller must not infer commit or non-commit; verify or retry with the same idempotency key;
+- \`processed\`, \`acknowledged\`, \`retry_scheduled\`, \`dead_lettered\`, and \`discarded\`: durable lifecycle states, not publish results.
 
-Add an optional producer-supplied idempotency key to the durable enqueue API while preserving the two-argument call.
+A successful MessagingService publish means only that publish succeeded. A MemoryStore enqueue means only that an ephemeral hint was recorded. Neither proves that a durable message exists or that a handler completed.
 
-- EnqueueAsync(message_type, data) keeps its current non-idempotent behavior.
-- EnqueueAsync(message_type, data, idempotency_key) is idempotent for that record owner and producer key.
-- The same key with the same canonical request returns the original logical message ID and a duplicate outcome if already accepted.
-- The same key with a different message type or payload returns **conflict**; it must never silently reuse the earlier ID for different content.
-- Validate key type and length before issuing DataStore requests. The key is scoped to the full (name, scope, key) record identity.
-- Canonical request comparison must be deterministic for nested Luau tables. Do not use table iteration order as an idempotency oracle.
-- By default, keep receipts until explicitly pruned. An optional configured retention may prune terminal receipts, and the API documentation must state that reuse after expiry may create a new logical message.
+### 1.4 Backpressure instead of silent loss
 
-A receipt is a separate bounded DataStore key, not an ever-growing index in a queue envelope. Store the full producer key and full canonical request representation, or an equivalently collision-safe representation. Hashes may shorten key names, but every loaded receipt must validate the original owner and key. A hash collision must fail closed or use a collision slot; it must never merge two producer keys.
+Each record family has explicit item and byte limits. When a queue, outbox, inbox-dedup ledger, or workflow reaches its configured bound, the API returns a capacity result before committing a partial user mutation. Never silently drop an accepted message, discard the oldest receipt, or mark a message processed because storage is full.
 
-### 2.3 Transient messages
+## 2. How RecordStore should differ from ProfileStore
 
-MessageAsync remains a transient MessagingService API. A successful return means only that the publish call succeeded. It does not imply persistence, subscriber delivery, handler execution, or acknowledgement. Document it separately from durable enqueue.
+The current public ProfileStore documentation describes session locking, autosaving, reconciliation, profile reads/version queries, and durable per-profile \`MessageAsync()\` with \`MessageHandler()\`/processed acknowledgement. Therefore, **durable messages alone are not a differentiator**, and this design must not claim ProfileStore lacks durable messaging.
 
-## 3. Option A: harden queue correctness
+The unique value is the combination of capabilities below. Statements about ProfileStore refer to the public API documented in its current repository; they do not assert that no internal implementation detail could be similar.
 
-Implement these correctness improvements as the first production slice and carry the invariants into the segmented layout:
+| Capability | ProfileStore documented surface | RecordStore proposal |
+| --- | --- | --- |
+| Profile session lock and autosave | Yes | Preserve session ownership/fencing and current persistence guarantees |
+| Message sent to a profile and processed by its active session | \`MessageAsync()\` and \`MessageHandler()\` | Keep an easy profile-targeted send path, plus explicit durable lifecycle state and receipt inspection |
+| Producer idempotency key that deduplicates a retried submission | No equivalent documented parameter/contract found | Stable logical ID; exact-request comparison; same-key retry returns original outcome; mismatched request conflicts |
+| Independent segmented mailbox and independent dead-letter storage | No equivalent documented public queue/DLQ API found | Bounded append-only ID indexes and per-message authoritative records, separate DLQ index, paginated inspection and replay |
+| Persisted retry schedule, leases, claim fencing, ack recovery | No equivalent documented public queue state-machine API found | Explicit \`available_at\`, claim lease/token, bounded backoff, ack/dead-letter recovery states |
+| Delivery status query and transition trace | No equivalent documented message receipt/history API found | \`GetDeliveryAsync\` with status, attempts, next retry, terminal reason and bounded transition history |
+| Transactional outbox with profile mutation | No equivalent documented public API found | One profile-key update commits data and outbound intent together; dispatcher publishes idempotently later |
+| Atomic inbox deduplication with a profile mutation | No equivalent documented public API found | One profile-key update commits the reducer result and the message receipt together |
+| Multi-profile workflow/saga recovery | No equivalent documented public workflow API found | Optional saga coordinator that resumes idempotent steps and compensations |
+| Schema-aware message validation and safe dead-letter replay | No equivalent documented queue/replay API found | Versioned payload codecs, validation-before-replay, replay audit and operator-controlled retention |
+| Queue/outbox/inbox health snapshots | ProfileStore exposes critical-state/error signals for its profile operations | RecordStore adds bounded, explicitly approximate queue and workflow diagnostics without using metrics for correctness |
 
-- Persist an explicit **available_at** retry time and bounded exponential backoff. Apply deterministic or injected jitter so mass failures do not synchronize into a retry storm. Cap the delay and honor maximum attempts.
-- Distinguish attempts for the current delivery cycle, total attempts across replay, and replay count. Preserve existing fields during migration.
-- A claim is expired only when its persisted lease deadline has passed. A claim token fences renewals, acknowledgements, retries, and dead-letter transitions from stale workers.
-- Add lease renewal for claimed messages. Preserve the non-yielding **on_queue_message** callback for compatibility. Add a separate opt-in async callback for operations that await Roblox APIs; it requires a renewable claim and must stop progressing when either the claim or owning record session is fenced. It remains at-least-once.
-- Persist acknowledgement-in-progress before updating the idempotency receipt and removing the active item. Recovery must finish this transition without invoking the successful handler a second time.
-- Persist dead-letter-in-progress before copying to the independent dead-letter key. Recovery repeats the copy idempotently and then removes the active item.
-- Keep UpdateAsync transforms pure and non-yielding. Do not generate IDs, mutate InternalState, publish messages, invoke observers, call other services, or acquire locks inside transforms. Generate tokens before the update and emit observations only after classifying its outcome.
-- Publish MessagingService hints only after durable enqueue is verified. Failed or missed hints must not change enqueue success or prevent polling recovery.
-- Validate queue settings before queue writes: timeouts, retry counts, segment sizes, retention, and partition counts.
+Primary comparison references:
+- ProfileStore README: https://github.com/MadStudioRoblox/ProfileStore/blob/main/README.md
+- ProfileStore API: https://github.com/MadStudioRoblox/ProfileStore/blob/main/docs/api.md
 
-Option A is the correctness contract, not a reason to retain the v3 envelope indefinitely.
+The differentiators should be released as individually useful APIs. The mailbox remains useful without sagas; outbox/inbox remains useful without MemoryStore; the optional accelerator can be removed without changing durable semantics.
 
-## 4. Option B: versioned segmented durable mailbox
+## 3. Public API proposal
 
-### 4.1 Key layout
+Names are provisional. Preserve existing two-argument \`Record:EnqueueAsync(type, data)\`, \`Record:MessageAsync(type, data)\`, \`ProcessQueueAsync()\`, \`GetQueueAsync()\`, \`GetDeadLettersAsync()\`, and \`Stats()\` behavior unless a separately reviewed compatibility change is approved.
 
-Use the configured queue DataStore name and scope, with a new mailbox layout version referred to as **mailbox v2**. Keep every key name within Roblox's 50-character limit. Persist full record-owner identity in manifests, segments, receipts, and dead-letter records. A compact deterministic owner fingerprint is a routing prefix only, never proof of ownership.
+### 3.1 Enqueue without requiring the target profile to be open
 
-Use four record families:
+Add a store-level operation analogous to:
 
-1. **Partition manifest**: one small record per owner and partition. Contains layout version, full owner identity, immutable partition count, head segment number, tail/current segment number, and migration/reconciliation state. Its size is independent of message count. It is updated for rollover, head advancement, and recovery, not for every claim or acknowledgement.
-2. **Bounded active segment**: one key per owner, partition, and segment number. Contains at most the configured item count and serialized-byte ceiling. Every update validates version, owner, partition, segment number, message identity, shape, and encoded size. Claim, lease renewal, retry, acknowledgement-in-progress, and removal normally touch only this bounded key.
-3. **Independent dead-letter record**: one durable key per message ID, including payload, terminal error, attempt history, timestamps, replay fencing state, and owner identity. Dead letters no longer consume active-segment bytes or slots. Retention defaults to disabled (keep records) unless explicitly configured; cleanup must be bounded and observable.
-4. **Idempotency receipt**: one durable key per producer key, containing original producer key, canonical request representation, original message ID, enqueue reservation/fencing token, lifecycle status, and timestamps. The active item references the receipt identity. Receipt operations are idempotent and use a compare-and-set state machine.
+\`\`\`lua
+local result = RecordStore.EnqueueToAsync(
+    store_name,
+    scope,
+    profile_key,
+    message_type,
+    payload,
+    {
+        idempotency_key = "purchase:receipt-id",
+        payload_version = 1,
+        available_at = nil,
+        expires_at = nil,
+        correlation_id = nil,
+        ordering_key = nil,
+    }
+)
+\`\`\`
 
-No worker may enumerate the entire DataStore keyspace to find ready messages on every poll. Normal processing uses bounded manifests and segment ranges. ListKeysAsync is reserved for paginated operator-facing dead-letter inspection or infrequent reconciliation, with its request-budget cost handled explicitly.
+This lets a server durably submit work for an offline profile without holding or fabricating an active Record session. Only the legitimate active Record session may execute that profile's handlers. The store-level submitter cannot claim a message or bypass session fencing.
 
-### 4.2 Segments and rollover
+Existing \`Record:EnqueueAsync(type, data)\` remains a convenience method; it delegates to the same submission protocol. A third options argument is additive. For valuable/irreversible work, require a caller-stable idempotency key. Calls without one get a unique submission, and an ambiguous outcome cannot be safely deduplicated by repeating the whole call.
 
-Initial conservative mailbox v2 defaults:
+### 3.2 Query delivery outcome
 
-- **queue_segment_max_messages = 32**
-- **queue_segment_max_bytes = 250000**
-- **queue_max_segments = 64** per partition
-- **queue_partition_count = 1**
-- Start with the existing 60-second claim lease; validate all lease values.
-- Preserve the existing 10-second poll default until benchmarks and live telemetry justify changing it.
+Add \`RecordStore.GetDeliveryAsync(store_name, scope, profile_key, message_id)\` and/or \`Record:GetDeliveryAsync(message_id)\`. Return a single canonical message snapshot:
 
-These defaults allow up to 2,048 small active messages per single-partition mailbox while preserving a byte ceiling per segment. Larger messages naturally reduce the item count per segment. Dead letters do not count toward active capacity. Capacity exhaustion returns an explicit capacity/validation result; it never silently drops an existing message.
+- message ID, owner identity, type, payload schema version;
+- lifecycle state, created/updated time, current attempt and total attempts;
+- next eligibility time, current claim expiry when relevant;
+- terminal result, bounded last error and replay count;
+- correlation/causation IDs and bounded transition history;
+- whether the response came from the canonical durable message record or is incomplete.
 
-A writer reads the current manifest and attempts an append to the selected segment. The segment UpdateAsync rejects appends if sealed or full. Rollover is recoverable:
+Do not expose a \`processed\` result based on MessagingService or MemoryStore. A status read is not a transactional snapshot across the entire mailbox; one message record is authoritative for that message.
 
-1. Seal the old segment using UpdateAsync guarded by its current identity.
-2. Create and verify the next empty segment.
-3. Advance the manifest tail only if it still points to the old segment and the old segment is sealed.
-4. Retry the append against the current manifest.
-5. Recovery repairs a sealed current segment or an orphan empty segment without deleting a referenced active segment.
+### 3.3 Atomic inbox operation
 
-The order is mandatory. A stale producer may not append after a segment is sealed. Only sealed, empty, non-current segments may be skipped and retired. Head/tail segment numbers avoid a manifest array that grows with every rollover.
+Add a profile method analogous to:
 
-The default partition count remains one to preserve the old queue's effective order as closely as possible. Partitioning is opt-in and immutable after activation. With more than one partition, ordering is only per partition; no total FIFO order is promised. Resizing partitions requires a future migration rather than an in-place setting change.
+\`\`\`lua
+local result, message = record:ApplyInboxAsync(message_id, function(data)
+    -- Pure, deterministic data reducer only.
+    data.coins += 50
+    return data
+end)
+\`\`\`
 
-### 4.3 Cross-key crash recovery
+In **one UpdateAsync on the same profile key**, apply the reducer result and persist the deduplication receipt. If the same message ID is delivered again while its inbox receipt is retained, return \`duplicate\` and do not reapply the reducer. If the same ID is reused with a different request fingerprint or recipient, return \`conflict\`.
 
-DataStore provides no transaction spanning the manifest, segment, receipt, and dead-letter keys. Every cross-key transition therefore has a persisted intermediate state and an idempotent recovery path.
+The reducer runs inside an UpdateAsync transform and may be invoked multiple times. It must not yield or perform external side effects. For irreversible game actions, keep the domain idempotency key in the application's own durable state for as long as the business rule requires. The inbox receipt window is not a substitute for a permanent purchase-receipt ledger.
 
-**Enqueue with an idempotency key**
+### 3.4 Transactional outbox operation
 
-1. Create or read the receipt using UpdateAsync. A matching key and canonical request reuse the same message ID; a mismatched request returns conflict.
-2. Persist a reservation token in the receipt.
-3. Append the message with that ID and reservation token to a segment.
-4. Mark the receipt accepted only if the reservation token still matches.
-5. Verify the stored result, then return enqueued or duplicate.
-6. If the process stops between steps, a repeated submit with the same key resumes the same logical enqueue. A worker must not execute an item whose receipt is still reserved. Recovery may commit the receipt only after verifying the corresponding segment item. A stale reservation is fenced; a late item with that token is removed or reconciled without invoking its handler.
+Add a method analogous to:
 
-Do not report enqueue success until the item exists and the receipt is committed. A write response with an uncertain outcome is verified using an uncached read or a subsequent idempotent retry, not guessed from a nil return value.
+\`\`\`lua
+local result, snapshot = record:CommitWithOutboxAsync(
+    "shop-purchase:operation-123",
+    function(current_data)
+        -- Pure, deterministic reducer.
+        local next_data = copy_and_apply_purchase(current_data)
+        local events = {
+            {
+                target_store = "PlayerData",
+                target_scope = "global",
+                target_key = "player_456",
+                type = "ItemGift",
+                payload_version = 1,
+                data = { item_id = "sword_01" },
+            },
+        }
+        return next_data, events
+    end
+)
+\`\`\`
 
-**Claim and execution**
+One UpdateAsync on the source profile key commits the data mutation, commit receipt, and bounded outbox entries together. Stable event IDs are derived from the stable commit key and event ordinal outside the transform; retries must return the original committed operation rather than reapply the reducer. Reusing a commit key with different input is a conflict.
 
-Claim is a compare-and-set transition on the segment item. It increments attempt counters, stores a new GUID claim token, sets locked_until, and records the processing server and session generation. Only the matching unexpired token may renew or finish the item. A handler starts only after the worker verifies queue state and current record-session ownership. Session ownership and queue claim are different keys, so they are not one atomic lock.
+A dispatcher sends outbox events through the durable mailbox using the event ID as the idempotency key. It removes/marks an outbox entry only after it verifies the matching durable mailbox receipt. If the process crashes after destination acceptance but before outbox cleanup, a retry returns the same mailbox message and does not create a second logical event.
 
-**Acknowledgement**
+This gives atomicity between **one profile's data update and its outbound intent**. It does not atomically update the target profile or run the target handler. The bounded outbox applies backpressure to future commits when full; it never discards an unconfirmed event.
 
-1. After handler success, persist **acknowledging** on the active item using the current claim token.
-2. Mark the matching idempotency receipt acknowledged.
-3. Remove the active item from its segment.
-4. Recovery of an acknowledging item completes steps 2-3 and never re-runs the handler. If the process dies before step 1 commits, delivery may repeat; application-side idempotency remains necessary.
+### 3.5 Recoverable workflow/saga API
 
-**Retry**
+Add an optional companion module, for example \`RecordStore.Workflow\`, after inbox/outbox correctness is established. Its durable API should provide:
 
-Persist ready plus available_at, last_error, attempt counts, and cleared claim fields. A retry becomes claimable only at available_at. Reconcile an uncertain write before starting another transition. After maximum attempts, use the dead-letter protocol rather than retrying indefinitely.
+- stable workflow ID and exact-request idempotency;
+- named, versioned steps with checkpoints and status;
+- step input/output summaries that avoid storing secrets;
+- bounded retry policy and next retry time;
+- idempotent per-record actions through \`ApplyInboxAsync\`;
+- explicit forward recovery or compensating steps;
+- status query, cancellation request, and operator-visible stuck-step reason.
 
-**Dead-lettering**
+A saga is eventually consistent, not a cross-key ACID transaction. Never name it \`AtomicTransfer\` or claim that source and destination balances change simultaneously.
 
-1. Persist **dead_lettering** in the active item under its claim token.
-2. Upsert the separate dead-letter record idempotently by message ID and terminal lock token.
-3. Update the idempotency receipt to dead-lettered if present.
-4. Remove the active item.
-5. Recovery repeats these transitions idempotently. A dead-lettering item must never be passed to the handler again.
+## 4. Corrected durable storage architecture
 
-**Dead-letter replay/discard**
+### 4.1 Record families
 
-Dead-letter claim tokens and replay tokens are separate from active claim tokens. Replay persists an intent, creates the active item with the original message ID and replay token, verifies the item, and then marks the dead-letter record replayed. If a crash leaves both records, reconciliation must finish without creating a second logical message. Discard persists an explicit terminal state before cleanup; deletion must never be the first record of the decision.
+Use the configured queue DataStore name and scope with a versioned mailbox namespace. The full record owner is \`(store_name, scope, profile_key)\`. Every route, receipt, segment, message, dead-letter and manifest value must store and validate the full owner; a hashed key prefix is only a routing aid.
 
-## 5. Option C: optional acceleration only
+The layout consists of:
 
-Add **queue_acceleration_enabled**, defaulting to false until measurements justify enabling it.
+1. **Constant-size manifest** per owner and partition: protocol version, full owner identity, immutable partition count, head/tail segment numbers, activation/migration state and bounded reconciliation metadata. It must not contain a growing array of all messages.
+2. **Append-only segment index**: bounded entries containing message ID plus placement generation, not payload, retry state, or dead-letter history. Appending is idempotent; message processing never rewrites this index entry.
+3. **Canonical message record**: one DataStore key per message ID. It owns payload, schema version, current lifecycle state, retry scheduling, attempt counters, claim token/expiry, current segment locator and generation, idempotency-receipt reference, correlation IDs, terminal reason and bounded transition history.
+4. **Submission receipt**: maps an owner-scoped producer idempotency key to one stable message ID and canonical request identity. It stores reservation/acceptance state, placement generation and timestamps. The exact request representation remains available for the configured deduplication window, so a hash collision cannot silently equate two payloads.
+5. **Independent dead-letter index**: separately segmented IDs for messages in dead-letter state. The canonical message record retains the payload/error needed for inspection and replay. A growing DLQ cannot consume active-segment capacity.
+6. **Profile-local inbox and outbox fields**: bounded sidecars in the profile envelope, so the data mutation and its corresponding inbox receipt/outbox intent can be committed in a single UpdateAsync. These fields require a versioned profile-envelope migration and explicit rollout gating.
 
-- Publish a compact MessagingService wake-up hint only after durable enqueue is verified. The hint contains routing and message identity, not the authoritative payload.
-- An optional MemoryStore queue/hash-map may hold short-lived message-ID hints, wake-up coalescing keys, or short-lived scheduling metadata. Use short explicit TTLs; handle throttling, eviction, quota exhaustion, and unavailable service as normal acceleration failures.
-- Every hint consumer must claim the actual item through DataStore using durable segment state and the current claim token. Never acknowledge or grant an effect solely because MemoryStore or MessagingService says a message exists.
-- Keep the bounded DataStore polling path enabled as recovery. Missing, duplicated, reordered, expired, or forged hints cannot drop a durable message or bypass owner/token checks.
-- Do not add MemoryStore until deterministic queue tests and the baseline benchmark show a measurable benefit. If it adds requests or latency without useful gain, leave it disabled or remove the accelerator without changing the durable protocol.
+A per-message canonical record costs more keys and service calls than one large queue envelope, but eliminates rewrites of unrelated message payloads on claim/ack and isolates hot-key traffic. CodSpeed and constrained-budget workload evidence must determine usable defaults rather than assuming this is always cheaper.
 
-Roblox documents MessagingService delivery as best-effort and not guaranteed. Messaging topics are limited to 80 characters and messages to 1 KiB. MemoryStore is ephemeral, TTL-based, and subject to game-level and per-structure/per-partition quotas. Neither service is a durable broker.
+### 4.2 Roblox key names and collision rules
 
-## 6. Handler safety patterns
+Roblox DataStore key names are limited to 50 characters. Define and test a stable key codec for every route, message, segment, idempotency, and DLQ key. Include store/scope/owner identity in the stored value, not only in the key name.
 
-### Purchase grants
+- Use fixed-length routing digests to fit names. Document the exact deterministic hash implementation; do not assume Roblox provides a cryptographic hash function.
+- On every read/update, compare the complete stored owner and logical ID to the requested values.
+- If two inputs map to the same routing key but differ in full identity, fail closed with an explicit route-collision error. Never read, mutate, or overwrite the other owner's record.
+- Hash collisions must not silently alias idempotency keys. If collision slots are not implemented and verified, the accepted behavior is a safe conflict, not automatic merging.
+- Test maximum-size store, scope and profile keys as well as generated IDs. Verify encoded serialized bytes, not character estimates.
 
-A grant handler must carry an application idempotency key such as a stable purchase receipt identifier. In the same authoritative application record that applies the grant, atomically record the receipt key and resulting grant state in one UpdateAsync transform. If the receipt key already exists, return the recorded outcome without applying the grant again. The transform itself must remain pure and non-yielding.
+### 4.3 Boundaries and initial defaults
 
-Do not rely solely on queue acknowledgement. A crash can occur after the application grant commits and before queue acknowledgement. Redelivery must encounter the durable receipt ledger and become a no-op.
+Initial values are benchmark candidates, not production claims:
 
-### Cross-profile transfers
+- one partition by default; partition count is immutable after activation;
+- at most 32 message IDs per active segment;
+- at most 250,000 encoded bytes per segment index, even though it contains only IDs;
+- at most 64 live segments per partition initially;
+- at most 64 KiB encoded payload per message by default, configurable only within validated service/key limits;
+- retain the current 60-second claim lease and 10-second polling defaults until queue-specific measurements justify changes;
+- deduplication and dead-letter retention must be explicit. Never expire a dedup receipt before the advertised idempotency window.
 
-A transfer across two profile keys cannot be made atomic by the queue. Use a transfer ID and a saga/escrow protocol: persist source-side intent/reservation, apply destination credit idempotently under a destination-side transfer ledger, and finalize the source reservation only after durable destination confirmation. Reconcile incomplete transfers after crashes and define compensation/refund behavior for a permanently unavailable destination. Two independent profile UpdateAsync calls are not one transaction.
+The number of message IDs per segment is not the same as maximum pending backlog. Segments may be reclaimed only after every referenced message is terminal or safely re-routed and the segment is sealed. Deleting a segment key is not the acknowledgement of any message in it.
 
-### Yielding handlers
+### 4.4 Segment rollover and append protocol
 
-Preserve existing non-yielding **on_queue_message** behavior. Add a separate opt-in async callback for operations that must await Roblox APIs. Its claim must be renewed by a worker-owned heartbeat, and processing must stop after session or claim fencing is detected. This cannot cancel or roll back an external effect that already committed; async handlers still need idempotency keys and must not perform irreversible work before their durable deduplication boundary.
+The segment index is a discovery aid; the canonical message record and its receipt decide whether an indexed ID is deliverable.
 
-## 7. Observability
+1. Reserve one stable message ID and target segment in the submission receipt. Generate candidate GUIDs before UpdateAsync; the winning receipt's ID is reused by every retry.
+2. Create the canonical message record in \`preparing\` state using that ID and locator. Repeated creation with the same identity is idempotent; conflicting owner or request data fails closed.
+3. Append \`(message_id, placement_generation)\` to the selected segment index using UpdateAsync. A repeated append of the same pair returns the existing entry rather than creating a duplicate.
+4. If append returns an ambiguous error, do not move the receipt to a different segment. Re-run the idempotent append/verification against the same key until the item is known present or the operation deadline returns \`unknown\`.
+5. If the segment reports full/sealed and the ID is verified absent, atomically seal the segment, create/verify the next segment, CAS the manifest tail, then CAS the preparing receipt/message locator to the new segment with a larger placement generation. A stale writer must see the sealed segment and be rejected. Never switch target merely because a read timed out.
+6. Once the index entry is present, mark the receipt accepted only if its reservation and placement generation still match. Then promote the canonical message to \`ready\`. Only \`ready\` records can be claimed.
+7. If the server stops at any intermediate step, a repeated submission with the same idempotency key or a worker inspecting the indexed preparing entry can resume the same operation. If the receipt is not accepted and there is no index entry, it was not yet reported as accepted; the caller must use the same key to resolve an ambiguous submit.
+8. A stale index entry is deliverable only when both its segment number and placement generation match the canonical message record. This makes stale/duplicated index rows harmless and allows eventual cleanup without executing them.
 
-Add an additive typed **GetQueueStatsAsync()** snapshot exposing, where observable:
+Rollover transforms are compare-and-set operations. Creating segment N+1 twice is safe only when both creators verify the exact owner, partition and segment number. The manifest is a bounded locator, not a source of message truth.
 
-- active count and oldest active message age;
-- claimed items and expired-claim recoveries;
-- attempts/retries scheduled and next retry timing;
-- acknowledgement-in-progress count and acknowledgement failures;
-- dead-letter count, oldest dead-letter age, and retention eligibility;
-- enqueue conflicts, duplicate submissions, saturated segments, and uncertain-write verification failures;
-- last poll, last successful processing, and acceleration-hint failures.
+### 4.5 Lifecycle state machine
 
-Include observation time and whether the view is complete. A multi-key scan is not a transaction, so do not call it a linearizable global snapshot. Persist counters only when repeated transitions can update them idempotently; label process-local counters as resettable since-server-start metrics.
+Canonical message states:
 
-Keep **Stats()** backwards compatible. Add paginated **ListDeadLettersAsync(cursor, page_size)** for large dead-letter histories. Retain **GetDeadLettersAsync()** as a compatibility helper with an explicit bound/deadline outcome rather than silently returning an incomplete list. Observer callbacks happen outside DataStore transforms and are never required for recovery.
+- \`preparing\`: submission is not yet claimable; index/receipt reconciliation is permitted.
+- \`ready\`: accepted and eligible after \`available_at\).
+- \`claimed\`: current claim token and lease fence the worker.
+- \`acknowledging\`: handler success is recorded; recovery finishes acknowledgement without invoking the handler again.
+- \`dead_lettering\`: terminal failure is recorded; recovery finishes DLQ indexing without invoking the handler again.
+- \`acknowledged\`, \`dead_lettered\`, \`discarded\`, \`expired\`: terminal states.
 
-## 8. Migration and rollback
+Allowed transitions are validated in the canonical message's UpdateAsync transform. A stale claim cannot acknowledge, renew, retry, discard or dead-letter a message. Terminal states are monotonic except an explicit replay operation, which increments the replay generation and creates a new active placement. Old index entries have older placement generations and are ignored.
 
-The current v3 queue key contains owner identity plus active and dead-letter lists. The older legacy queue key may not contain verifiable owner metadata; preserve the current behavior of refusing automatic migration for a non-empty legacy queue and report manual recovery as required.
+### 4.6 Claim, retry and acknowledgement
 
-Mailbox v2 activation uses a future-version sentinel in the old v3 key as a migration freeze. The marker preserves the v3 messages and dead letters and identifies migration state, but its implementation version is newer than v3, causing old binaries to refuse writes rather than mutate a queue they cannot understand.
+**Claim:** atomically change \`ready\` to \`claimed\`, increment attempts, assign a token and lease expiry, and record processing server/session generation. A concurrent claimant can win only one CAS. A message is not claimable before \`available_at\`. Claim tokens are generated before the transform.
 
-Migration protocol:
+**Renewal:** renew only when the persisted token and current state match and the owning profile session is still active with the expected fencing generation. Renewals have a maximum extension/deadline to prevent permanently stuck handlers. An expired token cannot renew itself.
 
-1. Validate owner identity and ensure the unsupported legacy queue is empty. Never overwrite corrupt or owner-mismatched data.
-2. Atomically transform the current v3 envelope into a frozen sentinel while preserving its exact messages and dead letters. Old v3 transforms then see a future version and must not modify it.
-3. Treat the frozen payload as an immutable migration source. Copy active messages into mailbox segments and dead letters into independent records, preserving IDs, timestamps, attempts, replay counters, errors, and safe lock state.
-4. Make imports idempotent by owner, source version, and message ID. Verify every copied item and dead letter.
-5. Write mailbox v2 activation only after all data is verified. Keep the frozen v3 source as a read-only recovery copy; do not delete it automatically.
-6. If a server stops at any point, the next compatible server resumes from the frozen source. Do not run handlers from a partial import.
-7. After activation, old binaries must fail closed on the future-version sentinel. Rollback must use a compatible binary that reads mailbox v2. Downgrading to v3 requires a separately verified reverse migration after quiescing the queue and proving all active and dead-letter data fits the old limits. Never silently fall back to an empty old queue.
+**Retry:** under the live token, persist \`ready\`, cleared lock fields, normalized last error, attempt counters and an explicit next \`available_at\`. Use capped exponential backoff with deterministic/injected jitter. Limit total attempts and delivery age. The next handler must not run before the stored time. At attempt/age limits, transition to \`dead_lettering\`.
 
-The sentinel matters because older code does not know about a separate route marker. It prevents stale v3 writers from appending to the old envelope after migration begins. A non-empty ownerless legacy queue remains a hard stop rather than being guessed into the new format.
+**Acknowledgement:**
+1. Persist \`acknowledging\` under the current token.
+2. Update the producer receipt to acknowledged if it exists.
+3. Persist the canonical message as acknowledged.
+4. Recovery repeats steps 2-3 idempotently and never invokes the handler for an \`acknowledging\` message.
 
-## 9. Tests and fault injection
+If the handler effect committed but the state never reached \`acknowledging\`, redelivery is possible. This is why the atomic inbox pattern is a first-class API.
 
-Build a deterministic fake DataStore service that exercises the **production RecordStore path**, not only RecordStore.Mock. It needs per-key atomic UpdateAsync behavior, configurable delay/budget, failures before and after commit, stale-read modes where relevant, and controllable crash points. It must not call real Roblox services or mutate test state from UpdateAsync transforms.
+**Dead-lettering:**
+1. Persist \`dead_lettering\` under the current token.
+2. Append the message ID and terminal generation to the independent DLQ index idempotently.
+3. Update the producer receipt, if any.
+4. Persist \`dead_lettered\`.
+5. Recovery repeats the same transitions idempotently. \`dead_lettering\` is never eligible for user handler execution.
 
-Required correctness coverage:
+No DataStore callback may perform any of these transitions by directly calling another key's API inside the transform.
 
-1. Same idempotency key and same request, sequential and concurrent: one logical ID; duplicates return it.
-2. Same key and different request: conflict; no payload substitution.
-3. Simulated hash collision and owner mismatch: fail closed; never cross-read or cross-write.
-4. Enqueue crash after receipt reservation, segment write, receipt commit, and hint publication; accepted messages remain discoverable and retry creates no second logical message.
-5. UpdateAsync fails before commit versus commits then returns an error; outcome is verified, not guessed.
-6. Concurrent enqueue across segment capacity and rollover; stale writers targeting sealed segments retry safely.
-7. Concurrent claims, repeated claims, lease renewal, expired claims, stale acknowledgements, and session generation changes.
-8. Handler returns true then process crashes before acknowledgement; redelivery is allowed and the sample handler's durable ledger applies the effect once.
-9. Crash at every acknowledgement step; acknowledging recovery never re-runs a successful handler.
-10. Handler rejects, throws, or yields; maximum attempts, exponential backoff, and delayed retry eligibility.
-11. Crash during every dead-letter transition; dead-letter persistence is independent of active capacity and repeated recovery creates one DLQ record.
-12. Dead-letter claim/replay/discard with stale tokens, replay idempotency, and crashes between source/destination writes.
-13. Dead-letter retention, idempotency retention, saturated segments, and recovery after server shutdown.
-14. MessagingService failure, dropped/duplicated/reordered hints, MemoryStore eviction/throttling/quota failure, and disabled acceleration; polling still recovers accepted messages.
-15. Migration from empty and non-empty v3 queues, malformed/future versions, corrupt values, wrong owner, interrupted copy, and old v3 writes racing with the freeze sentinel.
-16. Paginated DLQ inspection and metrics under large histories; no silent truncation and no unbounded single-value rewrite.
-17. Shutdown during claim, handler, acknowledgement, retry, dead-lettering, and migration.
+## 5. Transactional inbox: safer message effects
 
-Keep UpdateAsync transforms pure and non-yielding in tests and production. Assert that observer dispatch, MemoryStore, MessagingService, task waits, GUID generation, and mutable scheduler actions never run inside transforms.
+### 5.1 Atomic mutation plus receipt
 
-## 10. CodSpeed performance plan
+\`ApplyInboxAsync(message_id, reducer)\` loads and updates the recipient's primary profile envelope in one UpdateAsync. Its transform validates the session/record generation (unless the caller uses a separately authorized background mutation mode), checks the inbox receipt, applies the pure reducer to the current durable data, and records the message ID plus request fingerprint in the same envelope.
 
-The latest recorded main run (6ad31bfd3b85786a778fc5bf, commit 4f6d7d3) has 20 benchmarks covering CodeNum, compatibility regression, profile updates, startup, and session lifecycle. It has no dedicated durable-queue workload. Hosted WallTime measurements are flagged as environment-variable/noisy, and ten simulation benchmarks are noted as syscall-dominated. Those runs are not queue latency measurements.
+For a duplicate message ID with a matching request identity, it returns the previous result without applying the reducer again. For the same ID with a different recipient/type/payload fingerprint, it returns conflict. A reducer failure must abort the transform; it must not partially insert a receipt.
 
-Add CodSpeed scenarios for:
+This provides at-most-once application of that reducer to the one profile key while the receipt remains retained. Delivery may repeat, but the reducer's persisted profile mutation does not. It does not protect side effects performed outside the same UpdateAsync, and does not make another profile key part of the transaction.
 
-- append/claim/ack with empty, partially filled, and full segments;
-- depths of 1, 32, 256, 1,000, and the configured maximum;
-- dead-letter histories of 0, 100, 1,000, and 10,000 records, proving they do not enlarge active-segment updates;
-- idempotent enqueue for a new key versus a repeated key;
-- retries/backoff, expired-claim recovery, replay, migration, and uncertain write outcomes;
-- concurrent producers and partition-count candidates;
-- acceleration disabled versus enabled, measuring request count, hint hits, fallback polls, CPU overhead, and latency;
-- production-path fake DataStore workloads with ample and constrained request budgets.
+### 5.2 Receipt retention and capacity
 
-Use the CodSpeed CLI and MCP results for tracked performance claims. Simulation helps measure deterministic CPU work, not Roblox service latency. Hosted WallTime requires comparable environments. A fake service is a model, not a live Roblox quota test. Do not change defaults or claim a performance win unless comparable CodSpeed results improve without correctness, memory, or constrained-budget regressions. Roblox Studio/server playtests must separately verify throttling and cross-server behavior.
+Inbox receipts must be versioned and bounded by both entry count and encoded bytes. Define an advertised deduplication window that is at least as long as the maximum queue retry/replay window. Refuse new inbox commits with a capacity result when pruning would violate the advertised window; do not evict a live receipt to make space.
 
-## 11. Implementation phases and acceptance criteria
+For purchase receipts that must remain deduplicated indefinitely, applications keep the purchase identifier in durable domain state or a permanent ledger. Do not claim lifetime deduplication after a finite inbox receipt has expired. Receipt pruning is allowed only after expiry and must preserve the documented replay policy.
 
-### Phase 0: design and test contract
+## 6. Transactional outbox: remove the dual-write gap
 
-- Review and approve this design.
-- Add state-machine documentation, API compatibility tests, fault-injection seams, and the production-path fake DataStore harness.
-- Record a baseline and ensure new tests expose the current failure modes.
+### 6.1 Atomic commit
 
-### Phase 1: Option A correctness slice
+\`CommitWithOutboxAsync(commit_key, reducer)\` performs one UpdateAsync against the source profile key. The reducer returns the next data value and a bounded list of outbound events. The same transform writes:
 
-- Add idempotent enqueue, explicit outcomes, retry scheduling, lease fencing/renewal, acknowledgement recovery, dead-letter transition recovery, and retention rules.
-- Preserve old calls and callback behavior.
-- Add queue observability and negative tests for uncertain outcomes.
+- next profile data;
+- an exact-request commit receipt keyed by \`commit_key\`;
+- stable outbox event IDs derived from \`commit_key\` and event ordinal;
+- event payload schema version, target identity and correlation/causation fields.
 
-### Phase 2: Option B mailbox v2
+All IDs, timestamps and request canonicalization are prepared outside the transform. The callback must be deterministic, pure and non-yielding; Roblox may call it more than once. A retry of a committed \`commit_key\` returns its prior outcome without applying the data mutation again. The same key with different canonical input conflicts.
 
-- Implement manifest, bounded segments, separate receipts and dead letters, rollover recovery, and migration.
-- Implement the freeze sentinel and retain the old source as a recovery copy.
-- Keep mailbox v2 behind an explicit layout setting until migration and playtest criteria pass.
+The transform rejects the entire operation when the outbox byte/item budget would be exceeded. There is no state where the profile mutation is durably committed but the corresponding outbound intent is missing, nor a state where the outbox claims the data mutation succeeded when it did not.
 
-### Phase 3: cross-server and async processing
+### 6.2 Dispatch and cleanup
 
-- Add opt-in async handlers with heartbeat and session/claim fencing.
-- Test lease expiry and shutdown while an async handler is suspended.
-- Document idempotent purchase-grant and transfer/escrow patterns.
+The dispatcher reads durable pending outbox events, then enqueues each to the mailbox using its stable event ID as producer idempotency key. Only after the destination receipt is verified does it mark/remove the source outbox event. A crash between destination acceptance and source cleanup replays the same event ID and returns the original destination message.
 
-### Phase 4: Option C acceleration and measurement
+Outbox dispatch state lives in the profile envelope and is changed using transforms that merge only the outbox sidecar from the current raw envelope. Normal session saves must preserve newer inbox/outbox sidecar state from the stored envelope rather than overwrite it with a stale in-memory copy. Tests must explicitly cover a normal save racing with an outbox dispatcher.
 
-- Add the optional MemoryStore/MessagingService hint path, disabled by default.
-- Benchmark against the durable polling baseline. Leave it disabled without a measured benefit.
-- Add operational metrics and large-backlog/dead-letter workloads.
+### 6.3 Envelope compatibility gate
 
-### Phase 5: rollout decision
+Inbox/outbox fields affect the primary record format and must not be added as unversioned optional fields that older code silently drops on save. Implement a new envelope version and a tested parser/writer compatibility window.
 
-- Verify the Lune regression suite, Studio compatibility project, fake-service integration tests, fault-injection matrix, and CodSpeed runs.
-- Do not enable mailbox v2 by default until tests pass and migration/rollback has been exercised.
-- Do not claim exactly-once effects or live-service optimality. Publish residual limits in the README and API types.
+Before enabling the feature:
+1. Ship a compatibility build that reads the previous format and understands the new version but keeps new fields/features disabled.
+2. Drain or explicitly fence old servers so no old writer remains able to save the earlier envelope format.
+3. Enable inbox/outbox writes only when the feature/version gate proves the running server is compatible.
+4. Keep old source values and version history available for diagnosis; never auto-downgrade a record that contains new sidecars.
+5. Rollback uses a compatible binary or a reviewed reverse migration after quiescing writers; it must not discard inbox receipts or pending outbox events.
 
-Acceptance is evidence-based: accepted idempotent sends cannot disappear; uncertain results can be retried with the same key; duplicate notifications cannot compromise ownership; crash recovery preserves active and dead-letter work; dead-letter growth cannot fill active segments; migration never overwrites source data; measured improvements are reported separately from unverified live Roblox behavior.
+## 7. Recoverable sagas for multi-profile operations
 
-## 12. Roblox references
+### 7.1 Why a saga instead of a false transaction
 
-- [Data stores](https://create.roblox.com/docs/cloud-services/data-stores): UpdateAsync transforms must not yield; writes to separate keys are not one transaction.
-- [Data store error codes and limits](https://create.roblox.com/docs/cloud-services/data-stores/error-codes-and-limits): documented key names are limited to 50 characters and one data key value to 4,194,304 bytes; UpdateAsync consumes read and write budget.
-- [Data store versioning, listing, and caching](https://create.roblox.com/docs/cloud-services/data-stores/versioning-listing-and-caching): ListKeysAsync has its own request budget; read-after-write verification must account for caching.
-- [MessagingService](https://create.roblox.com/docs/reference/engine/classes/MessagingService/SubscribeAsync): cross-server delivery is best effort with topic and message-size limits.
-- [Memory stores](https://create.roblox.com/docs/cloud-services/memory-stores): MemoryStore is ephemeral, TTL-based, and subject to quotas; it is not a durable source of truth.
+A trade/transfer touches at least two profile keys. Roblox does not provide a transaction across those keys. RecordStore must expose this as a recoverable workflow with temporary states, not an atomic cross-profile operation.
+
+### 7.2 Transfer example
+
+For transfer ID \`T\` from A to B:
+
+1. Create a durable workflow record with exact request identity, source/destination, amount and step state.
+2. On A, reserve funds and record inbox key \`T:reserve\` in the same source-profile UpdateAsync.
+3. On B, credit the amount and record inbox key \`T:credit\` in the same destination-profile UpdateAsync.
+4. On A, finalize the reservation and record inbox key \`T:finalize\`.
+5. Mark the workflow complete only after each durable step is verified.
+
+Every leg is replay-safe because the profile data mutation and step receipt share one key. A crash after a leg commits but before the saga checkpoint writes is harmless: replay of that leg returns its recorded outcome. If a step permanently fails, execute a defined compensation (such as release the source reservation) with its own idempotency key. Compensation is a new business operation, not rollback of history.
+
+Workflow state is a checkpoint/projection; authoritative effects remain the per-profile inbox receipts and durable data. The reconciler compares them and resumes or compensates. Never assume the workflow record and the profile effects update atomically.
+
+### 7.3 Failure policy
+
+Every workflow specifies:
+- a deadline and retry budget;
+- retryable versus terminal errors;
+- an operator-readable stuck state;
+- a forward recovery path and, where safe, a compensation;
+- whether compensation is automatic or requires operator approval;
+- idempotency and retention requirements for each step.
+
+A compensation cannot always reverse an irreversible external effect. Document manual resolution for non-compensable steps. Do not provide a built-in money-transfer helper until the generic inbox/outbox primitives and crash tests pass.
+
+## 8. Scheduler, ordering and optional acceleration
+
+### 8.1 Durable polling
+
+Every mailbox always has a durable DataStore polling path. Workers maintain a local round-robin scan cursor over the bounded live segment range and scan a bounded number of IDs per tick. On restart, the cursor may reset; canonical message state makes repeat scans harmless. A delayed or claimed item must not block every later item unless the caller explicitly selected strict ordering.
+
+For the first release, promise FIFO placement per partition only, not global FIFO execution across concurrent workers. With partition count greater than one, ordering is per partition. Strict per-\`ordering_key\` serialization is a later opt-in feature requiring tests for fairness, lease expiry and head-of-line behavior; do not imply that supplying an arbitrary key currently guarantees ordering.
+
+Workers must:
+- check the canonical message state and placement generation before claim;
+- cap scan work per call and per scheduler tick;
+- advance cursors fairly to avoid starving segments with delayed retries or poison messages;
+- apply backoff to DataStore/service errors rather than tight-loop polling;
+- stop claims when owner session fencing or shutdown begins;
+- never rely on a MemoryStore index for correctness.
+
+### 8.2 MemoryStore and MessagingService
+
+Keep acceleration disabled by default until it shows measured value.
+
+- Publish compact wake-up hints only after a message is durably accepted.
+- MemoryStore may keep expiring message-ID hints or wake-up coalescing tokens; it may lose, duplicate, reorder or evict them.
+- A worker must reopen the canonical DataStore message and claim it through the durable protocol.
+- Failed hint publication never changes durable enqueue result. Polling discovers work if every hint is dropped.
+- Handle request budgets, TTL expiration, quotas and throttling as expected conditions. Never make correctness decisions from hint counts.
+
+Roblox documents MessagingService delivery as best effort and not guaranteed; messages are limited to 1 KiB and topic names to 80 characters. MemoryStore is ephemeral with TTL-based eviction and quotas.
+
+### 8.3 Future scheduling features
+
+The canonical message schema should leave room for \`available_at\`, \`expires_at\`, \`priority\`, consumer/type policy, correlation/causation ID and a schema version. Initial support should implement delayed availability and optional expiry before priority scheduling.
+
+Priority lanes and strict ordering should be enabled only after a starvation-proof scheduler is designed and benchmarked. Expired messages must reach a terminal \`expired\` state with a durable reason, not disappear silently.
+
+## 9. Dead letters, replay and retention
+
+### 9.1 Independent DLQ
+
+Dead letters are canonical message records plus a separately segmented DLQ index. A dead-letter append is idempotent by message ID and terminal generation. No active segment size calculation may include historical DLQ records.
+
+Expose:
+- paginated \`ListDeadLettersAsync(cursor, page_size)\`;
+- \`ClaimDeadLetterAsync\`, \`ReplayDeadLetterAsync\`, and \`DiscardDeadLetterAsync\` with fenced tokens;
+- bounded last error, attempts, timestamps and replay history;
+- retention eligibility and explicit purge outcomes.
+
+A large DLQ is inspected page by page; no API silently materializes an unbounded history in one call. The legacy \`GetDeadLettersAsync()\` remains a bounded compatibility helper with a clear limit/incomplete result.
+
+### 9.2 Replay safety
+
+Replay is a new delivery generation of the same logical message ID. It atomically reserves a replay token on the canonical record, appends a new segment index entry with a larger placement generation, then transitions back to ready. The old segment row becomes stale and is ignored. Repeated replay requests with the same replay operation ID return the same outcome; a different replay request while one is pending conflicts.
+
+Before replay, validate the message type and payload schema against the currently registered decoder/migration. Allow a dry-run validation result that shows the intended upgraded payload without changing durable state. Unknown future schemas remain quarantined; never force-rewrite them to an older guessed shape.
+
+### 9.3 Retention rules
+
+Retention is separate for completed message payloads, producer receipts, inbox receipts, outbox entries, dead letters and transition history. Defaults are conservative: retain pending work; do not auto-delete dead letters; retain dedup receipts for at least the advertised idempotency window.
+
+Purge only terminal data that is past its declared retention and no longer referenced by a live index, pending workflow or source outbox. Purge transitions need audit IDs and must be idempotent. A retained receipt whose referenced message has been purged must either retain enough exact request identity to resolve duplicates safely or expire at the same time; never keep a misleading receipt that points to nonexistent data and returns a false success.
+
+## 10. Operational observability
+
+Add \`GetQueueStatsAsync()\`, \`GetDeliveryAsync()\`, \`GetOutboxStatsAsync()\`, \`GetInboxStatsAsync()\` and workflow status snapshots without breaking \`Stats()\`.
+
+Useful fields include active/claimed/delayed/acknowledging/dead-lettering counts, oldest eligible age, oldest pending outbox age, expired claim recoveries, retry distribution, terminal error distribution, idempotent duplicate submissions, conflict/capacity/unknown outcomes, migration phase, segment count, scan cursor progress, hint failures, DLQ retention eligibility and stuck workflow step.
+
+**Accuracy contract:** a scan across many keys is not a linearizable snapshot. Every multi-key stats result includes \`observed_at\`, scanned range, completeness, and whether counters are exact, approximate, or process-local. Approximate metrics must never control claim correctness, purging, admission, or migration. Exact message status comes from its canonical message key. A background reconciler repairs projections using idempotent operation IDs, and reports discrepancies rather than silently rewriting ambiguous state.
+
+Do not log payloads, purchase tokens, player secrets or arbitrary user data by default. Provide correlation IDs and stable error categories while bounding the stored error text.
+
+## 11. Migration, rollout and rollback
+
+The existing queue v3 value stores active messages and dead letters together. Earlier legacy queue values may have no verifiable owner metadata; a non-empty ownerless legacy queue remains a manual-recovery stop.
+
+### 11.1 Mailbox migration
+
+1. Verify full owner identity, supported source version and queue shape. Corrupt or mismatched data is preserved untouched.
+2. Atomically replace the v3 queue envelope with a future-version freeze marker that preserves the exact source payload and migration ID. Old v3 code must fail closed rather than append to a structure it cannot understand.
+3. Copy old messages to canonical message records, segment indexes and DLQ indexes idempotently by migration ID and message ID. Preserve timestamps, attempts, replay counts, last error and payload; do not carry stale claim tokens as valid.
+4. Verify every message record and index entry. Keep all imported messages non-claimable while migration is incomplete.
+5. Activate the new manifest only after all copied data reconciles. Keep the frozen v3 source read-only as a recovery copy.
+6. Resume interrupted migration on a compatible server. Do not reset a partially imported mailbox to empty or discard unknown entries.
+7. Rollback may use only a binary that understands the current envelope and mailbox version. Reverse migration to v3 is allowed only after the queue is quiesced, all data is verified to fit the old envelope limits, and no unsupported state exists. Never silently downgrade, empty-fallback or remove the source copy as part of normal migration.
+
+The freeze marker blocks old writers only when their transform validates the version and refuses to write an unsupported future version. Add a compatibility test against the actual v3 parser and transform; a prose assumption is insufficient.
+
+### 11.2 Profile-envelope rollout for inbox/outbox
+
+Inbox/outbox requires a versioned primary envelope. Do not enable it while old server binaries can still write the old envelope. The rollout must have a compatibility release, old-server drain/fence, activation gate, read/write compatibility matrix, and tested rollback procedure. An earlier version must never silently strip unrecognized sidecars.
+
+Before migration/feature activation:
+- backup/version-history strategy is documented;
+- migration is idempotent at every step;
+- partial import is non-executable;
+- old-writer races are injected in tests;
+- rollout and rollback are tested with mixed version attempts;
+- an operator can inspect state without triggering automatic repair.
+
+## 12. Failure-injection and contract test matrix
+
+Build a deterministic fake DataStore that drives the actual RecordStore production path, not only \`RecordStore.Mock\`. It must support per-key atomic UpdateAsync, controlled concurrency/time, configurable request budgets, failures before commit, commit-then-error outcomes, and failpoints after each durable step. The fake must not mutate state or perform side effects inside UpdateAsync transforms.
+
+Required test groups:
+
+1. **Canonicalization/idempotency**: nested objects with different insertion order compare equal; arrays/holes/mixed keys are validated; same key/same request returns original ID; same key/different request conflicts; hash/owner collisions fail closed.
+2. **Submission windows**: crash after reservation, message preparation, index append, receipt acceptance, and ready promotion; retry and recovery never lose an accepted message or execute a preparing item.
+3. **Ambiguous writes**: UpdateAsync failure before commit versus commit then error; retries hit the same message/segment; no route reassignment while index existence is unknown.
+4. **Rollover races**: many producers fill the final segment concurrently; stale writers to sealed segments are rejected; only one correct manifest tail wins; segment IDs never alias.
+5. **Duplicate index rows**: the same ID appears twice or in a stale old segment; canonical placement generation allows at most one delivery and stale rows are ignored.
+6. **Claim concurrency**: many workers claim one message; one live token wins; lease renewal, expiry, server shutdown and session generation changes fence old workers.
+7. **Acknowledgement**: crash before \`acknowledging\`, after it, after receipt update, and after terminal update; acknowledged messages never rerun, while pre-ack uncertainty is safely at-least-once.
+8. **Retry/DLQ**: thrown/rejected/yielding handler, bounded exponential delay, attempt and age caps, DLQ index append crash, duplicate DLQ append and independent active capacity.
+9. **Replay/purge**: repeated replay ID, stale replay token, schema migration failure, future schema quarantine, retention boundaries, active index references, and purge interruption.
+10. **Inbox atomicity**: crash after profile mutation and before mailbox ack; redelivery is duplicate and does not increment balance twice; payload/recipient mismatch conflicts; receipt capacity aborts both mutation and receipt.
+11. **Outbox atomicity**: profile mutation cannot commit without outbox intent; crash after outbox append before response; crash after destination enqueue before outbox cleanup; repeat uses the same event ID; normal session save races with outbox-only update without dropping either change.
+12. **Reducer semantics**: transforms may run more than once; deterministic pure reducer yields same result; exceptions/yields abort; external side-effect test fixture fails the contract test rather than simulating exactly-once.
+13. **Saga**: crash after each reserve/credit/finalize and before checkpoint; each step is idempotent; source funds are not duplicated; retry leads to completion or defined compensation; stuck state remains observable.
+14. **Acceleration failures**: MessagingService errors, dropped/reordered/duplicated hints, MemoryStore expiry/eviction/throttling/quotas, and disabled acceleration; durable polling recovers everything.
+15. **Migration**: empty/non-empty v3, active and dead-letter records, malformed/future version, wrong owner, crash between each import, old writer races, freeze marker read by actual v3 code, feature gate and reverse migration.
+16. **Scale**: 0/100/1,000/10,000 DLQ items; segment counts at low and configured max; high retry backlog; scan fairness and bounded requests; inbox/outbox capacity and retention.
+17. **Transform purity**: explicit assertions prove no yielding, MessagingService/MemoryStore use, observers, GUID generation, hidden mutable state, or cross-key API calls occur in transforms.
+
+The regression test must fail against the old implementation for the reason it claims to cover. A passing unit fake does not replace a Studio server playtest for real DataStore and service throttling behavior.
+
+## 13. CodSpeed and service-budget validation
+
+The existing main CodSpeed run has no dedicated durable-mailbox, outbox, inbox or saga benchmark. Existing hosted WallTime results have environment-noise warnings and some simulation cases are syscall dominated; do not reuse those numbers as queue latency evidence.
+
+Add repeatable benchmarks for:
+
+- ID-index append in empty/partial/full segments;
+- claim, renewal, retry, acknowledgement and DLQ transitions at different active and DLQ sizes;
+- idempotent new submit versus repeated submission;
+- payload sizes and canonicalization cost;
+- outbox commit, dispatch, and recovery after destination acceptance;
+- inbox first-application versus duplicate delivery;
+- saga replay/compensation and migration;
+- 1, 32, 256, 1,000 and configured-maximum pending messages;
+- high dead-letter history independent of active segment update size;
+- 10/30/50 concurrent producers with ample and constrained fake budgets;
+- polling alone versus acceleration on, measuring calls, request units, hit/miss ratios and recovery latency.
+
+All performance measurements go through CodSpeed. Use Simulation for deterministic CPU work, not Roblox service latency. Use comparable WallTime environments for elapsed-time evidence. The fake DataStore demonstrates the tested model, not live Roblox quota behavior. Defaults change only after comparable results show a meaningful improvement without correctness, memory or constrained-budget regressions. Real Studio/server tests remain required for live service throttling and cross-server behavior.
+
+## 14. Implementation sequence and release gates
+
+### Phase 0 — lock the protocol
+
+- Review this corrected design before production changes.
+- Implement canonical serializer/key codec tests and state-machine transition tests.
+- Define API types/outcome semantics and compatibility tests.
+- Establish the production-path fake DataStore harness and queue-specific CodSpeed baseline.
+
+### Phase 1 — mailbox core
+
+- Build the canonical message record, bounded append-only segment index, receipt protocol and recovery.
+- Keep the existing v3 queue reader and add the freeze/migration path.
+- Implement retries, lease fencing, acknowledgement recovery, independent DLQ, replay and status queries.
+- No MemoryStore dependency and no inbox/outbox format change yet.
+
+### Phase 2 — profile transactional primitives
+
+- Version and migrate the primary profile envelope for inbox/outbox sidecars.
+- Implement \`ApplyInboxAsync\` and \`CommitWithOutboxAsync\` with capacity/backpressure.
+- Prove that normal session saves preserve concurrent sidecar changes.
+- Keep feature activation gated until old writers are drained.
+
+### Phase 3 — workflows
+
+- Add the generic saga coordinator with persisted steps, idempotent inbox legs, recovery and compensation.
+- Publish a transfer example only after crash matrix coverage passes.
+- Do not expose a misleading atomic cross-profile transfer helper.
+
+### Phase 4 — optional acceleration and operations
+
+- Add the MemoryStore/MessagingService hint adapter behind an off-by-default setting.
+- Add approximate health/status endpoints, paginated DLQ tools, repair dry-run and diagnostics.
+- Benchmark against polling-only behavior and keep acceleration disabled without measurable benefit.
+
+### Phase 5 — staged rollout
+
+- Run all Lune regressions, fake DataStore integration/fault-injection suites, Rojo builds, Studio tests and CodSpeed.
+- Perform a controlled migration in a disposable DataStore namespace before real data.
+- Verify mixed-version rejection and rollback.
+- Enable new layout and envelope features separately, each with a kill switch that stops new writes without discarding accepted messages.
+
+## 15. Acceptance criteria
+
+The design is implementable only when tests and runtime evidence demonstrate all of the following:
+
+- Repeating the same producer key and exact request returns one logical message ID.
+- Reusing a producer key for a different request fails closed.
+- An accepted message survives every crash window and is eventually discoverable without relying on notifications.
+- One canonical message record prevents a duplicated/stale index row from creating two concurrent deliveries.
+- Claim tokens and session generations fence stale handlers; expired claims are recoverable.
+- Durable acknowledgement recovery never reruns a message already in the acknowledging state.
+- Dead-letter growth does not enlarge active segment writes or consume active message capacity.
+- Inbox mutations and their receipts are atomically committed to the same profile key.
+- Outbox intent and source data mutations are atomically committed to the same profile key.
+- Outbox dispatch is idempotent; a destination-accepted event is not duplicated when source cleanup crashes.
+- Multi-profile workflows converge through idempotent steps or a documented compensation/manual resolution.
+- Stats identify their completeness and are never treated as source of truth.
+- Migration preserves the v3 source, old writers fail closed, and rollback never silently drops unsupported sidecars.
+- Performance claims come from dedicated queue/outbox/inbox/saga benchmarks and are separated from live Roblox behavior that remains unverified.
+
+## 16. Roblox and comparison references
+
+- Roblox DataStore limits: https://create.roblox.com/docs/cloud-services/data-stores/error-codes-and-limits
+- Roblox data stores / UpdateAsync: https://create.roblox.com/docs/cloud-services/data-stores
+- Roblox versioning, listing and caching: https://create.roblox.com/docs/cloud-services/data-stores/versioning-listing-and-caching
+- MessagingService delivery/limits: https://create.roblox.com/docs/reference/engine/classes/MessagingService/SubscribeAsync
+- MemoryStore limits and TTL: https://create.roblox.com/docs/cloud-services/memory-stores
+- ProfileStore README: https://github.com/MadStudioRoblox/ProfileStore/blob/main/README.md
+- ProfileStore API: https://github.com/MadStudioRoblox/ProfileStore/blob/main/docs/api.md
