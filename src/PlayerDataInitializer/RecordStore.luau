@@ -3921,6 +3921,8 @@ local function save_internal(state: InternalState, reason: string?, operation_de
 					acquired_at = session.acquired_at,
 					lease_until = transform_time + (state.options.lease_duration or DEFAULT_LEASE_DURATION),
 				},
+				inbox_receipts = envelope.inbox_receipts or {},
+				outbox = envelope.outbox or {},
 				write_id = write_id,
 			}
 			local envelope_valid, envelope_error = validate_envelope(next_envelope)
@@ -5492,6 +5494,13 @@ local function delete_record(self: Record): (ResultCode, string?)
 				decision_message = "durable session lease has expired"
 				return nil, nil, nil
 			end
+			for _, event in envelope.outbox or {} do
+				if event.state == "pending" then
+					decision = "conflict"
+					decision_message = "record cannot be deleted while a durable outbox event is pending"
+					return nil, nil, nil
+				end
+			end
 			if envelope.revision ~= state.revision then
 				decision = "conflict"
 				decision_message = "durable revision changed unexpectedly"
@@ -5511,6 +5520,8 @@ local function delete_record(self: Record): (ResultCode, string?)
 					generation = next_generation,
 				},
 				session = nil,
+				inbox_receipts = envelope.inbox_receipts or {},
+				outbox = envelope.outbox or {},
 				write_id = write_id,
 			}
 			local valid_envelope, envelope_error = validate_envelope(next_envelope)
@@ -5743,6 +5754,8 @@ local function open_internal(state: InternalState, default_data: JsonValue?, rec
 				user_ids = clone_user_ids(snapshot.UserIds),
 				tombstone = nil,
 				session = nil,
+				inbox_receipts = {},
+				outbox = {},
 				write_id = "history-recovery-" .. HttpService:GenerateGUID(false),
 			}
 			local envelope_valid, envelope_error = validate_envelope(recovered_envelope)
@@ -5995,6 +6008,8 @@ local function open_internal(state: InternalState, default_data: JsonValue?, rec
 				data = migrated,
 				user_ids = initial_ids,
 				tombstone = nil,
+				inbox_receipts = if envelope ~= nil then envelope.inbox_receipts or {} else {},
+				outbox = if envelope ~= nil then envelope.outbox or {} else {},
 				session = {
 					token = token,
 					generation = next_generation,
@@ -6308,6 +6323,8 @@ local function renew_internal(state: InternalState): (ResultCode, string?)
 					acquired_at = envelope.session.acquired_at,
 					lease_until = transform_time + (state.options.lease_duration or DEFAULT_LEASE_DURATION),
 				},
+				inbox_receipts = envelope.inbox_receipts or {},
+				outbox = envelope.outbox or {},
 				write_id = write_id,
 			}
 			local valid_envelope, envelope_error = validate_envelope(next_envelope)
@@ -6498,6 +6515,8 @@ close_internal = function(state: InternalState, shutdown: boolean): (ResultCode,
 				user_ids = clone_user_ids(state.user_ids),
 				tombstone = nil,
 				session = nil,
+				inbox_receipts = envelope.inbox_receipts or {},
+				outbox = envelope.outbox or {},
 				write_id = write_id,
 			}
 			local valid_envelope, envelope_error = validate_envelope(next_envelope)
