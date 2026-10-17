@@ -1882,6 +1882,7 @@ function V2.new(record_store, mailbox_module, options)
 		ReceiptProcessor = { new = new_receipt_processor },
 		Sagas = { new = saga_coordinator },
 		Erasure = { new = new_erasure },
+		Rollout = { new = new_rollout },
 		Projections = { new = new_projections },
 		ReadCoalescer = { new = new_read_coalescer },
 		Maintenance = new_maintenance(),
