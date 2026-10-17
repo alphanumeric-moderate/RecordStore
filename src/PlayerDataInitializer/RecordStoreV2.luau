@@ -1956,7 +1956,9 @@ local function new_erasure(store, families, options)
 						if not observed[identity] then missing += 1 end
 					end
 					local structurally_complete = unmatched == 0 and missing == 0 and item_count == #expected
-					local attested = family.templates_verified == true and family.inventory_verified == true
+					local history_adapter_present = type(family.clear_history_if_generation) == "function"
+					local history_verified = family.history_inventory_verified == true and history_adapter_present
+					local attested = family.templates_verified == true and family.inventory_verified == true and history_verified
 					local family_verified = structurally_complete and attested
 					coverage[family.name] = {
 						status = if family_verified then "coverage_verified_by_integrator" else "coverage_unverified",
@@ -1967,6 +1969,9 @@ local function new_erasure(store, families, options)
 						unmatched_count = unmatched,
 						templates_verified = family.templates_verified == true,
 						inventory_verified = family.inventory_verified == true,
+						history_inventory_verified = family.history_inventory_verified == true,
+						history_adapter_present = history_adapter_present,
+						history_verified = history_verified,
 						structurally_complete = structurally_complete,
 					}
 				end
@@ -2026,8 +2031,9 @@ local function new_erasure(store, families, options)
 		for _, family in ipairs(self.families) do
 			if type(family.fence_user) ~= "function" or type(family.dependencies_clear) ~= "function"
 				or type(family.redact_or_delete_if_generation) ~= "function"
+				or type(family.clear_history_if_generation) ~= "function"
 			then
-				return { code = "unsupported", message = "family needs writer fencing, dependency proof and generation-aware delete/redact" }
+				return { code = "unsupported", message = "family needs writer fencing, dependency proof, generation-aware delete/redact and history clearing" }
 			end
 			local fenced, fence_error = io_call(family.fence_user, user_id, erasure_id)
 			if fenced ~= true then return { code = "retryable", message = fence_error or "writer fence unconfirmed" } end
@@ -2059,6 +2065,30 @@ local function new_erasure(store, families, options)
 				end
 				return { code = if status == "unknown" or state_error ~= nil then "unknown" else "retryable",
 					cursor = index - 1, message = action_error or state_error or "delete outcome unresolved" }
+			end
+			-- Current-key deletion is not complete RTBF while historical versions or
+			-- backups can still restore the prior payload. The callback must clear
+			-- history for this exact generation while retaining its current tombstone.
+			local history_cleared, history_error = io_call(family.clear_history_if_generation, entry.item, user_id, erasure_id)
+			if history_cleared ~= true then
+				local observed, state_error = adapter_call(store, "UpdateAsync", key, function(old)
+					if type(old) ~= "table" or old.erasure_id ~= erasure_id then return old end
+					if old.status == "completed" or (finite(old.cursor) and old.cursor >= index) then return old end
+					local value = copy(old)
+					value.status = if history_cleared == "unknown" then "unknown" else "in_progress"
+					value.last_error = text_error(history_error or "history cleanup is unresolved", 256)
+					return value
+				end)
+				if state_error == nil and type(observed) == "table" and observed.erasure_id == erasure_id
+					and (observed.status == "completed" or (finite(observed.cursor) and observed.cursor >= index))
+				then
+					return { code = if observed.status == "completed" then "committed" else "incomplete",
+						cursor = observed.cursor, completed_count = observed.completed_count,
+						rtbf_coverage_verified = observed.rtbf_coverage_verified == true,
+						message = "another worker checkpointed the action and history cleanup" }
+				end
+				return { code = if history_cleared == "unknown" or state_error ~= nil then "unknown" else "retryable",
+					cursor = index - 1, message = history_error or state_error or "history cleanup did not confirm completion" }
 			end
 			completed += 1
 			local updated, progress_error = adapter_call(store, "UpdateAsync", key, function(old)
