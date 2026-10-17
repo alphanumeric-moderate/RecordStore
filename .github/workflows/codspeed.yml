@@ -64,6 +64,7 @@ jobs:
           lune run bench/run_v2_runtime_governor_regression.luau
           lune run bench/run_v2_production_path_failure_matrix.luau
           lune run bench/run_v2_production_mailbox_failure_matrix.luau
+          lune run bench/run_v2_transaction_inbox_outbox_failure_matrix.luau
           lune run bench/run_codenum_regression_tests.luau
           lune run bench/run_codenumvalue_regression_tests.luau
           lune run bench/run_playerdata_set_regression_tests.luau
