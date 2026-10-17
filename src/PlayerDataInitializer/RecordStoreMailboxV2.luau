@@ -90,6 +90,39 @@ local DEFAULT_MAX_ATTEMPTS = 5
 local DEFAULT_RETRY_BASE_MS = 1000
 local DEFAULT_RETRY_MAX_MS = 60000
 local DEFAULT_PRIORITY_AGING_MS = 60000
+
+-- Roblox provides the global task library; Lune exposes the same operations
+-- as @lune/task. Cache the adapter so deterministic harnesses can run the
+-- synchronous path without pretending to execute lease heartbeats.
+local resolved_task_api = false
+local cached_task_api: any = nil
+local function task_api(): any
+	if resolved_task_api then return cached_task_api end
+	resolved_task_api = true
+	local global_ok, global_value = pcall(function() return task end)
+	if global_ok and type(global_value) == "table"
+		and type(global_value.spawn) == "function" and type(global_value.wait) == "function"
+	then
+		cached_task_api = global_value
+		return cached_task_api
+	end
+	local module_ok, module_value = pcall(require, "@lune/task")
+	if module_ok and type(module_value) == "table"
+		and type(module_value.spawn) == "function" and type(module_value.wait) == "function"
+	then
+		cached_task_api = module_value
+	end
+	return cached_task_api
+end
+local function spawn_scheduled(callback: () -> ())
+	local api = task_api()
+	if api ~= nil then api.spawn(callback) else callback() end
+end
+local function wait_scheduled(seconds: number)
+	local api = task_api()
+	if api ~= nil then api.wait(seconds) end
+end
+
 local TERMINAL = {
 	acknowledged = true,
 	dead_lettered = true,
@@ -1910,7 +1943,7 @@ local function process_next_internal(self: Mailbox, handler: (unknown, Dict, Han
 			-- Run the handler in its own task so yielding callbacks can be protected by
 			-- periodic, token-fenced lease renewal. A lost lease signals cancellation;
 			-- it cannot forcibly undo arbitrary external side effects.
-			task.spawn(function()
+			spawn_scheduled(function()
 				local call_ok, result_value, error_value = pcall(handler, clone_json(record.payload), snapshot, context)
 				handler_ok = call_ok
 				handler_result = result_value
@@ -1919,7 +1952,7 @@ local function process_next_internal(self: Mailbox, handler: (unknown, Dict, Han
 			end)
 			local renewal_interval = math.max(1, math.floor((self.options.lease_ms :: number) / 3))
 			while not handler_done do
-				task.wait(renewal_interval / 1000)
+				wait_scheduled(renewal_interval / 1000)
 				if handler_done then break end
 				if not lease_lost then
 					renew_for_handler()
