@@ -293,11 +293,11 @@ No DataStore callback may perform any of these transitions by directly calling a
 
 ### 5.1 Atomic mutation plus receipt
 
-`ApplyInboxAsync(message_id, reducer)` loads and updates the recipient's primary profile envelope in one UpdateAsync. Its transform validates the session/record generation (unless the caller uses a separately authorized background mutation mode), checks the inbox receipt, applies the pure reducer to the current durable data, and records the message ID plus request fingerprint in the same envelope.
+`ApplyInboxAsync(message_id, message_type, payload, reducer)` updates the recipient's primary profile envelope in one UpdateAsync. Its transform checks the retained inbox receipt, applies the pure reducer to the current durable data, and records the message ID plus exact canonical request identity in the same envelope. A matching receipt returns the stored prior outcome without running the reducer again. A mismatched message type/payload/owner returns conflict.
 
-For a duplicate message ID with a matching request identity, it returns the previous result without applying the reducer again. For the same ID with a different recipient/type/payload fingerprint, it returns conflict. A reducer failure must abort the transform; it must not partially insert a receipt.
+Before entering this transform, serialize the operation through the Record's write gate: block local mutators, flush pending dirty data, then apply the reducer to the current envelope. If flushing fails or its outcome is unknown, do not proceed from a stale cache. On successful commit, rebase the in-memory Record to the committed data/revision before releasing the gate. On an ambiguous commit, reconcile by the stable message ID and receipt before allowing a second mutation.
 
-This provides at-most-once application of that reducer to the one profile key while the receipt remains retained. Delivery may repeat, but the reducer's persisted profile mutation does not. It does not protect side effects performed outside the same UpdateAsync, and does not make another profile key part of the transaction.
+The reducer may run multiple times and must be pure, deterministic and non-yielding. If it throws, yields, or returns an invalid value, abort both the data mutation and receipt insertion. This provides at-most-once application of that reducer to the one profile key while the receipt remains retained. Delivery may repeat, but the same persisted profile mutation does not. It does not protect side effects outside the same UpdateAsync or make another profile key part of the transaction.
 
 ### 5.2 Receipt retention and capacity
 
@@ -309,22 +309,26 @@ For purchase receipts that must remain deduplicated indefinitely, applications k
 
 ### 6.1 Atomic commit
 
-`CommitWithOutboxAsync(commit_key, reducer)` performs one UpdateAsync against the source profile key. The reducer returns the next data value and a bounded list of outbound events. The same transform writes:
+`CommitWithOutboxAsync(commit_key, command_type, command_payload, reducer)` performs one UpdateAsync against the source profile key. The reducer returns the next data value and a bounded list of outbound events. The same transform writes:
 
 - next profile data;
 - an exact-request commit receipt keyed by `commit_key`;
 - stable outbox event IDs derived from `commit_key` and event ordinal;
 - event payload schema version, target identity and correlation/causation fields.
 
-All IDs, timestamps and request canonicalization are prepared outside the transform. The callback must be deterministic, pure and non-yielding; Roblox may call it more than once. A retry of a committed `commit_key` returns its prior outcome without applying the data mutation again. The same key with different canonical input conflicts.
+The receipt compares the exact canonical `command_type + command_payload`; it must not attempt to compare callback identity. All IDs, timestamps and request canonicalization are prepared outside the transform. The reducer receives the current durable data from the transform, is deterministic/pure/non-yielding, and may be invoked multiple times. A retry of an already committed `commit_key` returns the stored prior outcome without applying the data mutation again. The same key with a different command type/payload conflicts.
 
-The transform rejects the entire operation when the outbox byte/item budget would be exceeded. There is no state where the profile mutation is durably committed but the corresponding outbound intent is missing, nor a state where the outbox claims the data mutation succeeded when it did not.
+Serialize this operation through the Record write gate: block local mutators, flush pending local dirty data, then run the durable transform. If flushing fails or is ambiguous, do not apply the command to a potentially stale envelope. After a confirmed commit, update/rebase the in-memory data, revision and saved snapshot before releasing the gate. If the result is uncertain, reconcile through the stable `commit_key` rather than applying a new operation.
+
+The transform rejects the entire operation when the outbox byte/item budget would be exceeded. The profile mutation and outbound intent are committed together; neither is allowed to commit alone.
 
 ### 6.2 Dispatch and cleanup
 
-The dispatcher reads durable pending outbox events, then enqueues each to the mailbox using its stable event ID as producer idempotency key. Only after the destination receipt is verified does it mark/remove the source outbox event. A crash between destination acceptance and source cleanup replays the same event ID and returns the original destination message.
+The dispatcher reads durable pending outbox events, then enqueues each to the mailbox using its stable event ID as producer idempotency key. Only after the destination receipt is verified does it mark/remove the source outbox event. A crash between destination acceptance and source cleanup replays the same event ID and returns the original mailbox message.
 
-Outbox dispatch state lives in the profile envelope and is changed using transforms that merge only the outbox sidecar from the current raw envelope. Normal session saves must preserve newer inbox/outbox sidecar state from the stored envelope rather than overwrite it with a stale in-memory copy. Tests must explicitly cover a normal save racing with an outbox dispatcher.
+The dispatcher may run when the source profile is not open. It may update only the outbox sidecar in the source envelope and must preserve the current data, session, revision, inbox and all unknown-compatible fields from the UpdateAsync transform's current raw value. It must not write a stale full-envelope snapshot. Normal session saves and inbox/outbox transactions must also preserve any newer sidecar state read by their transforms.
+
+Reading pending outbox events may use GetAsync as a discovery hint; the dispatcher must CAS the current source envelope before deleting an event and verify that the destination receipt is accepted. Cached/stale reads cannot cause the source intent to be removed.
 
 ### 6.3 Envelope compatibility gate
 
