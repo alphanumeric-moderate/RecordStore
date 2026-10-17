@@ -14,6 +14,7 @@ local SOURCES = {
 }
 
 local MODULE_PATHS = {
+	RecordStore = "mock",
 	PlayerData = "src/PlayerDataInitializer/PlayerData.luau",
 	PlayerDataCore = "src/PlayerDataInitializer/PlayerDataCore.luau",
 	IntegerInfinityValue = "src/PlayerDataInitializer/IntegerInfinityValue.luau",
