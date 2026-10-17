@@ -77,6 +77,45 @@ assert(timeout_fetch_calls == 1, "waiter timeout started a duplicate fetch")
 assert(timeout_service:Stats().waiters == 0 and timeout_service:Stats().timeouts == 1,
 	"timed-out waiter remained registered")
 
+local invalidation_fetch_calls = 0
+local invalidation_service = V2.ReadCoalescer.new(function(key)
+	invalidation_fetch_calls += 1
+	local this_call = invalidation_fetch_calls
+	task.wait(0.12)
+	return { key = key, version = this_call }, nil
+end, {
+	max_entries = 2,
+	max_waiters_per_key = 3,
+	max_total_waiters = 4,
+	waiter_timeout_seconds = 0.4,
+})
+local invalidation_results = {}
+task.spawn(function()
+	invalidation_results.leader = table.pack(invalidation_service:GetAsync("invalidate-key", "owner-D"))
+end)
+task.wait(0.01)
+task.spawn(function()
+	invalidation_results.waiter = table.pack(invalidation_service:GetAsync("invalidate-key", "owner-D"))
+end)
+task.wait(0.01)
+assert(invalidation_service:Invalidate("invalidate-key", "owner-D"), "Invalidate failed")
+wait_until(function() return invalidation_results.waiter ~= nil end, 0.08,
+	"in-flight waiter was not released after invalidation")
+assert(invalidation_results.waiter[1] == nil and invalidation_results.waiter[3] == "invalidated",
+	"invalidated in-flight value was delivered to a waiter")
+task.spawn(function()
+	invalidation_results.fresh = table.pack(invalidation_service:GetAsync("invalidate-key", "owner-D"))
+end)
+wait_until(function()
+	return invalidation_results.leader ~= nil and invalidation_results.fresh ~= nil
+end, 1, "old and fresh read calls did not finish after invalidation")
+assert(invalidation_results.leader[1] == nil and invalidation_results.leader[3] == "invalidated",
+	"initiating caller received a result from an invalidated flight")
+assert(invalidation_results.fresh[1] ~= nil and invalidation_results.fresh[1].version == 2,
+	"new read did not start a fresh fetch after in-flight invalidation")
+assert(invalidation_service:Stats().active_reads == 0 and invalidation_service:Stats().entries == 0,
+	"invalidation leaked old or fresh in-flight state")
+
 local bounded_fetch_calls = 0
 local bounded = V2.ReadCoalescer.new(function(key)
 	bounded_fetch_calls += 1
@@ -109,5 +148,28 @@ assert(bounded_fetch_calls == 1, "capacity rejection triggered an extra fetch")
 assert(bounded:Stats().entries == 0 and bounded:Stats().waiters == 0,
 	"bounded coalescer leaked in-flight state")
 
-print("[PASS] Read coalescer singleflight, independent result clones, no post-completion cache, waiter deadlines and bounded state.")
+local clear_fetch_calls = 0
+local clear_service = V2.ReadCoalescer.new(function(key)
+	clear_fetch_calls += 1
+	task.wait(0.1)
+	return { key = key }, nil
+end, {
+	max_entries = 2,
+	max_waiters_per_key = 2,
+	max_total_waiters = 2,
+	waiter_timeout_seconds = 0.5,
+})
+local clear_result = nil
+task.spawn(function()
+	clear_result = table.pack(clear_service:GetAsync("clear-key", "owner-E"))
+end)
+task.wait(0.01)
+assert(clear_service:Clear(), "Clear failed")
+wait_until(function() return clear_result ~= nil end, 1, "Clear did not release the old leader")
+assert(clear_result[1] == nil and clear_result[3] == "invalidated",
+	"Clear allowed an old in-flight result to escape")
+assert(clear_fetch_calls == 1 and clear_service:Stats().active_reads == 0,
+	"Clear caused a duplicate fetch or leaked active state")
+
+print("[PASS] Read coalescer singleflight, independent clones, no completed cache, invalidation, waiter deadlines and bounded state.")
 Shim.close()
