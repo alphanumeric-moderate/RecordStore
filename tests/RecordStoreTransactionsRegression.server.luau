@@ -385,6 +385,11 @@ assert(risk_subscribe_code == "success" and risk_subscription ~= nil, tostring(r
 local acquired_wait, acquired_wait_code = risk_record:WaitForSessionAsync(nil)
 assert(acquired_wait_code == "success" and acquired_wait.Outcome == "ownership_acquired",
 	"session wait did not recognize the active locally owned lease")
+local active_cancel_wait, active_cancel_code = risk_record:WaitForSessionAsync(nil, {
+	cancelled = function() return true end,
+})
+assert(active_cancel_code == "success" and active_cancel_wait.Outcome == "ownership_acquired",
+	"cancellation was reported despite an already acquired local session")
 local cancelled_wait_record = RecordStore.Mock.new(STORE, SCOPE, "session-wait-cancelled", {
 	schema_version = 1,
 	retry_attempts = 1,
@@ -411,17 +416,17 @@ assert(dirty_durability.dirty and dirty_durability.dirty_generation > dirty_dura
 assert(dirty_durability.dirty_age_available and dirty_durability.dirty_age_seconds ~= nil,
 	"tracked dirty generation did not expose its age")
 risk_now += dirty_durability.max_dirty_age_seconds + 1
-RecordStore.Mock.check_durability_risks()
+local health_snapshot = RecordStore.get_health_snapshot(32)
+assert(health_snapshot.code == "success" and health_snapshot.scope == "server_local_bounded_observation",
+	"server health snapshot did not declare its bounded local scope")
+assert(health_snapshot.aged_dirty_records >= 1 and health_snapshot.risk_active_records >= 1,
+	"health snapshot did not refresh and include the aged dirty record")
 task.wait(0.05)
 assert(#risk_events == 1 and risk_events[1].Transition == "entered" and risk_events[1].Reason == "dirty_age_exceeded",
 	"dirty-age risk must emit one edge-triggered event")
 RecordStore.Mock.check_durability_risks()
 task.wait(0.05)
 assert(#risk_events == 1, "risk notifier emitted repeated events without a state transition")
-local health_snapshot = RecordStore.get_health_snapshot(32)
-assert(health_snapshot.code == "success" and health_snapshot.scope == "server_local_bounded_observation",
-	"server health snapshot did not declare its bounded local scope")
-assert(health_snapshot.aged_dirty_records >= 1, "health snapshot did not include the aged dirty record")
 local risk_save, risk_save_message = risk_record:Save("durability-risk-regression")
 assert(risk_save == "success" or risk_save == "saved", tostring(risk_save_message))
 RecordStore.Mock.check_durability_risks()
@@ -429,6 +434,37 @@ task.wait(0.05)
 assert(#risk_events == 2 and risk_events[2].Transition == "recovered" and risk_events[2].Reason == "recovered",
 	"confirmed persistence did not emit a single recovery event")
 risk_subscription:Disconnect()
+
+local delete_risk_record = RecordStore.Mock.new(STORE, SCOPE, "durability-risk-delete", {
+	schema_version = 1,
+	retry_attempts = 1,
+	lease_duration = 1000,
+	user_ids = { USER_ID },
+})
+local delete_risk_open, delete_risk_open_message = delete_risk_record:Open({ coins = 0 })
+assert(delete_risk_open == "created" or delete_risk_open == "loaded", tostring(delete_risk_open_message))
+local delete_risk_events = {}
+local delete_risk_subscription, delete_risk_subscribe_code, delete_risk_subscribe_message =
+	delete_risk_record:SubscribeDurabilityRisk(function(event) table.insert(delete_risk_events, event) end)
+assert(delete_risk_subscribe_code == "success" and delete_risk_subscription ~= nil, tostring(delete_risk_subscribe_message))
+local delete_risk_update = delete_risk_record:Update(function(current)
+	local next_data = table.clone(current)
+	next_data.coins += 1
+	return next_data
+end)
+assert(delete_risk_update == "success")
+local delete_risk_status = delete_risk_record:GetDurabilityStatus()
+risk_now += delete_risk_status.max_dirty_age_seconds + 1
+RecordStore.Mock.check_durability_risks()
+task.wait(0.05)
+assert(#delete_risk_events == 1 and delete_risk_events[1].Transition == "entered")
+local delete_risk_result, delete_risk_message = delete_risk_record:Delete()
+assert(delete_risk_result == "deleted", tostring(delete_risk_message))
+task.wait(0.05)
+assert(#delete_risk_events == 2 and delete_risk_events[2].Transition == "resolved"
+	and delete_risk_events[2].Reason == "record_deleted",
+	"confirmed deletion should resolve, not mislabel as recovery, a pending risk state")
+delete_risk_subscription:Disconnect()
 RecordStore.Mock.set_test_clock(nil)
 
 RecordStore.Mock.reset()

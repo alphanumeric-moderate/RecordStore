@@ -102,8 +102,8 @@ export type ChangeSubscription = {
 }
 
 export type DurabilityRiskEvent = {
-	Transition: "entered" | "changed" | "recovered",
-	Reason: "dirty_age_exceeded" | "write_outcome_uncertain" | "recovered",
+	Transition: "entered" | "changed" | "recovered" | "resolved",
+	Reason: "dirty_age_exceeded" | "write_outcome_uncertain" | "recovered" | "record_deleted",
 	State: SessionState,
 	Dirty: boolean,
 	DirtyGeneration: number,
@@ -7479,6 +7479,11 @@ local function delete_record(self: Record): (ResultCode, string?)
 	state.queue_hint = false
 	disconnect_message_subscription(state)
 	observe(state, "delete", "deleted", nil)
+	if state.durability_risk_active then
+		state.durability_risk_active = false
+		state.durability_risk_reason = nil
+		dispatch_durability_risk(state, "resolved", "record_deleted")
+	end
 	sync_public(self)
 	return "deleted", nil
 end
@@ -8572,7 +8577,7 @@ local function durability_status_for_state(state: InternalState): DurabilityStat
 	}
 end
 
-local function dispatch_durability_risk(state: InternalState, transition: "entered" | "changed" | "recovered", reason: "dirty_age_exceeded" | "write_outcome_uncertain" | "recovered")
+local function dispatch_durability_risk(state: InternalState, transition: "entered" | "changed" | "recovered" | "resolved", reason: "dirty_age_exceeded" | "write_outcome_uncertain" | "recovered" | "record_deleted")
 	if next(state.durability_risk_observers) == nil then return end
 	local status = durability_status_for_state(state)
 	local event: DurabilityRiskEvent = {
@@ -8813,16 +8818,11 @@ local function wait_for_session_async(self: Record, default_data: JsonValue?, wa
 	end
 
 	for attempt = 1, max_attempts do
-		local cancelled, cancellation_error = cancellation_requested()
-		if cancellation_error ~= nil then
-			local result = report("session_status_unavailable", attempt, last_job_id, last_lease_until, nil, false, "invalid", cancellation_error)
-			return result, "invalid", cancellation_error
-		end
-		if cancelled then
-			local result = report("cancellation_requested", attempt, last_job_id, last_lease_until, nil, false, "closing", "session wait was cancelled or takeover was requested")
+		if now_local() >= deadline then break end
+		if state.takeover_requested then
+			local result = report("cancellation_requested", attempt, last_job_id, last_lease_until, nil, false, "closing", "session takeover has been requested")
 			return result, "closing", result.Message
 		end
-		if now_local() >= deadline then break end
 		if state.state == "active" and state.token ~= nil then
 			if state.durable_lease_until > session_now_unix(state.backend.mock) then
 				local result = report("ownership_acquired", attempt, server_id, state.durable_lease_until, nil, false, "success", nil)
@@ -8832,6 +8832,15 @@ local function wait_for_session_async(self: Record, default_data: JsonValue?, wa
 				local result = report("ownership_fenced_or_lost", attempt, server_id, state.durable_lease_until, nil, false, "fenced", "the last confirmed local lease has expired")
 				return result, "fenced", result.Message
 			end
+		end
+		local cancelled, cancellation_error = cancellation_requested()
+		if cancellation_error ~= nil then
+			local result = report("session_status_unavailable", attempt, last_job_id, last_lease_until, nil, false, "invalid", cancellation_error)
+			return result, "invalid", cancellation_error
+		end
+		if cancelled then
+			local result = report("cancellation_requested", attempt, last_job_id, last_lease_until, nil, false, "closing", "session wait was cancelled")
+			return result, "closing", result.Message
 		end
 		if state.state == "fenced" or state.state == "tombstoned" then
 			local code: ResultCode = if state.state == "tombstoned" then "tombstoned" else "fenced"
@@ -9563,6 +9572,7 @@ function RecordStore.get_health_snapshot(max_records: number?): { [string]: unkn
 		local state = private[record]
 		if state ~= nil then
 			scanned += 1
+			evaluate_durability_risk(record, state)
 			local status = durability_status_for_state(state)
 			if status.dirty then dirty_records += 1 end
 			if status.dirty_age_exceeded == true then aged_dirty_records += 1 end
