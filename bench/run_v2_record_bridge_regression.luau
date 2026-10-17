@@ -48,6 +48,7 @@ local detached_mailbox = MailboxV2.new(MailboxV2.MockStore(), {
 	encode = function(value) return serde.encode("json", value) end,
 	now_ms = function() return 1_000_000 end,
 	guid = function() return "detached-bridge-guid" end,
+	allow_unattested_activation = true,
 })
 local detached_bind, detached_bind_message = record:BindMailboxV2Async(detached_mailbox)
 assert(detached_bind == "conflict", "bridge must reject a mailbox without this active Record")
@@ -66,6 +67,7 @@ local detached = MailboxV2.new(MailboxV2.MockStore(), {
 	encode = function(value) return serde.encode("json", value) end,
 	now_ms = function() return 1_000_000 end,
 	guid = function() return "detached-v2-guid" end,
+	allow_unattested_activation = true,
 })
 assert(detached:EnqueueAsync("detached", { value = 1 }, { idempotency_key = "detached-1" }).code == "accepted")
 local detached_process = detached:ProcessNextAsync(function() return true end)
@@ -82,6 +84,7 @@ local legacy_mailbox = MailboxV2.new(MailboxV2.MockStore(), {
 	guid = function() return "v2-bridge-guid" end,
 	sender_job_id = "bridge-server",
 	encode = function(value) return serde.encode("json", value) end,
+	allow_unattested_activation = true,
 	max_attempts = 1,
 })
 local blocked_bind, blocked_message = record:BindMailboxV2Async(legacy_mailbox)
