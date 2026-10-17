@@ -251,8 +251,8 @@ local mailbox = MailboxV2.new(store, owner, {
         return HttpService:JSONEncode(value)
     end,
 })
--- Explicitly route Record:EnqueueAsync through this mailbox. Unbound Records keep the legacy path.
-local bind_code, bind_error = record:BindMailboxV2(mailbox)
+-- Check and drain the legacy queue before switching this Record to V2.
+local bind_code, bind_error = record:BindMailboxV2Async(mailbox)
 assert(bind_code == "success", bind_error)
 
 local V2 = RecordStoreV2.new(RecordStore, MailboxV2, {
@@ -272,7 +272,7 @@ local function handle_message(payload, message)
     end
     local command = {
         message_id = message.Id,
-        message_type = message.MessageType,
+        message_type = message Type field,
         payload = payload,
     }
     local material = V2.Canonicalize(command)
@@ -307,8 +307,13 @@ server-local governor wired through RecordStore's actual request gate, revisione
 critical save/release reserve, backpressure and telemetry, purchase-receipt handling, schema
 migrations, transfer sagas, Profile Doctor and guarded restore, RTBF erasure planning, eventual
 projections and unique reservations, tracing, payload/codec utilities, and resumable compaction.
-After explicit `Record:BindMailboxV2(mailbox)`, existing `Record:EnqueueAsync` calls go through the
-bound V2 mailbox; an unbound Record retains the legacy queue behavior. Important operations should
+After `Record:BindMailboxV2Async(mailbox)` succeeds, `Record:EnqueueAsync`, `Record:ProcessQueueAsync`,
+and `Record:GetQueueAsync` use the bound V2 mailbox; an unbound Record retains the legacy queue behavior.
+Binding first checks the existing legacy queue and returns `busy` if pending legacy messages remain,
+so drain those messages before switching. The legacy `GetDeadLettersAsync` view is bounded to 1,000
+entries; legacy claim/replay/discard methods fail closed on a V2-bound Record because V2 uses operation
+IDs and replay generations. Use `MailboxV2.GetDeadLettersAsync`, `MailboxV2.ReplayDeadLetterAsync`, and
+`MailboxV2.DiscardDeadLetterAsync` directly for V2 dead-letter operations. Important operations should
 supply a caller-stable `idempotency_key` in the optional enqueue options.
 
 The DataStore adapter preserves key UserIds/metadata on updates and uses the shared RecordStore
