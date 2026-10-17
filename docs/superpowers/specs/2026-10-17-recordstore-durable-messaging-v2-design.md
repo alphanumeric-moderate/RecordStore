@@ -7,7 +7,7 @@
 
 ## Executive decision
 
-Build a durable messaging subsystem that is more than a replacement for \`ProfileStore:MessageAsync()\`. The design combines:
+Build a durable messaging subsystem that is more than a replacement for `ProfileStore:MessageAsync()`. The design combines:
 
 1. **Correctness-first mailbox**: at-least-once delivery, producer idempotency, per-message authoritative state, append-only bounded segment indexes, persisted retry/backoff, claim fencing, acknowledgement recovery, and an independent dead-letter index.
 2. **Transactional outbox/inbox**: atomically commit profile-data changes with outbound intent, and atomically apply inbound message effects to one profile key with a deduplication receipt.
@@ -29,9 +29,9 @@ Do not call arbitrary handlers exactly-once. RecordStore can provide a stronger,
 
 ### 1.2 Atomicity boundary
 
-Roblox DataStore \`UpdateAsync\` is atomic for the key being updated; it does not create a transaction across multiple keys. Any protocol that touches a manifest, segment, receipt, message record, profile record, dead-letter index, or saga record must persist intermediate states and recover them idempotently.
+Roblox DataStore `UpdateAsync` is atomic for the key being updated; it does not create a transaction across multiple keys. Any protocol that touches a manifest, segment, receipt, message record, profile record, dead-letter index, or saga record must persist intermediate states and recover them idempotently.
 
-Inside every \`UpdateAsync\` transform:
+Inside every `UpdateAsync` transform:
 
 - do not yield;
 - do not call MessagingService, MemoryStore, HTTP or another DataStore;
@@ -39,19 +39,19 @@ Inside every \`UpdateAsync\` transform:
 - do not generate GUIDs or read wall-clock/time-dependent values that would change on retry;
 - do not perform irreversible application side effects.
 
-Prepare stable IDs and timestamps before calling \`UpdateAsync\`. Transform callbacks supplied by consumers must be pure, deterministic for the same input, and non-yielding because Roblox can invoke a transform more than once.
+Prepare stable IDs and timestamps before calling `UpdateAsync`. Transform callbacks supplied by consumers must be pure, deterministic for the same input, and non-yielding because Roblox can invoke a transform more than once.
 
 ### 1.3 Durable results and uncertain outcomes
 
 New APIs return a typed result in addition to preserving existing result-code methods for compatibility. At minimum, distinguish:
 
-- \`accepted\`: durable intent and canonical message state were verified;
-- \`duplicate\`: the producer key matched an existing submission with the same exact canonical request;
-- \`conflict\`: the same producer key was reused for a different request, owner, or incompatible protocol state;
-- \`capacity\`: no durable space is available and no message was accepted;
-- \`retryable\`: no final conclusion was reached and the same operation key may be retried;
-- \`unknown\`: the caller must not infer commit or non-commit; verify or retry with the same idempotency key;
-- \`processed\`, \`acknowledged\`, \`retry_scheduled\`, \`dead_lettered\`, and \`discarded\`: durable lifecycle states, not publish results.
+- `accepted`: durable intent and canonical message state were verified;
+- `duplicate`: the producer key matched an existing submission with the same exact canonical request;
+- `conflict`: the same producer key was reused for a different request, owner, or incompatible protocol state;
+- `capacity`: no durable space is available and no message was accepted;
+- `retryable`: no final conclusion was reached and the same operation key may be retried;
+- `unknown`: the caller must not infer commit or non-commit; verify or retry with the same idempotency key;
+- `processed`, `acknowledged`, `retry_scheduled`, `dead_lettered`, and `discarded`: durable lifecycle states, not publish results.
 
 A successful MessagingService publish means only that publish succeeded. A MemoryStore enqueue means only that an ephemeral hint was recorded. Neither proves that a durable message exists or that a handler completed.
 
@@ -61,18 +61,18 @@ Each record family has explicit item and byte limits. When a queue, outbox, inbo
 
 ## 2. How RecordStore should differ from ProfileStore
 
-The current public ProfileStore documentation describes session locking, autosaving, reconciliation, profile reads/version queries, and durable per-profile \`MessageAsync()\` with \`MessageHandler()\`/processed acknowledgement. Therefore, **durable messages alone are not a differentiator**, and this design must not claim ProfileStore lacks durable messaging.
+The current public ProfileStore documentation describes session locking, autosaving, reconciliation, profile reads/version queries, and durable per-profile `MessageAsync()` with `MessageHandler()`/processed acknowledgement. Therefore, **durable messages alone are not a differentiator**, and this design must not claim ProfileStore lacks durable messaging.
 
 The unique value is the combination of capabilities below. Statements about ProfileStore refer to the public API documented in its current repository; they do not assert that no internal implementation detail could be similar.
 
 | Capability | ProfileStore documented surface | RecordStore proposal |
 | --- | --- | --- |
 | Profile session lock and autosave | Yes | Preserve session ownership/fencing and current persistence guarantees |
-| Message sent to a profile and processed by its active session | \`MessageAsync()\` and \`MessageHandler()\` | Keep an easy profile-targeted send path, plus explicit durable lifecycle state and receipt inspection |
+| Message sent to a profile and processed by its active session | `MessageAsync()` and `MessageHandler()` | Keep an easy profile-targeted send path, plus explicit durable lifecycle state and receipt inspection |
 | Producer idempotency key that deduplicates a retried submission | No equivalent documented parameter/contract found | Stable logical ID; exact-request comparison; same-key retry returns original outcome; mismatched request conflicts |
 | Independent segmented mailbox and independent dead-letter storage | No equivalent documented public queue/DLQ API found | Bounded append-only ID indexes and per-message authoritative records, separate DLQ index, paginated inspection and replay |
-| Persisted retry schedule, leases, claim fencing, ack recovery | No equivalent documented public queue state-machine API found | Explicit \`available_at\`, claim lease/token, bounded backoff, ack/dead-letter recovery states |
-| Delivery status query and transition trace | No equivalent documented message receipt/history API found | \`GetDeliveryAsync\` with status, attempts, next retry, terminal reason and bounded transition history |
+| Persisted retry schedule, leases, claim fencing, ack recovery | No equivalent documented public queue state-machine API found | Explicit `available_at`, claim lease/token, bounded backoff, ack/dead-letter recovery states |
+| Delivery status query and transition trace | No equivalent documented message receipt/history API found | `GetDeliveryAsync` with status, attempts, next retry, terminal reason and bounded transition history |
 | Transactional outbox with profile mutation | No equivalent documented public API found | One profile-key update commits data and outbound intent together; dispatcher publishes idempotently later |
 | Atomic inbox deduplication with a profile mutation | No equivalent documented public API found | One profile-key update commits the reducer result and the message receipt together |
 | Multi-profile workflow/saga recovery | No equivalent documented public workflow API found | Optional saga coordinator that resumes idempotent steps and compensations |
@@ -87,13 +87,13 @@ The differentiators should be released as individually useful APIs. The mailbox 
 
 ## 3. Public API proposal
 
-Names are provisional. Preserve existing two-argument \`Record:EnqueueAsync(type, data)\`, \`Record:MessageAsync(type, data)\`, \`ProcessQueueAsync()\`, \`GetQueueAsync()\`, \`GetDeadLettersAsync()\`, and \`Stats()\` behavior unless a separately reviewed compatibility change is approved.
+Names are provisional. Preserve existing two-argument `Record:EnqueueAsync(type, data)`, `Record:MessageAsync(type, data)`, `ProcessQueueAsync()`, `GetQueueAsync()`, `GetDeadLettersAsync()`, and `Stats()` behavior unless a separately reviewed compatibility change is approved.
 
 ### 3.1 Enqueue without requiring the target profile to be open
 
 Add a store-level operation analogous to:
 
-\`\`\`lua
+```lua
 local result = RecordStore.EnqueueToAsync(
     store_name,
     scope,
@@ -109,15 +109,15 @@ local result = RecordStore.EnqueueToAsync(
         ordering_key = nil,
     }
 )
-\`\`\`
+```
 
 This lets a server durably submit work for an offline profile without holding or fabricating an active Record session. Only the legitimate active Record session may execute that profile's handlers. The store-level submitter cannot claim a message or bypass session fencing.
 
-Existing \`Record:EnqueueAsync(type, data)\` remains a convenience method; it delegates to the same submission protocol. A third options argument is additive. For valuable/irreversible work, require a caller-stable idempotency key. Calls without one get a unique submission, and an ambiguous outcome cannot be safely deduplicated by repeating the whole call.
+Existing `Record:EnqueueAsync(type, data)` remains a convenience method; it delegates to the same submission protocol. A third options argument is additive. For valuable/irreversible work, require a caller-stable idempotency key. Canonicalization must be a deterministic, versioned serializer: dense arrays preserve order; string-keyed object keys are sorted; sparse arrays, mixed array/object shapes, cycles, unsupported values, and non-finite message numbers are rejected unless an explicit versioned codec supports them. Do not assume raw HttpService JSONEncode output is a canonical fingerprint unless stable key ordering is guaranteed. Retain exact canonical request material throughout the advertised deduplication window; a short hash alone does not prove equality. Calls without one get a unique submission, and an ambiguous outcome cannot be safely deduplicated by repeating the whole call.
 
 ### 3.2 Query delivery outcome
 
-Add \`RecordStore.GetDeliveryAsync(store_name, scope, profile_key, message_id)\` and/or \`Record:GetDeliveryAsync(message_id)\`. Return a single canonical message snapshot:
+Add `RecordStore.GetDeliveryAsync(store_name, scope, profile_key, message_id)` and/or `Record:GetDeliveryAsync(message_id)`. Return a single canonical message snapshot:
 
 - message ID, owner identity, type, payload schema version;
 - lifecycle state, created/updated time, current attempt and total attempts;
@@ -126,79 +126,76 @@ Add \`RecordStore.GetDeliveryAsync(store_name, scope, profile_key, message_id)\`
 - correlation/causation IDs and bounded transition history;
 - whether the response came from the canonical durable message record or is incomplete.
 
-Do not expose a \`processed\` result based on MessagingService or MemoryStore. A status read is not a transactional snapshot across the entire mailbox; one message record is authoritative for that message.
+Do not expose a `processed` result based on MessagingService or MemoryStore. A status read is not a transactional snapshot across the entire mailbox; one message record is authoritative for that message.
 
 ### 3.3 Atomic inbox operation
 
 Add a profile method analogous to:
 
-\`\`\`lua
-local result, message = record:ApplyInboxAsync(message_id, function(data)
-    -- Pure, deterministic data reducer only.
-    data.coins += 50
-    return data
-end)
-\`\`\`
+```lua
+local result, message = record:ApplyInboxAsync(
+    message_id,
+    message_type,
+    payload,
+    function(current_data, message_payload)
+        -- Pure, deterministic data reducer only.
+        return copy_and_apply(current_data, message_payload)
+    end
+)
+```
 
-In **one UpdateAsync on the same profile key**, apply the reducer result and persist the deduplication receipt. If the same message ID is delivered again while its inbox receipt is retained, return \`duplicate\` and do not reapply the reducer. If the same ID is reused with a different request fingerprint or recipient, return \`conflict\`.
+The API compares exact canonical `message_type + payload + target owner` request material against the retained receipt. The same ID and same request returns `duplicate`; the same ID with a different payload, type, or owner returns `conflict`.
 
-The reducer runs inside an UpdateAsync transform and may be invoked multiple times. It must not yield or perform external side effects. For irreversible game actions, keep the domain idempotency key in the application's own durable state for as long as the business rule requires. The inbox receipt window is not a substitute for a permanent purchase-receipt ledger.
+In one UpdateAsync on the same profile key, apply the reducer result and persist the deduplication receipt. The reducer runs inside an UpdateAsync transform and may be invoked multiple times. It must not yield or perform external side effects. The per-Record write gate serializes it with local mutations, flushes pending dirty state first, and rebases the in-memory snapshot after commit. For irreversible game actions, keep the domain idempotency key in the application's own durable state for as long as the business rule requires. The inbox receipt window is not a substitute for a permanent purchase-receipt ledger.
+
+Serialize this operation through the Record's write gate: stop concurrent local mutators, flush pending local dirty data, then apply the reducer to the current durable envelope. If flushing fails or its outcome is unknown, do not proceed from a stale cache. After commit, rebase the in-memory Record to the committed data/revision before releasing the gate. This API must never discard unsaved local mutations or overwrite a newer snapshot.
 
 ### 3.4 Transactional outbox operation
 
 Add a method analogous to:
 
-\`\`\`lua
+```lua
 local result, snapshot = record:CommitWithOutboxAsync(
     "shop-purchase:operation-123",
-    function(current_data)
-        -- Pure, deterministic reducer.
-        local next_data = copy_and_apply_purchase(current_data)
-        local events = {
-            {
-                target_store = "PlayerData",
-                target_scope = "global",
-                target_key = "player_456",
-                type = "ItemGift",
-                payload_version = 1,
-                data = { item_id = "sword_01" },
-            },
-        }
+    "ShopPurchase",
+    { item_id = "sword_01", recipient_key = "player_456" },
+    function(current_data, command)
+        -- Pure reducer. The command is the canonical input.
+        local next_data = copy_and_apply_purchase(current_data, command)
+        local events = build_outbound_events(next_data, command)
         return next_data, events
     end
 )
-\`\`\`
+```
 
-One UpdateAsync on the source profile key commits the data mutation, commit receipt, and bounded outbox entries together. Stable event IDs are derived from the stable commit key and event ordinal outside the transform; retries must return the original committed operation rather than reapply the reducer. Reusing a commit key with different input is a conflict.
+The API accepts an explicit command type and canonical command payload; it does not try to fingerprint a Lua callback. One UpdateAsync on the source profile key commits the data mutation, exact-request commit receipt, and bounded outbox entries together. Event IDs derive from the stable commit key and event ordinal before entering the transform; reducers cannot generate IDs or time-dependent output. An already-committed key returns its stored outcome without reapplying the reducer. Reusing the key with different command type/payload returns conflict.
 
-A dispatcher sends outbox events through the durable mailbox using the event ID as the idempotency key. It removes/marks an outbox entry only after it verifies the matching durable mailbox receipt. If the process crashes after destination acceptance but before outbox cleanup, a retry returns the same mailbox message and does not create a second logical event.
-
-This gives atomicity between **one profile's data update and its outbound intent**. It does not atomically update the target profile or run the target handler. The bounded outbox applies backpressure to future commits when full; it never discards an unconfirmed event.
+Serialize the operation through the Record write gate: flush pending local dirty data, block local mutators while the durable transform runs, and rebase the live cache/revision after commit. If the dirty flush has an unknown outcome, stop and reconcile instead of applying the command to stale data.
 
 ### 3.5 Recoverable workflow/saga API
 
-Add an optional companion module, for example \`RecordStore.Workflow\`, after inbox/outbox correctness is established. Its durable API should provide:
+Add an optional companion module, for example `RecordStore.Workflow`, after inbox/outbox correctness is established. Its durable API should provide:
 
 - stable workflow ID and exact-request idempotency;
 - named, versioned steps with checkpoints and status;
 - step input/output summaries that avoid storing secrets;
 - bounded retry policy and next retry time;
-- idempotent per-record actions through \`ApplyInboxAsync\`;
+- idempotent per-record actions through `ApplyInboxAsync`;
 - explicit forward recovery or compensating steps;
 - status query, cancellation request, and operator-visible stuck-step reason.
 
-A saga is eventually consistent, not a cross-key ACID transaction. Never name it \`AtomicTransfer\` or claim that source and destination balances change simultaneously.
+A saga is eventually consistent, not a cross-key ACID transaction. Never name it `AtomicTransfer` or claim that source and destination balances change simultaneously.
 
 ## 4. Corrected durable storage architecture
 
 ### 4.1 Record families
 
-Use the configured queue DataStore name and scope with a versioned mailbox namespace. The full record owner is \`(store_name, scope, profile_key)\`. Every route, receipt, segment, message, dead-letter and manifest value must store and validate the full owner; a hashed key prefix is only a routing aid.
+Use the configured queue DataStore name and scope with a versioned mailbox namespace. The full record owner is `(store_name, scope, profile_key)`. Every route, receipt, segment, message, dead-letter and manifest value must store and validate the full owner; a hashed key prefix is only a routing aid.
 
 The layout consists of:
 
-1. **Constant-size manifest** per owner and partition: protocol version, full owner identity, immutable partition count, head/tail segment numbers, activation/migration state and bounded reconciliation metadata. It must not contain a growing array of all messages.
-2. **Append-only segment index**: bounded entries containing message ID plus placement generation, not payload, retry state, or dead-letter history. Appending is idempotent; message processing never rewrites this index entry.
+1. **Constant-bounded manifest** per owner and partition: protocol version, full owner identity, immutable partition count, activation/migration state, a fixed-size segment-slot table, per-slot generation/state/current segment key, and a scan hint. The table is capped at the configured maximum (initially 64); it never grows with message count.
+2. **Append-only segment index**: bounded entries containing message ID plus placement generation, not payload, retry state, or dead-letter history. Appending is idempotent; message processing never rewrites this index entry. Segment keys include both slot and generation so a reused slot cannot alias an older segment.
 3. **Canonical message record**: one DataStore key per message ID. It owns payload, schema version, current lifecycle state, retry scheduling, attempt counters, claim token/expiry, current segment locator and generation, idempotency-receipt reference, correlation IDs, terminal reason and bounded transition history.
 4. **Submission receipt**: maps an owner-scoped producer idempotency key to one stable message ID and canonical request identity. It stores reservation/acceptance state, placement generation and timestamps. The exact request representation remains available for the configured deduplication window, so a hash collision cannot silently equate two payloads.
 5. **Independent dead-letter index**: separately segmented IDs for messages in dead-letter state. The canonical message record retains the payload/error needed for inspection and replay. A growing DLQ cannot consume active-segment capacity.
@@ -223,7 +220,8 @@ Initial values are benchmark candidates, not production claims:
 - one partition by default; partition count is immutable after activation;
 - at most 32 message IDs per active segment;
 - at most 250,000 encoded bytes per segment index, even though it contains only IDs;
-- at most 64 live segments per partition initially;
+- at most 64 live segment slots per partition initially; slots can be reclaimed out of order after all entries are terminal or stale, so a delayed old item does not pin all later completed slots;
+- each reused slot gets a strictly increasing generation encoded into its segment key; generations never wrap or reuse an old key;
 - at most 64 KiB encoded payload per message by default, configurable only within validated service/key limits;
 - retain the current 60-second claim lease and 10-second polling defaults until queue-specific measurements justify changes;
 - deduplication and dead-letter retention must be explicit. Never expire a dedup receipt before the advertised idempotency window.
@@ -232,54 +230,62 @@ The number of message IDs per segment is not the same as maximum pending backlog
 
 ### 4.4 Segment rollover and append protocol
 
-The segment index is a discovery aid; the canonical message record and its receipt decide whether an indexed ID is deliverable.
+The segment index is a discovery aid; the canonical message record and its receipt decide whether an indexed ID is deliverable. The manifest uses a fixed-size slot table rather than a monotonically contiguous head/tail range. This allows out-of-order slot reclamation when an old delayed item remains pending.
 
-1. Reserve one stable message ID and target segment in the submission receipt. Generate candidate GUIDs before UpdateAsync; the winning receipt's ID is reused by every retry.
-2. Create the canonical message record in \`preparing\` state using that ID and locator. Repeated creation with the same identity is idempotent; conflicting owner or request data fails closed.
-3. Append \`(message_id, placement_generation)\` to the selected segment index using UpdateAsync. A repeated append of the same pair returns the existing entry rather than creating a duplicate.
-4. If append returns an ambiguous error, do not move the receipt to a different segment. Re-run the idempotent append/verification against the same key until the item is known present or the operation deadline returns \`unknown\`.
-5. If the segment reports full/sealed and the ID is verified absent, atomically seal the segment, create/verify the next segment, CAS the manifest tail, then CAS the preparing receipt/message locator to the new segment with a larger placement generation. A stale writer must see the sealed segment and be rejected. Never switch target merely because a read timed out.
-6. Once the index entry is present, mark the receipt accepted only if its reservation and placement generation still match. Then promote the canonical message to \`ready\`. Only \`ready\` records can be claimed.
-7. If the server stops at any intermediate step, a repeated submission with the same idempotency key or a worker inspecting the indexed preparing entry can resume the same operation. If the receipt is not accepted and there is no index entry, it was not yet reported as accepted; the caller must use the same key to resolve an ambiguous submit.
-8. A stale index entry is deliverable only when both its segment number and placement generation match the canonical message record. This makes stale/duplicated index rows harmless and allows eventual cleanup without executing them.
+1. Reserve a stable message ID and target (slot, generation) in the submission receipt. Generate candidate GUIDs before UpdateAsync; retries reuse the winning ID.
+2. Create the canonical message record in `preparing` state. Repeated creation with the same owner/request is idempotent; a conflict fails closed.
+3. Append (message ID, placement generation) to the selected segment with UpdateAsync. Append requires that the target segment key already exists for the generation published in the manifest. A missing/retired key is rejected rather than implicitly initialized. Repeating the same append returns the existing entry.
+4. If append returns an ambiguous error, do not move the receipt to a different segment. Repeat the idempotent append/verification on the same key until the ID is known present or the deadline returns `unknown`. Never infer absence from a cached GetAsync or timeout.
+5. If the segment is full, seal it with a compare-and-set UpdateAsync. Once sealed, no append is accepted. The allocator increments a free slot's generation, creates and verifies its empty segment key, then publishes the slot as open with a CAS. Multiple allocators may race, but only the manifest-published generation is valid.
+6. Retarget a preparing receipt/message only after the previous segment is confirmed sealed and the index pair is confirmed absent. Increment the placement generation. Stale writers to an old generation see a sealed or missing key and cannot append. Workers require the index generation to match the canonical message locator.
+7. Once the index entry is present, mark the receipt accepted only if its reservation and placement generation still match. Then promote the canonical message to `ready`. Only `ready` messages can be claimed.
+8. If the server stops mid-protocol, a repeated submission with the same idempotency key or a worker inspecting the indexed preparing entry can resume it. Recovery may finalize a reservation only after verifying the exact owner/request and matching index pair. If there is no index entry and the receipt is not accepted, the request was not reported as accepted; use the same key to resolve an ambiguous submit.
+9. An index row is deliverable only when owner, slot, segment generation, message ID and placement generation match the canonical message. Duplicate or stale rows are skipped. Claim is still a CAS on the canonical message record.
 
-Rollover transforms are compare-and-set operations. Creating segment N+1 twice is safe only when both creators verify the exact owner, partition and segment number. The manifest is a bounded locator, not a source of message truth.
+Slot lifecycle:
+
+- Slots transition through `empty -> allocating -> open -> sealed -> draining -> empty`. Manifest transitions are compare-and-set operations.
+- A slot can be reclaimed only after a bounded scan proves every index entry terminal or stale. Keep canonical message/receipt tombstones until their idempotency and diagnostic-retention rules permit deletion.
+- A slot generation is part of the segment key and strictly increases. A segment key is never reinitialized for another generation. Only the allocator may initialize a new segment, and append to a missing generation is rejected; this prevents an old delayed writer from recreating a purged index.
+- Reclaim slots out of order to avoid head-of-line capacity loss. Polling scans the fixed slot table fairly; it does not assume a contiguous range.
+- Accepted messages are not relocated simply because another slot becomes available. Relocation is allowed only while preparing and after the previous segment is sealed and the index pair verified absent.
+- The manifest is rewritten only on slot allocation/reclamation, not each enqueue or lifecycle transition. Segment ID arrays are rewritten only on append/seal, never on claim, retry or acknowledgement.
 
 ### 4.5 Lifecycle state machine
 
 Canonical message states:
 
-- \`preparing\`: submission is not yet claimable; index/receipt reconciliation is permitted.
-- \`ready\`: accepted and eligible after \`available_at\).
-- \`claimed\`: current claim token and lease fence the worker.
-- \`acknowledging\`: handler success is recorded; recovery finishes acknowledgement without invoking the handler again.
-- \`dead_lettering\`: terminal failure is recorded; recovery finishes DLQ indexing without invoking the handler again.
-- \`acknowledged\`, \`dead_lettered\`, \`discarded\`, \`expired\`: terminal states.
+- `preparing`: submission is not yet claimable; index/receipt reconciliation is permitted.
+- `ready`: accepted and eligible after `available_at\).
+- `claimed`: current claim token and lease fence the worker.
+- `acknowledging`: handler success is recorded; recovery finishes acknowledgement without invoking the handler again.
+- `dead_lettering`: terminal failure is recorded; recovery finishes DLQ indexing without invoking the handler again.
+- `acknowledged`, `dead_lettered`, `discarded`, `expired`: terminal states.
 
 Allowed transitions are validated in the canonical message's UpdateAsync transform. A stale claim cannot acknowledge, renew, retry, discard or dead-letter a message. Terminal states are monotonic except an explicit replay operation, which increments the replay generation and creates a new active placement. Old index entries have older placement generations and are ignored.
 
 ### 4.6 Claim, retry and acknowledgement
 
-**Claim:** atomically change \`ready\` to \`claimed\`, increment attempts, assign a token and lease expiry, and record processing server/session generation. A concurrent claimant can win only one CAS. A message is not claimable before \`available_at\`. Claim tokens are generated before the transform.
+**Claim:** atomically change `ready` to `claimed`, increment attempts, assign a token and lease expiry, and record processing server/session generation. A concurrent claimant can win only one CAS. A message is not claimable before `available_at`. Claim tokens are generated before the transform.
 
 **Renewal:** renew only when the persisted token and current state match and the owning profile session is still active with the expected fencing generation. Renewals have a maximum extension/deadline to prevent permanently stuck handlers. An expired token cannot renew itself.
 
-**Retry:** under the live token, persist \`ready\`, cleared lock fields, normalized last error, attempt counters and an explicit next \`available_at\`. Use capped exponential backoff with deterministic/injected jitter. Limit total attempts and delivery age. The next handler must not run before the stored time. At attempt/age limits, transition to \`dead_lettering\`.
+**Retry:** under the live token, persist `ready`, cleared lock fields, normalized last error, attempt counters and an explicit next `available_at`. Use capped exponential backoff with deterministic/injected jitter. Limit total attempts and delivery age. The next handler must not run before the stored time. At attempt/age limits, transition to `dead_lettering`.
 
 **Acknowledgement:**
-1. Persist \`acknowledging\` under the current token.
+1. Persist `acknowledging` under the current token.
 2. Update the producer receipt to acknowledged if it exists.
 3. Persist the canonical message as acknowledged.
-4. Recovery repeats steps 2-3 idempotently and never invokes the handler for an \`acknowledging\` message.
+4. Recovery repeats steps 2-3 idempotently and never invokes the handler for an `acknowledging` message.
 
-If the handler effect committed but the state never reached \`acknowledging\`, redelivery is possible. This is why the atomic inbox pattern is a first-class API.
+If the handler effect committed but the state never reached `acknowledging`, redelivery is possible. This is why the atomic inbox pattern is a first-class API.
 
 **Dead-lettering:**
-1. Persist \`dead_lettering\` under the current token.
+1. Persist `dead_lettering` under the current token.
 2. Append the message ID and terminal generation to the independent DLQ index idempotently.
 3. Update the producer receipt, if any.
-4. Persist \`dead_lettered\`.
-5. Recovery repeats the same transitions idempotently. \`dead_lettering\` is never eligible for user handler execution.
+4. Persist `dead_lettered`.
+5. Recovery repeats the same transitions idempotently. `dead_lettering` is never eligible for user handler execution.
 
 No DataStore callback may perform any of these transitions by directly calling another key's API inside the transform.
 
@@ -287,7 +293,7 @@ No DataStore callback may perform any of these transitions by directly calling a
 
 ### 5.1 Atomic mutation plus receipt
 
-\`ApplyInboxAsync(message_id, reducer)\` loads and updates the recipient's primary profile envelope in one UpdateAsync. Its transform validates the session/record generation (unless the caller uses a separately authorized background mutation mode), checks the inbox receipt, applies the pure reducer to the current durable data, and records the message ID plus request fingerprint in the same envelope.
+`ApplyInboxAsync(message_id, reducer)` loads and updates the recipient's primary profile envelope in one UpdateAsync. Its transform validates the session/record generation (unless the caller uses a separately authorized background mutation mode), checks the inbox receipt, applies the pure reducer to the current durable data, and records the message ID plus request fingerprint in the same envelope.
 
 For a duplicate message ID with a matching request identity, it returns the previous result without applying the reducer again. For the same ID with a different recipient/type/payload fingerprint, it returns conflict. A reducer failure must abort the transform; it must not partially insert a receipt.
 
@@ -303,14 +309,14 @@ For purchase receipts that must remain deduplicated indefinitely, applications k
 
 ### 6.1 Atomic commit
 
-\`CommitWithOutboxAsync(commit_key, reducer)\` performs one UpdateAsync against the source profile key. The reducer returns the next data value and a bounded list of outbound events. The same transform writes:
+`CommitWithOutboxAsync(commit_key, reducer)` performs one UpdateAsync against the source profile key. The reducer returns the next data value and a bounded list of outbound events. The same transform writes:
 
 - next profile data;
-- an exact-request commit receipt keyed by \`commit_key\`;
-- stable outbox event IDs derived from \`commit_key\` and event ordinal;
+- an exact-request commit receipt keyed by `commit_key`;
+- stable outbox event IDs derived from `commit_key` and event ordinal;
 - event payload schema version, target identity and correlation/causation fields.
 
-All IDs, timestamps and request canonicalization are prepared outside the transform. The callback must be deterministic, pure and non-yielding; Roblox may call it more than once. A retry of a committed \`commit_key\` returns its prior outcome without applying the data mutation again. The same key with different canonical input conflicts.
+All IDs, timestamps and request canonicalization are prepared outside the transform. The callback must be deterministic, pure and non-yielding; Roblox may call it more than once. A retry of a committed `commit_key` returns its prior outcome without applying the data mutation again. The same key with different canonical input conflicts.
 
 The transform rejects the entire operation when the outbox byte/item budget would be exceeded. There is no state where the profile mutation is durably committed but the corresponding outbound intent is missing, nor a state where the outbox claims the data mutation succeeded when it did not.
 
@@ -339,12 +345,12 @@ A trade/transfer touches at least two profile keys. Roblox does not provide a tr
 
 ### 7.2 Transfer example
 
-For transfer ID \`T\` from A to B:
+For transfer ID `T` from A to B:
 
 1. Create a durable workflow record with exact request identity, source/destination, amount and step state.
-2. On A, reserve funds and record inbox key \`T:reserve\` in the same source-profile UpdateAsync.
-3. On B, credit the amount and record inbox key \`T:credit\` in the same destination-profile UpdateAsync.
-4. On A, finalize the reservation and record inbox key \`T:finalize\`.
+2. On A, reserve funds and record inbox key `T:reserve` in the same source-profile UpdateAsync.
+3. On B, credit the amount and record inbox key `T:credit` in the same destination-profile UpdateAsync.
+4. On A, finalize the reservation and record inbox key `T:finalize`.
 5. Mark the workflow complete only after each durable step is verified.
 
 Every leg is replay-safe because the profile data mutation and step receipt share one key. A crash after a leg commits but before the saga checkpoint writes is harmless: replay of that leg returns its recorded outcome. If a step permanently fails, execute a defined compensation (such as release the source reservation) with its own idempotency key. Compensation is a new business operation, not rollback of history.
@@ -367,11 +373,13 @@ A compensation cannot always reverse an irreversible external effect. Document m
 
 ### 8.1 Durable polling
 
-Every mailbox always has a durable DataStore polling path. Workers maintain a local round-robin scan cursor over the bounded live segment range and scan a bounded number of IDs per tick. On restart, the cursor may reset; canonical message state makes repeat scans harmless. A delayed or claimed item must not block every later item unless the caller explicitly selected strict ordering.
+Every mailbox always has a durable DataStore polling path. Workers maintain a local round-robin scan cursor over the manifest's fixed-size live slot table and scan a bounded number of IDs per tick. Slots can be reclaimed out of order, so the worker cannot assume a contiguous head/tail range. On restart, the cursor may reset; canonical message state makes repeat scans harmless. A delayed or claimed item must not block every later item unless the caller explicitly selected strict ordering.
 
-For the first release, promise FIFO placement per partition only, not global FIFO execution across concurrent workers. With partition count greater than one, ordering is per partition. Strict per-\`ordering_key\` serialization is a later opt-in feature requiring tests for fairness, lease expiry and head-of-line behavior; do not imply that supplying an arbitrary key currently guarantees ordering.
+For the first release, promise FIFO placement per partition only, not global FIFO execution across concurrent workers. With partition count greater than one, ordering is per partition. Strict per-`ordering_key` serialization is a later opt-in feature requiring tests for fairness, lease expiry and head-of-line behavior; do not imply that supplying an arbitrary key currently guarantees ordering.
 
 Workers must:
+- use GetAsync only to discover candidates; all owner/state/lease decisions are revalidated inside the canonical message's UpdateAsync transform against the current stored value;
+- never infer that an ambiguous write did not commit from a cached read;
 - check the canonical message state and placement generation before claim;
 - cap scan work per call and per scheduler tick;
 - advance cursors fairly to avoid starving segments with delayed retries or poison messages;
@@ -393,9 +401,9 @@ Roblox documents MessagingService delivery as best effort and not guaranteed; me
 
 ### 8.3 Future scheduling features
 
-The canonical message schema should leave room for \`available_at\`, \`expires_at\`, \`priority\`, consumer/type policy, correlation/causation ID and a schema version. Initial support should implement delayed availability and optional expiry before priority scheduling.
+The canonical message schema should leave room for `available_at`, `expires_at`, `priority`, consumer/type policy, correlation/causation ID and a schema version. Initial support should implement delayed availability and optional expiry before priority scheduling.
 
-Priority lanes and strict ordering should be enabled only after a starvation-proof scheduler is designed and benchmarked. Expired messages must reach a terminal \`expired\` state with a durable reason, not disappear silently.
+Priority lanes and strict ordering should be enabled only after a starvation-proof scheduler is designed and benchmarked. Expired messages must reach a terminal `expired` state with a durable reason, not disappear silently.
 
 ## 9. Dead letters, replay and retention
 
@@ -404,12 +412,12 @@ Priority lanes and strict ordering should be enabled only after a starvation-pro
 Dead letters are canonical message records plus a separately segmented DLQ index. A dead-letter append is idempotent by message ID and terminal generation. No active segment size calculation may include historical DLQ records.
 
 Expose:
-- paginated \`ListDeadLettersAsync(cursor, page_size)\`;
-- \`ClaimDeadLetterAsync\`, \`ReplayDeadLetterAsync\`, and \`DiscardDeadLetterAsync\` with fenced tokens;
+- paginated `ListDeadLettersAsync(cursor, page_size)`;
+- `ClaimDeadLetterAsync`, `ReplayDeadLetterAsync`, and `DiscardDeadLetterAsync` with fenced tokens;
 - bounded last error, attempts, timestamps and replay history;
 - retention eligibility and explicit purge outcomes.
 
-A large DLQ is inspected page by page; no API silently materializes an unbounded history in one call. The legacy \`GetDeadLettersAsync()\` remains a bounded compatibility helper with a clear limit/incomplete result.
+A large DLQ is inspected page by page; no API silently materializes an unbounded history in one call. The legacy `GetDeadLettersAsync()` remains a bounded compatibility helper with a clear limit/incomplete result.
 
 ### 9.2 Replay safety
 
@@ -425,11 +433,11 @@ Purge only terminal data that is past its declared retention and no longer refer
 
 ## 10. Operational observability
 
-Add \`GetQueueStatsAsync()\`, \`GetDeliveryAsync()\`, \`GetOutboxStatsAsync()\`, \`GetInboxStatsAsync()\` and workflow status snapshots without breaking \`Stats()\`.
+Add `GetQueueStatsAsync()`, `GetDeliveryAsync()`, `GetOutboxStatsAsync()`, `GetInboxStatsAsync()` and workflow status snapshots without breaking `Stats()`.
 
 Useful fields include active/claimed/delayed/acknowledging/dead-lettering counts, oldest eligible age, oldest pending outbox age, expired claim recoveries, retry distribution, terminal error distribution, idempotent duplicate submissions, conflict/capacity/unknown outcomes, migration phase, segment count, scan cursor progress, hint failures, DLQ retention eligibility and stuck workflow step.
 
-**Accuracy contract:** a scan across many keys is not a linearizable snapshot. Every multi-key stats result includes \`observed_at\`, scanned range, completeness, and whether counters are exact, approximate, or process-local. Approximate metrics must never control claim correctness, purging, admission, or migration. Exact message status comes from its canonical message key. A background reconciler repairs projections using idempotent operation IDs, and reports discrepancies rather than silently rewriting ambiguous state.
+**Accuracy contract:** a scan across many keys is not a linearizable snapshot. Every multi-key stats result includes `observed_at`, scanned range, completeness, and whether counters are exact, approximate, or process-local. Approximate metrics must never control claim correctness, purging, admission, or migration. Exact message status comes from its canonical message key. A background reconciler repairs projections using idempotent operation IDs, and reports discrepancies rather than silently rewriting ambiguous state.
 
 Do not log payloads, purchase tokens, player secrets or arbitrary user data by default. Provide correlation IDs and stable error categories while bounding the stored error text.
 
@@ -463,7 +471,7 @@ Before migration/feature activation:
 
 ## 12. Failure-injection and contract test matrix
 
-Build a deterministic fake DataStore that drives the actual RecordStore production path, not only \`RecordStore.Mock\`. It must support per-key atomic UpdateAsync, controlled concurrency/time, configurable request budgets, failures before commit, commit-then-error outcomes, and failpoints after each durable step. The fake must not mutate state or perform side effects inside UpdateAsync transforms.
+Build a deterministic fake DataStore that drives the actual RecordStore production path, not only `RecordStore.Mock`. It must support per-key atomic UpdateAsync, controlled concurrency/time, configurable request budgets, failures before commit, commit-then-error outcomes, and failpoints after each durable step. The fake must not mutate state or perform side effects inside UpdateAsync transforms.
 
 Required test groups:
 
@@ -473,7 +481,7 @@ Required test groups:
 4. **Rollover races**: many producers fill the final segment concurrently; stale writers to sealed segments are rejected; only one correct manifest tail wins; segment IDs never alias.
 5. **Duplicate index rows**: the same ID appears twice or in a stale old segment; canonical placement generation allows at most one delivery and stale rows are ignored.
 6. **Claim concurrency**: many workers claim one message; one live token wins; lease renewal, expiry, server shutdown and session generation changes fence old workers.
-7. **Acknowledgement**: crash before \`acknowledging\`, after it, after receipt update, and after terminal update; acknowledged messages never rerun, while pre-ack uncertainty is safely at-least-once.
+7. **Acknowledgement**: crash before `acknowledging`, after it, after receipt update, and after terminal update; acknowledged messages never rerun, while pre-ack uncertainty is safely at-least-once.
 8. **Retry/DLQ**: thrown/rejected/yielding handler, bounded exponential delay, attempt and age caps, DLQ index append crash, duplicate DLQ append and independent active capacity.
 9. **Replay/purge**: repeated replay ID, stale replay token, schema migration failure, future schema quarantine, retention boundaries, active index references, and purge interruption.
 10. **Inbox atomicity**: crash after profile mutation and before mailbox ack; redelivery is duplicate and does not increment balance twice; payload/recipient mismatch conflicts; receipt capacity aborts both mutation and receipt.
@@ -526,7 +534,7 @@ All performance measurements go through CodSpeed. Use Simulation for determinist
 ### Phase 2 — profile transactional primitives
 
 - Version and migrate the primary profile envelope for inbox/outbox sidecars.
-- Implement \`ApplyInboxAsync\` and \`CommitWithOutboxAsync\` with capacity/backpressure.
+- Implement `ApplyInboxAsync` and `CommitWithOutboxAsync` with capacity/backpressure.
 - Prove that normal session saves preserve concurrent sidecar changes.
 - Keep feature activation gated until old writers are drained.
 
