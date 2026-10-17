@@ -136,6 +136,28 @@ assert(profile_snapshot ~= nil and profile_snapshot.data.processed_coins == 60,
 	"mailbox handler profile effects did not persist exactly once per test message")
 local stats = Fake:Stats()
 assert(stats.calls.update > 0 and stats.calls.get > 0, "mailbox path bypassed the deterministic DataStore backend")
+
+-- Renewal response loss is reconciled from the canonical row, and an old
+-- claim token cannot renew after another worker takes over the expired lease.
+local lease_message = mailbox:EnqueueAsync("reward", { coins = 50 }, { idempotency_key = "mailbox-lease-renewal" })
+assert(lease_message.code == "accepted", tostring(lease_message.error))
+local first_claim, first_claim_result = mailbox:_claim(lease_message.message_id)
+assert(first_claim ~= nil and first_claim_result.code == "claimed", "message could not be claimed for lease renewal")
+local first_token = tostring(first_claim.claim_token)
+now_ms += 1000
+Fake:ScheduleFault("update", MAILBOX_STORE, SCOPE, lease_message.message_id, "after")
+local renewal = mailbox:RenewClaimAsync(lease_message.message_id, first_token)
+assert(renewal.code == "renewed", "commit-then-error claim renewal was not reconciled: " .. tostring(renewal.error))
+assert(renewal.message ~= nil and type(renewal.message.LeaseUntil) == "number" and renewal.message.LeaseUntil > now_ms,
+	"verified renewal did not return a future lease deadline")
+
+now_ms = renewal.message.LeaseUntil + 1001
+local takeover, takeover_result = mailbox:_claim(lease_message.message_id)
+assert(takeover ~= nil and takeover_result.code == "claimed", "expired claim could not be taken over after the grace period")
+assert(takeover.claim_token ~= first_token, "takeover reused the stale claim token")
+local stale_renewal = mailbox:RenewClaimAsync(lease_message.message_id, first_token)
+assert(stale_renewal.code == "lease_lost", "stale worker renewed a claim after another worker took ownership")
+
 active_record:Close()
 print("[PASS] V2 production mailbox: shared request gate, idempotent submission, ambiguous reservations, ack recovery.")
 Shim.close()
