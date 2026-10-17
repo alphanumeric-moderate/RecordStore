@@ -29,6 +29,7 @@ type WakeupAdapter = {
 type Options = {
 	active_record: ActiveRecordLike?,
 	wakeups: WakeupAdapter?,
+	sender_job_id: string?,
 	now_ms: (() -> number)?,
 	guid: (() -> string)?,
 	encode: ((unknown) -> string)?,
@@ -59,7 +60,9 @@ type Mailbox = typeof(setmetatable({} :: {
 	store: StoreAdapter,
 	owner: Owner,
 	owner_text: string,
+	sender_job_id: string,
 	options: Options,
+	processing: boolean,
 	wakeup_published: number,
 	wakeup_publish_errors: number,
 }, MailboxV2))
@@ -331,11 +334,19 @@ function MailboxV2.new(store: unknown, owner_value: Owner, options_value: Option
 	if (options.segment_max_messages :: number) > 32 or (options.dlq_segment_max_messages :: number) > 32 then
 		error("initial v2 segment bounds may not exceed 32 rows per segment", 2)
 	end
+	local sender_job_id = options.sender_job_id
+	if sender_job_id == nil then
+		local job_ok, job_id = pcall(function() return game.JobId end)
+		sender_job_id = if job_ok and type(job_id) == "string" then job_id else ""
+	end
+	if type(sender_job_id) ~= "string" or #sender_job_id > 128 then error("sender_job_id must be a string of at most 128 bytes", 2) end
 	local self = {
 		store = store :: StoreAdapter,
 		owner = owner,
 		owner_text = canonical(owner),
+		sender_job_id = sender_job_id,
 		options = options,
+		processing = false,
 		wakeup_published = 0,
 		wakeup_publish_errors = 0,
 	}
@@ -841,6 +852,7 @@ function MailboxV2._reserve(self: Mailbox, route: string, request_text: string, 
 		token = token,
 		request_text = request_text,
 		request = clone_json(request),
+		sender_job_id = self.sender_job_id,
 		phase = "reserved",
 		created_at = self:_now(),
 		placement_generation = 1,
@@ -923,6 +935,7 @@ function MailboxV2._record_snapshot(self: Mailbox, record: Dict): Dict
 		Id = record.route,
 		Type = record.message_type,
 		Data = clone_json(record.payload),
+		SenderJobId = if type(record.sender_job_id) == "string" then record.sender_job_id else "",
 		State = record.state,
 		Attempts = record.attempts,
 		TotalAttempts = record.total_attempts,
@@ -1155,6 +1168,7 @@ function MailboxV2._resume_reservation(self: Mailbox, route: string, initial_ent
 				request_text = request_text,
 				message_type = request.message_type,
 				payload = clone_json(request.payload),
+				sender_job_id = if type(entry.sender_job_id) == "string" then entry.sender_job_id else "",
 				priority = request.priority,
 				available_at = if is_finite(request.available_at) then request.available_at else entry.created_at,
 				expires_at = request.expires_at,
@@ -1682,7 +1696,7 @@ function MailboxV2._retry_claim(self: Mailbox, route: string, token: string, rea
 	return ok("retry_scheduled", route, self:_record_snapshot(updated), nil)
 end
 
-function MailboxV2.ProcessNextAsync(self: Mailbox, handler: (unknown, Dict) -> (unknown, string?)): Result
+local function process_next_internal(self: Mailbox, handler: (unknown, Dict) -> (unknown, string?)): Result
 	if type(handler) ~= "function" then
 		return ok("invalid", nil, nil, "handler must be a function")
 	end
@@ -1737,6 +1751,16 @@ function MailboxV2.ProcessNextAsync(self: Mailbox, handler: (unknown, Dict) -> (
 		end
 	end
 	return ok("empty", nil, nil, nil)
+end
+
+function MailboxV2.ProcessNextAsync(self: Mailbox, handler: (unknown, Dict) -> (unknown, string?)): Result
+	if self.processing then return ok("busy", nil, nil, "a ProcessNextAsync call is already running on this mailbox instance") end
+	self.processing = true
+	local call_ok, result = pcall(process_next_internal, self, handler)
+	self.processing = false
+	if not call_ok then return ok("unknown", nil, nil, tostring(result)) end
+	if type(result) ~= "table" then return ok("unknown", nil, nil, "ProcessNextAsync returned no structured result") end
+	return result :: Result
 end
 
 function MailboxV2.RecoverAsync(self: Mailbox): Result
