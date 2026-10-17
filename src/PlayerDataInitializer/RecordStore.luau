@@ -777,7 +777,7 @@ local function valid_runtime_policy(candidate: RuntimePolicy): (boolean, string?
 	then
 		return false, "concurrency limits must be ordered integers between 1 and 64"
 	end
-	if candidate.critical_request_reserve < 1 or math.floor(candidate.critical_request_reserve) ~= candidate.critical_request_reserve
+	if candidate.critical_request_reserve < 0 or math.floor(candidate.critical_request_reserve) ~= candidate.critical_request_reserve
 		or candidate.adaptive_min_concurrent_requests + candidate.critical_request_reserve > candidate.adaptive_max_concurrent_requests
 	then
 		return false, "critical_request_reserve must be positive and fit below maximum concurrency"
@@ -905,7 +905,7 @@ end
 local function consume_runtime_queue_token(): boolean
 	local now = now_local()
 	local elapsed = math.max(0, now - runtime_queue_tokens_updated)
-	local rate = runtime_options.adaptive_max_concurrent_requests * runtime_options.adaptive_queue_budget_share
+	local rate = runtime_options.adaptive_max_concurrent_requests * runtime_options.adaptive_queue_budget_share * 8
 	local capacity = math.max(1, rate * 2)
 	runtime_queue_tokens = math.min(capacity, runtime_queue_tokens + elapsed * rate)
 	runtime_queue_tokens_updated = now
@@ -927,7 +927,12 @@ local function observe_runtime_request(kind: string, success: boolean, message: 
 		runtime_metrics.write_latency_ewma_ms = if runtime_metrics.write_latency_ewma_ms == 0 then duration_ms else runtime_metrics.write_latency_ewma_ms * 0.8 + duration_ms * 0.2
 	end
 	if success then
-		runtime_next_growth_at = math.max(runtime_next_growth_at, now_local() + runtime_options.adaptive_hysteresis_seconds)
+		if runtime_options.adaptive_runtime_enabled and now_local() >= runtime_next_growth_at
+			and runtime_effective_concurrent_requests < runtime_options.adaptive_max_concurrent_requests
+		then
+			runtime_effective_concurrent_requests += 1
+			runtime_next_growth_at = now_local() + runtime_options.adaptive_hysteresis_seconds
+		end
 		return
 	end
 	runtime_metrics.failures += 1
@@ -946,11 +951,6 @@ local function observe_runtime_request(kind: string, success: boolean, message: 
 			)
 			runtime_next_growth_at = now_local() + runtime_options.adaptive_hysteresis_seconds
 		end
-	elseif runtime_options.adaptive_runtime_enabled and now_local() >= runtime_next_growth_at
-		and runtime_effective_concurrent_requests < runtime_options.adaptive_max_concurrent_requests
-	then
-		runtime_effective_concurrent_requests += 1
-		runtime_next_growth_at = now_local() + runtime_options.adaptive_hysteresis_seconds
 	end
 end
 
