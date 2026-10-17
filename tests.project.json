@@ -16,6 +16,12 @@
       "RecordStoreV2Simulator": {
         "$path": "src/PlayerDataInitializer/RecordStoreV2Simulator.luau"
       },
+      "RecordStoreV2DataStoreAdapter": {
+        "$path": "src/PlayerDataInitializer/RecordStoreV2DataStoreAdapter.luau"
+      },
+      "RecordStoreV2Acceleration": {
+        "$path": "src/PlayerDataInitializer/RecordStoreV2Acceleration.luau"
+      },
       "RecordStoreMailboxV2Regression": {
         "$path": "tests/RecordStoreMailboxV2Regression.server.luau"
       },
