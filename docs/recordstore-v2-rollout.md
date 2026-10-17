@@ -19,8 +19,15 @@ Do not return success because a timer elapsed or a local flag was set. The verif
 
 ## Example
 
-```luau
-local rollout = V2.Rollout.new(rolloutStoreAdapter, {
+Construct the durable rollout coordinator before constructing the guarded V2 facade. This lets the same gate be injected into every V2 service and mailbox:
+
+\`\`\`luau
+local V2Module = require(path.to.RecordStoreV2)
+
+local rollout_id = "recordstore-v2-release-2026-10"
+local matrix_digest = "release-matrix-v2-sha-or-review-id"
+
+local rollout = V2Module.Rollout.new(rolloutStoreAdapter, {
     verify_compatibility = verify_compatibility,
     verify_writers_drained = verify_old_writers_drained,
     verify_activation_frozen = verify_activation_freeze,
@@ -29,8 +36,13 @@ local rollout = V2.Rollout.new(rolloutStoreAdapter, {
     verify_rollback_completed = verify_rollback_completion,
 })
 
-local rollout_id = "recordstore-v2-release-2026-10"
-local matrix_digest = "release-matrix-v2-sha-or-review-id"
+local function activation_guard(operation)
+    return rollout:ActivationGuard(rollout_id, operation)
+end
+
+local V2 = V2Module.new(RecordStore, MailboxV2, {
+    activation_guard = activation_guard,
+})
 
 local prepared = rollout:PrepareAsync(rollout_id, matrix_digest)
 assert(prepared.code == "prepared" or prepared.code == "duplicate")
@@ -38,23 +50,17 @@ assert(prepared.code == "prepared" or prepared.code == "duplicate")
 local ready = rollout:AttestAsync(rollout_id)
 assert(ready.code == "committed" or ready.code == "committed_reconciled")
 
--- This guard must be shared by the V2 mailbox on every server.
-local function activation_guard(operation)
-    return rollout:ActivationGuard(rollout_id, operation)
-end
-
-local mailbox = MailboxV2.new(dataStoreAdapter, owner, {
+-- The facade inherits its guard when V2.Mailbox.new is used.
+local mailbox = V2.Mailbox.new(dataStoreAdapter, owner, {
     encode = exact_store_encoder,
-    activation_guard = activation_guard,
 })
 
 -- Activate only after a fresh preflight attestation succeeds.
 local active = rollout:ActivateAsync(rollout_id, "activate-recordstore-v2-1")
 assert(active.code == "committed" or active.code == "committed_reconciled")
-```
+\`\`\`
 
-Use a stable rollout ID and matrix digest. Do not rewrite a prepared rollout to point at a different matrix; create a new rollout ID for a different compatibility contract. Keep activation disabled if any assertion fails or returns an unknown result.
-
+Do not use \`allow_unattested_activation = true\` in production. That flag is for isolated tests or explicitly unsafe staging only.
 ## Freeze and rollback
 
 1. `FreezeAsync(rollout_id, freeze_id)` moves an active rollout to `frozen`. New mailbox enqueue, DLQ replay/discard and maintenance operations are denied. Existing work can still process/recover/acknowledge so the deployment can drain safely.
