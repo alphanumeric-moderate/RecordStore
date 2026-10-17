@@ -114,17 +114,35 @@ function Simulator:SetTransformReplayCount(count)
 end
 
 function Simulator:_take_fault(operation, store_name, key)
+	if self.fault_script_cursor <= #self.fault_script then
+		local expected = self.fault_script[self.fault_script_cursor]
+		local matches = expected.operation == operation
+			and (expected.store_name == nil or expected.store_name == store_name)
+			and (expected.key == nil or expected.key == key)
+		if not matches then
+			local detail = {
+				index = self.fault_script_cursor,
+				expected_operation = expected.operation,
+				expected_store = expected.store_name,
+				expected_key = expected.key,
+				actual_operation = operation,
+				actual_store = store_name,
+				actual_key = key,
+			}
+			self:_event("fault_script_mismatch", store_name, key, detail)
+			error(("fault script entry %d expected %s/%s/%s before %s/%s/%s"):format(
+				self.fault_script_cursor,
+				tostring(expected.operation), tostring(expected.store_name), tostring(expected.key),
+				tostring(operation), tostring(store_name), tostring(key)
+			), 2)
+		end
+		self.fault_script_cursor += 1
+		self:_event("fault_script_consume", store_name, key, { operation = operation, mode = expected.mode })
+		return copy(expected)
+	end
 	for index, fault in ipairs(self.faults) do
 		if fault.operation == operation and (fault.store_name == nil or fault.store_name == store_name)
 			and (fault.key == nil or fault.key == key) then return table.remove(self.faults, index) end
-	end
-	if self.fault_script_cursor <= #self.fault_script then
-		local next_fault = self.fault_script[self.fault_script_cursor]
-		if next_fault.operation == operation and (next_fault.store_name == nil or next_fault.store_name == store_name)
-			and (next_fault.key == nil or next_fault.key == key) then
-			self.fault_script_cursor += 1
-			return copy(next_fault)
-		end
 	end
 	return nil
 end
@@ -196,7 +214,19 @@ end
 
 function Simulator:SetFaultScript(script)
 	assert(type(script) == "table", "fault script must be an array")
-	self.fault_script = copy(script)
+	local prepared = copy(script)
+	for index, fault in ipairs(prepared) do
+		assert(type(fault) == "table", ("fault script entry %d must be a table"):format(index))
+		assert(fault.operation == "get" or fault.operation == "update" or fault.operation == "remove",
+			("fault script entry %d has an unknown storage operation"):format(index))
+		assert(fault.mode == "fail_before_commit" or fault.mode == "commit_then_error" or fault.mode == "replay_transform",
+			("fault script entry %d has an unknown fault mode"):format(index))
+		assert(fault.store_name == nil or (type(fault.store_name) == "string" and fault.store_name ~= ""),
+			("fault script entry %d has an invalid store selector"):format(index))
+		assert(fault.key == nil or (type(fault.key) == "string" and fault.key ~= ""),
+			("fault script entry %d has an invalid key selector"):format(index))
+	end
+	self.fault_script = prepared
 	self.fault_script_cursor = 1
 end
 
@@ -206,9 +236,18 @@ end
 
 function Simulator:Snapshot()
 	return {
-		now_ms = self.now_ms, stores = copy(self.stores), faults = copy(self.faults),
-		fault_script_cursor = self.fault_script_cursor, hints = copy(self.hints),
-		budgets = copy(self.budgets), servers = copy(self.servers),
+		now_ms = self.now_ms,
+		stores = copy(self.stores),
+		faults = copy(self.faults),
+		fault_script = copy(self.fault_script),
+		fault_script_cursor = self.fault_script_cursor,
+		transform_replays = self.transform_replays,
+		transform_attempt = self.transform_attempt,
+		next_event = self.next_event,
+		hint_policy = copy(self.hint_policy),
+		hints = copy(self.hints),
+		budgets = copy(self.budgets),
+		servers = copy(self.servers),
 	}
 end
 

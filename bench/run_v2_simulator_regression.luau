@@ -104,6 +104,38 @@ local restarted = hints:RestartServer("job-1", { loaded_from_store = true })
 assert(restarted.local_state.pending_local == nil and restarted.local_state.loaded_from_store == true,
 	"restart leaked pre-crash state instead of using reloaded state")
 
+-- Fault scripts are ordered contracts: a mismatched operation must fail before consuming the script.
+local scripted = Simulator.new()
+local scripted_store = scripted:Store("script-store")
+scripted:SetFaultScript({
+	{
+		operation = "update",
+		store_name = "script-store",
+		key = "script-key",
+		mode = "commit_then_error",
+		message = "scripted ambiguous commit",
+	},
+})
+local unexpected_read_ok = pcall(function()
+	scripted_store:GetAsync("script-key")
+end)
+assert(not unexpected_read_ok, "fault script silently ignored an unexpected storage operation")
+assert(scripted:Snapshot().fault_script_cursor == 1, "fault script mismatch consumed the expected entry")
+local scripted_update_ok = pcall(function()
+	scripted_store:UpdateAsync("script-key", function()
+		return { committed = true }
+	end)
+end)
+assert(not scripted_update_ok, "scripted commit-then-error fault was not applied")
+assert(scripted_store:GetAsync("script-key").committed == true, "scripted ambiguous update did not commit before surfacing the error")
+local scripted_snapshot = scripted:Snapshot()
+assert(scripted_snapshot.fault_script_cursor == 2 and scripted_snapshot.next_event == #scripted:Trace() + 1,
+	"simulator snapshot omitted fault-script progress or trace sequence")
+scripted_snapshot.fault_script[1].mode = "fail_before_commit"
+scripted_snapshot.hint_policy.reverse = true
+assert(scripted:Snapshot().fault_script[1].mode == "commit_then_error", "snapshot fault script shares references with live simulator")
+assert(scripted:Snapshot().hint_policy.reverse == false, "snapshot hint policy shares references with live simulator")
+
 -- Event sequence numbers, traces, and snapshots are monotonic and isolated copies.
 store:UpdateAsync("snapshot-key", function()
 	return { nested = { value = 1 } }
