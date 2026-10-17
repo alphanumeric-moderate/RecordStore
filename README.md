@@ -205,30 +205,120 @@ codspeed run --mode simulation
 
 The v2 feature layer is opt-in and lives at
 `ServerScriptService.PlayerDataInitializer.RecordStoreV2`. It receives explicit dependencies on
-`RecordStore` and `RecordStoreMailboxV2`:
+`RecordStore` and `RecordStoreMailboxV2`. Runtime policy must be configured before creating the
+first Record; adaptive mode remains disabled unless explicitly enabled.
 
 ```lua
+local DataStoreService = game:GetService("DataStoreService")
+local MemoryStoreService = game:GetService("MemoryStoreService")
+local HttpService = game:GetService("HttpService")
+
 local RecordStore = require(script.Parent.RecordStore)
 local MailboxV2 = require(script.Parent.RecordStoreMailboxV2)
 local RecordStoreV2 = require(script.Parent.RecordStoreV2)
-local V2 = RecordStoreV2.new(RecordStore, MailboxV2)
+local DataStoreAdapter = require(script.Parent.RecordStoreV2DataStoreAdapter)
+local Acceleration = require(script.Parent.RecordStoreV2Acceleration)
+
+local runtime_code, runtime_error = RecordStore.configure_runtime({
+    revision = 2,
+    runtime_profile = "balanced",
+    server_role = "standard",
+    adaptive_runtime_enabled = true,
+    adaptive_min_concurrent_requests = 1,
+    adaptive_max_concurrent_requests = 4,
+    critical_request_reserve = 1,
+    adaptive_queue_budget_share = 0.2,
+})
+assert(runtime_code == "success", runtime_error)
+
+local owner = {
+    store_name = "PlayerRecords",
+    scope = "global",
+    profile_key = "player-" .. tostring(player.UserId),
+    user_id = player.UserId,
+}
+local record = RecordStore.new(owner.store_name, owner.scope, owner.profile_key, {
+    schema_version = 1,
+    user_ids = { owner.user_id },
+})
+local open_code, open_error = record:Open({ coins = 0 })
+assert(open_code == "created" or open_code == "loaded", open_error)
+
+local store = DataStoreAdapter.new(RecordStore, "RecordStoreMailboxV2", "global")
+local mailbox = MailboxV2.new(store, owner, {
+    active_record = record,
+    encode = function(value)
+        return HttpService:JSONEncode(value)
+    end,
+})
+
+local V2 = RecordStoreV2.new(RecordStore, MailboxV2, {
+    acceleration_module = Acceleration,
+})
+local wakeups = Acceleration.new({
+    memory_map = MemoryStoreService:GetHashMap("RecordStoreV2Wake"),
+})
+local started, start_error = wakeups:Start()
+if not started then warn(start_error) end -- durable polling remains the fallback
+
+local function handle_message(payload, message)
+    if type(payload) ~= "table" or type(payload.coins) ~= "number" then
+        return false, "invalid coin payload"
+    end
+    local command = {
+        message_id = message.Id,
+        message_type = message.MessageType,
+        payload = payload,
+    }
+    local material = V2.Canonicalize(command)
+    local fingerprint = V2.Fingerprint(command)
+    if type(fingerprint) ~= "string" then return false, "command is not canonical" end
+
+    local code, message_error = record:ApplyInboxAsync(
+        message.Id,
+        fingerprint,
+        function(data)
+            local next_data = if type(data) == "table" then table.clone(data) else {}
+            next_data.coins = (tonumber(next_data.coins) or 0) + payload.coins
+            return next_data
+        end,
+        material
+    )
+    return code == "success" or code == "duplicate", message_error
+end
+
+local bound, bind_error = V2.BindMailboxWakeups(wakeups, owner, mailbox, handle_message, 8)
+assert(bound, bind_error)
 ```
 
-It exposes bounded inbox batches, transaction/outbox helpers, a server-local runtime governor and
-fair scheduler, request-budget admission, circuit breakers, retry tokens, purchase receipt handling,
-application-schema migrations, multi-profile transfer sagas and escrow, Profile Doctor and guarded
-restore, RTBF-oriented erasure planning, eventually consistent projections and unique reservations,
-operation tracing, safe read coalescing, payload sizing/codec validation, and resumable compaction
-callbacks. The service layer never activates itself.
+The example assumes the surrounding game script has a `player` variable and a
+server-authoritative policy for which messages are allowed to grant coins. The reducer must remain
+deterministic, non-yielding, and free of external side effects. The per-message inbox receipt is what
+makes reprocessing the same mailbox message safe after a crash. Arbitrary effects outside the profile
+transaction remain at-least-once and need their own durable idempotency/reconciliation.
+
+The v2 service exposes bounded inbox batches, grouped outbox dispatch, transaction receipts, a
+server-local governor wired through RecordStore's actual request gate, revisioned runtime policy,
+critical save/release reserve, backpressure and telemetry, purchase-receipt handling, schema
+migrations, transfer sagas, Profile Doctor and guarded restore, RTBF erasure planning, eventual
+projections and unique reservations, tracing, payload/codec utilities, and resumable compaction.
+
+The DataStore adapter preserves key UserIds/metadata on updates and uses the shared RecordStore
+request gate. It intentionally exposes no unconditional physical-delete method. The wake-up
+accelerator uses fixed shard topics, a bounded local candidate set, optional expiring MemoryStore
+hints, and periodic per-owner polling. A hint is never an acceptance receipt or permission to execute
+work. Each dispatch requires a bound active Record whose store, scope, profile key, UserIds and session
+state match the mailbox owner.
 
 The library reserves the `__recordstore_v2_` prefix for its optional profile-data ledgers. Do not
 store application fields under this prefix. Cross-key workflows remain sagas, projections are
-eventually consistent, and neither strict `ordering_key` semantics nor exactly-once arbitrary
-external effects are promised. Erasure and compaction require application-provided inventories,
-writer fences, dependency checks, and generation-aware delete/redact adapters. Template coverage is
-not considered verified unless the application explicitly verifies rendered platform templates.
+eventually consistent, and strict `ordering_key` semantics and exactly-once arbitrary external
+effects are not promised. Erasure still needs complete application inventories, verified Roblox key
+templates, writer fences, dependency clearance, and generation-aware deletion/redaction. The full
+mixed-version rollout protocol and these integration guarantees are release gates, not results of
+adding helper APIs.
 
 PR #35 currently uses a `[benchmark-only]` phase marker. During that phase the CodSpeed workflow
-skips regression/failure suites and benchmarks ordinary successful feature paths. Remove the marker
-to restore the full regression gate. Lune/Mock measurements are not real Roblox service latency or
-production acceptance evidence.
+skips regression/failure suites and benchmarks successful paths, including the new wake-up workload.
+Remove the marker only in the separate verification pass. Lune/Mock measurements are not real Roblox
+service latency or production acceptance evidence.
