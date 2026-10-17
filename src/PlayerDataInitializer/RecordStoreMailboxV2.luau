@@ -43,6 +43,7 @@ type Options = {
 	dlq_max_segments: number?,
 	dlq_segment_max_messages: number?,
 	lease_ms: number?,
+	lease_renewal_horizon_ms: number?,
 	clock_skew_grace_ms: number?,
 	max_attempts: number?,
 	retry_base_ms: number?,
@@ -55,6 +56,11 @@ type Result = {
 	message_id: string?,
 	message: Dict?,
 	error: string?,
+}
+type HandlerContext = {
+	is_cancelled: () -> boolean,
+	cancellation_reason: () -> string?,
+	renew_lease_async: () -> Result,
 }
 type Mailbox = typeof(setmetatable({} :: {
 	store: StoreAdapter,
@@ -311,6 +317,7 @@ function MailboxV2.new(store: unknown, owner_value: Owner, options_value: Option
 	options.dlq_max_segments = options.dlq_max_segments or DEFAULT_DLQ_MAX_SEGMENTS
 	options.dlq_segment_max_messages = options.dlq_segment_max_messages or DEFAULT_DLQ_SEGMENT_MAX_MESSAGES
 	options.lease_ms = options.lease_ms or DEFAULT_LEASE_MS
+	options.lease_renewal_horizon_ms = options.lease_renewal_horizon_ms or (options.lease_ms :: number) * 4
 	options.clock_skew_grace_ms = options.clock_skew_grace_ms or DEFAULT_CLOCK_SKEW_GRACE_MS
 	options.max_attempts = options.max_attempts or DEFAULT_MAX_ATTEMPTS
 	options.retry_base_ms = options.retry_base_ms or DEFAULT_RETRY_BASE_MS
@@ -319,7 +326,7 @@ function MailboxV2.new(store: unknown, owner_value: Owner, options_value: Option
 	local numeric_options = {
 		"max_segments", "segment_max_messages", "max_payload_bytes", "max_request_bytes",
 		"preparation_shard_count", "preparation_max_entries_per_shard", "preparation_max_entry_bytes",
-		"dlq_max_segments", "dlq_segment_max_messages", "lease_ms", "clock_skew_grace_ms",
+		"dlq_max_segments", "dlq_segment_max_messages", "lease_ms", "lease_renewal_horizon_ms", "clock_skew_grace_ms",
 		"max_attempts", "retry_base_ms", "retry_max_ms", "priority_aging_ms",
 	}
 	for _, key in numeric_options do
@@ -333,6 +340,9 @@ function MailboxV2.new(store: unknown, owner_value: Owner, options_value: Option
 	end
 	if (options.segment_max_messages :: number) > 32 or (options.dlq_segment_max_messages :: number) > 32 then
 		error("initial v2 segment bounds may not exceed 32 rows per segment", 2)
+	end
+	if (options.lease_renewal_horizon_ms :: number) < (options.lease_ms :: number) then
+		error("lease_renewal_horizon_ms must be at least lease_ms", 2)
 	end
 	local sender_job_id = options.sender_job_id
 	if sender_job_id == nil then
@@ -949,6 +959,7 @@ function MailboxV2._record_snapshot(self: Mailbox, record: Dict): Dict
 		LastError = record.last_error,
 		CapacityBlocked = record.capacity_blocked == true,
 		LeaseUntil = record.locked_until,
+		ClaimStartedAt = record.claim_started_at,
 		PlacementGeneration = record.placement_generation,
 		DeadLetteredAt = record.dead_lettered_at,
 	}
@@ -1637,6 +1648,7 @@ function MailboxV2._claim(self: Mailbox, route: string): (Dict?, Result)
 		local next_record = clone_dict(current)
 		next_record.state = "claimed"
 		next_record.claim_token = token
+		next_record.claim_started_at = now
 		next_record.locked_until = now + (self.options.lease_ms :: number)
 		next_record.attempts = (current.attempts :: number) + 1
 		next_record.total_attempts = (current.total_attempts :: number) + 1
@@ -1667,6 +1679,82 @@ function MailboxV2._claim(self: Mailbox, route: string): (Dict?, Result)
 		return nil, ok("unknown", route, self:_record_snapshot(claimed), "claim has insufficient verified lease margin")
 	end
 	return claimed, ok("claimed", route, self:_record_snapshot(claimed), nil)
+end
+
+
+-- Renew a still-live claim using its existing fencing token. Expired claims are
+-- never resurrected; ambiguous writes are reconciled by reading the canonical row.
+function MailboxV2.RenewClaimAsync(self: Mailbox, message_id: string, claim_token: string): Result
+	if type(message_id) ~= "string" or message_id == "" or #message_id > MAX_KEY_LENGTH then
+		return ok("invalid", message_id, nil, "message_id must be a valid v2 key")
+	end
+	if type(claim_token) ~= "string" or claim_token == "" or #claim_token > 256 then
+		return ok("invalid", message_id, nil, "claim_token must be 1 to 256 bytes")
+	end
+
+	local now = self:_now()
+	local renewal_id = if self.options.guid ~= nil then self.options.guid()
+		else digest(message_id .. ":" .. claim_token .. ":renew:" .. tostring(now) .. ":" .. tostring(math.random()))
+	local renewed, update_error = self:_update_message(message_id, function(current)
+		if current == nil or current.state ~= "claimed" or current.claim_token ~= claim_token then
+			return current
+		end
+		if not is_finite(current.claim_started_at) or (current.claim_started_at :: number) > now
+			or not is_finite(current.locked_until) or (current.locked_until :: number) <= now
+		then
+			return current
+		end
+		local claim_started_at = current.claim_started_at :: number
+		local horizon_end = claim_started_at + (self.options.lease_renewal_horizon_ms :: number)
+		if now >= horizon_end then
+			return current
+		end
+		local next_lease_until = math.min(now + (self.options.lease_ms :: number), horizon_end)
+		local margin = math.min(2000, (self.options.lease_ms :: number) / 4)
+		if next_lease_until - now <= margin then
+			return current
+		end
+		local next_record = clone_dict(current)
+		next_record.locked_until = next_lease_until
+		next_record.lease_renewed_at = now
+		next_record.last_renewal_id = renewal_id
+		next_record.updated_at = now
+		return next_record
+	end)
+
+	if update_error ~= nil or renewed == nil then
+		local latest_value, read_error = self:_get(message_id)
+		local latest = as_dict(latest_value)
+		if read_error ~= nil then
+			return ok("unknown", message_id, nil, "claim renewal outcome is unknown; verification read failed: " .. read_error)
+		end
+		if latest == nil or not same_owner(latest.owner, self.owner) then
+			return ok("lease_lost", message_id, nil, "claim is missing or belongs to another owner")
+		end
+		if latest.state == "claimed" and latest.claim_token == claim_token
+			and latest.last_renewal_id == renewal_id and is_finite(latest.locked_until)
+			and (latest.locked_until :: number) > self:_now()
+		then
+			return ok("renewed", message_id, self:_record_snapshot(latest), "renewal was committed despite an ambiguous response")
+		end
+		return ok("unknown", message_id, self:_record_snapshot(latest),
+			"claim renewal outcome could not be proven: " .. tostring(update_error or "no canonical record"))
+	end
+
+	if renewed.state ~= "claimed" or renewed.claim_token ~= claim_token then
+		return ok("lease_lost", message_id, self:_record_snapshot(renewed), "claim token was fenced or the message is no longer claimed")
+	end
+	if renewed.last_renewal_id ~= renewal_id then
+		local started = renewed.claim_started_at
+		if is_finite(started) and now >= (started :: number) + (self.options.lease_renewal_horizon_ms :: number) then
+			return ok("lease_horizon_reached", message_id, self:_record_snapshot(renewed), "bounded claim-renewal horizon has been reached")
+		end
+		if is_finite(renewed.locked_until) and (renewed.locked_until :: number) <= now then
+			return ok("lease_lost", message_id, self:_record_snapshot(renewed), "claim lease expired before renewal")
+		end
+		return ok("lease_not_renewed", message_id, self:_record_snapshot(renewed), "claim remained owned but renewal was not applied")
+	end
+	return ok("renewed", message_id, self:_record_snapshot(renewed), nil)
 end
 
 function MailboxV2._complete_claim(self: Mailbox, route: string, token: string): Result
@@ -1743,7 +1831,7 @@ function MailboxV2._retry_claim(self: Mailbox, route: string, token: string, rea
 	return ok("retry_scheduled", route, self:_record_snapshot(updated), nil)
 end
 
-local function process_next_internal(self: Mailbox, handler: (unknown, Dict) -> (unknown, string?)): Result
+local function process_next_internal(self: Mailbox, handler: (unknown, Dict, HandlerContext?) -> (unknown, string?)): Result
 	if type(handler) ~= "function" then
 		return ok("invalid", nil, nil, "handler must be a function")
 	end
@@ -1787,12 +1875,64 @@ local function process_next_internal(self: Mailbox, handler: (unknown, Dict) -> 
 				return ok(session_code_after_claim, route, nil, session_error_after_claim)
 			end
 			local snapshot = self:_record_snapshot(record)
-			local call_ok, handler_result, handler_error = pcall(handler, clone_json(record.payload), snapshot)
-			if call_ok and handler_result ~= false then
-				return self:_complete_claim(route, tostring(record.claim_token))
+			local token = tostring(record.claim_token)
+			local lease_until = record.locked_until :: number
+			local lease_lost = false
+			local cancellation_reason: string? = nil
+			local handler_done = false
+			local handler_ok = false
+			local handler_result: unknown = nil
+			local handler_error: unknown = nil
+			local function renew_for_handler(): Result
+				if lease_lost then
+					return ok("lease_lost", route, nil, cancellation_reason or "claim lease has been lost")
+				end
+				local renewal = self:RenewClaimAsync(route, token)
+				if renewal.code == "renewed" then
+					local renewed_snapshot = as_dict(renewal.message)
+					if renewed_snapshot ~= nil and is_finite(renewed_snapshot.LeaseUntil) then
+						lease_until = renewed_snapshot.LeaseUntil :: number
+					end
+				elseif renewal.code ~= "unknown" and renewal.code ~= "lease_not_renewed" then
+					lease_lost = true
+					cancellation_reason = renewal.error or renewal.code
+				elseif self:_now() >= lease_until then
+					lease_lost = true
+					cancellation_reason = renewal.error or "claim renewal could not be verified before the last verified lease deadline"
+				end
+				return renewal
 			end
-			local reason = if not call_ok then tostring(handler_result) else tostring(handler_error or "handler returned false")
-			return self:_retry_claim(route, tostring(record.claim_token), reason)
+			local context: HandlerContext = {
+				is_cancelled = function(): boolean return lease_lost end,
+				cancellation_reason = function(): string? return cancellation_reason end,
+				renew_lease_async = renew_for_handler,
+			}
+			-- Run the handler in its own task so yielding callbacks can be protected by
+			-- periodic, token-fenced lease renewal. A lost lease signals cancellation;
+			-- it cannot forcibly undo arbitrary external side effects.
+			task.spawn(function()
+				local call_ok, result_value, error_value = pcall(handler, clone_json(record.payload), snapshot, context)
+				handler_ok = call_ok
+				handler_result = result_value
+				handler_error = error_value
+				handler_done = true
+			end)
+			local renewal_interval = math.max(1, math.floor((self.options.lease_ms :: number) / 3))
+			while not handler_done do
+				task.wait(renewal_interval / 1000)
+				if handler_done then break end
+				if not lease_lost then
+					renew_for_handler()
+				end
+			end
+			if lease_lost then
+				return ok("unknown", route, nil, "handler ended after claim lease loss; external effect outcome is uncertain: " .. tostring(cancellation_reason or "claim ownership changed"))
+			end
+			if handler_ok and handler_result ~= false then
+				return self:_complete_claim(route, token)
+			end
+			local reason = if not handler_ok then tostring(handler_result) else tostring(handler_error or "handler returned false")
+			return self:_retry_claim(route, token, reason)
 		elseif claim_result.code == "unknown" or claim_result.code == "capacity" then
 			return claim_result
 		end
@@ -1800,7 +1940,7 @@ local function process_next_internal(self: Mailbox, handler: (unknown, Dict) -> 
 	return ok("empty", nil, nil, nil)
 end
 
-function MailboxV2.ProcessNextAsync(self: Mailbox, handler: (unknown, Dict) -> (unknown, string?)): Result
+function MailboxV2.ProcessNextAsync(self: Mailbox, handler: (unknown, Dict, HandlerContext?) -> (unknown, string?)): Result
 	if self.processing then return ok("busy", nil, nil, "a ProcessNextAsync call is already running on this mailbox instance") end
 	self.processing = true
 	local call_ok, result = pcall(process_next_internal, self, handler)
