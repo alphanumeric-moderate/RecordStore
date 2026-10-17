@@ -17,8 +17,13 @@ type MemoryMapLike = {
 	SetAsync: (self: MemoryMapLike, key: string, value: unknown, expiration: number) -> unknown,
 	GetAsync: (self: MemoryMapLike, key: string) -> unknown,
 }
+type RequestRunner = {
+	run_runtime_request: (kind: string, callback: () -> unknown, operation_deadline: number?, work_class: string?) -> (unknown, string?, string?),
+}
 type Config = {
 	messaging_service: MessagingLike?,
+	request_runner: RequestRunner?,
+	operation_deadline_seconds: number?,
 	memory_map: MemoryMapLike?,
 	topic_prefix: string?,
 	shard_count: number?,
@@ -45,6 +50,8 @@ type Pending = {
 
 type State = typeof(setmetatable({} :: {
 	messaging_service: MessagingLike,
+	request_runner: RequestRunner?,
+	operation_deadline_seconds: number?,
 	memory_map: MemoryMapLike?,
 	topic_prefix: string,
 	shard_count: number,
@@ -80,7 +87,7 @@ local DEFAULT_CANDIDATES = 512
 local DEFAULT_MAX_AGE_MS = 60_000
 local DEFAULT_FUTURE_SKEW_MS = 5_000
 local DEFAULT_MEMORY_TTL_SECONDS = 30
-local DEFAULT_POLL_INTERVAL_SECONDS = 1
+local DEFAULT_POLL_INTERVAL_SECONDS = 3
 local DEFAULT_POLL_CALLBACKS_PER_TICK = 64
 
 local function finite(value: unknown): boolean
@@ -120,6 +127,20 @@ end
 
 local function memory_key(shard: number, owner_digest: string): string
 	return "rs2w-" .. tostring(shard) .. "-" .. owner_digest
+end
+
+local function call_external(self: State, kind: string, callback: () -> unknown): unknown
+	if self.request_runner == nil then return callback() end
+	local result, code, message = self.request_runner.run_runtime_request(
+		kind,
+		callback,
+		self.operation_deadline_seconds,
+		"messaging"
+	)
+	if code ~= nil then
+		error(("shared RecordStore runtime gate rejected an external service call (%s): %s"):format(tostring(code), tostring(message or "")), 3)
+	end
+	return result
 end
 
 local function valid_reason(reason: unknown): boolean
@@ -236,6 +257,8 @@ function Acceleration.new(config: Config?): State
 	end
 	local self: State = {
 		messaging_service = messaging_service :: MessagingLike,
+		request_runner = config.request_runner,
+		operation_deadline_seconds = config.operation_deadline_seconds,
 		memory_map = config.memory_map,
 		topic_prefix = prefix,
 		shard_count = shard_count,
@@ -354,7 +377,9 @@ function Acceleration.Publish(self: State, owner_identity: string, reason: strin
 	task.spawn(function()
 		if self.memory_map ~= nil then
 			local ok, message = pcall(function()
-				self.memory_map:SetAsync(memory_key(shard, owner_digest), payload, self.memory_ttl_seconds)
+				call_external(self, "service", function()
+					return self.memory_map:SetAsync(memory_key(shard, owner_digest), payload, self.memory_ttl_seconds)
+				end)
 			end)
 			if ok then self.metrics.memory_writes += 1 else
 				self.metrics.memory_write_errors += 1
@@ -362,7 +387,9 @@ function Acceleration.Publish(self: State, owner_identity: string, reason: strin
 			end
 		end
 		local ok, message = pcall(function()
-			self.messaging_service:PublishAsync(topic_for(self, shard), payload)
+			call_external(self, "service", function()
+				return self.messaging_service:PublishAsync(topic_for(self, shard), payload)
+			end)
 		end)
 		if ok then
 			self.metrics.published_hints += 1
@@ -380,7 +407,9 @@ function Acceleration.ProbeHint(self: State, owner_identity: string): (boolean, 
 	local owner_digest = digest(owner_identity)
 	local shard = shard_for_digest(owner_digest, self.shard_count)
 	local ok, value = pcall(function()
-		return self.memory_map:GetAsync(memory_key(shard, owner_digest))
+		return call_external(self, "service", function()
+			return self.memory_map:GetAsync(memory_key(shard, owner_digest))
+		end)
 	end)
 	if not ok then
 		self.metrics.memory_read_errors += 1
@@ -402,9 +431,11 @@ function Acceleration.Start(self: State): (boolean, string?)
 		if not self.subscribed_shards[shard] then
 			local expected_shard = shard
 			local ok, connection = pcall(function()
-				return self.messaging_service:SubscribeAsync(topic_for(self, expected_shard), function(message)
-					local payload = if type(message) == "table" then (message :: Dict).Data else nil
-					receive(self, payload, expected_shard)
+				return call_external(self, "service", function()
+					return self.messaging_service:SubscribeAsync(topic_for(self, expected_shard), function(message)
+						local payload = if type(message) == "table" then (message :: Dict).Data else nil
+						receive(self, payload, expected_shard)
+					end)
 				end)
 			end)
 			if ok and connection ~= nil then
@@ -466,6 +497,7 @@ function Acceleration.Stats(self: State): { [string]: unknown }
 		candidate_count = pending,
 		metrics = table.clone(self.metrics),
 		memory_map_configured = self.memory_map ~= nil,
+		shared_request_gate_configured = self.request_runner ~= nil,
 		hints_are_authoritative = false,
 	}
 end
