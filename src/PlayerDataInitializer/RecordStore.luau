@@ -292,6 +292,7 @@ export type OutboxEvent = OutboxEventInput & {
 	OperationId: string,
 	State: "pending" | "dispatched",
 	CreatedAt: number,
+	DispatchedAt: number?,
 	Attempts: number,
 	LastError: string?,
 	DestinationReceiptId: string?,
@@ -315,6 +316,7 @@ type OutboxEntryRecord = {
 	payload: JsonValue?,
 	state: "pending" | "dispatched",
 	created_at: number,
+	dispatched_at: number?,
 	attempts: number,
 	last_error: string?,
 	destination_receipt_id: string?,
@@ -2369,6 +2371,7 @@ local function parse_envelope(raw: unknown): (Envelope?, string?, boolean)
 			local raw_payload = get_string_field(raw_event, "payload")
 			local status = get_string_field(raw_event, "state")
 			local created_at = get_string_field(raw_event, "created_at")
+			local dispatched_at = get_string_field(raw_event, "dispatched_at")
 			local attempts = get_string_field(raw_event, "attempts")
 			local last_error = get_string_field(raw_event, "last_error")
 			local receipt_id = get_string_field(raw_event, "destination_receipt_id")
@@ -2380,6 +2383,7 @@ local function parse_envelope(raw: unknown): (Envelope?, string?, boolean)
 				or type(message_type) ~= "string" or message_type == "" or #message_type > MAX_MESSAGE_TYPE_LENGTH
 				or (status ~= "pending" and status ~= "dispatched")
 				or type(created_at) ~= "number" or not math.isfinite(created_at)
+				or (dispatched_at ~= nil and (type(dispatched_at) ~= "number" or not math.isfinite(dispatched_at)))
 				or type(attempts) ~= "number" or not math.isfinite(attempts) or math.floor(attempts) ~= attempts or attempts < 0
 				or (last_error ~= nil and (type(last_error) ~= "string" or #last_error > MAX_QUEUE_ERROR_LENGTH))
 				or (receipt_id ~= nil and (type(receipt_id) ~= "string" or #receipt_id > 256))
@@ -2404,6 +2408,7 @@ local function parse_envelope(raw: unknown): (Envelope?, string?, boolean)
 				payload = payload,
 				state = status :: "pending" | "dispatched",
 				created_at = created_at,
+				dispatched_at = dispatched_at :: number?,
 				attempts = attempts,
 				last_error = last_error :: string?,
 				destination_receipt_id = receipt_id :: string?,
@@ -5012,6 +5017,7 @@ local function clone_outbox_entries(source: { [string]: OutboxEntryRecord }?): {
 			payload = if event.payload ~= nil then copy_value(event.payload) else nil,
 			state = event.state,
 			created_at = event.created_at,
+			dispatched_at = event.dispatched_at,
 			attempts = event.attempts,
 			last_error = event.last_error,
 			destination_receipt_id = event.destination_receipt_id,
@@ -5031,6 +5037,7 @@ local function outbox_to_public(event: OutboxEntryRecord): OutboxEvent
 		Data = if event.payload ~= nil then copy_value(event.payload) else nil,
 		State = event.state,
 		CreatedAt = event.created_at,
+		DispatchedAt = event.dispatched_at,
 		Attempts = event.attempts,
 		LastError = event.last_error,
 		DestinationReceiptId = event.destination_receipt_id,
@@ -5092,6 +5099,7 @@ local function prepare_outbox_inputs(
 			payload = payload,
 			state = "pending",
 			created_at = created_at,
+			dispatched_at = nil,
 			attempts = 0,
 			last_error = nil,
 			destination_receipt_id = nil,
@@ -5592,10 +5600,12 @@ local function set_outbox_result(
 		current.attempts += 1
 		if accepted then
 			current.state = "dispatched"
+			current.dispatched_at = transaction_time
 			current.last_error = nil
 			current.destination_receipt_id = destination_receipt_id
 		else
 			current.state = "pending"
+			current.dispatched_at = nil
 			current.last_error = string.sub(string.gsub(reason or "destination did not confirm acceptance", "[^ -~]", "?"), 1, MAX_QUEUE_ERROR_LENGTH)
 		end
 		return receipts, updated, nil, nil, 1
@@ -5664,7 +5674,8 @@ local function prune_outbox(self: Record, dispatched_before_ms: number, max_item
 	return update_profile_sidecars(state, "outbox_prune", function(receipts, outbox, _now)
 		local keys: { string } = {}
 		for event_id, event in outbox do
-			if event.state == "dispatched" and event.created_at < cutoff_unix then table.insert(keys, event_id) end
+			-- Do not delete legacy dispatched rows that lack a verifiable dispatch time.
+			if event.state == "dispatched" and event.dispatched_at ~= nil and event.dispatched_at < cutoff_unix then table.insert(keys, event_id) end
 		end
 		table.sort(keys)
 		local remove_count = math.min(limit, #keys)
