@@ -97,6 +97,13 @@ export type Dependencies = {
 
 type PlayerRecord = RecordStore.Record
 
+type PlayerValuePathCache = {
+	leaderstats: Instance?,
+	player_data_values: Instance?,
+	values_by_key: { [string]: Instance },
+}
+type PlayerValuePathKey = "leaderstats" | "player_data_values"
+
 export type Controller = {
 	Start: (self: Controller) -> boolean,
 	Shutdown: (self: Controller) -> boolean,
@@ -652,6 +659,7 @@ local function new(dependencies: Dependencies?): Controller
 	local player_added_connection: RBXScriptConnection? = nil
 	local player_removing_connection: RBXScriptConnection? = nil
 	local sessions: {[Player]: PlayerRecord} = {}
+	local player_value_paths: { [Player]: PlayerValuePathCache } = setmetatable({}, { __mode = "k" })
 	local loading: {[Player]: boolean} = {}
 	local cancelled_loading: {[Player]: boolean} = {}
 	local departed_players: {[Player]: boolean} = {}
@@ -1076,8 +1084,68 @@ local function new(dependencies: Dependencies?): Controller
 			player_data_values.Parent = player
 		end
 		leaderstats.Parent = player
+
+		local values_by_key: { [string]: Instance } = {}
+		for key, field in pairs(CONFIG.data) do
+			local definition = leaderstat_by_key[key]
+			local value_instance: Instance? = nil
+			if field.class_name == "CodeNumValue"
+				or (definition ~= nil and definition.number_format ~= nil)
+			then
+				if player_data_values ~= nil then
+					value_instance = player_data_values:FindFirstChild(key)
+				end
+			elseif definition ~= nil then
+				value_instance = leaderstats:FindFirstChild(definition.name)
+			end
+			if value_instance ~= nil then
+				values_by_key[key] = value_instance
+			end
+		end
+		player_value_paths[player] = {
+			leaderstats = leaderstats,
+			player_data_values = player_data_values,
+			values_by_key = values_by_key,
+		}
 	end
 
+	local function find_cached_player_child(
+		player: Player,
+		path_key: PlayerValuePathKey,
+		root_name: string,
+		cache_key: string,
+		child_name: string
+	): Instance?
+		local paths = player_value_paths[player]
+		if paths == nil then
+			paths = {
+				leaderstats = nil,
+				player_data_values = nil,
+				values_by_key = {},
+			}
+			player_value_paths[player] = paths
+		end
+
+		local root = paths[path_key]
+		if root == nil or root.Parent ~= player or root.Name ~= root_name then
+			root = player:FindFirstChild(root_name)
+			paths[path_key] = root
+		end
+		if root == nil then
+			return nil
+		end
+
+		local cached_value = paths.values_by_key[cache_key]
+		if cached_value ~= nil and cached_value.Parent == root and cached_value.Name == child_name then
+			return cached_value
+		end
+
+		local value_instance = root:FindFirstChild(child_name)
+		if value_instance ~= nil then
+			paths.values_by_key[cache_key] = value_instance
+		end
+		return value_instance
+	end
 
 	local function find_player_value_instance(player: Player, key: string, field: DataField): Instance?
 		if not CONFIG.leaderstats.enabled then
@@ -1088,13 +1156,11 @@ local function new(dependencies: Dependencies?): Controller
 		if field.class_name == "CodeNumValue"
 			or (definition ~= nil and definition.number_format ~= nil)
 		then
-			local values = player:FindFirstChild("PlayerDataValues")
-			return if values ~= nil then values:FindFirstChild(key) else nil
+			return find_cached_player_child(player, "player_data_values", "PlayerDataValues", key, key)
 		end
 
 		if definition ~= nil then
-			local leaderstats = player:FindFirstChild(CONFIG.leaderstats.name)
-			return if leaderstats ~= nil then leaderstats:FindFirstChild(definition.name) else nil
+			return find_cached_player_child(player, "leaderstats", CONFIG.leaderstats.name, key, definition.name)
 		end
 
 		return nil
@@ -1453,6 +1519,7 @@ local function new(dependencies: Dependencies?): Controller
 
 		local record = sessions[player]
 		sessions[player] = nil
+		player_value_paths[player] = nil
 		if record == nil then
 			removing[player] = nil
 			return

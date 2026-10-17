@@ -29,3 +29,6 @@ benchmarks:
 
   - name: "PlayerData startup with lazy optional CodeNumValue load"
     exec: lune run bench/playerdata_startup_lazy.bench.luau
+
+  - name: "PlayerData.Set path lookup"
+    exec: lune run bench/playerdata_set_paths.bench.luau
