@@ -1742,8 +1742,6 @@ end
 -- Renew a still-live claim using its existing fencing token. Expired claims are
 -- never resurrected; ambiguous writes are reconciled by reading the canonical row.
 function MailboxV2.RenewClaimAsync(self: Mailbox, message_id: string, claim_token: string): Result
-	local activation = self:_check_activation("renew_claim")
-	if activation ~= nil then return activation end
 	if type(message_id) ~= "string" or message_id == "" or #message_id > MAX_KEY_LENGTH then
 		return ok("invalid", message_id, nil, "message_id must be a valid v2 key")
 	end
