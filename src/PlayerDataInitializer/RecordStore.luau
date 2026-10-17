@@ -140,6 +140,37 @@ export type DurabilityStatus = {
 	observed_at_unix: number,
 }
 
+export type SessionWaitOutcome =
+	"no_known_competing_session"
+	| "competing_session_observed"
+	| "wait_retry_scheduled"
+	| "cancellation_requested"
+	| "ownership_acquired"
+	| "ownership_fenced_or_lost"
+	| "session_status_unavailable"
+
+export type SessionWaitResult = {
+	Outcome: SessionWaitOutcome,
+	Attempt: number,
+	ObservedAtUnix: number,
+	SessionJobId: string?,
+	LeaseUntilUnix: number?,
+	RetryAfterSeconds: number?,
+	RetryScheduled: boolean,
+	ReadResult: ResultCode?,
+	Message: string?,
+}
+
+export type SessionWaitOptions = {
+	max_wait_seconds: number?,
+	max_attempts: number?,
+	retry_interval_seconds: number?,
+	max_retry_interval_seconds: number?,
+	recreate: boolean?,
+	cancelled: (() -> boolean)?,
+	on_status: ((SessionWaitResult) -> ())?,
+}
+
 export type HandoffStatus =
 	"pending"
 | "accepted"
@@ -636,6 +667,7 @@ export type Record = {
 	SubscribeChanges: (self: Record, observer: ChangeObserver) -> (ChangeSubscription?, ResultCode, string?),
 	GetDurabilityStatus: (self: Record) -> (DurabilityStatus?, ResultCode, string?),
 	SubscribeDurabilityRisk: (self: Record, observer: DurabilityRiskObserver) -> (ChangeSubscription?, ResultCode, string?),
+	WaitForSessionAsync: (self: Record, default_data: JsonValue?, wait_options: SessionWaitOptions?) -> (SessionWaitResult, ResultCode, string?),
 	GetUserIds: (self: Record) -> { number },
 	SetUserIds: (self: Record, user_ids: { number }) -> (ResultCode, string?),
 	AddUserId: (self: Record, user_id: number) -> (ResultCode, string?),
@@ -7257,6 +7289,7 @@ local function close_record(self: Record): (ResultCode, string?)
 		return "invalid", "record does not exist"
 	end
 	local result, message = close_internal(state, false)
+	evaluate_durability_risk(self, state)
 	sync_public(self)
 	return result, message
 end
@@ -8462,6 +8495,7 @@ local function save(self: Record, reason: string?): (ResultCode, string?)
 		return "invalid", "record does not exist"
 	end
 	local result, message = save_internal(state, reason or "manual", nil, nil)
+	evaluate_durability_risk(self, state)
 	sync_public(self)
 	return result, message
 end
@@ -8634,6 +8668,236 @@ local function open(self: Record, default_data: JsonValue?, recreate: boolean?):
 	return result, message
 end
 
+
+local function wait_for_session_async(self: Record, default_data: JsonValue?, wait_options: SessionWaitOptions?): (SessionWaitResult, ResultCode, string?)
+	local state = private[self]
+	if state == nil then
+		return {
+			Outcome = "session_status_unavailable", Attempt = 0, ObservedAtUnix = now_unix(),
+			SessionJobId = nil, LeaseUntilUnix = nil, RetryAfterSeconds = nil, RetryScheduled = false,
+			ReadResult = "invalid", Message = "record does not exist",
+		}, "invalid", "record does not exist"
+	end
+	local options = wait_options or {}
+	local max_wait = options.max_wait_seconds or DEFAULT_OPERATION_DEADLINE
+	local max_attempts = options.max_attempts or 8
+	local retry_interval = options.retry_interval_seconds or MIN_RETRY_DELAY
+	local max_retry_interval = options.max_retry_interval_seconds or MAX_RETRY_DELAY
+	if not math.isfinite(max_wait) or max_wait <= 0 or max_wait > 1200 then
+		return {
+			Outcome = "session_status_unavailable", Attempt = 0, ObservedAtUnix = now_unix(),
+			SessionJobId = nil, LeaseUntilUnix = nil, RetryAfterSeconds = nil, RetryScheduled = false,
+			ReadResult = "invalid", Message = "max_wait_seconds must be between 0 and 1200",
+		}, "invalid", "max_wait_seconds must be between 0 and 1200"
+	end
+	if not math.isfinite(max_attempts) or math.floor(max_attempts) ~= max_attempts or max_attempts < 1 or max_attempts > 32 then
+		return {
+			Outcome = "session_status_unavailable", Attempt = 0, ObservedAtUnix = now_unix(),
+			SessionJobId = nil, LeaseUntilUnix = nil, RetryAfterSeconds = nil, RetryScheduled = false,
+			ReadResult = "invalid", Message = "max_attempts must be an integer from 1 to 32",
+		}, "invalid", "max_attempts must be an integer from 1 to 32"
+	end
+	if not math.isfinite(retry_interval) or retry_interval <= 0 or retry_interval > 30
+		or not math.isfinite(max_retry_interval) or max_retry_interval < retry_interval or max_retry_interval > 30
+	then
+		return {
+			Outcome = "session_status_unavailable", Attempt = 0, ObservedAtUnix = now_unix(),
+			SessionJobId = nil, LeaseUntilUnix = nil, RetryAfterSeconds = nil, RetryScheduled = false,
+			ReadResult = "invalid", Message = "retry intervals must be positive, ordered and at most 30 seconds",
+		}, "invalid", "retry intervals must be positive, ordered and at most 30 seconds"
+	end
+	if options.cancelled ~= nil and type(options.cancelled) ~= "function" then
+		return {
+			Outcome = "session_status_unavailable", Attempt = 0, ObservedAtUnix = now_unix(),
+			SessionJobId = nil, LeaseUntilUnix = nil, RetryAfterSeconds = nil, RetryScheduled = false,
+			ReadResult = "invalid", Message = "cancelled must be a function",
+		}, "invalid", "cancelled must be a function"
+	end
+	if options.on_status ~= nil and type(options.on_status) ~= "function" then
+		return {
+			Outcome = "session_status_unavailable", Attempt = 0, ObservedAtUnix = now_unix(),
+			SessionJobId = nil, LeaseUntilUnix = nil, RetryAfterSeconds = nil, RetryScheduled = false,
+			ReadResult = "invalid", Message = "on_status must be a function",
+		}, "invalid", "on_status must be a function"
+	end
+
+	local deadline = now_local() + max_wait
+	local last_outcome: SessionWaitOutcome = "no_known_competing_session"
+	local last_job_id: string? = nil
+	local last_lease_until: number? = nil
+	local last_code: ResultCode? = nil
+	local last_message: string? = nil
+
+	local function make_result(
+		outcome: SessionWaitOutcome,
+		attempt: number,
+		job_id: string?,
+		lease_until: number?,
+		retry_after: number?,
+		retry_scheduled: boolean,
+		read_result: ResultCode?,
+		message: string?
+	): SessionWaitResult
+		return {
+			Outcome = outcome,
+			Attempt = attempt,
+			ObservedAtUnix = session_now_unix(state.backend.mock),
+			SessionJobId = job_id,
+			LeaseUntilUnix = lease_until,
+			RetryAfterSeconds = retry_after,
+			RetryScheduled = retry_scheduled,
+			ReadResult = read_result,
+			Message = message,
+		}
+	end
+
+	local function report(
+		outcome: SessionWaitOutcome,
+		attempt: number,
+		job_id: string?,
+		lease_until: number?,
+		retry_after: number?,
+		retry_scheduled: boolean,
+		read_result: ResultCode?,
+		message: string?
+	): SessionWaitResult
+		local result = make_result(outcome, attempt, job_id, lease_until, retry_after, retry_scheduled, read_result, message)
+		if options.on_status ~= nil then pcall(options.on_status, result) end
+		return result
+	end
+
+	local function cancellation_requested(): boolean
+		if state.takeover_requested then return true end
+		if options.cancelled == nil then return false end
+		local ok, value = pcall(options.cancelled)
+		return not ok or value == true
+	end
+
+	local function observe_competitor(attempt: number): (SessionWaitOutcome, string?, number?, ResultCode?, string?)
+		local raw, _, read_code, read_message = backend_get(state.backend, false, deadline, state)
+		if read_code ~= nil then
+			return "session_status_unavailable", nil, nil, read_code, read_message
+		end
+		if raw == nil then
+			return "no_known_competing_session", nil, nil, nil, nil
+		end
+		local envelope, parse_error, current_format = parse_envelope(raw)
+		if not current_format then
+			local code: ResultCode = if parse_error == "future implementation version" then "future_schema" elseif parse_error == "legacy payload" then "legacy" else "corrupt"
+			return "session_status_unavailable", nil, nil, code, parse_error or "stored record envelope is invalid"
+		end
+		if envelope == nil then
+			return "session_status_unavailable", nil, nil, "corrupt", parse_error or "stored record envelope is missing"
+		end
+		if envelope.tombstone ~= nil then
+			return "ownership_fenced_or_lost", nil, nil, "tombstoned", "record is tombstoned"
+		end
+		local session = envelope.session
+		if session == nil or session.lease_until <= session_now_unix(state.backend.mock) then
+			return "no_known_competing_session", nil, nil, nil, nil
+		end
+		if state.state == "active" and state.token == session.token
+			and state.generation == session.generation and session.job_id == server_id
+		then
+			return "ownership_acquired", session.job_id, session.lease_until, nil, nil
+		end
+		return "competing_session_observed", session.job_id, session.lease_until, "locked", "a live session lease was observed; this read does not authorize ownership"
+	end
+
+	for attempt = 1, max_attempts do
+		if cancellation_requested() then
+			local result = report("cancellation_requested", attempt, last_job_id, last_lease_until, nil, false, "closing", "session wait was cancelled or takeover was requested")
+			return result, "closing", result.Message
+		end
+		if now_local() >= deadline then break end
+		if state.state == "active" and state.token ~= nil then
+			if state.durable_lease_until > session_now_unix(state.backend.mock) then
+				local result = report("ownership_acquired", attempt, server_id, state.durable_lease_until, nil, false, "success", nil)
+				return result, "success", nil
+			end
+			if not state.busy then
+				local result = report("ownership_fenced_or_lost", attempt, server_id, state.durable_lease_until, nil, false, "fenced", "the last confirmed local lease has expired")
+				return result, "fenced", result.Message
+			end
+		end
+		if state.state == "fenced" or state.state == "tombstoned" then
+			local code: ResultCode = if state.state == "tombstoned" then "tombstoned" else "fenced"
+			local result = report("ownership_fenced_or_lost", attempt, nil, nil, nil, false, code, "local Record is not eligible to acquire ownership")
+			return result, code, result.Message
+		end
+		if state.state == "unknown" then
+			local result = report("session_status_unavailable", attempt, nil, nil, nil, false, "unknown", "prior open/save outcome is unresolved; do not blindly retry acquisition")
+			return result, "unknown", result.Message
+		end
+
+		local open_code: ResultCode
+		local open_message: string?
+		if state.busy or state.queue_busy then
+			open_code, open_message = "busy", "another Record operation is in flight"
+		else
+			open_code, open_message = open(self, default_data, options.recreate)
+		end
+		last_code, last_message = open_code, open_message
+		if open_code == "created" or open_code == "loaded" or open_code == "already_open" then
+			if state.state == "active" and state.token ~= nil and state.durable_lease_until > session_now_unix(state.backend.mock) then
+				local result = report("ownership_acquired", attempt, server_id, state.durable_lease_until, nil, false, "success", nil)
+				return result, "success", nil
+			end
+			local result = report("session_status_unavailable", attempt, nil, nil, nil, false, "unknown", "Open reported success without a confirmed live local lease")
+			return result, "unknown", result.Message
+		end
+		if open_code == "fenced" or open_code == "tombstoned" then
+			local outcome: SessionWaitOutcome = "ownership_fenced_or_lost"
+			local result = report(outcome, attempt, nil, nil, nil, false, open_code, open_message)
+			return result, open_code, open_message
+		end
+		if open_code == "unknown" or open_code == "retry_exhausted" then
+			local result = report("session_status_unavailable", attempt, nil, nil, nil, false, open_code, open_message)
+			return result, open_code, open_message
+		end
+
+		local observed_outcome: SessionWaitOutcome = "no_known_competing_session"
+		local observed_job_id: string? = nil
+		local observed_lease_until: number? = nil
+		local observed_code: ResultCode? = open_code
+		local observed_message: string? = open_message
+		if open_code == "locked" then
+			observed_outcome, observed_job_id, observed_lease_until, observed_code, observed_message = observe_competitor(attempt)
+			if observed_outcome == "ownership_acquired" then
+				local result = report("ownership_acquired", attempt, observed_job_id, observed_lease_until, nil, false, "success", nil)
+				return result, "success", nil
+			end
+			if observed_outcome == "ownership_fenced_or_lost" then
+				local result = report(observed_outcome, attempt, nil, nil, nil, false, observed_code, observed_message)
+				return result, observed_code or "tombstoned", observed_message
+			end
+			if observed_outcome == "session_status_unavailable" then
+				local result = report(observed_outcome, attempt, nil, nil, nil, false, observed_code, observed_message)
+				return result, observed_code or "unknown", observed_message
+			end
+		end
+		last_outcome, last_job_id, last_lease_until = observed_outcome, observed_job_id, observed_lease_until
+		if observed_outcome == "competing_session_observed" then
+			report(observed_outcome, attempt, observed_job_id, observed_lease_until, nil, false, observed_code, observed_message)
+		end
+		local remaining = math.max(0, deadline - now_local())
+		if attempt >= max_attempts or remaining <= 0 then break end
+		local backoff = math.min(max_retry_interval, retry_interval * (2 ^ math.min(attempt - 1, 8)))
+		if observed_lease_until ~= nil then
+			local lease_remaining = math.max(0, observed_lease_until - session_now_unix(state.backend.mock))
+			if lease_remaining > 0 then backoff = math.min(backoff, math.max(retry_interval, lease_remaining)) end
+		end
+		local delay = math.min(backoff, remaining)
+		report("wait_retry_scheduled", attempt, observed_job_id, observed_lease_until, delay, true, observed_code, observed_message)
+		task.wait(delay)
+	end
+	local timed_out_code: ResultCode = if now_local() >= deadline then "budget" else (last_code or "retry_exhausted")
+	local timed_out_message = if now_local() >= deadline then "session wait deadline expired" else (last_message or "session wait attempt limit reached")
+	local final_outcome: SessionWaitOutcome = if last_outcome == "competing_session_observed" then "competing_session_observed" else "no_known_competing_session"
+	local result = report(final_outcome, max_attempts, last_job_id, last_lease_until, nil, false, timed_out_code, timed_out_message)
+	return result, timed_out_code, timed_out_message
+end
+
 local function make_record(name: string, scope: string, key: string, options: Options, mock: boolean): Record
 	local mode = if mock then "mock" else "live"
 	local id = HttpService:JSONEncode({ mode, name, scope, key })
@@ -8759,6 +9023,7 @@ local function make_record(name: string, scope: string, key: string, options: Op
 		SubscribeChanges = subscribe_changes,
 		GetDurabilityStatus = get_durability_status,
 		SubscribeDurabilityRisk = subscribe_durability_risk,
+		WaitForSessionAsync = wait_for_session_async,
 		GetUserIds = get_user_ids,
 		SetUserIds = set_user_ids,
 		AddUserId = add_user_id,

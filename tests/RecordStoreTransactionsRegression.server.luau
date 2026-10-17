@@ -382,6 +382,19 @@ local risk_subscription, risk_subscribe_code, risk_subscribe_message = risk_reco
 	table.insert(risk_events, event)
 end)
 assert(risk_subscribe_code == "success" and risk_subscription ~= nil, tostring(risk_subscribe_message))
+local acquired_wait, acquired_wait_code = risk_record:WaitForSessionAsync(nil)
+assert(acquired_wait_code == "success" and acquired_wait.Outcome == "ownership_acquired",
+	"session wait did not recognize the active locally owned lease")
+local cancelled_wait_record = RecordStore.Mock.new(STORE, SCOPE, "session-wait-cancelled", {
+	schema_version = 1,
+	retry_attempts = 1,
+	user_ids = { USER_ID },
+})
+local cancelled_wait, cancelled_wait_code = cancelled_wait_record:WaitForSessionAsync({ coins = 0 }, {
+	cancelled = function() return true end,
+})
+assert(cancelled_wait_code == "closing" and cancelled_wait.Outcome == "cancellation_requested",
+	"session wait did not distinguish explicit cancellation")
 local risk_update, risk_update_message = risk_record:Update(function(current)
 	local next_data = table.clone(current)
 	next_data.coins += 1

@@ -342,3 +342,9 @@ grouped outbox dispatch and wake-up acceleration workloads. These are configured
 results: a fresh run on the current head is not yet verified. Remove the marker only in the separate
 verification pass. Lune/Mock measurements are not real Roblox service latency or production acceptance
 evidence.
+
+## Durability status and session waiting
+
+Call `record:GetDurabilityStatus()` to inspect dirty and durable generations, the tracked age of unsaved changes, the last confirmed save, and whether the local write outcome remains uncertain. `record:SubscribeDurabilityRisk(callback)` sends edge-triggered transitions when the configured dirty-age threshold is exceeded, a write outcome is uncertain, or the condition recovers. The default `max_dirty_age_seconds` is 300 seconds and can be configured through `RecordStore.configure_runtime({ max_dirty_age_seconds = ... })` before the first Record is created. Observer capacity is bounded per Record.
+
+`RecordStore.get_health_snapshot(max_records)` provides a bounded server-local summary; it does not prove that every profile or every server is healthy. `record:WaitForSessionAsync(default_data, options)` wraps the existing durable `Open` path and reports competing-session observations, retry scheduling, cancellation, acquisition, and fencing/loss. It never treats an observed expired lease as an ownership token and does not bypass the existing cooperative takeover protocol. A `session_status_unavailable` result, especially after an unknown write outcome, requires reconciliation instead of blindly retrying an external effect.
