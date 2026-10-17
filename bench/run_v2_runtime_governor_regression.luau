@@ -144,5 +144,42 @@ assert(governor_after_fault.stats.errors == errors_before_fault + 1,
 assert((governor_after_fault.classes.messaging or 0) == 0,
 	"failed adapter request leaked the messaging work-class counter")
 
+shared_governor:Observe("read", true, 1, nil, 100)
+shared_governor:Observe("write", true, 1, nil, 1)
+local read_ticket = shared_governor:Admit("messaging", "read", 1, false)
+assert(read_ticket.code == "admitted", "healthy read budget was hidden by the lower write budget")
+assert(shared_governor:Release(read_ticket), "read budget test ticket did not release")
+local low_write_ticket = shared_governor:Admit("messaging", "write", 1, true)
+assert(low_write_ticket.code == "backpressure", "low write budget was hidden by the healthy read budget")
+assert((shared_governor:Stats().classes.messaging or 0) == 0,
+	"budget rejections modified work-class in-flight counters")
+
+local circuit_revision = reject_revision + 2
+local circuit_policy_code, circuit_policy_message = V2.ApplySchedulerPolicy({
+	revision = circuit_revision,
+	mode = "normal",
+	minimum_budget = 2,
+	circuit_threshold = 1,
+	circuit_cooldown_ms = 100,
+})
+assert(circuit_policy_code == "success", tostring(circuit_policy_message))
+shared_governor:Observe("write", false, 2, "throttled", 100)
+assert(shared_governor:Stats().circuits.write.state == "open", "write failure did not open its circuit")
+now_ms += 101
+shared_governor:Observe("write", true, 1, nil, 0)
+local blocked_probe = shared_governor:Admit("messaging", "write", 1, true)
+assert(blocked_probe.code == "backpressure", "probe bypassed the per-write request budget")
+assert(shared_governor:Stats().circuits.write.state == "open",
+	"budget rejection stranded the circuit in half-open state")
+shared_governor:Observe("write", true, 1, nil, 100)
+local half_open_ticket = shared_governor:Admit("messaging", "write", 1, true)
+assert(half_open_ticket.code == "admitted", "write circuit did not admit one probe after budget recovery")
+assert(shared_governor:Stats().circuits.write.state == "half_open",
+	"post-cooldown admission did not reserve a single half-open probe")
+shared_governor:Observe("write", true, 1, nil, 100)
+assert(shared_governor:Stats().circuits.write.state == "closed",
+	"successful half-open probe did not close its circuit")
+assert(shared_governor:Release(half_open_ticket), "half-open probe ticket did not release")
+
 print("[PASS] RecordStoreV2 runtime policy and advanced adapter admission hooks.")
 Shim.close()

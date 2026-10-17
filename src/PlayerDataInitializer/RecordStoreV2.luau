@@ -359,7 +359,7 @@ local function new_governor(options)
 		},
 		in_flight = 0, by_class = {}, queue = {}, due = {}, completed = {}, known = {},
 		owner_finish = {}, high_streak = 0, retry_tokens = 32, last_token_time = now_ms(),
-		last_budget = nil, latency_ewma = {}, consecutive_errors = {}, circuits = {},
+		last_budget = nil, last_budget_by_kind = {}, latency_ewma = {}, consecutive_errors = {}, circuits = {},
 		stats = { admitted = 0, rejected = 0, completed = 0, throttled = 0, errors = 0 },
 	}
 	local limits = { critical = 32, profile_save = 32, profile_release = 32, interactive = 24, messaging = 20, migration = 4, maintenance = 2, tracing = 1 }
@@ -422,7 +422,10 @@ local function new_governor(options)
 			local prior = self.latency_ewma[kind]
 			self.latency_ewma[kind] = prior and prior * 0.8 + latency_ms * 0.2 or latency_ms
 		end
-		if finite(budget) then self.last_budget = budget end
+		if finite(budget) then
+			self.last_budget = budget
+			self.last_budget_by_kind[kind] = budget
+		end
 		if ok then
 			self.consecutive_errors[kind] = 0
 			if self.circuits[kind] and self.circuits[kind].state == "half_open" then self.circuits[kind] = { state = "closed" } end
@@ -441,24 +444,48 @@ local function new_governor(options)
 		if self.policy.mode == "read_only" and mutating and not critical then self.stats.rejected += 1; return { code = "read_only" } end
 		if self.policy.mode == "reject_noncritical" and not critical then self.stats.rejected += 1; return { code = "backpressure" } end
 		local circuit = self.circuits[request_kind]
+		local probe_needed = false
 		if circuit and circuit.state == "open" then
 			if now_ms() < circuit.until_ms then return { code = "circuit_open", retry_after_ms = circuit.until_ms - now_ms(), reason = circuit.reason } end
-			circuit.state = "half_open"
-			circuit.probe = true
-		elseif circuit and circuit.state == "half_open" and circuit.probe then return { code = "circuit_open", reason = "half-open probe already reserved" } end
-		if finite(self.last_budget) and self.last_budget < self.policy.minimum_budget and not critical then self.stats.rejected += 1; return { code = "backpressure", message = "request budget is below configured minimum" } end
+			probe_needed = true
+		elseif circuit and circuit.state == "half_open" then
+			if circuit.probe then return { code = "circuit_open", reason = "half-open probe already reserved" } end
+			probe_needed = true
+		end
+		local observed_budget = self.last_budget_by_kind[request_kind]
+		if finite(observed_budget) and observed_budget < self.policy.minimum_budget and not critical then
+			self.stats.rejected += 1
+			return { code = "backpressure", message = "request budget is below configured minimum" }
+		end
 		if self.in_flight + cost > self.policy.max_in_flight then self.stats.rejected += 1; return { code = "capacity" } end
 		if not critical and self.in_flight + cost > self.policy.max_in_flight - self.policy.critical_reserve then self.stats.rejected += 1; return { code = "backpressure", message = "critical save/release reserve protected" } end
 		if (self.by_class[work_class] or 0) + cost > math.min(limits[work_class] or limits.interactive, self.policy.max_in_flight) then self.stats.rejected += 1; return { code = "capacity", message = "work-class cap reached" } end
+		if probe_needed and circuit ~= nil then
+			circuit.state = "half_open"
+			circuit.probe = true
+		end
 		self.in_flight += cost
 		self.by_class[work_class] = (self.by_class[work_class] or 0) + cost
 		self.stats.admitted += 1
-		return { code = "admitted", ticket = tostring(self.policy.revision) .. ":" .. tostring(self.stats.admitted), cost = cost, work_class = work_class }
+		return {
+			code = "admitted",
+			ticket = tostring(self.policy.revision) .. ":" .. tostring(self.stats.admitted),
+			cost = cost,
+			work_class = work_class,
+			request_kind = request_kind,
+			probe = probe_needed,
+		}
 	end
 	function governor:Release(ticket)
 		if type(ticket) ~= "table" or ticket.code ~= "admitted" then return false end
 		self.in_flight = math.max(0, self.in_flight - (ticket.cost or 1))
 		self.by_class[ticket.work_class] = math.max(0, (self.by_class[ticket.work_class] or 0) - (ticket.cost or 1))
+		local circuit = self.circuits[ticket.request_kind]
+		if ticket.probe == true and circuit ~= nil and circuit.state == "half_open" and circuit.probe == true then
+			-- Core admission can fail after the advanced governor reserved this probe.
+			-- If no outcome was observed, release the probe reservation for the next attempt.
+			circuit.probe = false
+		end
 		self.stats.completed += 1
 		return true
 	end
@@ -623,7 +650,7 @@ local function new_governor(options)
 	function governor:Stats()
 		local lanes = { high = 0, normal = 0, background = 0, lease_renewal = 0 }
 		for _, item in ipairs(self.queue) do lanes[item.lane] = (lanes[item.lane] or 0) + 1 end
-		return { policy = copy(self.policy), in_flight = self.in_flight, queue_items = #self.queue, lanes = lanes, classes = copy(self.by_class), stats = copy(self.stats), latency_ewma = copy(self.latency_ewma), circuits = copy(self.circuits), retry_tokens = self.retry_tokens }
+		return { policy = copy(self.policy), in_flight = self.in_flight, queue_items = #self.queue, lanes = lanes, classes = copy(self.by_class), stats = copy(self.stats), latency_ewma = copy(self.latency_ewma), circuits = copy(self.circuits), last_budget_by_kind = copy(self.last_budget_by_kind), retry_tokens = self.retry_tokens }
 	end
 	return governor
 end

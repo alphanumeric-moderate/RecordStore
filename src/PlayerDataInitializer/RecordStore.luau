@@ -9765,8 +9765,8 @@ function RecordStore.run_runtime_request(
 		local service_duration = (now_local() - service_started) * 1000
 		release_slot()
 		runtime_external_in_flight[class] = math.max(0, runtime_external_in_flight[class] - 1)
-		external_governor_release(hooks, governor_ticket)
 		external_governor_observe(hooks, "service", service_ok, service_duration, if service_ok then nil else tostring(service_result))
+		external_governor_release(hooks, governor_ticket)
 		observe_runtime_request("service", service_ok, if service_ok then nil else tostring(service_result), service_duration)
 		if not service_ok then return nil, "unknown", tostring(service_result) end
 		return service_result, nil, nil
@@ -9799,8 +9799,8 @@ function RecordStore.run_runtime_request(
 	local duration_ms = (now_local() - started_at) * 1000
 	release_slot()
 	runtime_external_in_flight[class] = math.max(0, runtime_external_in_flight[class] - 1)
-	external_governor_release(hooks, governor_ticket)
 	external_governor_observe(hooks, governor_kind, ok, duration_ms, if ok then nil else tostring(result))
+	external_governor_release(hooks, governor_ticket)
 	observe_runtime_request(governor_kind, ok, if ok then nil else tostring(result), duration_ms)
 	if not ok then return nil, "unknown", tostring(result) end
 	return result, nil, nil
