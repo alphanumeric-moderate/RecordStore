@@ -79,7 +79,7 @@ local Enum = table.freeze({
 
 local DateTime = table.freeze({
 	now = function()
-		return { UnixTimestampMillis = datetime.now().unixTimestampMillis }
+		return { UnixTimestampMillis = DataStoreService:NowMilliseconds() }
 	end,
 })
 
@@ -158,6 +158,22 @@ Shim.environment = {
 -- Returns the RecordStore module, loaded inside the shimmed environment.
 function Shim.load(source_path: string?): any
 	return load_record_store(source_path)
+end
+
+-- Loads an independent RecordStore module instance to model another server.
+-- All instances share the fake DataStore service but retain independent session state.
+function Shim.load_isolated(job_id: string, source_path: string?): any
+	assert(type(job_id) == "string" and job_id ~= "", "job_id must be a non-empty string")
+	local isolated_game = table.clone(game)
+	isolated_game.JobId = job_id
+	local environment = table.clone(Shim.environment)
+	environment.game = isolated_game
+	local source = fs.readFile(source_path or SOURCE_PATH)
+	local chunk = luau.load(source, {
+		debugName = "RecordStore:" .. job_id,
+		environment = environment,
+	})
+	return chunk()
 end
 
 -- Shared fake service used by RecordStore.new() to exercise the live backend path.

@@ -69,6 +69,10 @@ function FakeService:SetClock(clock)
 	self.clock = clock
 end
 
+function FakeService:NowMilliseconds()
+	return now_ms(self)
+end
+
 function FakeService:SetBudget(request_type, budget)
 	local name = if type(request_type) == "table" then request_type.Name else request_type
 	assert(type(name) == "string" and self.budgets[name] ~= nil, "unsupported request budget class")
