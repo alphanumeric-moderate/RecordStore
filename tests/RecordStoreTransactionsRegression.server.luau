@@ -359,6 +359,62 @@ local old_dispatched_pruned, old_dispatched_code =
 expect_pruned(old_dispatched_pruned, old_dispatched_code, "eligible post-dispatch retention")
 RecordStore.Mock.set_test_clock(nil)
 
+-- Durability status describes dirty generations separately from confirmed persisted revisions.
+local risk_now = DateTime.now().UnixTimestampMillis / 1000
+RecordStore.Mock.set_test_clock(function()
+	return risk_now
+end)
+local risk_record = RecordStore.Mock.new(STORE, SCOPE, "durability-risk", {
+	schema_version = 1,
+	retry_attempts = 1,
+	lease_duration = 1000,
+	user_ids = { USER_ID },
+})
+local risk_open, risk_open_message = risk_record:Open({ coins = 0 })
+assert(risk_open == "created" or risk_open == "loaded", tostring(risk_open_message))
+local initial_durability, initial_durability_code, initial_durability_message = risk_record:GetDurabilityStatus()
+assert(initial_durability_code == "success", tostring(initial_durability_message))
+assert(initial_durability ~= nil and not initial_durability.dirty, "freshly opened profile should report clean durability state")
+assert(initial_durability.dirty_generation == initial_durability.durable_generation,
+	"a clean profile reported mismatched dirty and durable generations")
+local risk_events = {}
+local risk_subscription, risk_subscribe_code, risk_subscribe_message = risk_record:SubscribeDurabilityRisk(function(event)
+	table.insert(risk_events, event)
+end)
+assert(risk_subscribe_code == "success" and risk_subscription ~= nil, tostring(risk_subscribe_message))
+local risk_update, risk_update_message = risk_record:Update(function(current)
+	local next_data = table.clone(current)
+	next_data.coins += 1
+	return next_data
+end)
+assert(risk_update == "success", tostring(risk_update_message))
+local dirty_durability, dirty_durability_code, dirty_durability_message = risk_record:GetDurabilityStatus()
+assert(dirty_durability_code == "success" and dirty_durability ~= nil, tostring(dirty_durability_message))
+assert(dirty_durability.dirty and dirty_durability.dirty_generation > dirty_durability.durable_generation,
+	"local mutation did not separate dirty and durable generations")
+assert(dirty_durability.dirty_age_available and dirty_durability.dirty_age_seconds ~= nil,
+	"tracked dirty generation did not expose its age")
+risk_now += dirty_durability.max_dirty_age_seconds + 1
+RecordStore.Mock.check_durability_risks()
+task.wait(0.05)
+assert(#risk_events == 1 and risk_events[1].Transition == "entered" and risk_events[1].Reason == "dirty_age_exceeded",
+	"dirty-age risk must emit one edge-triggered event")
+RecordStore.Mock.check_durability_risks()
+task.wait(0.05)
+assert(#risk_events == 1, "risk notifier emitted repeated events without a state transition")
+local health_snapshot = RecordStore.get_health_snapshot(32)
+assert(health_snapshot.code == "success" and health_snapshot.scope == "server_local_bounded_observation",
+	"server health snapshot did not declare its bounded local scope")
+assert(health_snapshot.aged_dirty_records >= 1, "health snapshot did not include the aged dirty record")
+local risk_save, risk_save_message = risk_record:Save("durability-risk-regression")
+assert(risk_save == "success" or risk_save == "saved", tostring(risk_save_message))
+RecordStore.Mock.check_durability_risks()
+task.wait(0.05)
+assert(#risk_events == 2 and risk_events[2].Transition == "recovered" and risk_events[2].Reason == "recovered",
+	"confirmed persistence did not emit a single recovery event")
+risk_subscription:Disconnect()
+RecordStore.Mock.set_test_clock(nil)
+
 RecordStore.Mock.reset()
 
 if #retention_failures > 0 then

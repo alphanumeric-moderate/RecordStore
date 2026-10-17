@@ -101,6 +101,45 @@ export type ChangeSubscription = {
 	Disconnect: (self: ChangeSubscription) -> (),
 }
 
+export type DurabilityRiskEvent = {
+	Transition: "entered" | "changed" | "recovered",
+	Reason: "dirty_age_exceeded" | "write_outcome_uncertain" | "recovered",
+	State: SessionState,
+	Dirty: boolean,
+	DirtyGeneration: number,
+	DurableGeneration: number,
+	KnownRevision: number,
+	LastConfirmedDurableRevision: number,
+	DirtyAgeSeconds: number?,
+	MaxDirtyAgeSeconds: number,
+	LastConfirmedSaveUnix: number,
+	WriteOutcomeUncertain: boolean,
+	ObservedAtUnix: number,
+}
+
+export type DurabilityRiskObserver = (event: DurabilityRiskEvent) -> ()
+
+export type DurabilityStatus = {
+	state: SessionState,
+	dirty: boolean,
+	dirty_generation: number,
+	durable_generation: number,
+	known_revision: number,
+	last_confirmed_durable_revision: number,
+	dirty_age_seconds: number?,
+	dirty_age_available: boolean,
+	dirty_age_exceeded: boolean?,
+	age_basis: "clean" | "tracked_dirty_generation" | "unavailable",
+	max_dirty_age_seconds: number,
+	last_confirmed_save_unix: number,
+	write_outcome_uncertain: boolean,
+	retry_category: string?,
+	in_flight_operations: number,
+	durability_risk_active: boolean,
+	durability_risk_reason: string?,
+	observed_at_unix: number,
+}
+
 export type HandoffStatus =
 	"pending"
 | "accepted"
@@ -284,6 +323,7 @@ export type Options = {
 export type RuntimeOptions = {
 	revision: number?,
 	runtime_profile: string?,
+	max_dirty_age_seconds: number?,
 	server_role: string?,
 	degraded_mode: string?,
 	circuit_threshold: number?,
@@ -306,6 +346,7 @@ export type RuntimeOptions = {
 type RuntimePolicy = {
 	revision: number,
 	runtime_profile: string,
+	max_dirty_age_seconds: number,
 	server_role: string,
 	degraded_mode: string,
 	circuit_threshold: number,
@@ -493,6 +534,11 @@ type InternalState = {
 	change_dispatch_tail: number,
 	change_dispatch_running: boolean,
 	change_events_dropped: number,
+	durability_risk_observers: { [number]: DurabilityRiskObserver },
+	durability_risk_observer_next_id: number,
+	durability_risk_observer_errors: number,
+	durability_risk_active: boolean,
+	durability_risk_reason: string?,
 	takeover_seen: { [string]: HandoffStatus },
 	takeover_seen_order: { string },
 	takeover_request_id: string?,
@@ -588,6 +634,8 @@ export type Record = {
 	GetLastError: (self: Record) -> RecordError?,
 	GetHandoff: (self: Record) -> HandoffResult?,
 	SubscribeChanges: (self: Record, observer: ChangeObserver) -> (ChangeSubscription?, ResultCode, string?),
+	GetDurabilityStatus: (self: Record) -> (DurabilityStatus?, ResultCode, string?),
+	SubscribeDurabilityRisk: (self: Record, observer: DurabilityRiskObserver) -> (ChangeSubscription?, ResultCode, string?),
 	GetUserIds: (self: Record) -> { number },
 	SetUserIds: (self: Record, user_ids: { number }) -> (ResultCode, string?),
 	AddUserId: (self: Record, user_id: number) -> (ResultCode, string?),
@@ -653,6 +701,8 @@ local MAX_QUEUE_ERROR_LENGTH = 256
 local MAX_MESSAGE_BYTES = 900
 local CHANGE_OBSERVER_CAPACITY = 1024
 local CHANGE_DISPATCH_QUEUE_CAPACITY = 4096
+local DURABILITY_RISK_OBSERVER_CAPACITY = 32
+local DEFAULT_MAX_DIRTY_AGE_SECONDS = 300
 local TAKEOVER_SEEN_CAPACITY = 64
 local HANDOFF_PUBLISH_COOLDOWN = 0.5
 local INTERNAL_METADATA_WRITE_ID = "__rs:w"
@@ -694,6 +744,7 @@ local mock_update_response_lost_message: string? = nil
 local runtime_options: RuntimePolicy = {
 	revision = 1,
 	runtime_profile = "balanced",
+	max_dirty_age_seconds = DEFAULT_MAX_DIRTY_AGE_SECONDS,
 	server_role = "standard",
 	degraded_mode = "normal",
 	circuit_threshold = 5,
@@ -778,7 +829,7 @@ end
 
 local function mark_dirty(state: InternalState)
 	if state.change_sequence == state.saved_change_sequence then
-		state.dirty_since_unix = now_unix()
+		state.dirty_since_unix = session_now_unix(state.backend.mock)
 	end
 	state.change_sequence += 1
 end
@@ -811,7 +862,7 @@ local function valid_runtime_policy(candidate: RuntimePolicy): (boolean, string?
 		or candidate.circuit_cooldown_seconds < 1 or candidate.circuit_cooldown_seconds > 300
 	then return false, "circuit_cooldown_seconds must be between 1 and 300" end
 	local numeric_values = {
-		candidate.revision, candidate.adaptive_sample_interval,
+		candidate.revision, candidate.max_dirty_age_seconds, candidate.adaptive_sample_interval,
 		candidate.adaptive_min_queue_poll_interval, candidate.adaptive_max_queue_poll_interval,
 		candidate.adaptive_min_concurrent_requests, candidate.adaptive_max_concurrent_requests,
 		candidate.adaptive_read_budget_floor, candidate.adaptive_write_budget_floor,
@@ -822,6 +873,9 @@ local function valid_runtime_policy(candidate: RuntimePolicy): (boolean, string?
 		if type(value) ~= "number" or not math.isfinite(value) then return false, "runtime numeric fields must be finite" end
 	end
 	if candidate.revision < 1 or math.floor(candidate.revision) ~= candidate.revision then return false, "revision must be a positive integer" end
+	if candidate.max_dirty_age_seconds < 1 or candidate.max_dirty_age_seconds > 86400 then
+		return false, "max_dirty_age_seconds must be between 1 and 86400 seconds"
+	end
 	if candidate.adaptive_sample_interval < 1 or candidate.adaptive_sample_interval > 60 then return false, "adaptive_sample_interval must be 1 to 60 seconds" end
 	if candidate.adaptive_min_queue_poll_interval < 0.25 or candidate.adaptive_max_queue_poll_interval > 300
 		or candidate.adaptive_min_queue_poll_interval > candidate.adaptive_max_queue_poll_interval
@@ -853,7 +907,7 @@ local function valid_runtime_policy(candidate: RuntimePolicy): (boolean, string?
 end
 
 local RUNTIME_POLICY_FIELDS: { [string]: boolean } = {
-	revision = true, runtime_profile = true, server_role = true, degraded_mode = true,
+	revision = true, runtime_profile = true, max_dirty_age_seconds = true, server_role = true, degraded_mode = true,
 	circuit_threshold = true, circuit_cooldown_seconds = true, adaptive_runtime_enabled = true,
 	adaptive_sample_interval = true, adaptive_min_queue_poll_interval = true,
 	adaptive_max_queue_poll_interval = true, adaptive_min_concurrent_requests = true,
@@ -909,6 +963,9 @@ local function merge_runtime_policy(patch: { [string]: unknown }, base: RuntimeP
 		elseif key == "runtime_profile" then
 			if type(value) ~= "string" then return nil, "runtime_profile must be a string" end
 			candidate.runtime_profile = value
+		elseif key == "max_dirty_age_seconds" then
+			if type(value) ~= "number" then return nil, key .. " must be numeric" end
+			candidate.max_dirty_age_seconds = value
 		elseif key == "server_role" then
 			if type(value) ~= "string" then return nil, "server_role must be a string" end
 			candidate.server_role = value
@@ -8440,9 +8497,131 @@ local function stats(self: Record): { [string]: number | string? }
 		change_sequence = state.change_sequence,
 		saved_change_sequence = state.saved_change_sequence,
 		dirty_since_unix = state.dirty_since_unix,
-		dirty_age_seconds = if state.change_sequence ~= state.saved_change_sequence and state.dirty_since_unix > 0 then math.max(0, now_unix() - state.dirty_since_unix) else 0,
+		dirty_age_seconds = if state.change_sequence ~= state.saved_change_sequence and state.dirty_since_unix > 0 then math.max(0, session_now_unix(state.backend.mock) - state.dirty_since_unix) else 0,
 		dirty = if state.change_sequence ~= state.saved_change_sequence then 1 else 0,
+		durability_risk_active = if state.durability_risk_active then 1 else 0,
+		durability_risk_reason = state.durability_risk_reason,
+		durability_risk_observer_errors = state.durability_risk_observer_errors,
 	}
+end
+
+
+local function durability_status_for_state(state: InternalState): DurabilityStatus
+	local observed_at = session_now_unix(state.backend.mock)
+	local dirty = state.change_sequence ~= state.saved_change_sequence
+	local dirty_since = state.dirty_since_unix
+	local age_available = not dirty or (type(dirty_since) == "number" and dirty_since > 0)
+	local dirty_age = if not dirty then 0 else if age_available then math.max(0, observed_at - dirty_since) else nil
+	local dirty_age_exceeded = if not dirty then false else if dirty_age ~= nil then dirty_age > runtime_options.max_dirty_age_seconds else nil
+	local last_error = state.last_error_info
+	local uncertain = state.state == "unknown"
+		or (last_error ~= nil and last_error.DurableOutcome == "unknown" and state.last_result == "unknown")
+	return {
+		state = state.state,
+		dirty = dirty,
+		dirty_generation = state.change_sequence,
+		durable_generation = state.saved_change_sequence,
+		known_revision = state.revision,
+		last_confirmed_durable_revision = if state.last_saved ~= nil then state.last_saved.Revision else 0,
+		dirty_age_seconds = dirty_age,
+		dirty_age_available = age_available,
+		dirty_age_exceeded = dirty_age_exceeded,
+		age_basis = if not dirty then "clean" else if age_available then "tracked_dirty_generation" else "unavailable",
+		max_dirty_age_seconds = runtime_options.max_dirty_age_seconds,
+		last_confirmed_save_unix = if state.last_saved ~= nil then state.last_saved.ConfirmedAt else 0,
+		write_outcome_uncertain = uncertain,
+		retry_category = if last_error ~= nil then last_error.Code else state.last_result,
+		in_flight_operations = (if state.busy then 1 else 0) + (if state.queue_busy then 1 else 0),
+		durability_risk_active = state.durability_risk_active,
+		durability_risk_reason = state.durability_risk_reason,
+		observed_at_unix = observed_at,
+	}
+end
+
+local function dispatch_durability_risk(state: InternalState, transition: "entered" | "changed" | "recovered", reason: "dirty_age_exceeded" | "write_outcome_uncertain" | "recovered")
+	if next(state.durability_risk_observers) == nil then return end
+	local status = durability_status_for_state(state)
+	local event: DurabilityRiskEvent = {
+		Transition = transition,
+		Reason = reason,
+		State = state.state,
+		Dirty = status.dirty,
+		DirtyGeneration = state.change_sequence,
+		DurableGeneration = state.saved_change_sequence,
+		KnownRevision = state.revision,
+		LastConfirmedDurableRevision = status.last_confirmed_durable_revision,
+		DirtyAgeSeconds = status.dirty_age_seconds,
+		MaxDirtyAgeSeconds = status.max_dirty_age_seconds,
+		LastConfirmedSaveUnix = status.last_confirmed_save_unix,
+		WriteOutcomeUncertain = status.write_outcome_uncertain,
+		ObservedAtUnix = status.observed_at_unix,
+	}
+	local observers: { DurabilityRiskObserver } = {}
+	for _, observer in pairs(state.durability_risk_observers) do table.insert(observers, observer) end
+	task.spawn(function()
+		for _, observer in ipairs(observers) do
+			local ok = pcall(observer, event)
+			if not ok then state.durability_risk_observer_errors += 1 end
+		end
+	end)
+end
+
+local function evaluate_durability_risk(_record: Record, state: InternalState)
+	local status = durability_status_for_state(state)
+	local next_reason: ("dirty_age_exceeded" | "write_outcome_uncertain")? = nil
+	if status.write_outcome_uncertain then
+		next_reason = "write_outcome_uncertain"
+	elseif status.dirty_age_exceeded == true then
+		next_reason = "dirty_age_exceeded"
+	end
+	if next_reason == nil then
+		if state.durability_risk_active then
+			state.durability_risk_active = false
+			state.durability_risk_reason = nil
+			dispatch_durability_risk(state, "recovered", "recovered")
+		end
+		return
+	end
+	if not state.durability_risk_active then
+		state.durability_risk_active = true
+		state.durability_risk_reason = next_reason
+		dispatch_durability_risk(state, "entered", next_reason)
+	elseif state.durability_risk_reason ~= next_reason then
+		state.durability_risk_reason = next_reason
+		dispatch_durability_risk(state, "changed", next_reason)
+	end
+end
+
+local function get_durability_status(self: Record): (DurabilityStatus?, ResultCode, string?)
+	local state = private[self]
+	if state == nil then return nil, "invalid", "record does not exist" end
+	track_external_data_mutation(state)
+	evaluate_durability_risk(self, state)
+	return durability_status_for_state(state), "success", nil
+end
+
+local function subscribe_durability_risk(self: Record, observer: DurabilityRiskObserver): (ChangeSubscription?, ResultCode, string?)
+	local state = private[self]
+	if state == nil then return nil, "invalid", "record does not exist" end
+	if type(observer) ~= "function" then return nil, "invalid", "durability-risk observer must be a function" end
+	local count = 0
+	for _ in pairs(state.durability_risk_observers) do count += 1 end
+	if count >= DURABILITY_RISK_OBSERVER_CAPACITY then
+		return nil, "capacity", "durability-risk observer capacity reached"
+	end
+	local id = state.durability_risk_observer_next_id
+	state.durability_risk_observer_next_id += 1
+	state.durability_risk_observers[id] = observer
+	local connected = true
+	local subscription: ChangeSubscription = {
+		Disconnect = function(_: ChangeSubscription)
+			if not connected then return end
+			connected = false
+			state.durability_risk_observers[id] = nil
+		end,
+	}
+	evaluate_durability_risk(self, state)
+	return subscription, "success", nil
 end
 
 local function open(self: Record, default_data: JsonValue?, recreate: boolean?): (ResultCode, string?)
@@ -8488,6 +8667,11 @@ local function make_record(name: string, scope: string, key: string, options: Op
 		options = options,
 		change_observers = {},
 		change_observer_next_id = 1,
+		durability_risk_observers = {},
+		durability_risk_observer_next_id = 1,
+		durability_risk_observer_errors = 0,
+		durability_risk_active = false,
+		durability_risk_reason = nil,
 		change_dispatch_queue = {},
 		change_dispatch_head = 1,
 		change_dispatch_tail = 0,
@@ -8573,6 +8757,8 @@ local function make_record(name: string, scope: string, key: string, options: Op
 		GetLastError = get_last_error_info,
 		GetHandoff = get_handoff,
 		SubscribeChanges = subscribe_changes,
+		GetDurabilityStatus = get_durability_status,
+		SubscribeDurabilityRisk = subscribe_durability_risk,
 		GetUserIds = get_user_ids,
 		SetUserIds = set_user_ids,
 		AddUserId = add_user_id,
@@ -8628,7 +8814,9 @@ local function start_scheduler()
 			end
 			for record in active_records do
 				local state = private[record]
-				if state ~= nil and state.state == "active" then
+				if state ~= nil then
+					evaluate_durability_risk(record, state)
+					if state.state == "active" then
 					local handled_takeover = false
 					if state.takeover_requested and not state.busy and not state.queue_busy then
 						complete_deferred_takeover(state)
@@ -8673,6 +8861,7 @@ local function start_scheduler()
 							process_queue_internal(state, 4)
 							sync_public(record)
 						end)
+					end
 					end
 				end
 			end
@@ -9078,6 +9267,52 @@ function RecordStore.get_runtime_stats(): { [string]: unknown }
 	}
 end
 
+function RecordStore.get_health_snapshot(max_records: number?): { [string]: unknown }
+	local limit = max_records or 512
+	if type(limit) ~= "number" or not math.isfinite(limit) or math.floor(limit) ~= limit or limit < 1 or limit > 4096 then
+		return { code = "invalid", message = "max_records must be an integer from 1 to 4096" }
+	end
+	local scanned, truncated = 0, false
+	local dirty_records, aged_dirty_records, uncertain_writes, risk_active_records = 0, 0, 0, 0
+	local oldest_dirty_age_seconds, latest_confirmed_save_unix = 0, 0
+	for record in active_records do
+		if scanned >= limit then truncated = true; break end
+		local state = private[record]
+		if state ~= nil then
+			scanned += 1
+			local status = durability_status_for_state(state)
+			if status.dirty then dirty_records += 1 end
+			if status.dirty_age_exceeded == true then aged_dirty_records += 1 end
+			if status.write_outcome_uncertain then uncertain_writes += 1 end
+			if state.durability_risk_active then risk_active_records += 1 end
+			if status.dirty_age_seconds ~= nil then oldest_dirty_age_seconds = math.max(oldest_dirty_age_seconds, status.dirty_age_seconds) end
+			latest_confirmed_save_unix = math.max(latest_confirmed_save_unix, status.last_confirmed_save_unix)
+		end
+	end
+	local known_risk = aged_dirty_records > 0 or uncertain_writes > 0
+	return {
+		code = "success",
+		scope = "server_local_bounded_observation",
+		state = if closing then "closing" elseif known_risk then "degraded" else "no_observed_durability_risk",
+		state_semantics = "no_observed_durability_risk is not a claim that experience-wide storage is healthy",
+		observed_at_unix = now_unix(),
+		max_dirty_age_seconds = runtime_options.max_dirty_age_seconds,
+		max_records = limit,
+		records_scanned = scanned,
+		truncated = truncated,
+		dirty_records = dirty_records,
+		aged_dirty_records = aged_dirty_records,
+		uncertain_writes = uncertain_writes,
+		risk_active_records = risk_active_records,
+		oldest_observed_dirty_age_seconds = oldest_dirty_age_seconds,
+		latest_confirmed_save_unix = latest_confirmed_save_unix,
+		active_requests = active_requests,
+		read_budget = runtime_budget_read,
+		write_budget = runtime_budget_write,
+		configured_degraded_mode = runtime_options.degraded_mode,
+	}
+end
+
 function RecordStore.run_runtime_request(
 	kind: string,
 	callback: () -> unknown,
@@ -9453,6 +9688,17 @@ RecordStore.Mock = (function()
 			return result, message
 		end,
 		read_async = read_async_mock,
+		check_durability_risks = function()
+			local checked = 0
+			for record in active_records do
+				local state = private[record]
+				if state ~= nil and state.backend.mock then
+					evaluate_durability_risk(record, state)
+					checked += 1
+				end
+			end
+			return checked
+		end,
 		claim_queue_message = mock_claim_queue_message,
 		dead_letter_queue_message = mock_dead_letter_queue_message,
 		list_versions_async = list_versions_mock,
