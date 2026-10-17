@@ -1447,8 +1447,12 @@ local function new_rollout(store, options)
 		local value, message = adapter_call(store, "GetAsync", key_for(id))
 		if message then return nil, { code = "unknown", message = message } end
 		if value == nil then return nil, { code = "not_found" } end
-		if type(value) ~= "table" or value.version ~= 1 or value.rollout_id ~= id
-			or not valid_text(value.matrix_digest, 128) or not valid_text(value.phase, 32)
+		local valid_phases = { prepared = true, ready = true, active = true, frozen = true, rollback_pending = true, rolled_back = true }
+		if type(value) ~= "table" then return nil, { code = "corrupt", message = "rollout manifest is not a table" } end
+		if value.version ~= 1 then return nil, { code = "unsupported_schema", message = "unsupported rollout manifest version" } end
+		if value.rollout_id ~= id or not valid_text(value.matrix_digest, 128)
+			or not valid_text(value.phase, 32) or not valid_phases[value.phase]
+			or not finite(value.revision) or value.revision < 1 or math.floor(value.revision) ~= value.revision
 		then
 			return nil, { code = "corrupt", message = "rollout manifest identity, revision or phase is invalid" }
 		end
@@ -1470,6 +1474,7 @@ local function new_rollout(store, options)
 		return evidence, nil
 	end
 	local function phase_update(id, expected_phase, next_phase, operation_field, operation_id, patch)
+		if not valid_text(id, 96) then return { code = "invalid", message = "rollout ID must be 1..96 bytes" } end
 		local manifest, read_error = read(id)
 		if not manifest then return read_error end
 		if manifest.phase == next_phase and operation_id ~= nil and manifest[operation_field] == operation_id then
@@ -1590,8 +1595,12 @@ local function new_rollout(store, options)
 		return copy(manifest)
 	end
 	function api:CanUseAsync(id, operation)
+		local known_operations = {
+			read = true, enqueue = true, process = true, recover = true, renew_claim = true,
+			acknowledge = true, reconcile = true, replay = true, discard = true, maintenance = true,
+		}
+		if not valid_text(operation, 32) or not known_operations[operation] then return false, "operation is invalid or unsupported" end
 		if operation == "read" then return true, "read-only diagnostics allowed" end
-		if not valid_text(operation, 32) then return false, "operation is invalid" end
 		local manifest, read_error = read(id)
 		if not manifest then return false, "rollout state is unavailable: " .. tostring(read_error and read_error.code), read_error end
 		if manifest.phase == "active" then return true, manifest.phase, copy(manifest) end
