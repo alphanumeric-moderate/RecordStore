@@ -251,6 +251,9 @@ local mailbox = MailboxV2.new(store, owner, {
         return HttpService:JSONEncode(value)
     end,
 })
+-- Explicitly route Record:EnqueueAsync through this mailbox. Unbound Records keep the legacy path.
+local bind_code, bind_error = record:BindMailboxV2(mailbox)
+assert(bind_code == "success", bind_error)
 
 local V2 = RecordStoreV2.new(RecordStore, MailboxV2, {
     acceleration_module = Acceleration,
@@ -298,10 +301,13 @@ makes reprocessing the same mailbox message safe after a crash. Arbitrary effect
 transaction remain at-least-once and need their own durable idempotency/reconciliation.
 
 The v2 service exposes bounded inbox batches, grouped outbox dispatch, transaction receipts, a
-server-local governor wired through RecordStore's actual request gate, revisioned runtime policy,
+server-local governor wired through RecordStore's actual request gate, revisioned runtime profiles,
 critical save/release reserve, backpressure and telemetry, purchase-receipt handling, schema
 migrations, transfer sagas, Profile Doctor and guarded restore, RTBF erasure planning, eventual
 projections and unique reservations, tracing, payload/codec utilities, and resumable compaction.
+After explicit `Record:BindMailboxV2(mailbox)`, existing `Record:EnqueueAsync` calls go through the
+bound V2 mailbox; an unbound Record retains the legacy queue behavior. Important operations should
+supply a caller-stable `idempotency_key` in the optional enqueue options.
 
 The DataStore adapter preserves key UserIds/metadata on updates and uses the shared RecordStore
 request gate. It intentionally exposes no unconditional physical-delete method. The wake-up
