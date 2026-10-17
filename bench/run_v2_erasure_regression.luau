@@ -69,6 +69,30 @@ local execution = unverified:ExecuteAsync(111, "erasure-unverified-coverage", 16
 assert(execution.code == "blocked", "erasure with incomplete template coverage was not blocked: " .. tostring(execution.code))
 assert(delete_calls == 0, "erasure invoked deletion before coverage verification")
 
+local long_template_coordinator = V2.Erasure.new(new_store(), {
+	{
+		name = "long_rendered_template",
+		templates = {
+			{ name = "PlayerData", scope = "global", key = string.rep("x", 38) .. "{user_id}" },
+		},
+		templates_verified = true,
+		inventory_verified = true,
+		inventory = function(user_id)
+			return { { key = "Player_" .. tostring(user_id), generation = 1 } }
+		end,
+		fence_user = function() return true end,
+		dependencies_clear = function() return true end,
+		redact_or_delete_if_generation = function() delete_calls += 1; return "deleted" end,
+	},
+}, {
+	verify_templates = function() return true end,
+})
+local invalid_rendered_plan = long_template_coordinator:PlanAsync(1234567890123456, "erasure-long-rendered-key")
+assert(invalid_rendered_plan.code == "invalid",
+	"an RTBF template that exceeds the 50-byte DataStore key bound after substitution was accepted")
+assert(long_template_coordinator:ExecuteAsync(1234567890123456, "erasure-long-rendered-key", 1).code == "not_found",
+	"invalid rendered key unexpectedly created an executable erasure plan")
+
 local overflow_store = new_store()
 local overflow_family = family(true, function(user_id, maximum)
 	local items = table.create(maximum + 1)
