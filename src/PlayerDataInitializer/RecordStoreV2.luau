@@ -954,6 +954,14 @@ local function new_doctor(record_store)
 		local request = { kind = "guarded_restore", restore_id = restore_id, operator_id = operator_id, reason = reason, expected_revision = expected_revision, historical_digest = digest(historical_text) }
 		local result = transaction_run(record, "rv2:restore:" .. digest(restore_id), request, function(current)
 			if type(current) ~= "table" then error("restore requires table profile") end
+			-- The external erasure lookup above is advisory and can race a write.
+			-- The durable profile-key tombstone is checked again inside the same
+			-- profile transaction that would otherwise restore historical data.
+			local erasure_tombstone_key = RESERVED .. "erasure_tombstone"
+			local tombstone = current[erasure_tombstone_key]
+			if tombstone ~= nil and tombstone ~= false then
+				error("restore is blocked by the durable profile erasure tombstone")
+			end
 			local merged = {}
 			for key, value in pairs(current) do if type(key) ~= "string" or not string.find(key, "^" .. RESERVED, 1) then merged[key] = copy(value) end end
 			for key, value in pairs(historical_data) do if type(key) ~= "string" or not string.find(key, "^" .. RESERVED, 1) then merged[key] = copy(value) end end
