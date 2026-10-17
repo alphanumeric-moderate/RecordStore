@@ -2702,6 +2702,70 @@ function V2.new(record_store, mailbox_module, options)
 		end)
 	end
 	api.GetSchedulerDispatchStats = function() return copy(dispatch_metrics) end
+	local function enqueue_scheduled_callback(owner, lane, reason, callback, due_at_ms)
+		if type(callback) ~= "function" then return { code = "invalid", message = "scheduled callback is required" } end
+		local owner_material, owner_error = request_material(owner)
+		if owner_material == nil then return { code = "invalid", message = owner_error or "owner identity is invalid" } end
+		dispatch_sequence += 1
+		local job_id = "rv2job:" .. tostring(dispatch_sequence)
+		local due_now = if finite(due_at_ms) then due_at_ms
+			elseif options.runtime ~= nil and type(options.runtime.now_ms) == "function" then options.runtime.now_ms()
+			else os.clock() * 1000
+		local accepted = runtime_governor:Enqueue({
+			id = job_id,
+			owner_id = digest(owner_material),
+			lane = lane or "normal",
+			due_at_ms = due_now,
+			wake_reason = reason,
+		})
+		if type(accepted) ~= "table" or accepted.code ~= "accepted" then
+			dispatch_metrics.rejected += 1
+			return { code = if type(accepted) == "table" then accepted.code else "unknown",
+				message = if type(accepted) == "table" then accepted.message else "scheduler rejected work" }
+		end
+		dispatch_callbacks[job_id] = callback
+		dispatch_metrics.accepted += 1
+		kick_dispatcher()
+		return { code = "accepted", job_id = job_id }
+	end
+	-- Outbox dispatch is a durable side-effect runner. The selector is advisory
+	-- and server-local; source outbox rows remain the authority and must be
+	-- polled again after overload, restart, or a rejected wake-up.
+	api.ScheduleOutboxDispatch = function(owner, record, dispatcher, batch_size, max_batches, on_complete, schedule_options)
+		schedule_options = schedule_options or {}
+		if type(record) ~= "table" or (type(record.DispatchOutboxBatchAsync) ~= "function"
+			and type(record.DispatchOutboxAsync) ~= "function")
+		then
+			return { code = "invalid", message = "a Record with outbox dispatch APIs is required" }
+		end
+		if type(dispatcher) ~= "function" then return { code = "invalid", message = "outbox dispatcher is required" } end
+		if on_complete ~= nil and type(on_complete) ~= "function" then return { code = "invalid", message = "on_complete must be a function" } end
+		return enqueue_scheduled_callback(owner, schedule_options.lane or "background", "outbox_dispatch", function()
+			local result = api.Outbox.DispatchBatches(record, dispatcher, batch_size, max_batches)
+			if type(on_complete) == "function" then
+				local completed, callback_error = pcall(on_complete, copy(result))
+				if not completed then error("outbox completion callback failed: " .. tostring(callback_error)) end
+			end
+		end, schedule_options.due_at_ms)
+	end
+	-- Maintenance uses this same work selector but stays bounded and resumable:
+	-- callback code must process one bounded chunk and persist its own cursor.
+	api.ScheduleMaintenance = function(owner, maintenance_id, callback, schedule_options)
+		schedule_options = schedule_options or {}
+		if not valid_text(maintenance_id, 96) then return { code = "invalid", message = "maintenance_id must be 1..96 bytes" } end
+		if type(callback) ~= "function" then return { code = "invalid", message = "maintenance callback is required" } end
+		local lane = schedule_options.lane or "background"
+		if lane ~= "high" and lane ~= "normal" and lane ~= "background" and lane ~= "lease_renewal" then
+			return { code = "invalid", message = "maintenance lane is unsupported" }
+		end
+		return enqueue_scheduled_callback(owner, lane, "maintenance:" .. maintenance_id, function()
+			local result = callback(maintenance_id)
+			if type(schedule_options.on_complete) == "function" then
+				local completed, callback_error = pcall(schedule_options.on_complete, copy(result))
+				if not completed then error("maintenance completion callback failed: " .. tostring(callback_error)) end
+			end
+		end, schedule_options.due_at_ms)
+	end
 	api.BindMailboxWakeups = function(accelerator, owner, mailbox, handler, max_messages_per_wake)
 		if type(accelerator) ~= "table" or type(accelerator.Register) ~= "function" then
 			return false, "an initialized RecordStoreV2Acceleration instance is required"
