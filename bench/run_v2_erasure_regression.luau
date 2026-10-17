@@ -41,7 +41,7 @@ local function family(verified, inventory)
 		templates_verified = verified,
 		inventory_verified = verified,
 		inventory = inventory or function(user_id)
-			return { { key = "Player_" .. tostring(user_id), generation = 1 } }
+			return { { store_name = "PlayerData", scope = "global", key = "Player_" .. tostring(user_id), generation = 1 } }
 		end,
 		fence_user = function(_user_id, _erasure_id)
 			fence_calls += 1
@@ -78,7 +78,7 @@ local long_template_coordinator = V2.Erasure.new(new_store(), {
 		templates_verified = true,
 		inventory_verified = true,
 		inventory = function(user_id)
-			return { { key = "Player_" .. tostring(user_id), generation = 1 } }
+			return { { store_name = "PlayerData", scope = "global", key = "Player_" .. tostring(user_id), generation = 1 } }
 		end,
 		fence_user = function() return true end,
 		dependencies_clear = function() return true end,
@@ -97,7 +97,7 @@ local overflow_store = new_store()
 local overflow_family = family(true, function(user_id, maximum)
 	local items = table.create(maximum + 1)
 	for i = 1, maximum + 1 do
-		items[i] = { key = ("Player_%d_%d"):format(user_id, i), generation = 1 }
+		items[i] = { store_name = "PlayerData", scope = "global", key = ("Player_%d_%d"):format(user_id, i), generation = 1 }
 	end
 	return items
 end)
@@ -126,12 +126,16 @@ assert(fence_calls >= 1, "verified erasure did not fence writers before deleting
 local deleted_before_resume = delete_calls
 local multi_item_family = family(true, function(user_id)
 	return {
-		{ key = "Player_" .. tostring(user_id) .. "_one", generation = 1 },
-		{ key = "Player_" .. tostring(user_id) .. "_two", generation = 2 },
+		{ store_name = "PlayerData", scope = "global", key = "Player_" .. tostring(user_id) .. "_one", generation = 1 },
+		{ store_name = "PlayerData", scope = "global", key = "Player_" .. tostring(user_id) .. "_two", generation = 2 },
 	}
 end)
+multi_item_family.templates = {
+	{ name = "PlayerData", scope = "global", key = "Player_{user_id}_one" },
+	{ name = "PlayerData", scope = "global", key = "Player_{user_id}_two" },
+}
 local resumable = V2.Erasure.new(new_store(), { multi_item_family }, {
-	verify_templates = function(_user_id, rendered) return type(rendered) == "table" and #rendered == 1 end,
+	verify_templates = function(_user_id, rendered) return type(rendered) == "table" and #rendered == 2 end,
 })
 local resumable_plan = resumable:PlanAsync(114, "erasure-resume")
 assert(resumable_plan.rtbf_coverage_verified == true, "resumable fixture coverage was not verified")
@@ -148,10 +152,14 @@ local concurrent_coordinator
 local nested_started = false
 local concurrent_family = family(true, function(user_id)
 	return {
-		{ key = "Player_" .. tostring(user_id) .. "_first", generation = 1 },
-		{ key = "Player_" .. tostring(user_id) .. "_second", generation = 2 },
+		{ store_name = "PlayerData", scope = "global", key = "Player_" .. tostring(user_id) .. "_first", generation = 1 },
+		{ store_name = "PlayerData", scope = "global", key = "Player_" .. tostring(user_id) .. "_second", generation = 2 },
 	}
 end)
+concurrent_family.templates = {
+	{ name = "PlayerData", scope = "global", key = "Player_{user_id}_first" },
+	{ name = "PlayerData", scope = "global", key = "Player_{user_id}_second" },
+}
 concurrent_family.redact_or_delete_if_generation = function(item, user_id, erasure_id)
 	delete_calls += 1
 	local outer_first_action = false
@@ -165,7 +173,7 @@ concurrent_family.redact_or_delete_if_generation = function(item, user_id, erasu
 	return "deleted"
 end
 concurrent_coordinator = V2.Erasure.new(concurrent_store, { concurrent_family }, {
-	verify_templates = function(_user_id, rendered) return type(rendered) == "table" and #rendered == 1 end,
+	verify_templates = function(_user_id, rendered) return type(rendered) == "table" and #rendered == 2 end,
 })
 local concurrent_plan = concurrent_coordinator:PlanAsync(116, "erasure-concurrent-progress")
 assert(concurrent_plan.rtbf_coverage_verified == true, "concurrent fixture did not attest coverage")
