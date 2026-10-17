@@ -535,6 +535,7 @@ type InternalState = {
 	retired: boolean,
 	takeover_requested: boolean,
 	queue_hint: boolean,
+	mailbox_v2: any?,
 	message_topic: string,
 	message_subscription: RBXScriptConnection?,
 	last_error: string?,
@@ -600,7 +601,8 @@ export type Record = {
 	PruneTransactionReceiptsAsync: (self: Record, committed_before_ms: number, max_items: number?) -> (number, ResultCode, string?),
 	PruneOutboxAsync: (self: Record, dispatched_before_ms: number, max_items: number?) -> (number, ResultCode, string?),
 	MessageAsync: (self: Record, message_type: string, data: JsonValue?) -> (ResultCode, string?),
-	EnqueueAsync: (self: Record, message_type: string, data: JsonValue?) -> (ResultCode, string?),
+	BindMailboxV2: (self: Record, mailbox: unknown) -> (ResultCode, string?),
+	EnqueueAsync: (self: Record, message_type: string, data: JsonValue?, enqueue_options: { [string]: unknown }?) -> (ResultCode, string?),
 	ProcessQueueAsync: (self: Record, max_messages: number?) -> (ResultCode, string?),
 	GetQueueAsync: (self: Record) -> ({ QueueMessage }, ResultCode, string?),
 	GetDeadLettersAsync: (self: Record) -> ({ DeadLetterMessage }, ResultCode, string?),
@@ -6313,10 +6315,65 @@ local function message(self: Record, message_type: string, data: JsonValue?): (R
 	return "success", nil
 end
 
-local function enqueue(self: Record, message_type: string, data: JsonValue?): (ResultCode, string?)
+local function bind_mailbox_v2(self: Record, mailbox: unknown): (ResultCode, string?)
 	local state = private[self]
-	if state == nil then
-		return "invalid", "record does not exist"
+	if state == nil then return "invalid", "record does not exist" end
+	if state.state ~= "active" then return "fenced", "V2 mailbox binding requires an active Record" end
+	if state.takeover_requested then return "closing", "session takeover has been requested" end
+	if type(mailbox) ~= "table" or type((mailbox :: any).GetOwner) ~= "function"
+		or type((mailbox :: any).EnqueueAsync) ~= "function"
+	then
+		return "invalid", "mailbox must expose GetOwner and EnqueueAsync"
+	end
+	local ok, owner = pcall(function() return (mailbox :: any):GetOwner() end)
+	if not ok or type(owner) ~= "table" then return "invalid", "mailbox owner identity could not be read" end
+	local owner_fields = owner :: { [string]: unknown }
+	if owner_fields.store_name ~= state.name or owner_fields.scope ~= state.scope or owner_fields.profile_key ~= state.key then
+		return "conflict", "mailbox owner does not match this Record identity"
+	end
+	if #state.user_ids > 0 and owner_fields.user_id == nil then
+		return "invalid", "mailbox owner must include a UserId for a UserId-associated Record"
+	end
+	if owner_fields.user_id ~= nil then
+		if type(owner_fields.user_id) ~= "number" or not math.isfinite(owner_fields.user_id)
+			or math.floor(owner_fields.user_id) ~= owner_fields.user_id
+		then
+			return "invalid", "mailbox owner UserId must be a finite integer"
+		end
+		local found = false
+		for _, user_id in ipairs(state.user_ids) do if user_id == owner_fields.user_id then found = true; break end end
+		if not found then return "fenced", "mailbox UserId does not match the Record's persisted UserIds" end
+	end
+	state.mailbox_v2 = mailbox
+	return "success", nil
+end
+
+local function enqueue(self: Record, message_type: string, data: JsonValue?, enqueue_options: { [string]: unknown }?): (ResultCode, string?)
+	local state = private[self]
+	if state == nil then return "invalid", "record does not exist" end
+	if state.state ~= "active" then return "fenced", "record is not actively owned" end
+	if state.takeover_requested then return "closing", "session takeover has been requested" end
+	if state.mailbox_v2 ~= nil then
+		local call_ok, result = pcall(function()
+			return (state.mailbox_v2 :: any):EnqueueAsync(message_type, data, enqueue_options)
+		end)
+		if not call_ok then
+			local error_message = tostring(result)
+			observe(state, "v2_enqueue", "unknown", error_message)
+			return "unknown", error_message
+		end
+		if type(result) ~= "table" then return "unknown", "V2 mailbox returned no structured result" end
+		if result.code == "accepted" then observe(state, "v2_enqueue", "success", message_type); return "enqueued", nil end
+		if result.code == "duplicate" then observe(state, "v2_enqueue", "duplicate", message_type); return "duplicate", nil end
+		if result.code == "capacity" then return "capacity", result.message end
+		if result.code == "conflict" then return "conflict", result.message end
+		if result.code == "invalid" then return "invalid", result.message end
+		if result.code == "retryable" then return "budget", result.message end
+		if result.code == "unknown" then return "unknown", result.message end
+		return "unknown", "unmapped V2 mailbox result: " .. tostring(result.code)
+	end
+	if enqueue_options ~= nil then
+		return "invalid", "enqueue_options require an explicitly bound V2 mailbox"
 	end
 	return enqueue_internal(state, message_type, data)
 end
@@ -8044,6 +8101,7 @@ local function make_record(name: string, scope: string, key: string, options: Op
 		retired = false,
 		takeover_requested = false,
 		queue_hint = false,
+		mailbox_v2 = nil,
 		message_topic = make_message_topic(options.message_topic_prefix or DEFAULT_MESSAGE_TOPIC_PREFIX, name, scope, key),
 		message_subscription = nil,
 		last_error = nil,
@@ -8100,6 +8158,7 @@ local function make_record(name: string, scope: string, key: string, options: Op
 		PruneTransactionReceiptsAsync = prune_transaction_receipts,
 		PruneOutboxAsync = prune_outbox,
 		MessageAsync = message,
+		BindMailboxV2 = bind_mailbox_v2,
 		EnqueueAsync = enqueue,
 		ProcessQueueAsync = process_queue,
 		GetQueueAsync = get_queue,
