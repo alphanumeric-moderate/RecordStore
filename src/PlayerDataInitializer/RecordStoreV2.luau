@@ -1431,6 +1431,185 @@ local function new_erasure(store, families, options)
 	return coordinator
 end
 
+local function new_rollout(store, options)
+	options = options or {}
+	local api = {}
+	local verifiers = {
+		compatibility = options.verify_compatibility,
+		writers_drained = options.verify_writers_drained,
+		activation_frozen = options.verify_activation_frozen,
+		rollback_rehearsed = options.verify_rollback_rehearsed,
+		profile_key_fencing = options.verify_profile_key_fencing,
+	}
+	local required_verifiers = { "compatibility", "writers_drained", "activation_frozen", "rollback_rehearsed", "profile_key_fencing" }
+	local function key_for(id) return "rv2rollout-" .. digest(id) end
+	local function read(id)
+		local value, message = adapter_call(store, "GetAsync", key_for(id))
+		if message then return nil, { code = "unknown", message = message } end
+		if value == nil then return nil, { code = "not_found" } end
+		if type(value) ~= "table" or value.version ~= 1 or value.rollout_id ~= id
+			or not valid_text(value.matrix_digest, 128) or not valid_text(value.phase, 32)
+		then
+			return nil, { code = "corrupt", message = "rollout manifest identity, revision or phase is invalid" }
+		end
+		return value, nil
+	end
+	local function attest(id, manifest)
+		local evidence = {}
+		for _, name in ipairs(required_verifiers) do
+			local verifier = verifiers[name]
+			if type(verifier) ~= "function" then
+				return nil, { code = "unsupported", message = "rollout requires verifier: " .. name }
+			end
+			local verified, evidence_id = io_call(verifier, id, copy(manifest))
+			if verified ~= true or not valid_text(evidence_id, 256) then
+				return nil, { code = "blocked", message = "rollout verifier failed or supplied no durable evidence reference: " .. name }
+			end
+			evidence[name] = { evidence_id = evidence_id, verified_at = os.time() }
+		end
+		return evidence, nil
+	end
+	local function phase_update(id, expected_phase, next_phase, operation_field, operation_id, patch)
+		local manifest, read_error = read(id)
+		if not manifest then return read_error end
+		if manifest.phase == next_phase and operation_id ~= nil and manifest[operation_field] == operation_id then
+			local result = copy(manifest); result.code = "duplicate"; return result
+		end
+		if manifest.phase ~= expected_phase then
+			return { code = "conflict", phase = manifest.phase, message = "expected rollout phase " .. expected_phase }
+		end
+		local now = os.time()
+		local updated, update_error = adapter_call(store, "UpdateAsync", key_for(id), function(old)
+			if type(old) ~= "table" or old.rollout_id ~= id or old.matrix_digest ~= manifest.matrix_digest then return old end
+			if old.phase ~= expected_phase or old.revision ~= manifest.revision then return old end
+			local next_value = copy(old)
+			next_value.phase = next_phase
+			next_value.revision = (old.revision or 0) + 1
+			next_value.updated_at = now
+			if operation_field ~= nil then next_value[operation_field] = operation_id end
+			for name, value in pairs(patch or {}) do next_value[name] = copy(value) end
+			return next_value
+		end)
+		if update_error ~= nil then
+			local reconciled, reconcile_error = read(id)
+			if reconciled and reconciled.phase == next_phase
+				and (operation_id == nil or reconciled[operation_field] == operation_id)
+			then
+				reconciled.code = "committed_reconciled"
+				return reconciled
+			end
+			return { code = "unknown", message = update_error .. (reconcile_error and ("; reconcile: " .. tostring(reconcile_error.message)) or "") }
+		end
+		if type(updated) ~= "table" or updated.rollout_id ~= id then return { code = "conflict", message = "rollout manifest changed identity" } end
+		if updated.phase ~= next_phase or (operation_id ~= nil and updated[operation_field] ~= operation_id) then
+			return { code = "conflict", phase = updated.phase, message = "rollout phase changed concurrently" }
+		end
+		updated.code = "committed"
+		return copy(updated)
+	end
+	function api:PrepareAsync(id, matrix_digest)
+		if not valid_text(id, 96) or not valid_text(matrix_digest, 128) then return { code = "invalid" } end
+		local now = os.time()
+		local initial = {
+			version = 1, rollout_id = id, matrix_digest = matrix_digest, phase = "prepared",
+			revision = 1, attestations = {}, created_at = now, updated_at = now,
+		}
+		local value, message = adapter_call(store, "UpdateAsync", key_for(id), function(old)
+			if old ~= nil then return old end
+			return initial
+		end)
+		if message then
+			local observed, observe_error = read(id)
+			if observed and observed.matrix_digest == matrix_digest then observed.code = "unknown_reconciled"; return observed end
+			return { code = "unknown", message = message or (observe_error and observe_error.message) }
+		end
+		if type(value) ~= "table" or value.rollout_id ~= id or value.matrix_digest ~= matrix_digest then
+			return { code = "conflict", message = "rollout ID is already bound to another matrix digest" }
+		end
+		local result = copy(value)
+		result.code = if value.phase == "prepared" then "prepared" else "duplicate"
+		return result
+	end
+	function api:AttestAsync(id)
+		local manifest, read_error = read(id)
+		if not manifest then return read_error end
+		if manifest.phase ~= "prepared" then return { code = "conflict", phase = manifest.phase } end
+		local evidence, evidence_error = attest(id, manifest)
+		if not evidence then return evidence_error end
+		return phase_update(id, "prepared", "ready", "attestation_operation_id", digest(id .. ":attest:" .. tostring(manifest.revision)), {
+			attestations = evidence,
+		})
+	end
+	function api:ActivateAsync(id, activation_id)
+		if not valid_text(activation_id, 96) then return { code = "invalid", message = "activation_id must be stable and 1..96 bytes" } end
+		local manifest, read_error = read(id)
+		if not manifest then return read_error end
+		if manifest.phase == "active" and manifest.activation_id == activation_id then
+			local result = copy(manifest); result.code = "duplicate"; return result
+		end
+		if manifest.phase ~= "ready" then return { code = "conflict", phase = manifest.phase, message = "rollout must be ready before activation" } end
+		local evidence, evidence_error = attest(id, manifest)
+		if not evidence then return evidence_error end
+		return phase_update(id, "ready", "active", "activation_id", activation_id, { attestations = evidence, activated_at = os.time() })
+	end
+	function api:FreezeAsync(id, freeze_id)
+		if not valid_text(freeze_id, 96) then return { code = "invalid" } end
+		return phase_update(id, "active", "frozen", "freeze_id", freeze_id, { frozen_at = os.time() })
+	end
+	function api:BeginRollbackAsync(id, rollback_id)
+		if not valid_text(rollback_id, 96) then return { code = "invalid" } end
+		return phase_update(id, "frozen", "rollback_pending", "rollback_id", rollback_id, { rollback_started_at = os.time() })
+	end
+	function api:CompleteRollbackAsync(id, rollback_id)
+		if not valid_text(rollback_id, 96) then return { code = "invalid" } end
+		local manifest, read_error = read(id)
+		if not manifest then return read_error end
+		if manifest.phase == "rolled_back" and manifest.rollback_id == rollback_id then
+			local result = copy(manifest); result.code = "duplicate"; return result
+		end
+		if manifest.phase ~= "rollback_pending" or manifest.rollback_id ~= rollback_id then
+			return { code = "conflict", phase = manifest.phase, message = "rollback must be frozen and match the rollback ID" }
+		end
+		if type(options.verify_rollback_completed) ~= "function" then
+			return { code = "unsupported", message = "rollback completion needs a verifier for old-writer restoration and V2 fencing" }
+		end
+		local verified, evidence_id = io_call(options.verify_rollback_completed, id, copy(manifest))
+		if verified ~= true or not valid_text(evidence_id, 256) then
+			return { code = "blocked", message = "rollback completion is not verified" }
+		end
+		return phase_update(id, "rollback_pending", "rolled_back", "rollback_id", rollback_id, {
+			rollback_evidence = { evidence_id = evidence_id, verified_at = os.time() },
+			rolled_back_at = os.time(),
+		})
+	end
+	function api:GetStatusAsync(id)
+		if not valid_text(id, 96) then return { code = "invalid" } end
+		local manifest, read_error = read(id)
+		if not manifest then return read_error end
+		manifest.code = "success"
+		return copy(manifest)
+	end
+	function api:CanUseAsync(id, operation)
+		if operation == "read" then return true, "read-only diagnostics allowed" end
+		if not valid_text(operation, 32) then return false, "operation is invalid" end
+		local manifest, read_error = read(id)
+		if not manifest then return false, "rollout state is unavailable: " .. tostring(read_error and read_error.code), read_error end
+		if manifest.phase == "active" then return true, manifest.phase, copy(manifest) end
+		local drain_operations = {
+			process = true, recover = true, renew_claim = true, acknowledge = true, reconcile = true,
+		}
+		if (manifest.phase == "frozen" or manifest.phase == "rollback_pending") and drain_operations[operation] then
+			return true, manifest.phase, copy(manifest)
+		end
+		return false, "rollout phase " .. tostring(manifest.phase) .. " denies operation " .. operation, copy(manifest)
+	end
+	function api:ActivationGuard(id, operation)
+		local allowed, message, state = self:CanUseAsync(id, operation)
+		return allowed, if allowed then nil else message, state
+	end
+	return api
+end
+
 local function new_projections(store, options)
 	options = options or {}
 	local service = { store = store, projections = {} }
