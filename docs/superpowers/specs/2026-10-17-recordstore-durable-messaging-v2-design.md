@@ -1661,7 +1661,7 @@ The branch includes the segmented mailbox/DLQ and preparation protocol; transact
 
 Important limitations remain explicit:
 
-- The existing core `Record:EnqueueAsync`/queue path has not been replaced by, or automatically bridged into, the opt-in V2 mailbox API. Applications must opt in to the V2 API and use the documented adapter/session binding.
+- The existing core `Record:EnqueueAsync` retains the legacy behavior unless the active Record is explicitly bound with `Record:BindMailboxV2(mailbox)`. That opt-in bridge checks mailbox store/scope/profile key and persisted UserIds; unbound Records and pre-existing legacy queue rows are not migrated automatically.
 - Strict non-nil `ordering_key` continues to be rejected, as required by the initial design contract. Priority is advisory selection among eligible work.
 - Cross-profile changes remain sagas; arbitrary external effects remain at-least-once. RTBF completeness requires application-verified templates and inventory, writer fencing, dependency clearance and generation-aware deletion/redaction.
 - The compatibility bridge, old-writer drain, fully exercised rollback protocol, end-to-end tracing coverage, and integration of every advanced scheduling/performance policy remain incomplete or unverified.
