@@ -2905,7 +2905,7 @@ function V2.new(record_store, mailbox_module, options)
 	guard_factory(api.Erasure, "new", { PlanAsync = "erase_plan", ExecuteAsync = "erase_execute" })
 	guard_factory(api.Projections, "new", { ApplyAsync = "projection", RebuildAsync = "projection", ReserveUnique = "projection" })
 	guard_factory(api.Tracing, "new", { FlushAsync = "trace_flush" })
-	guard_factory(api.Maintenance, "new_compactor", { RunStep = "maintenance", Resume = "maintenance" })
+	guard_factory(api.Maintenance, "NewCompactor", { RunStep = "maintenance", Resume = "maintenance" })
 
 	local receipt_factory = api.ReceiptProcessor.new
 	api.ReceiptProcessor.new = function(config)
