@@ -49,6 +49,8 @@ type Options = {
 	retry_base_ms: number?,
 	retry_max_ms: number?,
 	priority_aging_ms: number?,
+	activation_guard: ((string) -> (boolean, string?))?,
+	allow_unattested_activation: boolean?,
 }
 type Locator = { slot: number, generation: number, key: string }
 type Result = {
@@ -340,6 +342,9 @@ function MailboxV2.new(store: unknown, owner_value: Owner, options_value: Option
 	if type(options.encode) ~= "function" then
 		error("options.encode must provide the exact serialized representation used by the DataStore adapter", 2)
 	end
+	if type(options.activation_guard) ~= "function" and options.allow_unattested_activation ~= true then
+		error("mailbox v2 requires activation_guard; allow_unattested_activation=true is reserved for isolated tests or explicitly unsafe staging", 2)
+	end
 	options.max_segments = options.max_segments or DEFAULT_MAX_SEGMENTS
 	options.segment_max_messages = options.segment_max_messages or DEFAULT_SEGMENT_MAX_MESSAGES
 	options.max_payload_bytes = options.max_payload_bytes or DEFAULT_MAX_PAYLOAD_BYTES
@@ -394,6 +399,23 @@ function MailboxV2.new(store: unknown, owner_value: Owner, options_value: Option
 		wakeup_publish_errors = 0,
 	}
 	return setmetatable(self, MailboxV2) :: Mailbox
+end
+
+
+function MailboxV2._check_activation(self: Mailbox, operation: string): Result?
+	if self.options.allow_unattested_activation == true then return nil end
+	local guard = self.options.activation_guard
+	if type(guard) ~= "function" then
+		return ok("disabled", nil, nil, "mailbox v2 has no authoritative rollout activation guard")
+	end
+	local call_ok, allowed, message = pcall(guard, operation)
+	if not call_ok then
+		return ok("unknown", nil, nil, "rollout activation guard failed: " .. tostring(allowed))
+	end
+	if allowed ~= true then
+		return ok("disabled", nil, nil, tostring(message or ("rollout gate denied " .. operation)))
+	end
+	return nil
 end
 
 function MailboxV2._now(self: Mailbox): number
@@ -1380,6 +1402,8 @@ local function verify_active_record(self: Mailbox): (string, string?)
 end
 
 function MailboxV2.EnqueueAsync(self: Mailbox, message_type: string, payload: unknown, enqueue_options: Dict?): Result
+	local activation = self:_check_activation("enqueue")
+	if activation ~= nil then return activation end
 	if type(message_type) ~= "string" or message_type == "" or #message_type > 100 then
 		return ok("invalid", nil, nil, "message_type must be 1 to 100 bytes")
 	end
@@ -1718,6 +1742,8 @@ end
 -- Renew a still-live claim using its existing fencing token. Expired claims are
 -- never resurrected; ambiguous writes are reconciled by reading the canonical row.
 function MailboxV2.RenewClaimAsync(self: Mailbox, message_id: string, claim_token: string): Result
+	local activation = self:_check_activation("renew_claim")
+	if activation ~= nil then return activation end
 	if type(message_id) ~= "string" or message_id == "" or #message_id > MAX_KEY_LENGTH then
 		return ok("invalid", message_id, nil, "message_id must be a valid v2 key")
 	end
@@ -1974,6 +2000,8 @@ local function process_next_internal(self: Mailbox, handler: (unknown, Dict, Han
 end
 
 function MailboxV2.ProcessNextAsync(self: Mailbox, handler: (unknown, Dict, HandlerContext?) -> (unknown, string?)): Result
+	local activation = self:_check_activation("process")
+	if activation ~= nil then return activation end
 	if self.processing then return ok("busy", nil, nil, "a ProcessNextAsync call is already running on this mailbox instance") end
 	self.processing = true
 	local call_ok, result = pcall(process_next_internal, self, handler)
@@ -1984,6 +2012,8 @@ function MailboxV2.ProcessNextAsync(self: Mailbox, handler: (unknown, Dict, Hand
 end
 
 function MailboxV2.RecoverAsync(self: Mailbox): Result
+	local activation = self:_check_activation("recover")
+	if activation ~= nil then return activation end
 	local capacity_blocked_preparations = 0
 	for shard = 1, (self.options.preparation_shard_count :: number) do
 		local raw, read_error = self:_get(self:_registry_key(shard))
@@ -2169,6 +2199,8 @@ function MailboxV2.GetDeadLettersAsync(self: Mailbox, cursor: string?, page_size
 end
 
 function MailboxV2.ReplayDeadLetterAsync(self: Mailbox, message_id: string, operation_id: string): Result
+	local activation = self:_check_activation("replay")
+	if activation ~= nil then return activation end
 	local replay_now = self:_now()
 	if type(operation_id) ~= "string" or operation_id == "" or #operation_id > 256 then
 		return ok("invalid", message_id, nil, "replay operation_id must be 1 to 256 bytes")
@@ -2235,6 +2267,8 @@ function MailboxV2.ReplayDeadLetterAsync(self: Mailbox, message_id: string, oper
 end
 
 function MailboxV2.DiscardDeadLetterAsync(self: Mailbox, message_id: string, expected_replay_count: number): Result
+	local activation = self:_check_activation("discard")
+	if activation ~= nil then return activation end
 	local discarded_at = self:_now()
 	local discarded, discard_error = self:_update_message(message_id, function(current)
 		if current == nil or current.state ~= "dead_lettered" or current.replay_count ~= expected_replay_count then
@@ -2290,6 +2324,8 @@ function MailboxV2.GetStatsAsync(self: Mailbox): (Dict, Result)
 end
 
 function MailboxV2.ReclaimAsync(self: Mailbox): Result
+	local activation = self:_check_activation("maintenance")
+	if activation ~= nil then return activation end
 	local reclaimed_active = self:_reclaim_slot("active")
 	local reclaimed_dlq = self:_reclaim_slot("dlq")
 	return ok(if reclaimed_active or reclaimed_dlq then "success" else "empty", nil, nil, nil)
