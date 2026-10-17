@@ -1345,11 +1345,25 @@ local function new_erasure(store, families, options)
 			if clear ~= true then return { code = "blocked", cursor = index - 1, message = dependency_error or "live dependency blocks deletion" }
 			local status, action_error = io_call(family.redact_or_delete_if_generation, entry.item, user_id, erasure_id)
 			if status ~= "deleted" and status ~= "redacted" then
-				adapter_call(store, "UpdateAsync", key, function(old)
+				local observed, state_error = adapter_call(store, "UpdateAsync", key, function(old)
 					if type(old) ~= "table" or old.erasure_id ~= erasure_id then return old end
-					local value = copy(old); value.status = if status == "unknown" then "unknown" else "in_progress"; value.last_error = text_error(action_error or status, 256); return value
+					-- Do not regress a checkpoint another worker has already committed.
+					if old.status == "completed" or (finite(old.cursor) and old.cursor >= index) then return old end
+					local value = copy(old)
+					value.status = if status == "unknown" then "unknown" else "in_progress"
+					value.last_error = text_error(action_error or status, 256)
+					return value
 				end)
-				return { code = if status == "unknown" then "unknown" else "retryable", cursor = index - 1, message = action_error or "delete outcome unresolved" }
+				if state_error == nil and type(observed) == "table" and observed.erasure_id == erasure_id
+					and (observed.status == "completed" or (finite(observed.cursor) and observed.cursor >= index))
+				then
+					return { code = if observed.status == "completed" then "committed" else "incomplete",
+						cursor = observed.cursor, completed_count = observed.completed_count,
+						rtbf_coverage_verified = observed.rtbf_coverage_verified == true,
+						message = "another worker already checkpointed this generation-safe action" }
+				end
+				return { code = if status == "unknown" or state_error ~= nil then "unknown" else "retryable",
+					cursor = index - 1, message = action_error or state_error or "delete outcome unresolved" }
 			end
 			completed += 1
 			local updated, progress_error = adapter_call(store, "UpdateAsync", key, function(old)
