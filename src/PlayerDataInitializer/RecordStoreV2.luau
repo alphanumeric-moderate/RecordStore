@@ -1437,7 +1437,7 @@ local function new_erasure(store, families, options)
 		if status.status == "planned" or status.status == "in_progress" or status.status == "completed" then
 			return true, status
 		end
-		if status.status == "cancelled" then return false, status end
+		-- Unknown states, including cancellation without a defined protocol, remain blocked.
 		-- Unknown states, blocked operations, or future schema revisions must not
 		-- be interpreted as permission to recreate user-associated data.
 		return nil, { code = "unsupported", message = "erasure state is unresolved or unsupported", state = status.status }
