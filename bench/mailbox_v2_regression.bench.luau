@@ -40,6 +40,7 @@ local function make_mailbox(overrides)
 		encode = function(value)
 			return serde.encode("json", value)
 		end,
+		allow_unattested_activation = true,
 	}
 	for key, value in overrides or {} do
 		options[key] = value
@@ -287,6 +288,7 @@ do
 		now_ms = function() return 1_000_000 end,
 		guid = function() return "restart-guid" end,
 		encode = function(value) return serde.encode("json", value) end,
+		allow_unattested_activation = true,
 	})
 	local delivery, delivery_result = fresh_mailbox:GetDeliveryAsync(interrupted.message_id)
 	expect_code(delivery_result, "success", "preparation status after restart")
@@ -387,6 +389,7 @@ do
 				now_ms = function() return 1_000_000 end,
 				guid = function() return "fault-matrix-restart" end,
 				encode = function(value) return serde.encode("json", value) end,
+			allow_unattested_activation = true,
 			})
 			local recovery = restarted:RecoverAsync()
 			if recovery.code == "unknown" then
