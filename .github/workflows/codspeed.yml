@@ -35,6 +35,7 @@ jobs:
       - name: Check the regression suite passes
         run: |
           lune run bench/run_regression_tests.luau
+          lune run bench/mailbox_v2_regression.bench.luau
           lune run bench/run_codenum_regression_tests.luau
           lune run bench/run_codenumvalue_regression_tests.luau
           lune run bench/run_playerdata_set_regression_tests.luau
