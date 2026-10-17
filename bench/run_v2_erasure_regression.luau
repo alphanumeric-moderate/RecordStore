@@ -2,6 +2,7 @@
 -- Verifies that erasure refuses unverified coverage and never silently truncates inventories.
 -- Uses deterministic in-memory storage; this is not Roblox service acceptance evidence.
 local Shim = require("./RobloxShim")
+local Fake = Shim.FakeDataStore
 local RecordStore = Shim.load_isolated("erasure-regression")
 local V2Module = require("../src/PlayerDataInitializer/RecordStoreV2")
 local MailboxV2 = require("../src/PlayerDataInitializer/RecordStoreMailboxV2")
@@ -122,6 +123,39 @@ local verified_result = verified:ExecuteAsync(113, "erasure-verified", 16)
 assert(verified_result.code == "committed", "verified erasure did not finish: " .. tostring(verified_result.code))
 assert(delete_calls == 1, "verified erasure did not perform exactly the one planned action")
 assert(fence_calls >= 1, "verified erasure did not fence writers before deleting")
+
+local untemplated = V2.Erasure.new(new_store(), {
+	family(true, function(user_id)
+		return { { store_name = "PlayerData", scope = "global", key = "Player_" .. tostring(user_id) .. "_unexpected", generation = 1 } }
+	end),
+}, {
+	verify_templates = function() return true end,
+})
+local untemplated_plan = untemplated:PlanAsync(121, "erasure-untemplated-inventory")
+assert(untemplated_plan.code == "success" and untemplated_plan.rtbf_coverage_verified == false,
+	"inventory key outside the declared template set was incorrectly marked complete")
+assert(untemplated_plan.coverage.player_profiles.unmatched_count == 1
+	and untemplated_plan.coverage.player_profiles.missing_count == 1,
+	"untemplated inventory did not report both the uncovered and missing identities")
+assert(untemplated:ExecuteAsync(121, "erasure-untemplated-inventory", 8).code == "blocked",
+	"erasure executed with an untemplated inventory key")
+
+local incomplete_family = family(true, function(user_id)
+	return { { store_name = "PlayerData", scope = "global", key = "Player_" .. tostring(user_id), generation = 1 } }
+end)
+incomplete_family.templates = {
+	{ name = "PlayerData", scope = "global", key = "Player_{user_id}" },
+	{ name = "PlayerData", scope = "global", key = "Backup_{user_id}" },
+}
+local incomplete = V2.Erasure.new(new_store(), { incomplete_family }, {
+	verify_templates = function() return true end,
+})
+local incomplete_plan = incomplete:PlanAsync(122, "erasure-missing-template-row")
+assert(incomplete_plan.rtbf_coverage_verified == false
+	and incomplete_plan.coverage.player_profiles.missing_count == 1,
+	"missing inventory row for a declared template was treated as verified coverage")
+assert(incomplete:ExecuteAsync(122, "erasure-missing-template-row", 8).code == "blocked",
+	"erasure executed without a row for every declared template")
 
 local deleted_before_resume = delete_calls
 local multi_item_family = family(true, function(user_id)
@@ -281,6 +315,53 @@ end)
 local unsupported = V2.Erasure.new(unsupported_store, {}, {})
 local unsupported_result = unsupported:IsErased(119)
 assert(unsupported_result == nil, "unknown/future erasure state did not fail closed")
+
+Fake:Reset()
+local profile_options = {
+	schema_version = 1,
+	retry_attempts = 2,
+	lease_duration = 60,
+	lease_renewal = 10,
+	operation_deadline = 5,
+	user_ids = { 123 },
+	metadata = { private_marker = "must be cleared" },
+	messaging_enabled = false,
+	takeover_enabled = false,
+	autosave_interval = 3600,
+	queue_poll_interval = 3600,
+}
+local profile = RecordStore.new("RecordStoreErasureProfileTest", "global", "Player_123", profile_options)
+local open_code, open_message = profile:Open({ Coins = 10 })
+assert(open_code == "created" or open_code == "loaded", tostring(open_message))
+local before_erase = profile:Stats()
+local profile_delete = V2.ProfileDoctor.DeleteIfGenerationAsync(profile, {
+	store_name = "RecordStoreErasureProfileTest",
+	scope = "global",
+	key = "Player_123",
+	generation = before_erase.generation,
+	revision = before_erase.revision,
+}, 123, "erase-profile-123")
+assert(profile_delete.code == "deleted", "ProfileDoctor did not use generation-fenced core erasure: " .. tostring(profile_delete.message))
+local after_erase = profile:Stats()
+assert(after_erase.state == "tombstoned" and after_erase.generation == before_erase.generation + 1,
+	"erase did not leave a higher-generation core tombstone")
+assert(#profile:GetUserIds() == 0, "erasure tombstone retained DataStore UserIds")
+assert(next(profile:GetMetadata()) == nil, "erasure tombstone retained custom DataStore metadata")
+assert(profile:Get() == nil, "erased profile data remained readable through the old Record")
+
+local stale_record = RecordStore.new("RecordStoreErasureProfileTest", "global", "Player_123", profile_options)
+local stale_open, stale_message = stale_record:Open({ Coins = 0 })
+assert(stale_open == "tombstoned", "normal Open recreated a generation-fenced erased profile: " .. tostring(stale_message))
+local old_generation_delete = V2.ProfileDoctor.DeleteIfGenerationAsync(stale_record, {
+	store_name = "RecordStoreErasureProfileTest",
+	scope = "global",
+	key = "Player_123",
+	generation = before_erase.generation,
+}, 123, "erase-profile-123")
+assert(old_generation_delete.code == "deleted",
+	"repeated erasure did not reconcile the already committed tombstone")
+assert(stale_record:Stats().generation == before_erase.generation + 1,
+	"repeated erasure changed the tombstone generation")
 
 print("[PASS] Erasure coverage gating, bounded inventory, immutable checkpoints, writer fencing and generation-aware deletion.")
 Shim.close()
