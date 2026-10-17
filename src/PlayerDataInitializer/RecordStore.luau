@@ -580,6 +580,7 @@ export type Record = {
 	CommitWithOutboxAsync: (self: Record, operation_id: string, request_fingerprint: string, transform: TransactionTransform, events: { OutboxEventInput }, request_material: string?) -> (ResultCode, string?),
 	GetOutboxAsync: (self: Record, max_items: number?) -> ({ OutboxEvent }, ResultCode, string?),
 	DispatchOutboxAsync: (self: Record, dispatcher: OutboxDispatcher, max_items: number?) -> (number, ResultCode, string?),
+	DispatchOutboxBatchAsync: (self: Record, dispatcher: OutboxDispatcher, max_items: number?) -> (number, ResultCode, string?),
 	PruneTransactionReceiptsAsync: (self: Record, committed_before_ms: number, max_items: number?) -> (number, ResultCode, string?),
 	PruneOutboxAsync: (self: Record, dispatched_before_ms: number, max_items: number?) -> (number, ResultCode, string?),
 	MessageAsync: (self: Record, message_type: string, data: JsonValue?) -> (ResultCode, string?),
@@ -6033,6 +6034,66 @@ local function dispatch_outbox(self: Record, dispatcher: OutboxDispatcher, max_i
 	return dispatched, "success", first_error
 end
 
+
+local function dispatch_outbox_batch(self: Record, dispatcher: OutboxDispatcher, max_items: number?): (number, ResultCode, string?)
+	if type(dispatcher) ~= "function" then return 0, "invalid", "dispatcher must be a function" end
+	local state = private[self]
+	if state == nil then return 0, "invalid", "record does not exist" end
+	local events, read_code, read_message = get_outbox(self, max_items)
+	if read_code ~= "success" then return 0, read_code, read_message end
+	if #events == 0 then return 0, "success", nil end
+
+	local outcomes: { [string]: { accepted: boolean, receipt_id: string?, reason: string? } } = {}
+	local first_error: string? = nil
+	for _, event in events do
+		-- Destination IDs are stable. If the source commit below is ambiguous, the same IDs are retried.
+		local call_ok, accepted, receipt_id = pcall(dispatcher, event)
+		local confirmed = call_ok and accepted == true
+		local reason = if not call_ok then tostring(accepted)
+			elseif accepted ~= true then tostring(receipt_id or "destination did not confirm acceptance")
+			else nil
+		outcomes[event.EventId] = {
+			accepted = confirmed,
+			receipt_id = if type(receipt_id) == "string" then receipt_id else nil,
+			reason = reason,
+		}
+		if not confirmed then first_error = first_error or reason end
+	end
+
+	local count, code, message = update_profile_sidecars(state, "outbox_dispatch_batch", function(receipts, outbox, transaction_time)
+		local updated = clone_outbox_entries(outbox)
+		local changed = 0
+		local newly_dispatched = 0
+		for _, event in events do
+			local current = updated[event.EventId]
+			local outcome = outcomes[event.EventId]
+			if current == nil then
+				return nil, nil, "not_found", "outbox event disappeared before batch result commit", 0
+			end
+			if current.state == "dispatched" then
+				continue
+			end
+			current.attempts += 1
+			changed += 1
+			if outcome.accepted then
+				current.state = "dispatched"
+				current.dispatched_at = transaction_time
+				current.last_error = nil
+				current.destination_receipt_id = outcome.receipt_id
+				newly_dispatched += 1
+			else
+				current.state = "pending"
+				current.dispatched_at = nil
+				current.last_error = string.sub(string.gsub(outcome.reason or "destination acceptance remains unconfirmed", "[^ -~]", "?"), 1, MAX_QUEUE_ERROR_LENGTH)
+			end
+		end
+		if changed == 0 then return nil, nil, "duplicate", "all selected outbox entries were already dispatched", 0 end
+		return receipts, updated, nil, nil, newly_dispatched
+	end)
+	if code == "success" then return count, code, first_error end
+	return 0, code, message or first_error
+end
+
 local function prune_transaction_receipts(self: Record, committed_before_ms: number, max_items: number?): (number, ResultCode, string?)
 	local state = private[self]
 	if state == nil then return 0, "invalid", "record does not exist" end
@@ -7893,6 +7954,7 @@ local function make_record(name: string, scope: string, key: string, options: Op
 		CommitWithOutboxAsync = commit_with_outbox,
 		GetOutboxAsync = get_outbox,
 		DispatchOutboxAsync = dispatch_outbox,
+		DispatchOutboxBatchAsync = dispatch_outbox_batch,
 		PruneTransactionReceiptsAsync = prune_transaction_receipts,
 		PruneOutboxAsync = prune_outbox,
 		MessageAsync = message,
