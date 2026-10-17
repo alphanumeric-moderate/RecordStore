@@ -4979,6 +4979,691 @@ local function reconcile(self: Record, template: JsonValue): (ResultCode, string
 	return "success", nil
 end
 
+local function clone_inbox_receipts(source: { [string]: InboxReceiptRecord }?): { [string]: InboxReceiptRecord }
+	local result: { [string]: InboxReceiptRecord } = {}
+	for operation_id, receipt in source or {} do
+		result[operation_id] = {
+			operation_id = receipt.operation_id,
+			request_fingerprint = receipt.request_fingerprint,
+			write_id = receipt.write_id,
+			revision = receipt.revision,
+			committed_at = receipt.committed_at,
+		}
+	end
+	return result
+end
+
+local function clone_outbox_entries(source: { [string]: OutboxEntryRecord }?): { [string]: OutboxEntryRecord }
+	local result: { [string]: OutboxEntryRecord } = {}
+	for event_id, event in source or {} do
+		result[event_id] = {
+			event_id = event.event_id,
+			operation_id = event.operation_id,
+			destination_store_name = event.destination_store_name,
+			destination_scope = event.destination_scope,
+			destination_profile_key = event.destination_profile_key,
+			message_type = event.message_type,
+			payload = if event.payload ~= nil then copy_value(event.payload) else nil,
+			state = event.state,
+			created_at = event.created_at,
+			attempts = event.attempts,
+			last_error = event.last_error,
+			destination_receipt_id = event.destination_receipt_id,
+		}
+	end
+	return result
+end
+
+local function outbox_to_public(event: OutboxEntryRecord): OutboxEvent
+	return {
+		EventId = event.event_id,
+		OperationId = event.operation_id,
+		DestinationStoreName = event.destination_store_name,
+		DestinationScope = event.destination_scope,
+		DestinationProfileKey = event.destination_profile_key,
+		MessageType = event.message_type,
+		Data = if event.payload ~= nil then copy_value(event.payload) else nil,
+		State = event.state,
+		CreatedAt = event.created_at,
+		Attempts = event.attempts,
+		LastError = event.last_error,
+		DestinationReceiptId = event.destination_receipt_id,
+	}
+end
+
+local function validate_operation_identity(operation_id: string, request_fingerprint: string): string?
+	if type(operation_id) ~= "string" or operation_id == "" or #operation_id > 128 then
+		return "operation_id must be 1 to 128 bytes"
+	end
+	if type(request_fingerprint) ~= "string" or request_fingerprint == "" or #request_fingerprint > 256 then
+		return "request_fingerprint must be 1 to 256 bytes"
+	end
+	return nil
+end
+
+local function prepare_outbox_inputs(
+	operation_id: string,
+	events: { OutboxEventInput },
+	created_at: number
+): ({ OutboxEntryRecord }?, string?)
+	if type(events) ~= "table" or #events > MAX_OUTBOX_EVENTS_PER_COMMIT then
+		return nil, "one transaction may contain at most " .. tostring(MAX_OUTBOX_EVENTS_PER_COMMIT) .. " outbox events"
+	end
+	local prepared: { OutboxEntryRecord } = {}
+	local seen: { [string]: boolean } = {}
+	for index, event in events do
+		if type(index) ~= "number" or not math.isfinite(index) or math.floor(index) ~= index or index < 1 or index > #events then
+			return nil, "outbox events must be a dense array"
+		end
+		if type(event) ~= "table"
+			or type(event.EventId) ~= "string" or event.EventId == "" or #event.EventId > 128
+			or seen[event.EventId] == true
+			or type(event.DestinationStoreName) ~= "string" or event.DestinationStoreName == "" or #event.DestinationStoreName > 50
+			or type(event.DestinationScope) ~= "string" or event.DestinationScope == "" or #event.DestinationScope > 50
+			or type(event.DestinationProfileKey) ~= "string" or event.DestinationProfileKey == "" or #event.DestinationProfileKey > 50
+			or type(event.MessageType) ~= "string" or event.MessageType == "" or #event.MessageType > MAX_MESSAGE_TYPE_LENGTH
+		then
+			return nil, "invalid or duplicate outbox event input at index " .. tostring(index)
+		end
+		seen[event.EventId] = true
+		local payload: JsonValue? = nil
+		if event.Data ~= nil then
+			local copied_ok, copied = pcall(function()
+				return copy_value(event.Data :: JsonValue)
+			end)
+			if not copied_ok or copied == nil then
+				return nil, "outbox payload is not a valid JSON value"
+			end
+			payload = copied
+		end
+		table.insert(prepared, {
+			event_id = event.EventId,
+			operation_id = operation_id,
+			destination_store_name = event.DestinationStoreName,
+			destination_scope = event.DestinationScope,
+			destination_profile_key = event.DestinationProfileKey,
+			message_type = event.MessageType,
+			payload = payload,
+			state = "pending",
+			created_at = created_at,
+			attempts = 0,
+			last_error = nil,
+			destination_receipt_id = nil,
+		})
+	end
+	return prepared, nil
+end
+
+local function validate_envelope_for_transaction(envelope: Envelope): (boolean, string?)
+	local encoded_ok, encoded_message = pcall(function()
+		return validate_serialized_size(encode_envelope_for_storage(envelope))
+	end)
+	if not encoded_ok then
+		return false, tostring(encoded_message)
+	end
+	local valid, message = validate_serialized_size(encode_envelope_for_storage(envelope))
+	if not valid then
+		return false, message
+	end
+	return true, nil
+end
+
+local function transaction_internal(
+	state: InternalState,
+	operation_id: string,
+	request_fingerprint: string,
+	transform: TransactionTransform,
+	outbox_inputs: { OutboxEventInput }?
+): (ResultCode, string?)
+	local identity_error = validate_operation_identity(operation_id, request_fingerprint)
+	if identity_error ~= nil then
+		return "invalid", identity_error
+	end
+	if type(transform) ~= "function" then
+		return "invalid", "transaction transform must be a function"
+	end
+	track_external_data_mutation(state)
+	if state.retired then
+		return "invalid", "record has been retired"
+	end
+	if closing then
+		return "closing", "server is shutting down"
+	end
+	if state.state ~= "active" then
+		return if state.state == "tombstoned" then "tombstoned" else "fenced", "record is not actively owned"
+	end
+	if state.takeover_requested then
+		return "closing", "session takeover has been requested"
+	end
+	if state.busy or state.queue_busy then
+		return "busy", "record has another durable operation in flight"
+	end
+	if state.change_sequence ~= state.saved_change_sequence then
+		return "busy", "save local profile changes before starting an atomic transaction"
+	end
+	local session_token = state.token
+	if session_token == nil then
+		return "fenced", "session token is missing"
+	end
+	if state.data == nil then
+		return "invalid", "record has no active profile data"
+	end
+	local base_data = copy_value(state.data)
+	if base_data == nil then
+		return "validation", "profile data could not be copied"
+	end
+	local callback_ok, transformed_value = pcall(transform, copy_value(base_data))
+	if not callback_ok then
+		return "validation", "transaction transform failed: " .. string.sub(tostring(transformed_value), 1, MAX_QUEUE_ERROR_LENGTH)
+	end
+	if transformed_value == nil then
+		return "validation", "transaction transform must return a non-nil JSON value"
+	end
+	local data_ok, next_data = pcall(function()
+		return copy_value(transformed_value)
+	end)
+	if not data_ok or next_data == nil then
+		return "validation", "transaction transform returned an invalid JSON value"
+	end
+	local valid_data, data_error = validate_value(next_data, state.options.validator)
+	if not valid_data then
+		return "validation", data_error
+	end
+
+	local generation = state.generation
+	local expected_revision = state.revision
+	local write_id = HttpService:GenerateGUID(false)
+	local operation_time = now_unix()
+	local deadline, deadline_error = resolve_operation_deadline(state.options.operation_deadline)
+	if deadline == nil then
+		return "invalid", deadline_error
+	end
+	local prepared_events, events_error = prepare_outbox_inputs(operation_id, outbox_inputs or {}, operation_time)
+	if prepared_events == nil then
+		return "validation", events_error
+	end
+	state.current_operation_id = write_id
+	state.busy = true
+	state.state = "saving"
+	local attempts = state.options.retry_attempts or DEFAULT_RETRY_ATTEMPTS
+	local last_error: string? = nil
+	for attempt = 1, attempts do
+		if state.retired or state.state ~= "saving" then
+			state.busy = false
+			return "closing", "transaction was invalidated before completion"
+		end
+		local decision: ResultCode? = nil
+		local decision_message: string? = nil
+		local transaction_time = session_now_unix(state.backend.mock)
+		local result, info, result_code, result_message = backend_update(state.backend, function(raw, info)
+			decision = nil
+			decision_message = nil
+			local envelope, parse_error, current_format = parse_envelope(raw)
+			if not current_format or envelope == nil then
+				decision = if parse_error == "future implementation version" then "future_schema" else "corrupt"
+				decision_message = parse_error or "durable envelope is invalid"
+				return nil, nil, nil
+			end
+			if not matches_session(envelope, session_token :: string, generation)
+				or envelope.session == nil or envelope.session.lease_until <= transaction_time
+			then
+				decision = "fenced"
+				decision_message = "durable profile session fence is no longer valid"
+				return nil, nil, nil
+			end
+			if envelope.schema_version > state.options.schema_version then
+				decision = "future_schema"
+				decision_message = "durable schema is newer than this server supports"
+				return nil, nil, nil
+			end
+			local receipts = envelope.inbox_receipts or {}
+			local existing_receipt = receipts[operation_id]
+			if existing_receipt ~= nil then
+				if existing_receipt.request_fingerprint ~= request_fingerprint then
+					decision = "conflict"
+					decision_message = "operation_id is already bound to a different request_fingerprint"
+					return nil, nil, nil
+				end
+				if existing_receipt.write_id == write_id then
+					decision = "success"
+					return envelope, (info ~= nil and info.UserIds or envelope.user_ids or state.user_ids),
+						make_backend_metadata(if info ~= nil then info.RawMetadata else state.metadata, envelope)
+				end
+				decision = "duplicate"
+				decision_message = "operation was already committed"
+				return nil, nil, nil
+			end
+			if envelope.revision ~= expected_revision then
+				decision = "conflict"
+				decision_message = "durable revision changed before transaction commit"
+				return nil, nil, nil
+			end
+			if #{} > 0 then
+				-- Keeps this transform visibly free of consumer callbacks and yielding work.
+				decision = "validation"
+				decision_message = "invalid transaction state"
+				return nil, nil, nil
+			end
+			local receipts_copy = clone_inbox_receipts(envelope.inbox_receipts)
+			if (function()
+				local count = 0
+				for _ in receipts_copy do count += 1 end
+				return count
+			end)() >= MAX_INBOX_RECEIPTS then
+				decision = "capacity"
+				decision_message = "inbox receipt capacity reached; prune only after the caller's deduplication window"
+				return nil, nil, nil
+			end
+			local outbox_copy = clone_outbox_entries(envelope.outbox)
+			local outbox_count = 0
+			for _ in outbox_copy do outbox_count += 1 end
+			if outbox_count + #prepared_events > MAX_OUTBOX_EVENTS then
+				decision = "capacity"
+				decision_message = "outbox capacity reached; dispatch and prune verified terminal events before retry"
+				return nil, nil, nil
+			end
+			for _, event in prepared_events do
+				if outbox_copy[event.event_id] ~= nil then
+					decision = "conflict"
+					decision_message = "outbox event_id is already present: " .. event.event_id
+					return nil, nil, nil
+				end
+				outbox_copy[event.event_id] = event
+			end
+			local durable_ids = if info ~= nil then clone_user_ids(info.UserIds) elseif envelope.user_ids ~= nil then clone_user_ids(envelope.user_ids) else clone_user_ids(state.user_ids)
+			local durable_metadata = if info ~= nil then clone_metadata(info.RawMetadata) else clone_metadata(state.metadata)
+			local next_envelope: Envelope = {
+				implementation_version = IMPLEMENTATION_VERSION,
+				schema_version = state.options.schema_version,
+				revision = envelope.revision + 1,
+				fencing_generation = generation,
+				created_at = envelope.created_at,
+				updated_at = transaction_time,
+				data = next_data :: JsonValue,
+				user_ids = durable_ids,
+				tombstone = nil,
+				session = {
+					token = session_token :: string,
+					generation = generation,
+					job_id = server_id,
+					place_id = game.PlaceId,
+					acquired_at = envelope.session.acquired_at,
+					lease_until = transaction_time + (state.options.lease_duration or DEFAULT_LEASE_DURATION),
+				},
+				inbox_receipts = receipts_copy,
+				outbox = outbox_copy,
+				write_id = write_id,
+			}
+			local envelope_valid, envelope_error = validate_envelope_for_transaction(next_envelope)
+			if not envelope_valid then
+				decision = "validation"
+				decision_message = envelope_error or "transaction envelope failed validation"
+				return nil, nil, nil
+			end
+			receipts_copy[operation_id] = {
+				operation_id = operation_id,
+				request_fingerprint = request_fingerprint,
+				write_id = write_id,
+				revision = next_envelope.revision,
+				committed_at = operation_time,
+			}
+			-- Refresh the encoded size after the receipt is part of the same atomic write.
+			local final_valid, final_error = validate_envelope_for_transaction(next_envelope)
+			if not final_valid then
+				decision = "validation"
+				decision_message = final_error or "transaction receipt envelope failed validation"
+				return nil, nil, nil
+			end
+			decision = "success"
+			return next_envelope, durable_ids, make_backend_metadata(durable_metadata, next_envelope)
+		end, deadline, state)
+		if result_code ~= nil then
+			decision = result_code
+			decision_message = result_message
+		end
+		if decision == "duplicate" or decision == "conflict" or decision == "capacity" or decision == "validation"
+			or decision == "fenced" or decision == "future_schema" or decision == "corrupt"
+		then
+			state.busy = false
+			state.state = if decision == "fenced" then "fenced" elseif decision == "future_schema" then "future" elseif decision == "corrupt" then "corrupt" else "active"
+			observe(state, "transaction", decision, decision_message)
+			return decision, decision_message
+		end
+		if result ~= nil then
+			local returned = parse_envelope(result)
+			local receipt = if returned ~= nil and returned.inbox_receipts ~= nil then returned.inbox_receipts[operation_id] else nil
+			if returned ~= nil and receipt ~= nil
+				and returned.write_id == write_id
+				and receipt.write_id == write_id
+				and receipt.request_fingerprint == request_fingerprint
+				and returned.revision == receipt.revision
+				and matches_session(returned, session_token :: string, generation)
+				and backend_metadata_matches(info, returned)
+			then
+				update_local_from_envelope(state, returned, info)
+				state.saved_change_sequence = state.change_sequence
+				state.last_saved = make_durable_snapshot(returned, info, "transaction")
+				state.last_observed = now_unix()
+				state.busy = false
+				state.state = "active"
+				observe(state, "transaction", "success", operation_id)
+				sync_public(state.public_record)
+				return "success", nil
+			end
+		end
+		last_error = result_message or decision_message
+		if attempt < attempts then
+			task.wait(math.min(retry_delay(attempt), math.max(0, deadline - now_local())))
+		end
+	end
+	state.busy = false
+	state.state = "unknown"
+	observe(state, "transaction", "unknown", last_error or "transaction commit outcome is unresolved")
+	return "unknown", last_error or "transaction commit outcome is unresolved"
+end
+
+local function update_profile_sidecars(
+	state: InternalState,
+	reason: string,
+	mutate: (
+		{ [string]: InboxReceiptRecord },
+		{ [string]: OutboxEntryRecord },
+		number
+	) -> ({ [string]: InboxReceiptRecord }?, { [string]: OutboxEntryRecord }?, ResultCode?, string?, number?)
+): (number, ResultCode, string?)
+	track_external_data_mutation(state)
+	if state.retired then return 0, "invalid", "record has been retired" end
+	if closing then return 0, "closing", "server is shutting down" end
+	if state.state ~= "active" then return 0, if state.state == "tombstoned" then "tombstoned" else "fenced", "record is not actively owned" end
+	if state.takeover_requested then return 0, "closing", "session takeover has been requested" end
+	if state.busy or state.queue_busy then return 0, "busy", "record has another durable operation in flight" end
+	local session_token = state.token
+	if session_token == nil then return 0, "fenced", "session token is missing" end
+	local generation = state.generation
+	local expected_revision = state.revision
+	local write_id = HttpService:GenerateGUID(false)
+	local deadline, deadline_error = resolve_operation_deadline(state.options.operation_deadline)
+	if deadline == nil then return 0, "invalid", deadline_error end
+	local max_attempts = state.options.retry_attempts or DEFAULT_RETRY_ATTEMPTS
+	state.current_operation_id = write_id
+	state.busy = true
+	state.state = "saving"
+	local affected_count = 0
+	local last_error: string? = nil
+	for attempt = 1, max_attempts do
+		if state.retired or state.state ~= "saving" then
+			state.busy = false
+			return affected_count, "closing", "sidecar update was invalidated"
+		end
+		local decision: ResultCode? = nil
+		local decision_message: string? = nil
+		local transaction_time = session_now_unix(state.backend.mock)
+		local result, info, result_code, result_message = backend_update(state.backend, function(raw, info)
+			decision = nil
+			decision_message = nil
+			local envelope, parse_error, current_format = parse_envelope(raw)
+			if not current_format or envelope == nil then
+				decision = if parse_error == "future implementation version" then "future_schema" else "corrupt"
+				decision_message = parse_error or "durable envelope is invalid"
+				return nil, nil, nil
+			end
+			if envelope.write_id == write_id and matches_session(envelope, session_token :: string, generation) then
+				decision = "success"
+				return envelope, (info ~= nil and info.UserIds or envelope.user_ids or state.user_ids),
+					make_backend_metadata(if info ~= nil then info.RawMetadata else state.metadata, envelope)
+			end
+			if not matches_session(envelope, session_token :: string, generation)
+				or envelope.session == nil or envelope.session.lease_until <= transaction_time
+			then
+				decision = "fenced"
+				decision_message = "durable profile session fence is no longer valid"
+				return nil, nil, nil
+			end
+			if envelope.schema_version > state.options.schema_version then
+				decision = "future_schema"
+				decision_message = "durable schema is newer than this server supports"
+				return nil, nil, nil
+			end
+			if envelope.revision ~= expected_revision then
+				decision = "conflict"
+				decision_message = "durable revision changed before sidecar update"
+				return nil, nil, nil
+			end
+			local next_receipts, next_outbox, mutate_code, mutate_message, count = mutate(
+				clone_inbox_receipts(envelope.inbox_receipts),
+				clone_outbox_entries(envelope.outbox),
+				transaction_time
+			)
+			if mutate_code ~= nil then
+				decision = mutate_code
+				decision_message = mutate_message
+				affected_count = count or affected_count
+				return nil, nil, nil
+			end
+			if next_receipts == nil or next_outbox == nil then
+				decision = "validation"
+				decision_message = "sidecar mutator returned incomplete maps"
+				return nil, nil, nil
+			end
+			affected_count = count or affected_count
+			local durable_ids = if info ~= nil then clone_user_ids(info.UserIds) elseif envelope.user_ids ~= nil then clone_user_ids(envelope.user_ids) else clone_user_ids(state.user_ids)
+			local durable_metadata = if info ~= nil then clone_metadata(info.RawMetadata) else clone_metadata(state.metadata)
+			local next_envelope: Envelope = {
+				implementation_version = IMPLEMENTATION_VERSION,
+				schema_version = envelope.schema_version,
+				revision = envelope.revision + 1,
+				fencing_generation = generation,
+				created_at = envelope.created_at,
+				updated_at = transaction_time,
+				data = envelope.data,
+				user_ids = durable_ids,
+				tombstone = nil,
+				session = {
+					token = session_token :: string,
+					generation = generation,
+					job_id = server_id,
+					place_id = game.PlaceId,
+					acquired_at = envelope.session.acquired_at,
+					lease_until = transaction_time + (state.options.lease_duration or DEFAULT_LEASE_DURATION),
+				},
+				inbox_receipts = next_receipts,
+				outbox = next_outbox,
+				write_id = write_id,
+			}
+			local valid_envelope, envelope_error = validate_envelope_for_transaction(next_envelope)
+			if not valid_envelope then
+				decision = "validation"
+				decision_message = envelope_error or "sidecar envelope failed validation"
+				return nil, nil, nil
+			end
+			decision = "success"
+			return next_envelope, durable_ids, make_backend_metadata(durable_metadata, next_envelope)
+		end, deadline, state)
+		if result_code ~= nil then
+			decision = result_code
+			decision_message = result_message
+		end
+		if decision == "duplicate" or decision == "not_found" or decision == "capacity"
+			or decision == "validation" or decision == "conflict" or decision == "fenced"
+			or decision == "future_schema" or decision == "corrupt"
+		then
+			state.busy = false
+			state.state = if decision == "fenced" then "fenced" elseif decision == "future_schema" then "future" elseif decision == "corrupt" then "corrupt" else "active"
+			return affected_count, decision, decision_message
+		end
+		if result ~= nil then
+			local returned = parse_envelope(result)
+			if returned ~= nil and returned.write_id == write_id
+				and returned.revision == expected_revision + 1
+				and matches_session(returned, session_token :: string, generation)
+				and backend_metadata_matches(info, returned)
+			then
+				state.revision = returned.revision
+				state.updated_at = returned.updated_at
+				state.durable_lease_until = if returned.session ~= nil then returned.session.lease_until else 0
+				update_state_metadata_from_info(state, info)
+				state.last_saved = make_durable_snapshot(returned, info, reason)
+				state.last_observed = now_unix()
+				if state.change_sequence ~= state.saved_change_sequence then
+					state.save_requested = true
+					state.next_autosave = now_local()
+				end
+				state.busy = false
+				state.state = "active"
+				sync_public(state.public_record)
+				return affected_count, "success", nil
+			end
+		end
+		last_error = result_message or decision_message
+		if attempt < max_attempts then
+			task.wait(math.min(retry_delay(attempt), math.max(0, deadline - now_local())))
+		end
+	end
+	state.busy = false
+	state.state = "unknown"
+	observe(state, reason, "unknown", last_error or "sidecar update outcome is unresolved")
+	return affected_count, "unknown", last_error or "sidecar update outcome is unresolved"
+end
+
+local function transaction(self: Record, operation_id: string, request_fingerprint: string, transform: TransactionTransform): (ResultCode, string?)
+	return transaction_internal(private[self], operation_id, request_fingerprint, transform, nil)
+end
+
+local function apply_inbox(self: Record, operation_id: string, request_fingerprint: string, transform: TransactionTransform): (ResultCode, string?)
+	return transaction_internal(private[self], operation_id, request_fingerprint, transform, nil)
+end
+
+local function commit_with_outbox(self: Record, operation_id: string, request_fingerprint: string, transform: TransactionTransform, events: { OutboxEventInput }): (ResultCode, string?)
+	return transaction_internal(private[self], operation_id, request_fingerprint, transform, events)
+end
+
+local function get_outbox(self: Record, max_items: number?): ({ OutboxEvent }, ResultCode, string?)
+	local state = private[self]
+	if state == nil then return {}, "invalid", "record does not exist" end
+	if state.state ~= "active" or state.token == nil then return {}, "fenced", "record is not actively owned" end
+	local limit = max_items or MAX_OUTBOX_EVENTS
+	if not math.isfinite(limit) or math.floor(limit) ~= limit or limit < 1 or limit > MAX_OUTBOX_EVENTS then
+		return {}, "invalid", "max_items must be an integer from 1 to " .. tostring(MAX_OUTBOX_EVENTS)
+	end
+	local deadline, deadline_error = resolve_operation_deadline(state.options.operation_deadline)
+	if deadline == nil then return {}, "invalid", deadline_error end
+	local raw, info, read_code, read_message = backend_get(state.backend, false, deadline, state)
+	if read_code ~= nil then return {}, read_code, read_message end
+	local envelope, parse_error, current_format = parse_envelope(raw)
+	if not current_format or envelope == nil then return {}, "corrupt", parse_error or "durable envelope is invalid" end
+	if not matches_session(envelope, state.token, state.generation)
+		or envelope.session == nil or envelope.session.lease_until <= session_now_unix(state.backend.mock)
+	then
+		return {}, "fenced", "durable profile session fence is no longer valid"
+	end
+	local result: { OutboxEvent } = {}
+	for _, event in envelope.outbox or {} do
+		if event.state == "pending" then
+			table.insert(result, outbox_to_public(event))
+		end
+	end
+	table.sort(result, function(left, right)
+		if left.CreatedAt ~= right.CreatedAt then return left.CreatedAt < right.CreatedAt end
+		return left.EventId < right.EventId
+	end)
+	while #result > limit do table.remove(result) end
+	return result, "success", nil
+end
+
+local function set_outbox_result(
+	state: InternalState,
+	event_id: string,
+	accepted: boolean,
+	destination_receipt_id: string?,
+	reason: string?
+): (ResultCode, string?)
+	if type(event_id) ~= "string" or event_id == "" or #event_id > 128 then return "invalid", "invalid event_id" end
+	if destination_receipt_id ~= nil and (type(destination_receipt_id) ~= "string" or #destination_receipt_id > 256) then
+		return "invalid", "destination receipt ID exceeds 256 bytes"
+	end
+	local _, code, message = update_profile_sidecars(state, "outbox_dispatch", function(receipts, outbox, transaction_time)
+		local event = outbox[event_id]
+		if event == nil then return nil, nil, "not_found", "outbox event does not exist", 0 end
+		if event.state == "dispatched" then return nil, nil, "duplicate", "outbox event was already dispatched", 0 end
+		local updated = clone_outbox_entries(outbox)
+		local current = updated[event_id]
+		current.attempts += 1
+		if accepted then
+			current.state = "dispatched"
+			current.last_error = nil
+			current.destination_receipt_id = destination_receipt_id
+		else
+			current.state = "pending"
+			current.last_error = string.sub(string.gsub(reason or "destination did not confirm acceptance", "[^ -~]", "?"), 1, MAX_QUEUE_ERROR_LENGTH)
+		end
+		return receipts, updated, nil, nil, 1
+	end)
+	return code, message
+end
+
+local function dispatch_outbox(self: Record, dispatcher: OutboxDispatcher, max_items: number?): (number, ResultCode, string?)
+	if type(dispatcher) ~= "function" then return 0, "invalid", "dispatcher must be a function" end
+	local events, read_code, read_message = get_outbox(self, max_items)
+	if read_code ~= "success" then return 0, read_code, read_message end
+	local dispatched = 0
+	local first_error: string? = nil
+	for _, event in events do
+		-- The destination must deduplicate by EventId. Source cleanup can fail after delivery,
+		-- so dispatch is at-least-once and an unknown source result causes the same EventId to retry.
+		local call_ok, accepted, receipt_id = pcall(dispatcher, event)
+		local confirmed = call_ok and accepted == true
+		local reason = if not call_ok then tostring(accepted) elseif accepted ~= true then tostring(receipt_id or "destination did not confirm acceptance") else nil
+		local code, message = set_outbox_result(private[self], event.EventId, confirmed, if type(receipt_id) == "string" then receipt_id else nil, reason)
+		if code == "success" or (confirmed and code == "duplicate") then
+			if confirmed then dispatched += 1 else first_error = first_error or reason end
+		else
+			first_error = first_error or message or "outbox status could not be updated"
+			if code == "fenced" or code == "unknown" or code == "conflict" or code == "corrupt" then
+				return dispatched, code, first_error
+			end
+		end
+	end
+	return dispatched, "success", first_error
+end
+
+local function prune_transaction_receipts(self: Record, committed_before_unix: number, max_items: number?): (number, ResultCode, string?)
+	if not math.isfinite(committed_before_unix) then return 0, "invalid", "committed_before_unix must be finite" end
+	local limit = max_items or 16
+	if not math.isfinite(limit) or math.floor(limit) ~= limit or limit < 1 or limit > 32 then
+		return 0, "invalid", "max_items must be an integer from 1 to 32"
+	end
+	return update_profile_sidecars(private[self], "receipt_prune", function(receipts, outbox, _now)
+		local keys: { string } = {}
+		for operation_id, receipt in receipts do
+			if receipt.committed_at < committed_before_unix then table.insert(keys, operation_id) end
+		end
+		table.sort(keys)
+		local remove_count = math.min(limit, #keys)
+		for index = 1, remove_count do receipts[keys[index]] = nil end
+		if remove_count == 0 then return nil, nil, "duplicate", "no receipts are eligible for the requested retention cutoff", 0 end
+		return receipts, outbox, nil, nil, remove_count
+	end)
+end
+
+local function prune_outbox(self: Record, dispatched_before_unix: number, max_items: number?): (number, ResultCode, string?)
+	if not math.isfinite(dispatched_before_unix) then return 0, "invalid", "dispatched_before_unix must be finite" end
+	local limit = max_items or 16
+	if not math.isfinite(limit) or math.floor(limit) ~= limit or limit < 1 or limit > 32 then
+		return 0, "invalid", "max_items must be an integer from 1 to 32"
+	end
+	return update_profile_sidecars(private[self], "outbox_prune", function(receipts, outbox, _now)
+		local keys: { string } = {}
+		for event_id, event in outbox do
+			if event.state == "dispatched" and event.created_at < dispatched_before_unix then table.insert(keys, event_id) end
+		end
+		table.sort(keys)
+		local remove_count = math.min(limit, #keys)
+		for index = 1, remove_count do outbox[keys[index]] = nil end
+		if remove_count == 0 then return nil, nil, "duplicate", "no dispatched outbox events are eligible for the requested retention cutoff", 0 end
+		return receipts, outbox, nil, nil, remove_count
+	end)
+end
+
 local function message(self: Record, message_type: string, data: JsonValue?): (ResultCode, string?)
 	local state = private[self]
 	if state == nil then
