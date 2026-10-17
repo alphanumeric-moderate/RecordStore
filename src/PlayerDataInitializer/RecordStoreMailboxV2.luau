@@ -1552,7 +1552,8 @@ function MailboxV2._claim(self: Mailbox, route: string): (Dict?, Result)
 	if claimed.state ~= "claimed" or claimed.claim_token ~= token then
 		return nil, ok("busy", route, self:_record_snapshot(claimed), nil)
 	end
-	if (claimed.locked_until :: number) - now <= math.min(2000, (self.options.lease_ms :: number) / 4) then
+	local verified_now = self:_now()
+	if (claimed.locked_until :: number) - verified_now <= math.min(2000, (self.options.lease_ms :: number) / 4) then
 		return nil, ok("unknown", route, self:_record_snapshot(claimed), "claim has insufficient verified lease margin")
 	end
 	return claimed, ok("claimed", route, self:_record_snapshot(claimed), nil)
@@ -1733,6 +1734,16 @@ function MailboxV2.RecoverAsync(self: Mailbox): Result
 			if record.state == "acknowledging" then
 				local result = self:_finish_acknowledgement(route, tostring(record.claim_token))
 				if result.code ~= "processed" and result.code ~= "duplicate" then
+					return result
+				end
+			elseif record.state == "claimed"
+				and is_finite(record.locked_until)
+				and (record.locked_until :: number) + (self.options.clock_skew_grace_ms :: number) <= self:_now()
+			then
+				-- An expired claim does not prove the handler had no external effect.
+				-- Requeue it as an uncertain, at-least-once attempt under the same message ID.
+				local result = self:_retry_claim(route, tostring(record.claim_token), "claim lease expired; handler outcome is unknown")
+				if result.code ~= "retry_scheduled" and result.code ~= "expired" and result.code ~= "dead_lettered" then
 					return result
 				end
 			elseif record.state == "dead_lettering" then
@@ -1993,6 +2004,8 @@ function MockStore.new()
 		fail_next_mode = nil,
 		fail_update_call = nil,
 		fail_update_call_mode = nil,
+		delay_next_update_ms = 0,
+		advance_time = nil,
 		replay_next_update = 0,
 	}, MockStore)
 end
@@ -2026,6 +2039,13 @@ function MockStore:UpdateAsync(key: string, transform: (unknown, unknown?) -> (u
 		self.values[key] = clone_json(proposed)
 	end
 	local result = clone_json(self.values[key])
+	if self.delay_next_update_ms > 0 then
+		local delay_ms = self.delay_next_update_ms
+		self.delay_next_update_ms = 0
+		if self.advance_time ~= nil then
+			self.advance_time(delay_ms)
+		end
+	end
 	if failure_mode == "after" then
 		error("injected response loss after commit")
 	end
@@ -2052,6 +2072,12 @@ function MockStore:FailUpdateAt(update_call: number, mode: string)
 	assert(mode == "before" or mode == "after", "mode must be before or after")
 	self.fail_update_call = update_call
 	self.fail_update_call_mode = mode
+end
+
+function MockStore:DelayNextUpdateBy(delay_ms: number)
+	assert(is_finite(delay_ms) and delay_ms >= 0 and delay_ms <= 60_000,
+		"delay_ms must be finite and between 0 and 60000")
+	self.delay_next_update_ms = delay_ms
 end
 
 function MailboxV2.MockStore()
