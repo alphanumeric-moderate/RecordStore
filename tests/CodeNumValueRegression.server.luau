@@ -2,8 +2,8 @@
 -- Requires CodeNum 0.2.0-preview.1 in ReplicatedStorage.
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerScriptService = game:GetService("ServerScriptService")
-local CodeNum = require(ReplicatedStorage:WaitForChild("CodeNum"))
-local CodeNumValue = require(ServerScriptService:WaitForChild("CodeNumValue"))
+local CodeNum = require(ReplicatedStorage.CodeNum)
+local CodeNumValue = require(ServerScriptService.CodeNumValue)
 local integer = CodeNum.integer("123456789012345678901234567890123456789")
 local backing = CodeNumValue.new("Cash", integer)
 assert(CodeNum.equals(CodeNumValue.get(backing), integer), "exact integer round-trip failed")
