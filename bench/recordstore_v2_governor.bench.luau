@@ -7,6 +7,29 @@ local RecordStore = Shim.load()
 local MailboxV2 = luau.load(fs.readFile("src/PlayerDataInitializer/RecordStoreMailboxV2.luau"), { debugName = "RecordStoreMailboxV2" })()
 local V2 = luau.load(fs.readFile("src/PlayerDataInitializer/RecordStoreV2.luau"), { debugName = "RecordStoreV2" })().new(RecordStore, MailboxV2)
 
+-- Exercise the actual core request gate with successful callbacks only.
+local runtime_code, runtime_error = RecordStore.configure_runtime({
+	revision = 2,
+	runtime_profile = "balanced",
+	server_role = "benchmark",
+	adaptive_runtime_enabled = true,
+	adaptive_min_concurrent_requests = 1,
+	adaptive_max_concurrent_requests = 4,
+	critical_request_reserve = 1,
+	adaptive_queue_budget_share = 0.2,
+})
+assert(runtime_code == "success", tostring(runtime_error))
+for index = 1, 512 do
+	local value, code, message = RecordStore.run_runtime_request("read", function()
+		return index
+	end, 2, "interactive")
+	assert(code == nil and value == index, tostring(code) .. " " .. tostring(message))
+end
+local runtime_stats = RecordStore.get_runtime_stats()
+assert(runtime_stats.active_requests == 0)
+assert(runtime_stats.effective_concurrent_requests >= 1 and runtime_stats.effective_concurrent_requests <= 4)
+assert(runtime_stats.metrics.reads >= 512)
+
 local now = 1000
 local governor = V2.RuntimeGovernor.new({ now_ms = function() return now end, advance_ms = function(ms) now += ms end })
 for index = 1, 500 do
