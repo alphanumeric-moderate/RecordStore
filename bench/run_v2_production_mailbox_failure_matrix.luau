@@ -59,6 +59,7 @@ local mailbox = MailboxV2.new(adapter, owner, {
 	max_attempts = 3,
 	retry_base_ms = 10,
 	retry_max_ms = 100,
+	allow_unattested_activation = true,
 })
 
 local function assert_stable_retry(key, payload)
