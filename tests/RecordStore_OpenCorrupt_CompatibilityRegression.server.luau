@@ -1,9 +1,10 @@
 --!strict
 -- Mock-only regression tests for RecordStore open corruption compatibility.
--- Place this Script under ServerScriptService and adjust the require path if needed.
+-- Place this Script under ServerScriptService; tests.project.json maps RecordStore as a direct child.
 -- Uses RecordStore.Mock only; it never reads or writes live DataStore records.
 
-local RecordStore = require(game:GetService("ServerScriptService"):WaitForChild("RecordStore"))
+local ServerScriptService = game:GetService("ServerScriptService")
+local RecordStore = require(ServerScriptService.RecordStore)
 
 local function assert_opened(result: RecordStore.ResultCode, message: string?, expected: string)
 	assert(result == "loaded", ("%s: expected loaded, got %s: %s"):format(expected, result, message or "no message"))
