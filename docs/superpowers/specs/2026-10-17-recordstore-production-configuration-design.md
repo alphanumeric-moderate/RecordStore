@@ -2,7 +2,7 @@
 
 - Date: 2026-10-17
 - Status: Proposed design, awaiting user review
-- Scope: follow-up to merged PR #30; no data-schema or store-identity migration
+- Scope: follow-up to merged PR #30; no data-schema or store-identity migration and no further PlayerDataCore persistence-interval changes
 
 ## Goal
 
@@ -20,9 +20,9 @@ Improve production configurability and reduce avoidable runtime work without wea
 
 ### 1. A validated, module-wide request-concurrency setting
 
-Expose a module-wide `RecordStore.configure({ max_concurrent_requests = n })` setting, defaulting to 4 to preserve existing behavior until the experiment has evidence. This is not a per-record setting: the request cap applies to all RecordStore instances sharing the module and must be configured before the first record starts the scheduler. Reject invalid values and late configuration attempts with an explicit error. Freeze configuration once runtime work has started so the limit cannot silently change while requests are in flight.
+Expose a module-wide `RecordStore.configure({ max_concurrent_requests = n })` setting. The current shipped baseline is 4. Benchmark candidate values 4, 6, 8, and 12 first; after applying the selection rule below, ship the smallest qualifying value as the default, or retain 4 if no candidate qualifies. A consumer may set a different value before the first record starts the scheduler. This is not a per-record setting: the request cap applies to all RecordStore instances sharing the module. Reject non-integer values outside 1..16 and late configuration attempts with an explicit error. Freeze configuration once runtime work has started so the limit cannot silently change while requests are in flight.
 
-Candidate values for the benchmark: 4 (baseline), 6, 8, and 12. Keep a conservative upper bound of 16. Do not change the selected production default just because a larger cap improves an unlimited-budget simulation.
+Do not raise the limit just because a larger cap improves an unlimited-budget simulation.
 
 #### Benchmark model
 
@@ -60,7 +60,7 @@ Verify both Rojo builds and inspect their model trees so the minimal project omi
 
 ### 3. Reduce success-event callback overhead without removing diagnostics
 
-Preserve the existing `on_event` contract by default. Add an opt-in `on_event_errors_only` option that suppresses only success-result callback dispatch while continuing to update RecordStore's internal last-error metadata. Use this option for the PlayerDataCore observer, whose callback is used to warn on exceptional persistence outcomes rather than to consume success events.
+Preserve the existing `on_event` contract by default. Add an opt-in `on_event_errors_only` option that suppresses only success-result callback dispatch while continuing to update RecordStore's internal last-error metadata. Enable this option for the PlayerDataCore observer, whose callback is used to warn on exceptional persistence outcomes rather than to consume success events. This is a narrow observer configuration change, not another persistence-interval tune.
 
 Do not remove `on_event`, weaken validation, or disable external-mutation detection as a shortcut. Keep `track_external_data_mutation` behavior unchanged in this change. Test both compatibility modes: default callbacks still receive successful events; error-only mode suppresses successful events and still reports validation, budget, fenced, corrupt/future-schema, unknown, and retry-exhaustion outcomes.
 
@@ -83,7 +83,7 @@ Add/keep documentation that queue settings are workload-dependent and should be 
 ## Verification plan
 
 1. Add focused regression tests first and confirm each fails for the intended missing behavior.
-2. Test module-wide concurrency configuration: default 4, valid pre-start configuration, invalid values, and rejection after scheduler startup.
+2. Test module-wide concurrency configuration: baseline value, valid pre-start configuration, invalid values, and rejection after scheduler startup.
 3. Test the production-path fake DataStore harness and assert the observed peak in-flight request count never exceeds the selected cap; test both abundant and constrained budget models.
 4. Test event callback compatibility and error-only behavior, including error results.
 5. Run the complete existing Lune regression suite via the repository's CodSpeed workflow; compare candidate results with the main baseline.
@@ -94,7 +94,7 @@ Add/keep documentation that queue settings are workload-dependent and should be 
 
 - One clearly documented, validated module-wide concurrency setting controls actual production request admission.
 - A CodSpeed benchmark exercises the real RecordStore production path and reports candidate results plus the limits of its fake service model.
-- The chosen default follows the selection rule above.
+- The shipped default follows the selection rule above.
 - Both project variants build, with CodeNum placement correct in the enabled variant.
 - Error-only observer mode preserves error diagnostics and leaves the default observer contract intact.
 - Durable queue production defaults remain unchanged and unneeded automatic polling stays inactive.
