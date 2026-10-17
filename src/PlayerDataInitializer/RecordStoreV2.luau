@@ -563,16 +563,25 @@ local function new_governor(options)
 	function governor:GetDurabilitySLO(record, threshold)
 		local stats, now = record_stats(record), if type(options.now_unix) == "function" then options.now_unix() else os.time()
 		local dirty = tonumber(stats.dirty) == 1
+		local core_dirty_since = tonumber(stats.dirty_since_unix)
 		local seen = dirty_seen[record]
-		if not dirty then dirty_seen[record] = nil; seen = nil
-		elseif seen == nil or seen.sequence ~= stats.change_sequence then seen = { sequence = stats.change_sequence, since = now }; dirty_seen[record] = seen end
-		local age = if dirty and seen then math.max(0, now - seen.since) else 0
+		if not dirty then
+			dirty_seen[record] = nil
+			seen = nil
+		elseif seen == nil or seen.sequence ~= stats.change_sequence then
+			seen = { sequence = stats.change_sequence, since = now }
+			dirty_seen[record] = seen
+		end
+		local core_tracking = finite(core_dirty_since) and (core_dirty_since :: number) > 0
+		local age_start = if core_tracking then core_dirty_since else if seen then seen.since else nil
+		local age = if dirty and age_start ~= nil then math.max(0, now - (age_start :: number)) else 0
 		return {
 			state = stats.state or "unknown", durable_revision = stats.last_saved_revision or 0,
 			current_revision = stats.revision or 0, dirty = dirty, last_confirmed_save_unix = stats.last_saved_at or 0,
-			dirty_age_lower_bound_seconds = age, age_basis = "time since first observation of this dirty generation",
+			dirty_age_lower_bound_seconds = age,
+			age_basis = if core_tracking then "RecordStore dirty-generation timestamp" else "time since first observation of this dirty generation",
 			max_dirty_age_seconds = threshold or 60, slo_exceeded = dirty and age > (threshold or 60),
-			slo_conclusion = if not dirty then "clean" elseif seen then "lower_bound_only" else "age_unavailable",
+			slo_conclusion = if not dirty then "clean" elseif core_tracking then "tracked_generation" elseif seen then "lower_bound_only" else "age_unavailable",
 			write_outcome_uncertain = stats.state == "unknown", observed_at_unix = now,
 		}
 	end
@@ -1476,6 +1485,27 @@ function V2.new(record_store, mailbox_module, options)
 	api.GetContentionDiagnostics = function(record) return new_governor(options.runtime):GetContentionDiagnostics(record) end
 	api.ShouldSave = function(record) return new_maintenance().ShouldSave(record_stats(record)) end
 	api.RenderErasureTemplate = render_template
+	api.Acceleration = options.acceleration_module
+	api.BindMailboxWakeups = function(accelerator, owner, mailbox, handler, max_messages_per_wake)
+		if type(accelerator) ~= "table" or type(accelerator.Register) ~= "function" then
+			return false, "an initialized RecordStoreV2Acceleration instance is required"
+		end
+		if type(mailbox) ~= "table" or type(mailbox.ProcessNextAsync) ~= "function" or type(mailbox.BindWakeups) ~= "function" then
+			return false, "mailbox must expose ProcessNextAsync and BindWakeups"
+		end
+		if type(handler) ~= "function" then return false, "handler must be a function" end
+		local owner_text, owner_error = request_material(owner)
+		if owner_text == nil then return false, owner_error or "mailbox owner is not canonicalizable" end
+		local limit = math.clamp(math.floor(max_messages_per_wake or 4), 1, 32)
+		local bound, bind_error = mailbox:BindWakeups(accelerator)
+		if not bound then return false, bind_error end
+		return accelerator:Register(owner_text, function()
+			for _ = 1, limit do
+				local result = mailbox:ProcessNextAsync(handler)
+				if type(result) ~= "table" or result.code ~= "processed" then break end
+			end
+		end)
+	end
 	return api
 end
 
