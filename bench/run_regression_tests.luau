@@ -13,6 +13,7 @@ for _, path in {
 	"bench/AtomicFakeDataStore.luau",
 	"bench/run_v2_production_path_failure_matrix.luau",
 	"bench/run_v2_runtime_governor_regression.luau",
+	"bench/run_v2_production_mailbox_failure_matrix.luau",
 	"tests/RecordStoreMailboxV2Regression.server.luau",
 	"tests/RecordStoreTransactionsRegression.server.luau",
 	"bench/mailbox_v2_regression.bench.luau",

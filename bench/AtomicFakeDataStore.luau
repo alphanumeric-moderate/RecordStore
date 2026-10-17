@@ -101,8 +101,13 @@ function FakeService:ScheduleFault(operation, store_name, scope, key, mode, opti
 	assert(mode == "before" or mode == "after" or mode == "replay_transform", "unsupported fake DataStore fault mode")
 	assert(mode ~= "after" or operation == "update" or operation == "remove", "after-commit fault requires a mutating operation")
 	assert(mode ~= "replay_transform" or operation == "update", "transform replay applies only to UpdateAsync")
-	table.insert(self.faults, { operation = operation, store_name = store_name, scope = scope, key = key, mode = mode,
-		count = options and options.count, message = options and options.message })
+	local skip_matches = options and options.skip_matches or 0
+	assert(type(skip_matches) == "number" and skip_matches >= 0 and skip_matches <= 1000
+		and skip_matches == math.floor(skip_matches), "skip_matches must be an integer from 0 to 1000")
+	table.insert(self.faults, {
+		operation = operation, store_name = store_name, scope = scope, key = key, mode = mode,
+		count = options and options.count, skip_matches = skip_matches, message = options and options.message,
+	})
 	return #self.faults
 end
 
@@ -150,9 +155,16 @@ function FakeService:_take_fault(operation, name, scope, key)
 			and (fault.scope == nil or fault.scope == scope)
 			and (fault.key == nil or fault.key == key)
 		then
-			table.remove(self.faults, index)
-			self:_event("scheduled_fault_consume", name, scope, key, { operation = operation, mode = fault.mode })
-			return fault
+			if (fault.skip_matches or 0) > 0 then
+				fault.skip_matches -= 1
+				self:_event("scheduled_fault_skip", name, scope, key, {
+					operation = operation, remaining = fault.skip_matches, target_mode = fault.mode,
+				})
+			else
+				table.remove(self.faults, index)
+				self:_event("scheduled_fault_consume", name, scope, key, { operation = operation, mode = fault.mode })
+				return fault
+			end
 		end
 	end
 	return nil
