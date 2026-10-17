@@ -2691,6 +2691,7 @@ function V2.new(record_store, mailbox_module, options)
 	api.ShouldSave = function(record) return new_maintenance().ShouldSave(record_stats(record)) end
 	api.RenderErasureTemplate = render_template
 	api.Acceleration = options.acceleration_module
+	local activation_block
 	local dispatch_metrics = { accepted = 0, rejected = 0, dispatched = 0, callback_errors = 0, last_error = nil }
 	local dispatch_callbacks = {}
 	local dispatch_sequence = 0
@@ -2831,7 +2832,7 @@ function V2.new(record_store, mailbox_module, options)
 			kick_dispatcher()
 		end)
 	end
-	local function activation_block(operation)
+	activation_block = function(operation)
 		if allow_unattested_activation then return nil end
 		if type(activation_guard) ~= "function" then
 			return { code = "disabled", message = "no authoritative V2 rollout guard is installed" }
