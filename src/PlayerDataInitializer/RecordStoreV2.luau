@@ -1349,6 +1349,7 @@ local function saga_coordinator(store, options)
 				local marked, code, message = mark("credit_pending", "reconciliation_required", "recipient profile is not active")
 				return outcome(code or "fenced", "credit_pending", message or "recipient profile is not active; no refund attempted")
 			end
+			local credit_decided_at = os.time()
 			local credit = transaction_run(recipient,
 				"rv2:transfer:" .. digest(id) .. ":credit",
 				{ transfer_id = id, amount = amount, leg = "credit", recipient_id = recipient_id },
@@ -1377,7 +1378,7 @@ local function saga_coordinator(store, options)
 					if received[id] ~= nil then
 						if received[id] ~= amount then error("transfer receipt amount conflict") end
 						if decision == nil then
-							decisions[id] = { state = "credited", transfer_id = id, amount = amount, decided_at = os.time() }
+							decisions[id] = { state = "credited", transfer_id = id, amount = amount, decided_at = credit_decided_at }
 							next_data[decision_field] = decisions
 						end
 						return next_data
