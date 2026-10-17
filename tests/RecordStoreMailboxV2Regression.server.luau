@@ -31,6 +31,7 @@ local options = {
 	encode = function(value: unknown): string
 		return HttpService:JSONEncode(value)
 	end,
+	allow_unattested_activation = true,
 }
 local store = MailboxV2.MockStore()
 local mailbox = MailboxV2.new(store, owner, options)
