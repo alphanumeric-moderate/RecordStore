@@ -8,6 +8,8 @@ local Shim = require("./RobloxShim")
 for _, path in {
 	"src/PlayerDataInitializer/PlayerDataCore.luau",
 	"src/PlayerDataInitializer/RecordStoreMailboxV2.luau",
+	"src/PlayerDataInitializer/RecordStoreV2.luau",
+	"src/PlayerDataInitializer/RecordStoreV2Simulator.luau",
 	"tests/RecordStoreMailboxV2Regression.server.luau",
 	"tests/RecordStoreTransactionsRegression.server.luau",
 	"bench/mailbox_v2_regression.bench.luau",

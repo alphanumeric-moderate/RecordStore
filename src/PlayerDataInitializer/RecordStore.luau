@@ -302,6 +302,7 @@ export type OutboxDispatcher = (event: OutboxEvent) -> (boolean, string?)
 type InboxReceiptRecord = {
 	operation_id: string,
 	request_fingerprint: string,
+	request_material: string?,
 	write_id: string,
 	revision: number,
 	committed_at: number,
@@ -528,9 +529,9 @@ export type Record = {
 	Update: (self: Record, callback: (JsonValue?) -> JsonValue?) -> (ResultCode, string?),
 	Reconcile: (self: Record, template: JsonValue) -> (ResultCode, string?),
 	Save: (self: Record, reason: string?) -> (ResultCode, string?),
-	TransactAsync: (self: Record, operation_id: string, request_fingerprint: string, transform: TransactionTransform) -> (ResultCode, string?),
-	ApplyInboxAsync: (self: Record, operation_id: string, request_fingerprint: string, transform: TransactionTransform) -> (ResultCode, string?),
-	CommitWithOutboxAsync: (self: Record, operation_id: string, request_fingerprint: string, transform: TransactionTransform, events: { OutboxEventInput }) -> (ResultCode, string?),
+	TransactAsync: (self: Record, operation_id: string, request_fingerprint: string, transform: TransactionTransform, request_material: string?) -> (ResultCode, string?),
+	ApplyInboxAsync: (self: Record, operation_id: string, request_fingerprint: string, transform: TransactionTransform, request_material: string?) -> (ResultCode, string?),
+	CommitWithOutboxAsync: (self: Record, operation_id: string, request_fingerprint: string, transform: TransactionTransform, events: { OutboxEventInput }, request_material: string?) -> (ResultCode, string?),
 	GetOutboxAsync: (self: Record, max_items: number?) -> ({ OutboxEvent }, ResultCode, string?),
 	DispatchOutboxAsync: (self: Record, dispatcher: OutboxDispatcher, max_items: number?) -> (number, ResultCode, string?),
 	PruneTransactionReceiptsAsync: (self: Record, committed_before_ms: number, max_items: number?) -> (number, ResultCode, string?),
@@ -556,6 +557,7 @@ local DEFAULT_LEASE_RENEWAL = 60
 local DEFAULT_RETRY_ATTEMPTS = 5
 local MAX_RETRY_ATTEMPTS = 12
 local MAX_INBOX_RECEIPTS = 128
+local MAX_REQUEST_MATERIAL_BYTES = 16_384
 local MAX_OUTBOX_EVENTS = 32
 local MAX_OUTBOX_EVENTS_PER_COMMIT = 8
 local DEFAULT_OPERATION_DEADLINE = 20
@@ -2328,6 +2330,10 @@ local function parse_envelope(raw: unknown): (Envelope?, string?, boolean)
 			end
 			local raw_operation = get_string_field(raw_receipt, "operation_id")
 			local fingerprint = get_string_field(raw_receipt, "request_fingerprint")
+			local receipt_material = (raw_receipt :: { [string]: unknown }).request_material
+			if receipt_material ~= nil and (type(receipt_material) ~= "string" or #receipt_material > MAX_REQUEST_MATERIAL_BYTES) then
+				return nil, "invalid inbox receipt request_material", false
+			end
 			local receipt_write_id = get_string_field(raw_receipt, "write_id")
 			local receipt_revision = get_string_field(raw_receipt, "revision")
 			local committed_at = get_string_field(raw_receipt, "committed_at")
@@ -2342,6 +2348,7 @@ local function parse_envelope(raw: unknown): (Envelope?, string?, boolean)
 			inbox_receipts[operation_id] = {
 				operation_id = operation_id,
 				request_fingerprint = fingerprint,
+				request_material = receipt_material :: string?,
 				write_id = receipt_write_id,
 				revision = receipt_revision,
 				committed_at = committed_at,
@@ -4996,6 +5003,7 @@ local function clone_inbox_receipts(source: { [string]: InboxReceiptRecord }?): 
 		result[operation_id] = {
 			operation_id = receipt.operation_id,
 			request_fingerprint = receipt.request_fingerprint,
+			request_material = receipt.request_material,
 			write_id = receipt.write_id,
 			revision = receipt.revision,
 			committed_at = receipt.committed_at,
@@ -5044,12 +5052,15 @@ local function outbox_to_public(event: OutboxEntryRecord): OutboxEvent
 	}
 end
 
-local function validate_operation_identity(operation_id: string, request_fingerprint: string): string?
+local function validate_operation_identity(operation_id: string, request_fingerprint: string, request_material: string?): string?
 	if type(operation_id) ~= "string" or operation_id == "" or #operation_id > 128 then
 		return "operation_id must be 1 to 128 bytes"
 	end
 	if type(request_fingerprint) ~= "string" or request_fingerprint == "" or #request_fingerprint > 256 then
 		return "request_fingerprint must be 1 to 256 bytes"
+	end
+	if request_material ~= nil and (type(request_material) ~= "string" or #request_material > MAX_REQUEST_MATERIAL_BYTES) then
+		return "request_material exceeds its 16384-byte bound"
 	end
 	return nil
 end
@@ -5123,9 +5134,10 @@ local function transaction_internal(
 	operation_id: string,
 	request_fingerprint: string,
 	transform: TransactionTransform,
-	outbox_inputs: { OutboxEventInput }?
+	outbox_inputs: { OutboxEventInput }?,
+	request_material: string?
 ): (ResultCode, string?)
-	local identity_error = validate_operation_identity(operation_id, request_fingerprint)
+	local identity_error = validate_operation_identity(operation_id, request_fingerprint, request_material)
 	if identity_error ~= nil then
 		return "invalid", identity_error
 	end
@@ -5234,6 +5246,13 @@ local function transaction_internal(
 					decision_message = "operation_id is already bound to a different request_fingerprint"
 					return nil, nil, nil
 				end
+				if request_material ~= nil and existing_receipt.request_material ~= nil
+					and existing_receipt.request_material ~= request_material
+				then
+					decision = "conflict"
+					decision_message = "operation_id fingerprint matched but exact request material differed"
+					return nil, nil, nil
+				end
 				if existing_receipt.write_id == write_id then
 					decision = "success"
 					return envelope, (info ~= nil and info.UserIds or envelope.user_ids or state.user_ids),
@@ -5307,6 +5326,7 @@ local function transaction_internal(
 			receipts_copy[operation_id] = {
 				operation_id = operation_id,
 				request_fingerprint = request_fingerprint,
+				request_material = request_material,
 				write_id = write_id,
 				revision = next_envelope.revision,
 				committed_at = operation_time,
@@ -5529,22 +5549,22 @@ local function update_profile_sidecars(
 	return affected_count, "unknown", last_error or "sidecar update outcome is unresolved"
 end
 
-local function transaction(self: Record, operation_id: string, request_fingerprint: string, transform: TransactionTransform): (ResultCode, string?)
+local function transaction(self: Record, operation_id: string, request_fingerprint: string, transform: TransactionTransform, request_material: string?): (ResultCode, string?)
 	local state = private[self]
 	if state == nil then return "invalid", "record does not exist" end
-	return transaction_internal(state, operation_id, request_fingerprint, transform, nil)
+	return transaction_internal(state, operation_id, request_fingerprint, transform, nil, request_material)
 end
 
-local function apply_inbox(self: Record, operation_id: string, request_fingerprint: string, transform: TransactionTransform): (ResultCode, string?)
+local function apply_inbox(self: Record, operation_id: string, request_fingerprint: string, transform: TransactionTransform, request_material: string?): (ResultCode, string?)
 	local state = private[self]
 	if state == nil then return "invalid", "record does not exist" end
-	return transaction_internal(state, operation_id, request_fingerprint, transform, nil)
+	return transaction_internal(state, operation_id, request_fingerprint, transform, nil, request_material)
 end
 
-local function commit_with_outbox(self: Record, operation_id: string, request_fingerprint: string, transform: TransactionTransform, events: { OutboxEventInput }): (ResultCode, string?)
+local function commit_with_outbox(self: Record, operation_id: string, request_fingerprint: string, transform: TransactionTransform, events: { OutboxEventInput }, request_material: string?): (ResultCode, string?)
 	local state = private[self]
 	if state == nil then return "invalid", "record does not exist" end
-	return transaction_internal(state, operation_id, request_fingerprint, transform, events)
+	return transaction_internal(state, operation_id, request_fingerprint, transform, events, request_material)
 end
 
 local function get_outbox(self: Record, max_items: number?): ({ OutboxEvent }, ResultCode, string?)

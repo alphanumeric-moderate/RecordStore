@@ -10,6 +10,12 @@
       "RecordStoreMailboxV2": {
         "$path": "src/PlayerDataInitializer/RecordStoreMailboxV2.luau"
       },
+      "RecordStoreV2": {
+        "$path": "src/PlayerDataInitializer/RecordStoreV2.luau"
+      },
+      "RecordStoreV2Simulator": {
+        "$path": "src/PlayerDataInitializer/RecordStoreV2Simulator.luau"
+      },
       "RecordStoreMailboxV2Regression": {
         "$path": "tests/RecordStoreMailboxV2Regression.server.luau"
       },

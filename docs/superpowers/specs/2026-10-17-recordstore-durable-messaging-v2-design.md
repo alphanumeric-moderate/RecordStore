@@ -1638,3 +1638,32 @@ This section supersedes any less precise statement elsewhere in the document. It
 ### Release decision
 
 The design is improved, but v2 is **not implementation-ready for production activation** until the P0 items above have concrete protocols and executable tests. Close each blocker with an implementation PR, failure-injection coverage and relevant Studio tests. Then rerun the full 70-group matrix against the real production-path code plus the fake-service harness. CodSpeed measurements establish local CPU/wall-time behavior only for their instrumented workload; they do not prove Roblox DataStore latency, delivery or quota behavior.
+
+
+## 32. PR #35 feature-first implementation status
+
+PR #35 adds an opt-in implementation layer for the roadmap: bounded inbox batch application with
+per-message exact request receipts; bounded repeated outbox and transaction-receipt cleanup;
+persisted exact request material on transaction receipts; a versioned local request governor,
+critical save/release reserve, work-class caps, retry tokens, circuit breakers, backpressure modes,
+batch sizing, due-time scheduling, owner fairness, priority/dependency handling, lease-renewal lane,
+shadow selection, deterministic schedule replay hooks, durability-age lower-bound reporting and
+contention diagnostics; Marketplace receipt processing; declared sequential application-schema
+migrations and dry-run preview; transfer saga reserve/credit/settle/compensation; Profile Doctor,
+redacted diff, repair preview, and expected-revision guarded restore; callback-driven RTBF inventory,
+writer fences and generation-aware deletion; versioned eventual projections, rebuild, and unique
+reservations; redacted tracing with optional durable flush; in-flight read coalescing; payload sizing
+and versioned codec checks; and resumable budgeted compaction callbacks.
+
+A separate deterministic simulator module supplies a virtual clock, per-key UpdateAsync mock,
+pre-commit and commit-then-error injections, repeated transform execution, request budgets, lossy /
+duplicating / delayed / reordered messaging hints, server crash/restart controls, and trace capture.
+In this feature-first pass the simulator is compiled by the successful-path benchmark but its fault
+controls are not exercised. Failure-injection scripts remain in the later verification pass.
+
+This is a feature implementation, not a release-readiness declaration. Cross-key transfer remains a
+saga, projections are eventual, strict `ordering_key` remains unsupported, and user-key erasure is
+only complete when the integrating game verifies complete RTBF template coverage, writer fencing,
+dependency clearance and generation-safe physical deletion for every user-associated key family.
+The 70-group adversarial matrix, deterministic crash acceptance, real Roblox Studio/service runs,
+mixed-version rollout rehearsal, and production operational acceptance remain intentionally deferred.

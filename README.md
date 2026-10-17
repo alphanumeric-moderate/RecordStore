@@ -199,3 +199,36 @@ lune run bench/run_regression_tests.luau
 # run every benchmark from codspeed.yml with the CodSpeed CLI
 codspeed run --mode simulation
 ```
+
+
+## RecordStore v2 feature services
+
+The v2 feature layer is opt-in and lives at
+`ServerScriptService.PlayerDataInitializer.RecordStoreV2`. It receives explicit dependencies on
+`RecordStore` and `RecordStoreMailboxV2`:
+
+```lua
+local RecordStore = require(script.Parent.RecordStore)
+local MailboxV2 = require(script.Parent.RecordStoreMailboxV2)
+local RecordStoreV2 = require(script.Parent.RecordStoreV2)
+local V2 = RecordStoreV2.new(RecordStore, MailboxV2)
+```
+
+It exposes bounded inbox batches, transaction/outbox helpers, a server-local runtime governor and
+fair scheduler, request-budget admission, circuit breakers, retry tokens, purchase receipt handling,
+application-schema migrations, multi-profile transfer sagas and escrow, Profile Doctor and guarded
+restore, RTBF-oriented erasure planning, eventually consistent projections and unique reservations,
+operation tracing, safe read coalescing, payload sizing/codec validation, and resumable compaction
+callbacks. The service layer never activates itself.
+
+The library reserves the `__recordstore_v2_` prefix for its optional profile-data ledgers. Do not
+store application fields under this prefix. Cross-key workflows remain sagas, projections are
+eventually consistent, and neither strict `ordering_key` semantics nor exactly-once arbitrary
+external effects are promised. Erasure and compaction require application-provided inventories,
+writer fences, dependency checks, and generation-aware delete/redact adapters. Template coverage is
+not considered verified unless the application explicitly verifies rendered platform templates.
+
+PR #35 currently uses a `[benchmark-only]` phase marker. During that phase the CodSpeed workflow
+skips regression/failure suites and benchmarks ordinary successful feature paths. Remove the marker
+to restore the full regression gate. Lune/Mock measurements are not real Roblox service latency or
+production acceptance evidence.

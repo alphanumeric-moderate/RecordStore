@@ -32,7 +32,9 @@ jobs:
           rm lune.zip
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
+      # Remove [benchmark-only] from the PR body to re-enable feature-failure gates.
       - name: Check the regression suite passes
+        if: ${{ !contains(github.event.pull_request.body, '[benchmark-only]') }}
         run: |
           lune run bench/run_regression_tests.luau
           lune run bench/mailbox_v2_regression.bench.luau

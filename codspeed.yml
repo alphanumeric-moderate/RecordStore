@@ -6,6 +6,12 @@ benchmarks:
   - name: "MailboxV2 end-to-end enqueue, claim, and acknowledgement"
     exec: lune run bench/mailbox_v2.bench.luau
 
+  - name: "RecordStoreV2 successful-path feature services"
+    exec: lune run bench/recordstore_v2_features.bench.luau
+
+  - name: "RecordStoreV2 governor and read-coalescing throughput"
+    exec: lune run bench/recordstore_v2_governor.bench.luau
+
   - name: "session lifecycle (create/update/save/close/reopen)"
     exec: lune run bench/session_lifecycle.bench.luau
 
