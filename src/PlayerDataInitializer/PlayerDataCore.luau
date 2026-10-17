@@ -97,6 +97,12 @@ export type Dependencies = {
 
 type PlayerRecord = RecordStore.Record
 
+type PlayerValueFolders = {
+	leaderstats: Instance?,
+	player_data_values: Instance?,
+}
+type PlayerValuePathKey = "leaderstats" | "player_data_values"
+
 export type Controller = {
 	Start: (self: Controller) -> boolean,
 	Shutdown: (self: Controller) -> boolean,
@@ -652,6 +658,7 @@ local function new(dependencies: Dependencies?): Controller
 	local player_added_connection: RBXScriptConnection? = nil
 	local player_removing_connection: RBXScriptConnection? = nil
 	local sessions: {[Player]: PlayerRecord} = {}
+	local player_value_folders: { [Player]: PlayerValueFolders } = setmetatable({}, { __mode = "k" })
 	local loading: {[Player]: boolean} = {}
 	local cancelled_loading: {[Player]: boolean} = {}
 	local departed_players: {[Player]: boolean} = {}
@@ -1076,8 +1083,35 @@ local function new(dependencies: Dependencies?): Controller
 			player_data_values.Parent = player
 		end
 		leaderstats.Parent = player
-	end
 
+		player_value_folders[player] = {
+			leaderstats = leaderstats,
+			player_data_values = player_data_values,
+		}
+
+
+	local function find_cached_player_child(
+		player: Player,
+		path_key: PlayerValuePathKey,
+		root_name: string,
+		child_name: string
+	): Instance?
+		local paths = player_value_folders[player]
+		if paths == nil then
+			paths = {
+				leaderstats = nil,
+				player_data_values = nil,
+			}
+			player_value_folders[player] = paths
+		end
+
+		local root = paths[path_key]
+		if root == nil or root.Parent ~= player or root.Name ~= root_name then
+			root = player:FindFirstChild(root_name)
+			paths[path_key] = root
+		end
+		return if root ~= nil then root:FindFirstChild(child_name) else nil
+	end
 
 	local function find_player_value_instance(player: Player, key: string, field: DataField): Instance?
 		if not CONFIG.leaderstats.enabled then
@@ -1088,13 +1122,11 @@ local function new(dependencies: Dependencies?): Controller
 		if field.class_name == "CodeNumValue"
 			or (definition ~= nil and definition.number_format ~= nil)
 		then
-			local values = player:FindFirstChild("PlayerDataValues")
-			return if values ~= nil then values:FindFirstChild(key) else nil
+			return find_cached_player_child(player, "player_data_values", "PlayerDataValues", key)
 		end
 
 		if definition ~= nil then
-			local leaderstats = player:FindFirstChild(CONFIG.leaderstats.name)
-			return if leaderstats ~= nil then leaderstats:FindFirstChild(definition.name) else nil
+			return find_cached_player_child(player, "leaderstats", CONFIG.leaderstats.name, definition.name)
 		end
 
 		return nil
@@ -1453,6 +1485,7 @@ local function new(dependencies: Dependencies?): Controller
 
 		local record = sessions[player]
 		sessions[player] = nil
+		player_value_folders[player] = nil
 		if record == nil then
 			removing[player] = nil
 			return
