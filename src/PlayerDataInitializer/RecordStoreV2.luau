@@ -2573,8 +2573,17 @@ local function new_maintenance()
 	return service
 end
 
+-- The rollout control plane must be constructible before the guarded V2 facade.
+-- Integrations create this gate first, then pass its ActivationGuard into V2.new.
+V2.Rollout = { new = new_rollout }
+
 function V2.new(record_store, mailbox_module, options)
 	options = options or {}
+	local activation_guard = options.activation_guard
+	local allow_unattested_activation = options.allow_unattested_activation == true
+	if type(activation_guard) ~= "function" and not allow_unattested_activation then
+		error("RecordStoreV2 requires activation_guard; allow_unattested_activation=true is test/staging-only", 2)
+	end
 	if type(record_store) ~= "table" or type(record_store.new) ~= "function" then error("RecordStoreV2 requires RecordStore", 2) end
 	if type(mailbox_module) ~= "table" or type(mailbox_module.new) ~= "function" then error("RecordStoreV2 requires RecordStoreMailboxV2", 2) end
 	if type(record_store.apply_runtime_policy) ~= "function" or type(record_store.get_runtime_stats) ~= "function"
