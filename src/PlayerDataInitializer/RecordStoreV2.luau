@@ -1192,8 +1192,12 @@ local function saga_coordinator(store, options)
 		local value, message = adapter_call(store, "GetAsync", saga_key(id))
 		if message then return { code = "unknown", message = message } end
 		if value == nil then return { code = "not_found" } end
-		if type(value) ~= "table" or value.transfer_id ~= id then
-			return { code = "conflict", message = "saga route collision or corrupt manifest" }
+		local known_phases = { requested = true, reserved = true, credit_pending = true, credited = true, refund_pending = true, settled = true, rejected = true }
+		if type(value) ~= "table" or value.version ~= 1 or value.transfer_id ~= id
+			or not valid_text(value.request_material, MAX_REQUEST_BYTES)
+			or not valid_text(value.phase, 32) or not known_phases[value.phase]
+		then
+			return { code = "corrupt", message = "saga route identity, revision or phase is invalid" }
 		end
 		local result = copy(value)
 		result.code = result.status or "unknown"
@@ -1233,6 +1237,17 @@ local function saga_coordinator(store, options)
 		local request_digest = digest(canonical(request))
 		local begin_operation_id = "rv2s-begin-" .. request_digest
 		local saga, saga_code, saga_error = update_saga(id, request, begin_operation_id, function(current)
+			if (current.sender_id ~= nil and current.sender_id ~= sender_id)
+				or (current.recipient_id ~= nil and current.recipient_id ~= recipient_id)
+				or (current.amount ~= nil and current.amount ~= amount)
+				or (current.balance_field ~= nil and current.balance_field ~= balance_field)
+			then
+				return nil
+			end
+			current.sender_id = sender_id
+			current.recipient_id = recipient_id
+			current.amount = amount
+			current.balance_field = balance_field
 			return current
 		end)
 		if not saga then return { code = saga_code, transfer_id = id, message = saga_error } end
@@ -1479,6 +1494,7 @@ local function saga_coordinator(store, options)
 						if type(decision) ~= "table" or decision.amount ~= amount then error("recipient transfer decision amount conflict") end
 						if decision.state == "aborted" then error("recipient credit is fenced by the durable transfer-abort decision") end
 						if decision.state ~= "credited" then error("recipient transfer decision has an unsupported state") end
+						if received[id] == nil then error("credited decision exists without its recipient receipt") end
 					end
 					if received[id] ~= nil then
 						if received[id] ~= amount then error("transfer receipt amount conflict") end
