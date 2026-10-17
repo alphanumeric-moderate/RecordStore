@@ -185,8 +185,10 @@ local function parse_message(self: State, payload_value: unknown, expected_shard
 	if type(payload_value) ~= "table" then return nil, "payload is not an object" end
 	local payload = payload_value :: Dict
 	if payload.version ~= VERSION or payload.shard ~= expected_shard then return nil, "version/shard mismatch" end
-	if not valid_text(payload.owner_digest, 32) or string.match(payload.owner_digest :: string, "^[0-9a-f]+$") == nil then
-		return nil, "owner_digest is invalid"
+	if type(payload.owner_digest) ~= "string" or #payload.owner_digest ~= 32
+		or string.match(payload.owner_digest, "^[0-9a-f]+$") == nil
+	then
+		return nil, "owner_digest must be exactly 32 lowercase hex characters"
 	end
 	if not valid_text(payload.event_id, 128) or not valid_reason(payload.reason) or not finite(payload.issued_at_ms) then
 		return nil, "message fields are invalid"
