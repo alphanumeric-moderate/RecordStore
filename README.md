@@ -45,7 +45,9 @@ assert(math.isnan(record:Get().not_a_number))
 
 The repository also includes:
 
+- `src/PlayerDataInitializer/PlayerData.luau`: the shared controller ModuleScript required by the initializer and gameplay scripts.
 - `src/PlayerDataInitializer/PlayerDataCore.luau`: a configurable player session, leaderstats, persistence, retry, and shutdown controller.
+- `src/PlayerDataInitializer/RecordStore.luau`: the underlying persistence, session ownership, versioning, and recovery API.
 - `src/PlayerDataInitializer/IntegerInfinityValue.luau`: a `NumberValue` factory that rounds finite values to integers while preserving positive infinity, negative infinity, and NaN. The default `kills` field uses this type so non-finite values are not silently replaced with zero.
 - `src/PlayerDataInitializer/NumberFormatter.luau`: a display formatter for native Luau numbers. Formatting never changes stored values.
 - `src/PlayerDataInitializer/CodeNumValue.luau`: an adapter for your CodeNum module. It persists CodeNum's own versioned `encode`/`decode` JSON format and provides `get`/`set` helpers for a replicated StringValue backing instance.
@@ -165,7 +167,7 @@ The 202-entry sequence is `K, M, B, T`, followed by the `first`, `second`, `thir
 
 ## Rojo
 
-Build the production modules without the example Script:
+Build the standard production place, including `PlayerDataInitializer`:
 
 ```sh
 rojo build default.project.json -o RecordStore.rbxlx
