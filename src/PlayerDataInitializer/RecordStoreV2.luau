@@ -1209,29 +1209,46 @@ local function new_erasure(store, families, options)
 				local items, message = io_call(family.inventory, user_id, MAX_ERASURE_ITEMS)
 				if type(items) ~= "table" then coverage[family.name] = { status = "unresolved", count = 0, message = message }
 				else
-					local count = 0
-					for index, item in ipairs(items) do
-						if index > MAX_ERASURE_ITEMS then break end
+					local item_count = 0
+					for index in pairs(items) do
+						if type(index) ~= "number" or not finite(index) or math.floor(index) ~= index or index < 1 then
+							return { code = "invalid", message = "inventory must be a dense array" }
+						end
+						item_count += 1
+						if item_count > MAX_ERASURE_ITEMS then return { code = "capacity", message = "family inventory exceeds bounded item count" } end
+					end
+					for index = 1, item_count do
+						if items[index] == nil then return { code = "invalid", message = "inventory must be a dense array" } end
+					end
+					for index = 1, item_count do
+						local item = items[index]
 						if type(item) ~= "table" or not valid_text(item.key, 50) or not finite(item.generation) then return { code = "invalid", message = "inventory items require key and observed generation" } end
-						table.insert(entries, { family = family.name, item = copy(item) }); count += 1
+						table.insert(entries, { family = family.name, item = copy(item) })
 						if #entries > MAX_ERASURE_ITEMS then return { code = "capacity", message = "erasure plan exceeds bounded item count" } end
 					end
-					coverage[family.name] = { status = if family.templates_verified == true then "template_verified_by_integrator" else "template_unverified", count = count }
+					coverage[family.name] = {
+						status = if family.templates_verified == true and family.inventory_verified == true
+							then "coverage_verified_by_integrator" else "coverage_unverified",
+						count = item_count,
+						templates_verified = family.templates_verified == true,
+						inventory_verified = family.inventory_verified == true,
+					}
 				end
 			end
 		end
 		local rendered = self:RenderTemplates(user_id)
 		local template_ok = if type(options.verify_templates) == "function" then io_call(options.verify_templates, user_id, rendered) else false
 		local verified = #self.families > 0
-		for _, row in pairs(coverage) do if row.status ~= "template_verified_by_integrator" then verified = false end end
+		for _, row in pairs(coverage) do if row.status ~= "coverage_verified_by_integrator" then verified = false end end
 		local manifest = {
 			version = 1, user_id = user_id, erasure_id = erasure_id, status = "planned", cursor = 0,
 			completed_count = 0, entries = entries, coverage = coverage,
 			rtbf_coverage_verified = verified and template_ok == true, created_at = os.time(), updated_at = os.time(),
 		}
 		local value, message = adapter_call(store, "UpdateAsync", manifest_key(user_id), function(old)
-			if old ~= nil and (old.user_id ~= user_id or old.erasure_id ~= erasure_id) then return old end
-			if old ~= nil and old.status == "completed" then return old end
+			-- The erasure ID owns one immutable plan. A retry must not reset progress
+			-- or replace the authoritative inventory with a later, different snapshot.
+			if old ~= nil then return old end
 			return manifest
 		end)
 		if message then
@@ -1250,9 +1267,22 @@ local function new_erasure(store, families, options)
 		local manifest, message = adapter_call(store, "GetAsync", key)
 		if message then return { code = "unknown", message = message } end
 		if type(manifest) ~= "table" or manifest.user_id ~= user_id or manifest.erasure_id ~= erasure_id then return { code = "not_found" } end
-		if manifest.status == "completed" then return { code = "committed", completed_count = manifest.completed_count or 0, rtbf_coverage_verified = manifest.rtbf_coverage_verified } end
+		if manifest.rtbf_coverage_verified ~= true then
+			return { code = "blocked", cursor = manifest.cursor or 0, completed_count = manifest.completed_count or 0,
+				message = "RTBF coverage is not verified for every declared family, template and authoritative inventory; no erasure actions were run" }
+		end
+		if manifest.status == "completed" then return { code = "committed", completed_count = manifest.completed_count or 0, rtbf_coverage_verified = true } end
+		if type(manifest.entries) ~= "table" or not finite(manifest.cursor) or math.floor(manifest.cursor) ~= manifest.cursor
+			or manifest.cursor < 0 or manifest.cursor > #manifest.entries
+		then
+			return { code = "corrupt", message = "erasure manifest has an invalid bounded cursor or entries list" }
+		end
 		for _, family in ipairs(self.families) do
-			if type(family.fence_user) ~= "function" or type(family.redact_or_delete_if_generation) ~= "function" then return { code = "unsupported", message = "family needs writer fence and generation-aware delete/redact" } end
+			if type(family.fence_user) ~= "function" or type(family.dependencies_clear) ~= "function"
+				or type(family.redact_or_delete_if_generation) ~= "function"
+			then
+				return { code = "unsupported", message = "family needs writer fencing, dependency proof and generation-aware delete/redact" }
+			end
 			local fenced, fence_error = io_call(family.fence_user, user_id, erasure_id)
 			if fenced ~= true then return { code = "retryable", message = fence_error or "writer fence unconfirmed" } end
 		end
@@ -1260,10 +1290,8 @@ local function new_erasure(store, families, options)
 		for index = cursor + 1, math.min(#manifest.entries, cursor + max_items) do
 			local entry, family = manifest.entries[index], by_name[manifest.entries[index].family]
 			if not family then return { code = "corrupt", message = "unknown family in erasure plan" } end
-			if type(family.dependencies_clear) == "function" then
-				local clear, dependency_error = io_call(family.dependencies_clear, entry.item, user_id)
-				if clear ~= true then return { code = "blocked", cursor = index - 1, message = dependency_error or "live dependency blocks deletion" } end
-			end
+			local clear, dependency_error = io_call(family.dependencies_clear, entry.item, user_id)
+			if clear ~= true then return { code = "blocked", cursor = index - 1, message = dependency_error or "live dependency blocks deletion" }
 			local status, action_error = io_call(family.redact_or_delete_if_generation, entry.item, user_id, erasure_id)
 			if status ~= "deleted" and status ~= "redacted" then
 				adapter_call(store, "UpdateAsync", key, function(old)
