@@ -113,6 +113,7 @@ end
 local RecordStoreInstance = table.freeze({ Name = "RecordStore", ClassName = "ModuleScript" })
 
 local ServerScriptService = {
+	RecordStore = RecordStoreInstance,
 	WaitForChild = function(_self, name: string)
 		assert(name == "RecordStore", "only the RecordStore ModuleScript is available")
 		return RecordStoreInstance
