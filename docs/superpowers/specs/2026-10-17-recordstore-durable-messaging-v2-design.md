@@ -233,14 +233,14 @@ A saga is eventually consistent, not a cross-key ACID transaction. Never name it
 
 ### 4.1 Record families
 
-Use the configured queue DataStore name and scope with a versioned mailbox namespace. The full record owner is `(store_name, scope, profile_key)`. Every route, segment, message, dead-letter and manifest value must store and validate the full owner; a hashed key is only a routing aid. Producer idempotency uses the canonical message record itself rather than a separate receipt key. The segment index stores the canonical record key; this lets migrated legacy messages keep their original public ID while using a v2-safe route.
+Use a dedicated queue DataStore name/scope reserved for RecordStore's mailbox; do not share that namespace with unrelated application keys or other libraries. Normalize the effective scope exactly as the underlying DataStore API does before computing any route, so omitted and explicit default scopes cannot produce two identities for the same logical owner. The full record owner is `(store_name, effective_scope, profile_key)`. Every route, segment, message, dead-letter, workflow and manifest value must store and validate its full identity; a hashed key is only a routing aid. Producer idempotency uses the canonical message record itself rather than a separate receipt key. The segment index stores the canonical record key; this lets migrated legacy messages keep their original public ID while using a v2-safe route.
 
 The layout consists of:
 
 1. **Constant-bounded manifest** per owner and partition: protocol version, full owner identity, immutable partition count, activation/migration state, a fixed-size segment-slot table, per-slot generation/state/current segment key, and a scan hint. The table is capped at the configured maximum (initially 64); it never grows with message count.
 2. **Append-only segment index**: bounded entries containing the canonical message record key plus placement generation, not payload, retry state, or dead-letter history. For new v2 messages the record key is the public message ID; for migrated v3 messages the index key is a stable `m2l-` route while the canonical value preserves the old public ID. Appending is idempotent; message processing never rewrites this index entry. Segment keys include both slot and generation so a reused slot cannot alias an older segment.
 3. **Canonical message record and producer receipt**: one DataStore key per logical message. With an idempotency key, the canonical route and public message ID are the deterministic `m2i-` key derived from the full owner tuple plus producer key; the record stores the full owner, original key, exact canonical request, payload, schema version, lifecycle state, retry schedule, attempts, claim token/expiry, current segment locator/generation, correlation IDs, terminal reason and bounded transition history. This record is both the message and the producer's durable receipt; there is no separate producer-receipt key to keep synchronized. Without a producer key, use a generated `m2g-` message ID; an ambiguous whole-call retry can create a second logical message.
-4. **Independent dead-letter index**: separately segmented IDs for messages in dead-letter state. The canonical message record retains the payload/error needed for inspection and replay. A growing DLQ cannot consume active-segment capacity.
+4. **Independent dead-letter index**: separately segmented canonical record keys for messages in dead-letter state. The canonical message record retains the payload/error needed for inspection and replay. A growing DLQ cannot consume active-segment capacity.
 5. **Profile-local inbox and outbox fields**: bounded sidecars in the profile envelope, so the data mutation and its corresponding inbox receipt/outbox intent can be committed in a single UpdateAsync. These fields require a versioned profile-envelope migration and explicit rollout gating.
 
 A per-message canonical record costs more keys and service calls than one large queue envelope, but eliminates rewrites of unrelated message payloads on claim/ack and isolates hot-key traffic. CodSpeed and constrained-budget workload evidence must determine usable defaults rather than assuming this is always cheaper.
@@ -262,14 +262,16 @@ Initial values are benchmark candidates, not production claims:
 
 - one partition by default; partition count is immutable after activation;
 - at most 32 canonical message record keys per active segment;
-- at most 250,000 encoded bytes per segment index, even though it contains only IDs;
+- at most 64 KiB encoded bytes per segment index, even though it contains only canonical record keys;
 - at most 64 live segment slots per partition initially; slots can be reclaimed out of order after all entries are terminal or stale, so a delayed old item does not pin all later completed slots;
 - each reused slot gets a strictly increasing generation encoded into its segment key; generations never wrap or reuse an old key;
 - at most 64 KiB encoded payload per message by default, configurable only within validated service/key limits;
 - use the current 60-second claim lease and 10-second polling interval as initial candidates; `queue_clock_skew_grace_ms = 5000` is a starting value that must be validated under simulated skew. Lease length and skew grace are correctness-sensitive settings, not adaptive knobs; the controller may change scan/poll/concurrency only within validated bounds;
 - deduplication and dead-letter retention must be explicit. Never expire a dedup receipt before the advertised idempotency window.
 
-The number of record keys per segment is not the same as maximum pending backlog. Segments may be reclaimed only after every referenced message is terminal or safely re-routed and the segment is sealed. Deleting a segment key is not the acknowledgement of any message in it.
+The proposed snake_case v2 layout options are `queue_layout`, `queue_partition_count`, `queue_segment_max_messages`, `queue_segment_max_bytes`, `queue_max_segments`, `queue_max_payload_bytes`, and `queue_clock_skew_grace_ms`; reuse the existing validated `queue_poll_interval`, `queue_processing_lease`, and `queue_max_attempts` names where compatible. For a new layout, defaults are candidates only: `queue_layout = "v2"` stays gated off; `queue_partition_count = 1`, `queue_segment_max_messages = 32`, `queue_segment_max_bytes = 65536`, `queue_max_segments = 64`, `queue_max_payload_bytes = 65536`, `queue_processing_lease = 60`, `queue_poll_interval = 10`, and the skew-grace candidate is 5000 ms. Slot count/partition count are frozen after activation; choose greater capacity before activation instead of resizing a live layout. Deduplication and DLQ retention are separate options and must be explicitly configured; DLQ auto-purge is disabled by default.
+
+The number of record keys per segment is not the same as maximum pending backlog. Segments may be reclaimed only after every indexed entry is terminal or safely stale and the segment is sealed. Deleting a segment key is not the acknowledgement of any message in it.
 
 ### 4.4 Segment rollover and append protocol
 
