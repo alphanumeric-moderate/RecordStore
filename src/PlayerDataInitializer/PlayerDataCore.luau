@@ -46,6 +46,7 @@ type CodeNumValueFactoryAPI = {
 	normalize_serialized: ((value: unknown) -> (string?, CodeNumValueNode?))?,
 }
 
+-- The default schema does not use CodeNumValue, so defer its module load.
 local cached_code_num_value_factory: CodeNumValueFactoryAPI? = nil
 
 local function get_code_num_value_factory(): CodeNumValueFactoryAPI

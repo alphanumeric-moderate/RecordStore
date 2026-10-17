@@ -52,7 +52,7 @@ The repository also includes:
 - `src/PlayerDataInitializer/RecordStore.luau`: the underlying persistence, session ownership, versioning, and recovery API.
 - `src/PlayerDataInitializer/IntegerInfinityValue.luau`: a `NumberValue` factory that rounds finite values to integers while preserving positive infinity, negative infinity, and NaN. The default `kills` field uses this type so non-finite values are not silently replaced with zero.
 - `src/PlayerDataInitializer/NumberFormatter.luau`: a display formatter for native Luau numbers. Formatting never changes stored values.
-- `src/PlayerDataInitializer/CodeNumValue.luau`: an adapter for your CodeNum module. It persists CodeNum's own versioned `encode`/`decode` JSON format and provides `get`/`set` helpers for a replicated StringValue backing instance.
+- `src/PlayerDataInitializer/CodeNumValue.luau`: an adapter for your CodeNum module. It persists CodeNum's own versioned `encode`/`decode` JSON format and provides `get`/`set` helpers for a replicated StringValue backing instance. With the default schema, this adapter is not required during startup; `PlayerDataCore` loads it only when a `CodeNumValue` field is configured or used.
 - `src/PlayerDataInitializer/init.server.luau`: a standard Script that starts the controller and shuts it down from `BindToClose`.
 
 ### PlayerData.Set API
