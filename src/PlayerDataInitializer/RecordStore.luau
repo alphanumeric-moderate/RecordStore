@@ -6330,6 +6330,13 @@ local function bind_mailbox_v2(self: Record, mailbox: unknown): (ResultCode, str
 	end
 	local ok, owner = pcall(function() return (mailbox :: any):GetOwner() end)
 	if not ok or type(owner) ~= "table" then return "invalid", "mailbox owner identity could not be read" end
+	if type((mailbox :: any).GetActiveRecord) == "function" then
+		local active_ok, active_record = pcall(function() return (mailbox :: any):GetActiveRecord() end)
+		if not active_ok then return "invalid", "mailbox active Record binding could not be inspected" end
+		if active_record ~= nil and active_record ~= self then
+			return "conflict", "mailbox processing is bound to a different Record instance"
+		end
+	end
 	local owner_fields = owner :: { [string]: unknown }
 	if owner_fields.store_name ~= state.name or owner_fields.scope ~= state.scope or owner_fields.profile_key ~= state.key then
 		return "conflict", "mailbox owner does not match this Record identity"
