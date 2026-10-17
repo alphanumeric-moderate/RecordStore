@@ -1167,7 +1167,10 @@ function MailboxV2._resume_reservation(self: Mailbox, route: string, initial_ent
 	if not self:_contains_index_row("active", locator, route, placement) then
 		return ok("unknown", route, self:_record_snapshot(ready), "ready record has no verified matching index row")
 	end
-	self:_set_registry_entry(route, token, nil, true)
+	local cleared_entry, clear_error = self:_set_registry_entry(route, token, nil, true)
+	if clear_error ~= nil or cleared_entry ~= nil then
+		return ok("unknown", route, self:_record_snapshot(ready), clear_error or "preparation registry clear was not verified")
+	end
 	return ok("accepted", route, self:_record_snapshot(ready), nil)
 end
 
