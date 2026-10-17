@@ -23,8 +23,12 @@ type StoreAdapter = {
 	UpdateAsync: (self: StoreAdapter, key: string, transform: (unknown, unknown?) -> (unknown, { number }?, Dict?)) -> unknown,
 	RemoveAsync: ((self: StoreAdapter, key: string) -> ())?,
 }
+type WakeupAdapter = {
+	Publish: (self: WakeupAdapter, owner_identity: string, reason: string) -> Dict,
+}
 type Options = {
 	active_record: ActiveRecordLike?,
+	wakeups: WakeupAdapter?,
 	now_ms: (() -> number)?,
 	guid: (() -> string)?,
 	encode: ((unknown) -> string)?,
@@ -56,6 +60,8 @@ type Mailbox = typeof(setmetatable({} :: {
 	owner: Owner,
 	owner_text: string,
 	options: Options,
+	wakeup_published: number,
+	wakeup_publish_errors: number,
 }, MailboxV2))
 
 local VERSION = 2
@@ -330,6 +336,8 @@ function MailboxV2.new(store: unknown, owner_value: Owner, options_value: Option
 		owner = owner,
 		owner_text = canonical(owner),
 		options = options,
+		wakeup_published = 0,
+		wakeup_publish_errors = 0,
 	}
 	return setmetatable(self, MailboxV2) :: Mailbox
 end
@@ -1232,6 +1240,32 @@ function MailboxV2._resume_reservation(self: Mailbox, route: string, initial_ent
 	return ok("accepted", route, self:_record_snapshot(ready), nil)
 end
 
+
+local function publish_after_enqueue(self: Mailbox, result: Result): Result
+	if result.code ~= "accepted" and result.code ~= "duplicate" then return result end
+	local state = if type(result.message) == "table" then result.message.State else nil
+	if state ~= nil and state ~= "ready" then return result end
+	local wakeups = self.options.wakeups
+	if wakeups == nil then return result end
+	local ok, response = pcall(function()
+		return wakeups:Publish(self.owner_text, "enqueue")
+	end)
+	if ok and type(response) == "table" and response.code == "scheduled" then
+		self.wakeup_published += 1
+	else
+		self.wakeup_publish_errors += 1
+	end
+	return result
+end
+
+function MailboxV2.BindWakeups(self: Mailbox, wakeups: unknown): (boolean, string?)
+	if type(wakeups) ~= "table" or type((wakeups :: Dict).Publish) ~= "function" then
+		return false, "wakeups must expose Publish(owner_identity, reason)"
+	end
+	self.options.wakeups = wakeups :: WakeupAdapter
+	return true, nil
+end
+
 function MailboxV2.EnqueueAsync(self: Mailbox, message_type: string, payload: unknown, enqueue_options: Dict?): Result
 	if type(message_type) ~= "string" or message_type == "" or #message_type > 100 then
 		return ok("invalid", nil, nil, "message_type must be 1 to 100 bytes")
@@ -1290,11 +1324,11 @@ function MailboxV2.EnqueueAsync(self: Mailbox, message_type: string, payload: un
 		if existing.state == "preparing" then
 			local entry = self:_get_registry_entry(route)
 			if entry ~= nil then
-				return self:_resume_reservation(route, entry)
+				return publish_after_enqueue(self, self:_resume_reservation(route, entry))
 			end
 			return ok("unknown", route, self:_record_snapshot(existing), "preparing record has no matching registry entry; quarantined")
 		end
-		return ok("duplicate", route, self:_record_snapshot(existing), nil)
+		return publish_after_enqueue(self, ok("duplicate", route, self:_record_snapshot(existing), nil))
 	end
 
 	local token = if self.options.guid ~= nil then self.options.guid() else digest(route .. request_text .. tostring(self:_now()))
@@ -1305,7 +1339,7 @@ function MailboxV2.EnqueueAsync(self: Mailbox, message_type: string, payload: un
 			else "unknown"
 		return ok(code, route, nil, reserve_error)
 	end
-	return self:_resume_reservation(route, entry)
+	return publish_after_enqueue(self, self:_resume_reservation(route, entry))
 end
 
 function MailboxV2.GetDeliveryAsync(self: Mailbox, message_id: string): (Dict?, Result)
