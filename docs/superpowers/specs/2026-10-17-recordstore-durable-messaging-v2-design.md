@@ -161,7 +161,7 @@ local result = record:ApplyInboxBatchAsync(messages, function(current_data, unse
 end)
 ```
 
-One UpdateAsync applies the combined profile mutation and records inbox receipts for all new message IDs. Matching duplicates are returned as duplicates and excluded from the reducer input. If any ID conflicts with a retained receipt, the full batch aborts without applying any new messages. An invalid reducer result, callback error/yield, owner/session fencing failure or capacity overflow also aborts the entire batch. The result gives an outcome for every input ID.
+One UpdateAsync applies the combined profile mutation and records inbox receipts for all new message IDs. The input must contain unique message IDs; duplicate IDs within one call are rejected as validation errors before any write. Matching receipts from earlier calls are returned as duplicates and excluded from the reducer input. If any ID conflicts with a retained receipt, the full batch aborts without applying any new messages. An invalid reducer result, callback error/yield, owner/session fencing failure or capacity overflow also aborts the entire batch. The result gives an outcome for every input ID.
 
 The batch has strict item and encoded-byte ceilings. Only messages for the same profile and compatible schema/reducer may share a transaction. Preserve delivery order explicitly; do not reorder messages with the same ordering key. Queue acknowledgements begin only after the profile mutation and all receipts are verified durable. A crash after profile commit but before queue acknowledgements is safe: redelivery finds the per-message inbox receipts and does not reapply the data mutations.
 
@@ -237,7 +237,7 @@ A per-message canonical record costs more keys and service calls than one large 
 
 Roblox DataStore key names are limited to 50 characters. Define and test a stable key codec for every route, message, segment, idempotency, and DLQ key. Include store/scope/owner identity in the stored value, not only in the key name.
 
-- Use a versioned deterministic route codec. For example, a canonical message key is `m2i-<32-hex-digest>` when a producer key is supplied and `m2g-<32-hex-guid>` otherwise; both are 36 characters. The idempotency digest covers a length-prefixed canonical tuple of store, scope, profile key and producer key. Document the exact pure-Luau digest algorithm and fixed test vectors; do not assume Roblox provides a built-in cryptographic hash.
+- Use a versioned deterministic route codec. For example, a canonical message key is `m2i-<32-hex-digest>` when a producer key is supplied, `m2g-<32-hex-guid>` for a new non-idempotent message, and `m2l-<32-hex-digest>` for a migrated legacy message; all are 36 characters. The idempotency digest covers a length-prefixed canonical tuple of store, scope, profile key and producer key. Document the exact pure-Luau digest algorithm and fixed test vectors; do not assume Roblox provides a built-in cryptographic hash.
 - On every read/update, compare the complete stored owner, producer key (when present), message ID and exact canonical request to the requested values.
 - An idempotent message's record key is derived from a versioned digest of the full length-prefixed owner tuple plus producer key, so the same logical submission maps directly to its canonical message record without a second receipt lookup. A submission without an idempotency key uses a generated ID and cannot deduplicate an ambiguous retry.
 - If two inputs map to the same routing key but differ in full identity or request, fail closed with an explicit route-collision/conflict result. Never read, mutate, or overwrite the other owner's record.
@@ -286,7 +286,7 @@ Slot lifecycle:
 
 Canonical message states:
 
-- `preparing`: submission is not yet claimable; index/receipt reconciliation is permitted.
+- `preparing`: submission is not yet claimable; index/message reconciliation is permitted.
 - `ready`: accepted and eligible after `available_at`.
 - `claimed`: current claim token and lease fence the worker.
 - `acknowledging`: handler success is recorded; recovery finishes acknowledgement without invoking the handler again.
@@ -345,7 +345,7 @@ For purchase receipts that must remain deduplicated indefinitely, applications k
 - stable outbox event IDs derived deterministically from `commit_key` and event ordinal;
 - each event's schema version, target identity and correlation/causation fields.
 
-Canonicalize the command and bounded event list before entering the transform. The reducer must be deterministic, pure and non-yielding; Roblox may invoke it more than once. The transform verifies owner identity, active session token and fencing generation before writing. An already-committed key with the same exact request returns its prior outcome without applying the data mutation again. The same key with a different command, payload or event list conflicts.
+Canonicalize the command and bounded event list before entering the transform. The reducer must be deterministic, pure and non-yielding; Roblox may invoke it more than once. The transform verifies owner identity, active session token and fencing generation before writing. An already-committed key with the same exact request returns its prior outcome without applying the data mutation again. The same key with a different command, payload or event list conflicts. Commit keys and derived event idempotency keys are operation identities and must never be reused for a different logical purchase/transfer. After the configured receipt-retention window expires, deduplication is no longer promised; applications must retain permanent domain ledgers for business operations that require lifetime deduplication.
 
 Serialize this operation through the Record write gate: block local mutators, flush pending local dirty data, then run the durable transform. If flushing fails or is ambiguous, do not apply the command to a potentially stale envelope. After a confirmed commit, rebase the in-memory data, revision and saved snapshot before releasing the gate. If the result is uncertain, reconcile through the stable `commit_key` rather than applying a new operation.
 
