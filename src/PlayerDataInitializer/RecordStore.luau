@@ -793,7 +793,7 @@ local function valid_runtime_policy(candidate: RuntimePolicy): (boolean, string?
 	if candidate.critical_request_reserve < 0 or math.floor(candidate.critical_request_reserve) ~= candidate.critical_request_reserve
 		or candidate.adaptive_min_concurrent_requests + candidate.critical_request_reserve > candidate.adaptive_max_concurrent_requests
 	then
-		return false, "critical_request_reserve must be positive and fit below maximum concurrency"
+		return false, "critical_request_reserve must be a non-negative integer that fits below maximum concurrency"
 	end
 	if candidate.adaptive_read_budget_floor < 0 or candidate.adaptive_write_budget_floor < 0
 		or math.floor(candidate.adaptive_read_budget_floor) ~= candidate.adaptive_read_budget_floor
@@ -815,6 +815,38 @@ local RUNTIME_POLICY_FIELDS: { [string]: boolean } = {
 	adaptive_write_budget_floor = true, adaptive_queue_budget_share = true,
 	adaptive_hysteresis_seconds = true, runtime_policy_refresh_interval = true,
 	critical_request_reserve = true,
+}
+
+local RUNTIME_PROFILE_DEFAULTS: { [string]: { [string]: unknown } } = {
+	balanced = {
+		adaptive_sample_interval = 5, adaptive_min_queue_poll_interval = 3,
+		adaptive_max_queue_poll_interval = 30, adaptive_min_concurrent_requests = 1,
+		adaptive_max_concurrent_requests = DEFAULT_MAX_CONCURRENT_REQUESTS,
+		adaptive_read_budget_floor = 1, adaptive_write_budget_floor = 1,
+		adaptive_queue_budget_share = 0.2, adaptive_hysteresis_seconds = 15,
+		critical_request_reserve = 1,
+	},
+	latency = {
+		adaptive_sample_interval = 2, adaptive_min_queue_poll_interval = 0.5,
+		adaptive_max_queue_poll_interval = 15, adaptive_min_concurrent_requests = 2,
+		adaptive_max_concurrent_requests = 12, adaptive_read_budget_floor = 1,
+		adaptive_write_budget_floor = 1, adaptive_queue_budget_share = 0.3,
+		adaptive_hysteresis_seconds = 5, critical_request_reserve = 2,
+	},
+	throughput = {
+		adaptive_sample_interval = 10, adaptive_min_queue_poll_interval = 5,
+		adaptive_max_queue_poll_interval = 45, adaptive_min_concurrent_requests = 4,
+		adaptive_max_concurrent_requests = 48, adaptive_read_budget_floor = 2,
+		adaptive_write_budget_floor = 2, adaptive_queue_budget_share = 0.25,
+		adaptive_hysteresis_seconds = 30, critical_request_reserve = 2,
+	},
+	conservative = {
+		adaptive_sample_interval = 5, adaptive_min_queue_poll_interval = 5,
+		adaptive_max_queue_poll_interval = 60, adaptive_min_concurrent_requests = 1,
+		adaptive_max_concurrent_requests = 16, adaptive_read_budget_floor = 3,
+		adaptive_write_budget_floor = 3, adaptive_queue_budget_share = 0.1,
+		adaptive_hysteresis_seconds = 30, critical_request_reserve = 2,
+	},
 }
 
 local function merge_runtime_policy(patch: { [string]: unknown }, base: RuntimePolicy, from_provider: boolean): (RuntimePolicy?, string?)
@@ -870,6 +902,13 @@ local function merge_runtime_policy(patch: { [string]: unknown }, base: RuntimeP
 		elseif key == "critical_request_reserve" then
 			if type(value) ~= "number" then return nil, key .. " must be numeric" end
 			candidate.critical_request_reserve = value
+		end
+	end
+	if candidate.runtime_profile ~= base.runtime_profile then
+		local profile_defaults = RUNTIME_PROFILE_DEFAULTS[candidate.runtime_profile]
+		if profile_defaults == nil then return nil, "unsupported runtime_profile" end
+		for field, value in pairs(profile_defaults) do
+			if patch[field] == nil then (candidate :: any)[field] = value end
 		end
 	end
 	if from_provider and candidate.revision <= base.revision then return nil, "runtime policy revision must increase" end
