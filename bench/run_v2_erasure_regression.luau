@@ -143,6 +143,35 @@ local final_step = resumable:ExecuteAsync(114, "erasure-resume", 1)
 assert(final_step.code == "committed", "resumable erasure did not complete after its checkpoint")
 assert(delete_calls == deleted_before_resume + 2, "resumed erasure did not perform one action per immutable plan entry")
 
+local concurrent_store = new_store()
+local concurrent_coordinator
+local nested_started = false
+local concurrent_family = family(true, function(user_id)
+	return {
+		{ key = "Player_" .. tostring(user_id) .. "_first", generation = 1 },
+		{ key = "Player_" .. tostring(user_id) .. "_second", generation = 2 },
+	}
+end)
+concurrent_family.redact_or_delete_if_generation = function(item, user_id, erasure_id)
+	delete_calls += 1
+	if item.key:find("_first", 1, true) and not nested_started then
+		nested_started = true
+		local nested = concurrent_coordinator:ExecuteAsync(user_id, erasure_id, 2)
+		assert(nested.code == "committed", "nested worker failed to finish the immutable erasure plan")
+	end
+	return "deleted"
+end
+concurrent_coordinator = V2.Erasure.new(concurrent_store, { concurrent_family }, {
+	verify_templates = function(_user_id, rendered) return type(rendered) == "table" and #rendered == 1 end,
+})
+local concurrent_plan = concurrent_coordinator:PlanAsync(116, "erasure-concurrent-progress")
+assert(concurrent_plan.rtbf_coverage_verified == true, "concurrent fixture did not attest coverage")
+local concurrent_result = concurrent_coordinator:ExecuteAsync(116, "erasure-concurrent-progress", 2)
+assert(concurrent_result.code == "committed", "outer worker regressed a completed concurrent checkpoint")
+local concurrent_status = concurrent_coordinator:GetStatus(116)
+assert(concurrent_status.status == "completed" and concurrent_status.cursor == 2 and concurrent_status.completed_count == 2,
+	"concurrent worker regressed erasure status/cursor/completed count")
+
 local no_dependency_family = family(true)
 no_dependency_family.dependencies_clear = nil
 local dependency_guard = V2.Erasure.new(new_store(), { no_dependency_family }, {
