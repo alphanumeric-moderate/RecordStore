@@ -263,5 +263,44 @@ group("06 batched outbox dispatch retries source write without repeating callbac
 	assert(#pending == 0, "batch-dispatched events remained pending")
 end)
 
+group("07 consumer reducers cannot modify RecordStore reserved sidecars", function()
+	Fake:Reset()
+	local record = open_record("reserved-sidecar-guard")
+	local sidecar_key = "__recordstore_v2_test_sidecar"
+	local seed_code, seed_message = record:TransactAsync(
+		"seed-reserved-sidecar",
+		"seed-reserved-sidecar:v1",
+		function(current)
+			local next_data = table.clone(current)
+			next_data[sidecar_key] = { value = "must survive" }
+			return next_data
+		end,
+		"seed-reserved-sidecar:v1"
+	)
+	assert(seed_code == "success", tostring(seed_message))
+	local removal = V2.Transactions.Run(record, "consumer-remove-sidecar", { kind = "remove-reserved" }, function(current)
+		local next_data = table.clone(current)
+		next_data[sidecar_key] = nil
+		next_data.coins += 1
+		return next_data
+	end)
+	assert(removal.code == "invalid", "consumer reducer was allowed to remove a reserved sidecar")
+	assert(record:Get().coins == 0 and record:Get()[sidecar_key].value == "must survive",
+		"rejected sidecar removal mutated profile state")
+	local insertion = V2.Transactions.Run(record, "consumer-add-sidecar", { kind = "add-reserved" }, function(current)
+		local next_data = table.clone(current)
+		next_data["__recordstore_v2_injected_sidecar"] = { injected = true }
+		next_data.coins += 1
+		return next_data
+	end)
+	assert(insertion.code == "invalid", "consumer reducer was allowed to create a reserved sidecar")
+	assert(record:Get().coins == 0 and record:Get().__recordstore_v2_injected_sidecar == nil,
+		"rejected sidecar insertion mutated profile state")
+	local normal = V2.Transactions.Run(record, "consumer-normal-update", { kind = "safe-update" }, increment("coins", 2))
+	assert(normal.code == "committed", "ordinary consumer mutation was rejected while preserving reserved fields")
+	assert(record:Get().coins == 2 and record:Get()[sidecar_key].value == "must survive",
+		"ordinary mutation failed to preserve a reserved sidecar")
+end)
+
 print(("[PASS] %d transaction/inbox/outbox failure-recovery groups using the deterministic DataStore fake."):format(passed))
 Shim.close()
