@@ -14,7 +14,7 @@ type Owner = {
 }
 type StoreAdapter = {
 	GetAsync: (self: StoreAdapter, key: string) -> unknown,
-	UpdateAsync: (self: StoreAdapter, key: string, transform: (unknown, unknown?) -> unknown) -> unknown,
+	UpdateAsync: (self: StoreAdapter, key: string, transform: (unknown, unknown?) -> (unknown, { number }?, Dict?)) -> unknown,
 	RemoveAsync: ((self: StoreAdapter, key: string) -> ())?,
 }
 type Options = {
@@ -1949,7 +1949,7 @@ function MockStore:GetAsync(key: string): unknown
 	return clone_json(self.values[key])
 end
 
-function MockStore:UpdateAsync(key: string, transform: (unknown, unknown?) -> unknown): unknown
+function MockStore:UpdateAsync(key: string, transform: (unknown, unknown?) -> (unknown, { number }?, Dict?)): unknown
 	self.update_calls += 1
 	if self.fail_next_mode == "before" then
 		self.fail_next_mode = nil
