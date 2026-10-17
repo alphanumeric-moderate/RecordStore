@@ -300,7 +300,7 @@ Canonical message states:
 
 - `preparing`: submission is not yet claimable; index/message reconciliation is permitted.
 - `ready`: accepted and eligible after `available_at`.
-- `claimed`: current claim token and lease fence the worker.
+- `claimed`: current claim token and lease fence the worker. A persisted claim whose lease expires remains in `claimed` until a fenced takeover or terminal recovery; an expired lease never proves the previous handler stopped.
 - `acknowledging`: handler success is recorded; recovery finishes acknowledgement without invoking the handler again.
 - `dead_lettering`: terminal failure is recorded; recovery finishes DLQ indexing without invoking the handler again.
 - `acknowledged`, `dead_lettered`, `discarded`, `expired`: terminal states.
@@ -309,11 +309,11 @@ Allowed transitions are validated in the canonical message's UpdateAsync transfo
 
 ### 4.6 Claim, retry and acknowledgement
 
-**Claim:** atomically change `ready` to `claimed`, increment attempts, assign a token and lease expiry, and record processing server/session generation. A concurrent claimant can win only one CAS. A message is not claimable before `available_at`. Claim tokens are generated before the transform.
+**Claim:** inside the canonical message UpdateAsync, first check the captured `now_ms` against `expires_at`. If the message's absolute expiry has passed, transition it to `expired` rather than running it. Otherwise, atomically claim either (a) `ready` with `available_at <= now_ms`, or (b) `claimed` whose persisted lease deadline is earlier than `now_ms` minus the configured clock-skew grace. The expired-claim takeover creates a new token, increments attempts/recovery counters, and records the new processing server/session generation; any old worker is fenced from renewing or acknowledging. If attempt or maximum-delivery-age limits are already reached, transition to `dead_lettering` instead of executing again. A concurrent claimant can win only one CAS. Capture `now_ms` and token before UpdateAsync so transforms remain deterministic. A message is not claimable before `available_at`. A takeover is at-least-once recovery, not proof the prior handler stopped.
 
-**Renewal:** renew only when the persisted token and current state match and the owning profile session is still active with the expected fencing generation. Renewals have a maximum extension/deadline to prevent permanently stuck handlers. An expired token cannot renew itself.
+**Renewal:** renew only when the persisted token and current state match and the owning profile session is still active with the expected fencing generation, and the message has not reached `expires_at`. Renewals have a maximum extension/deadline to prevent permanently stuck handlers. An expired token cannot renew itself. Cross-server lease deadlines use UTC wall-clock timestamps and therefore have clock-skew uncertainty; add a validated `queue_clock_skew_grace_ms` (initial candidate: 5,000 ms) before takeover. The grace reduces early takeover but is not a proof of exclusive execution. Inject clock jumps/skew in tests and keep user effects idempotent.
 
-**Retry:** under the live token, persist `ready`, cleared lock fields, normalized last error, attempt counters and an explicit next `available_at`. Use capped exponential backoff with deterministic/injected jitter. Limit total attempts and delivery age. The next handler must not run before the stored time. At attempt/age limits, transition to `dead_lettering`.
+**Retry:** under the live token, persist `ready`, cleared lock fields, normalized last error, attempt counters and an explicit next `available_at`. Use capped exponential backoff with deterministic/injected jitter. Limit total attempts and delivery age. The next handler must not run before the stored time. If `expires_at` has passed, transition to `expired`; at attempt/age limits, transition to `dead_lettering`.
 
 **Acknowledgement:**
 1. Persist `acknowledging` on the canonical message under the current token.
@@ -627,7 +627,7 @@ Required test groups:
 3. **Ambiguous writes**: UpdateAsync failure before commit versus commit then error; retries hit the same message/segment; no route reassignment while index existence is unknown.
 4. **Rollover races**: many producers fill the final segment concurrently; stale writers to sealed segments are rejected; only one correct manifest tail wins; segment IDs never alias.
 5. **Duplicate index rows**: the same ID appears twice or in a stale old segment; canonical placement generation allows at most one delivery and stale rows are ignored.
-6. **Claim concurrency**: many workers claim one message; one live token wins; lease renewal, expiry, server shutdown and session generation changes fence old workers.
+6. **Claim concurrency**: many workers claim one message; one live token wins; expired `claimed` messages can be taken over only through CAS after clock-skew grace; lease renewal, expiry, server shutdown and session generation changes fence old workers. Simulated fast/slow clocks never permit an old token to ack after takeover.
 7. **Acknowledgement**: crash before `acknowledging`, after it, and after terminal update; acknowledged messages never rerun, while pre-ack uncertainty is safely at-least-once.
 8. **Retry/DLQ**: thrown/rejected/yielding handler, bounded exponential delay, attempt and age caps, DLQ index append crash, duplicate DLQ append and independent active capacity.
 9. **Replay/purge**: repeated replay ID, stale replay token, schema migration failure, future schema quarantine, retention boundaries, active index references, and purge interruption.
