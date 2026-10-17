@@ -16,6 +16,7 @@ for _, path in {
 	"bench/run_v2_production_mailbox_failure_matrix.luau",
 	"bench/run_v2_transaction_inbox_outbox_failure_matrix.luau",
 	"bench/run_v2_erasure_regression.luau",
+	"bench/run_v2_rollout_regression.luau",
 	"tests/RecordStoreMailboxV2Regression.server.luau",
 	"tests/RecordStoreTransactionsRegression.server.luau",
 	"bench/mailbox_v2_regression.bench.luau",
