@@ -195,7 +195,7 @@ local result, snapshot = record:CommitWithOutboxAsync(
 )
 ```
 
-The API accepts an explicit command type, canonical command payload, and explicit bounded outbound event list; it does not try to fingerprint a Lua callback or infer event intent from arbitrary side effects. One UpdateAsync on the source profile key commits the data mutation, exact-request commit receipt, and bounded outbox entries together. Stable event IDs derive deterministically from the stable commit key and event ordinal before the transform. The same commit key with a different command type, payload, or event list returns conflict.
+The API accepts an explicit command type, canonical command payload, and explicit bounded outbound event list; it does not try to fingerprint a Lua callback or infer event intent from arbitrary side effects. One UpdateAsync on the source profile key commits the data mutation, exact-request commit receipt, and bounded outbox entries together. Stable event IDs derive deterministically from `(source store_name, source scope, source profile_key, commit_key, event ordinal)` before the transform, so the same commit key on different source profiles cannot collapse into one destination event. The same commit key with a different command type, payload, or event list returns conflict.
 
 Serialize the operation through the Record write gate: flush pending local dirty data, block local mutators while the durable transform runs, and rebase the live cache/revision after commit. If the dirty flush has an unknown outcome, stop and reconcile instead of applying the command to stale data.
 
@@ -344,7 +344,7 @@ For purchase receipts that must remain deduplicated indefinitely, applications k
 
 - next profile data;
 - an exact-request commit receipt keyed by `commit_key`, including the canonical command and event list identity;
-- stable outbox event IDs derived deterministically from `commit_key` and event ordinal;
+- stable outbox event IDs derived deterministically from full source profile identity, `commit_key` and event ordinal;
 - each event's schema version, target identity and correlation/causation fields.
 
 Canonicalize the command and bounded event list before entering the transform. The reducer must be deterministic, pure and non-yielding; Roblox may invoke it more than once. The transform verifies owner identity, active session token and fencing generation before writing. An already-committed key with the same exact request returns its prior outcome without applying the data mutation again. The same key with a different command, payload or event list conflicts. Commit keys and derived event idempotency keys are operation identities and must never be reused for a different logical purchase/transfer. After the configured receipt-retention window expires, deduplication is no longer promised; applications must retain permanent domain ledgers for business operations that require lifetime deduplication.
