@@ -1444,6 +1444,7 @@ local function new_rollout(store, options)
 	local required_verifiers = { "compatibility", "writers_drained", "activation_frozen", "rollback_rehearsed", "profile_key_fencing" }
 	local function key_for(id) return "rv2rollout-" .. digest(id) end
 	local function read(id)
+		if not valid_text(id, 96) then return nil, { code = "invalid", message = "rollout ID must be 1..96 bytes" } end
 		local value, message = adapter_call(store, "GetAsync", key_for(id))
 		if message then return nil, { code = "unknown", message = message } end
 		if value == nil then return nil, { code = "not_found" } end
@@ -1509,8 +1510,9 @@ local function new_rollout(store, options)
 		if updated.phase ~= next_phase or (operation_id ~= nil and updated[operation_field] ~= operation_id) then
 			return { code = "conflict", phase = updated.phase, message = "rollout phase changed concurrently" }
 		end
-		updated.code = "committed"
-		return copy(updated)
+		local result = copy(updated)
+		result.code = "committed"
+		return result
 	end
 	function api:PrepareAsync(id, matrix_digest)
 		if not valid_text(id, 96) or not valid_text(matrix_digest, 128) then return { code = "invalid" } end
@@ -1595,6 +1597,7 @@ local function new_rollout(store, options)
 		return copy(manifest)
 	end
 	function api:CanUseAsync(id, operation)
+		if not valid_text(id, 96) then return false, "rollout ID must be 1..96 bytes" end
 		local known_operations = {
 			read = true, enqueue = true, process = true, recover = true, renew_claim = true,
 			acknowledge = true, reconcile = true, replay = true, discard = true, maintenance = true,
