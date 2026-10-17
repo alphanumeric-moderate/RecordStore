@@ -9686,7 +9686,9 @@ local function external_governor_admit(
 		return nil, code, tostring(admission.message or admission.reason or admission.code or "external governor denied request")
 	end
 	if admission.ticket == nil then return nil, "unknown", "external governor admitted without a release ticket" end
-	return admission.ticket, nil, nil
+	-- Release receives the whole admission record: the V2 governor's ticket token alone
+	-- does not contain the class/cost accounting needed to decrement its in-flight counters.
+	return admission, nil, nil
 end
 
 local function external_governor_release(hooks: RuntimeGovernorHooks?, ticket: unknown)
