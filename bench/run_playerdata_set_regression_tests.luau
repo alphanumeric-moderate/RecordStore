@@ -32,6 +32,7 @@ local function make_signal()
 	return signal
 end
 
+local find_first_child_calls = 0
 local instance_methods = {}
 
 function instance_methods:IsA(class_name)
@@ -39,6 +40,7 @@ function instance_methods:IsA(class_name)
 end
 
 function instance_methods:FindFirstChild(name)
+	find_first_child_calls += 1
 	for _, child in ipairs(self._children) do
 		if child.Name == name and not child._destroyed then
 			return child
@@ -330,12 +332,17 @@ while player:GetAttribute("PlayerDataLoadStatus") ~= "Loaded" and os.clock() < d
 end
 assert(player:GetAttribute("PlayerDataLoadStatus") == "Loaded", "player session did not load")
 
+local path_lookups_before_set = find_first_child_calls
 local success, message = controller.Set(player, "kills", 12500124)
 assert(success, message)
 success, message = controller.Set(player, "equipped", "Hi")
 assert(success, message)
 success, message = controller.Set(player, "admin", true)
 assert(success, message)
+assert(
+	find_first_child_calls == path_lookups_before_set + 2,
+	"PlayerData.Set should reuse cached root folders and only look up the target value"
+)
 assert(not controller.Set(player, "admin", "true"), "invalid boolean value was accepted")
 assert(not controller.Set(player, "not_a_field", 1), "unknown field was accepted")
 
@@ -348,6 +355,31 @@ local equipped_display = leaderstats:FindFirstChild("Equipped")
 assert(kills ~= nil and kills.Value == 12500124, "kills backing value did not update")
 assert(equipped_display ~= nil and equipped_display.Value == "Hi", "Equipped did not update")
 assert(kills_display ~= nil and kills_display.Value == "12.5M", "formatted Kills display did not refresh")
+
+-- A detached cached folder must be re-resolved, not used as a stale path.
+local lookups_before_detach = find_first_child_calls
+values.Parent = nil
+local detached_ok = controller.Set(player, "kills", 12500124)
+assert(not detached_ok, "Set accepted a value whose backing folder was detached")
+assert(
+	find_first_child_calls == lookups_before_detach + 1,
+	"Set did not fall back to root lookup after the cached folder was detached"
+)
+values.Parent = player
+local lookups_before_refresh = find_first_child_calls
+success, message = controller.Set(player, "kills", 12500124)
+assert(success, message)
+assert(
+	find_first_child_calls == lookups_before_refresh + 2,
+	"Set did not rebuild the root path after the folder was restored"
+)
+local lookups_before_cached_set = find_first_child_calls
+success, message = controller.Set(player, "kills", 12500124)
+assert(success, message)
+assert(
+	find_first_child_calls == lookups_before_cached_set + 1,
+	"Set did not reuse the rebuilt root path"
+)
 
 task.wait(0.1)
 assert(controller:Shutdown(), "controller failed to shut down")
