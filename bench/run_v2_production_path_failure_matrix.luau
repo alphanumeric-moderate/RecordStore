@@ -193,6 +193,8 @@ group("12 live history listing and version reads", function()
 	)
 	assert(time_code == "success", tostring(time_message))
 	assert(by_time ~= nil and type(version_at_time) == "string", "GetVersionAtTimeAsync did not return a version")
+	assert(version_at_time == history[1].Version,
+		"equal-timestamp history lookup did not return the newest committed version")
 end)
 
 group("13 another server sees contention without gaining authority", function()

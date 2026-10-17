@@ -203,11 +203,12 @@ end
 
 local function row_version(service, prior, value, user_ids, metadata, deleted)
 	service.next_version += 1
-	local updated_at = math.max(now_ms(service), service.last_updated_ms + 1)
+	local updated_at = math.max(now_ms(service), service.last_updated_ms)
 	service.last_updated_ms = updated_at
 	local created_at = if prior ~= nil then prior.CreatedTime else updated_at
 	local version = ("%013d-%06d"):format(updated_at, service.next_version)
-	return { Version = version, Value = clone(value), UserIds = clone(user_ids or (prior and prior.UserIds) or {}),
+	return { Version = version, Sequence = service.next_version, Value = clone(value),
+		UserIds = clone(user_ids or (prior and prior.UserIds) or {}),
 		Metadata = clone(metadata or (prior and prior.Metadata) or {}), CreatedTime = created_at,
 		UpdatedTime = updated_at, IsDeleted = deleted == true }
 end
@@ -254,9 +255,9 @@ function FakeStore:UpdateAsync(key, transform)
 	end
 	local updated = row_version(service, row, next_value, next_user_ids, next_metadata, false)
 	updated.Versions = clone(row and row.Versions or {})
-	table.insert(updated.Versions, { Version = updated.Version, Value = clone(updated.Value),
-		UserIds = clone(updated.UserIds), Metadata = clone(updated.Metadata), CreatedTime = updated.CreatedTime,
-		UpdatedTime = updated.UpdatedTime, IsDeleted = false })
+	table.insert(updated.Versions, { Version = updated.Version, Sequence = updated.Sequence,
+		Value = clone(updated.Value), UserIds = clone(updated.UserIds), Metadata = clone(updated.Metadata),
+		CreatedTime = updated.CreatedTime, UpdatedTime = updated.UpdatedTime, IsDeleted = false })
 	self.rows[key] = updated
 	service:_event("update_commit", self.name, self.scope, key, { version = updated.Version, transform_attempts = replay_count })
 	if fault and fault.mode == "after" then error(fault.message or "injected response loss after commit", 2) end
@@ -272,8 +273,9 @@ function FakeStore:RemoveAsync(key)
 	if row == nil then return nil, nil end
 	local deleted = row_version(service, row, nil, row.UserIds, row.Metadata, true)
 	deleted.Versions = clone(row.Versions or {})
-	table.insert(deleted.Versions, { Version = deleted.Version, Value = nil, UserIds = clone(deleted.UserIds),
-		Metadata = clone(deleted.Metadata), CreatedTime = deleted.CreatedTime, UpdatedTime = deleted.UpdatedTime, IsDeleted = true })
+	table.insert(deleted.Versions, { Version = deleted.Version, Sequence = deleted.Sequence,
+		UserIds = clone(deleted.UserIds), Metadata = clone(deleted.Metadata), CreatedTime = deleted.CreatedTime,
+		UpdatedTime = deleted.UpdatedTime, IsDeleted = true })
 	self.rows[key] = deleted
 	service:_event("remove_commit", self.name, self.scope, key, { version = deleted.Version })
 	if fault and fault.mode == "after" then error(fault.message or "injected RemoveAsync response loss", 2) end
@@ -343,7 +345,13 @@ function FakeStore:GetVersionAtTimeAsync(key, timestamp_ms)
 	if fault and fault.mode == "before" then error(fault.message or "injected GetVersionAtTimeAsync failure", 2) end
 	local row, selected = self.rows[key], nil
 	for _, item in ipairs((self.rows[key] and self.rows[key].Versions) or {}) do
-		if item.UpdatedTime <= timestamp_ms and (selected == nil or item.UpdatedTime > selected.UpdatedTime) then selected = item end
+		if item.UpdatedTime <= timestamp_ms and (
+			selected == nil
+			or item.UpdatedTime > selected.UpdatedTime
+			or (item.UpdatedTime == selected.UpdatedTime and (item.Sequence or 0) > (selected.Sequence or 0))
+		) then
+			selected = item
+		end
 	end
 	if selected ~= nil then service:_event("get_version_at_time", self.name, self.scope, key, { version = selected.Version }); return clone(selected.Value), key_info(selected) end
 	return nil, nil
