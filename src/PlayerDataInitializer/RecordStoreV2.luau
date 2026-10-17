@@ -2656,34 +2656,111 @@ end
 local function new_maintenance()
 	local service = {}
 	function service.AssessPayload(value, maximum_bytes)
-		maximum_bytes = maximum_bytes or 3_800_000
+		maximum_bytes = if maximum_bytes == nil then 3_800_000 else maximum_bytes
+		if not finite(maximum_bytes) or math.floor(maximum_bytes) ~= maximum_bytes
+			or maximum_bytes < 1 or maximum_bytes > 3_800_000
+		then
+			return { code = "invalid", message = "maximum_bytes must be an integer in 1..3800000" }
+		end
 		local material, message = request_material(value)
 		if not material then return { code = "invalid", message = message } end
-		return { code = if #material > maximum_bytes then "capacity" elseif #material >= maximum_bytes * 0.9 then "near_limit" else "within_limit", estimated_bytes = #material, maximum_bytes = maximum_bytes, remaining_bytes = math.max(0, maximum_bytes - #material), estimate = "canonical payload only; not exact envelope encoding" }
+		return {
+			code = if #material > maximum_bytes then "capacity"
+				elseif #material >= maximum_bytes * 0.9 then "near_limit" else "within_limit",
+			estimated_bytes = #material,
+			maximum_bytes = maximum_bytes,
+			remaining_bytes = math.max(0, maximum_bytes - #material),
+			estimate = "canonical payload only; not exact envelope encoding",
+		}
 	end
 	function service.SelectEncoding(value, codec, options)
 		options = options or {}
-		local assessment = service.AssessPayload(value, options.maximum_bytes)
-		if not assessment.estimated_bytes then return assessment end
-		if assessment.estimated_bytes < (options.compression_threshold_bytes or 4096) or type(codec) ~= "table" then assessment.encoding = "raw"; assessment.payload = copy(value); return assessment end
-		if not valid_text(codec.id, 64) or not valid_text(codec.revision, 64) or type(codec.encode) ~= "function" or type(codec.decode) ~= "function" then return { code = "invalid", message = "codec needs stable id/revision and encode/decode" } end
-		local encoded, encode_error = pure(codec.encode, copy(value))
+		if type(options) ~= "table" then return { code = "invalid", message = "encoding options must be a table" } end
+		local maximum_bytes = if options.maximum_bytes == nil then 3_800_000 else options.maximum_bytes
+		local threshold = if options.compression_threshold_bytes == nil then 4096 else options.compression_threshold_bytes
+		if not finite(threshold) or math.floor(threshold) ~= threshold or threshold < 0 or threshold > 3_800_000 then
+			return { code = "invalid", message = "compression_threshold_bytes must be an integer in 0..3800000" }
+		end
+		local assessment = service.AssessPayload(value, maximum_bytes)
+		if assessment.code == "invalid" then return assessment end
+		local original_text, original_error = request_material(value)
+		if original_text == nil then return { code = "invalid", message = original_error } end
+		if #original_text < threshold or type(codec) ~= "table" then
+			if #original_text > assessment.maximum_bytes then return { code = "capacity", message = "raw payload exceeds maximum_bytes", estimated_bytes = #original_text, maximum_bytes = assessment.maximum_bytes } end
+			assessment.code = if #original_text >= assessment.maximum_bytes * 0.9 then "near_limit" else "within_limit"
+			assessment.encoding = "raw"
+			assessment.payload = copy(value)
+			return assessment
+		end
+		if not valid_text(codec.id, 64) or not valid_text(codec.revision, 64)
+			or type(codec.encode) ~= "function" or type(codec.decode) ~= "function"
+		then
+			return { code = "invalid", message = "codec needs stable id/revision and encode/decode" }
+		end
+		local encoded, encode_error = pure(codec.encode, copy(value), assessment.maximum_bytes)
 		if type(encoded) ~= "string" then return { code = "invalid", message = encode_error or "codec must return string" } end
-		local decoded, decode_error = pure(codec.decode, encoded, codec.revision)
+		if #encoded > assessment.maximum_bytes then
+			return { code = "capacity", message = "encoded payload exceeds maximum_bytes", encoded_bytes = #encoded, maximum_bytes = assessment.maximum_bytes }
+		end
+		if #encoded >= #original_text then
+			if #original_text > assessment.maximum_bytes then
+				return { code = "capacity", message = "neither encoded nor raw payload fits maximum_bytes", estimated_bytes = #original_text, encoded_bytes = #encoded, maximum_bytes = assessment.maximum_bytes }
+			end
+			assessment.code = if #original_text >= assessment.maximum_bytes * 0.9 then "near_limit" else "within_limit"
+			assessment.encoding = "raw"
+			assessment.payload = copy(value)
+			return assessment
+		end
+		-- Decoders should honor the output bound passed here; the post-check below
+		-- rejects oversized output even if a codec ignores the hint.
+		local decoded, decode_error = pure(codec.decode, encoded, codec.revision, assessment.maximum_bytes)
 		if decoded == nil then return { code = "invalid", message = decode_error or "decode failed" } end
-		local decoded_text, original_text = canonical_request(decoded), canonical_request(value)
+		local decoded_text, decoded_text_error = request_material(decoded)
+		if decoded_text == nil then return { code = "invalid", message = decoded_text_error or "decoded payload is not serializable" } end
+		if #decoded_text > assessment.maximum_bytes then
+			return { code = "capacity", message = "decoded payload exceeds maximum_bytes", decoded_bytes = #decoded_text, maximum_bytes = assessment.maximum_bytes }
+		end
 		if decoded_text ~= original_text then return { code = "invalid", message = "codec round-trip mismatch" } end
-		if #encoded >= assessment.estimated_bytes then assessment.encoding = "raw"; assessment.payload = copy(value)
-		else assessment.encoding = "codec"; assessment.codec_id = codec.id; assessment.codec_revision = codec.revision; assessment.payload = encoded end
+		assessment.code = if #encoded >= assessment.maximum_bytes * 0.9 then "near_limit" else "within_limit"
+		assessment.encoding = "codec"
+		assessment.codec_id = codec.id
+		assessment.codec_revision = codec.revision
+		assessment.payload = encoded
 		return assessment
 	end
-	function service.DecodeEncoding(encoding, codec_registry)
+	function service.DecodeEncoding(encoding, codec_registry, options)
+		options = options or {}
+		if type(options) ~= "table" then return nil, "decode options must be a table" end
+		local maximum_bytes = if options.maximum_decoded_bytes == nil then 3_800_000 else options.maximum_decoded_bytes
+		if not finite(maximum_bytes) or math.floor(maximum_bytes) ~= maximum_bytes
+			or maximum_bytes < 1 or maximum_bytes > 3_800_000
+		then
+			return nil, "maximum_decoded_bytes must be an integer in 1..3800000"
+		end
 		if type(encoding) ~= "table" then return nil, "encoded value must be table" end
-		if encoding.encoding == "raw" then return copy(encoding.payload), nil end
-		if encoding.encoding ~= "codec" then return nil, "unsupported encoding" end
+		if encoding.encoding == "raw" then
+			local raw_text, raw_error = request_material(encoding.payload)
+			if raw_text == nil then return nil, raw_error end
+			if #raw_text > maximum_bytes then return nil, "raw payload exceeds maximum_decoded_bytes" end
+			return copy(encoding.payload), nil
+		end
+		if encoding.encoding ~= "codec" or not valid_text(encoding.payload, maximum_bytes) then
+			return nil, "unsupported or oversized encoded payload"
+		end
 		local codec = codec_registry and codec_registry[encoding.codec_id]
-		if type(codec) ~= "table" or codec.revision ~= encoding.codec_revision or type(codec.decode) ~= "function" then return nil, "matching immutable codec revision is not registered" end
-		return pure(codec.decode, encoding.payload, encoding.codec_revision)
+		if type(codec) ~= "table" or codec.revision ~= encoding.codec_revision
+			or type(codec.decode) ~= "function"
+		then
+			return nil, "matching immutable codec revision is not registered"
+		end
+		local decoded, decode_error = pure(codec.decode, encoding.payload, encoding.codec_revision, maximum_bytes)
+		if decoded == nil then return nil, decode_error or "decode failed" end
+		local decoded_text, decoded_text_error = request_material(decoded)
+		if decoded_text == nil then return nil, decoded_text_error end
+		if #decoded_text > maximum_bytes then return nil, "decoded payload exceeds maximum_decoded_bytes" end
+		local copied, copied_value = pcall(copy, decoded)
+		if not copied then return nil, tostring(copied_value) end
+		return copied_value, nil
 	end
 	function service.ShouldSave(stats)
 		if type(stats) ~= "table" then return { code = "unknown", reason = "missing stats" } end
