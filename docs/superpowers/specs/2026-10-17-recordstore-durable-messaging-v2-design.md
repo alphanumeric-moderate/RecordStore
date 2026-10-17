@@ -674,6 +674,13 @@ The regression test must fail against the old implementation for the reason it c
 31. **Secondary indexes and tracing**: duplicate/out-of-order projection events, rebuild from checkpoint, deleted source, stale query confirmation, trace truncation/privacy, trace-sink failure and proof that tracing adds no separate hot-path write.
 32. **Performance optimizations preserve contracts**: no-op save only when clean is proven; coalescing obeys maximum dirty age; read singleflight never merges session acquisition; compression round-trips all supported codecs; queue cursors recover dropped hints; budget reserves prevent starvation; benchmark toggles do not alter durable state semantics.
 
+
+33. **Durability SLO and dirty-state visibility**: nested mutation, direct-mutable-table tracking gap, successful commit versus unknown write, age threshold crossing, repeated alert coalescing, no DataStore write per alert and accurate unavailable/estimated status.
+34. **Unified outcome/retry policy**: inject definitive failure, commit-then-error, fenced session, schema conflict and capacity result for each API family; verify that unknown outcomes are reconciled by the same stable operation ID and never converted to presumed failure.
+35. **Degraded mode and backpressure**: write outage, prolonged dirty age, bounded-buffer item/byte/age limit, queue saturation, mode recovery, shutdown and critical reserve pressure; confirm optional work is rejected visibly and critical intents are not falsely acknowledged.
+36. **Session contention diagnostics**: many simultaneous open attempts, stale status read, cancellation during wait, timeout around ambiguous ownership write, takeover race and old owner resume; diagnostic reads never change lease authority and retries remain bounded/fair.
+37. **Retention compactor/maintenance runner**: crash before/after checkpoint, unknown deletion outcome, stale cursor, live index reference, pending saga/outbox dependency, active lease, budget starvation and resume; no evidence needed for idempotency/recovery is deleted.
+
 ## 13. CodSpeed and service-budget validation
 
 The existing main CodSpeed run has no dedicated durable-mailbox, outbox, inbox or saga benchmark. Existing hosted WallTime results have environment-noise warnings and some simulation cases are syscall dominated; do not reuse those numbers as queue latency evidence.
@@ -810,6 +817,12 @@ The design is implementable only when tests and runtime evidence demonstrate all
 - The deterministic crash simulator can replay injected failures and validates production-path invariants; Studio/platform contract tests remain separate.
 - Secondary indexes are eventually consistent, rebuildable and never substitute for authoritative validation; operation tracing is bounded and adds no mandatory separate write per hot-path event.
 - Each performance optimization has a baseline, target metric, representative CodSpeed workload, correctness tests, rollback/disable path where practical, and no claim of real service improvement from mocks alone.
+
+
+- The priority matrix is reflected in implementation ordering: simulator/outcome contracts and bounded durability/backpressure controls precede purchase, transfer, migration automation, erasure and projections.
+- Durability snapshots expose age/revision/uncertain-write limitations and cannot claim clean state when mutation tracking is incomplete.
+- Degraded-mode policies have hard bounds and never treat an in-memory buffer as durable acknowledgement.
+- Session diagnostics are read-only with respect to ownership; maintenance/compaction is resumable, cursor-bounded and protects live idempotency/workflow dependencies.
 
 ## 16. Roblox and comparison references
 
@@ -1163,7 +1176,120 @@ Adopt an optimization only when a comparable baseline and head run show a repeat
 
 Do not: reduce lease/fencing safety to save requests; skip canonical request comparison after a hash match; move a receipt to a second key without recovery protocol; batch distinct business transactions implicitly; let MemoryStore/MessagingService become truth; remove old-version support to speed up decode without a migration plan; run unbounded concurrent UpdateAsync calls; use an unlimited in-memory pending queue; scan the entire keyspace to recover one missing entry; or change correctness defaults based on a benchmark-only profile.
 
-## 27. Final adversarial audit: remaining risks and required controls
+
+## 27. Priority design roadmap with paired performance work
+
+**Purpose:** turn the broad proposal into an orderable implementation plan. These are priority recommendations, not claims that the features are already implemented. Performance work is paired with the relevant correctness feature, but correctness acceptance is a prerequisite to performance optimization.
+
+### 27.1 Priority tiers
+
+| Tier | Design focus | Why this tier comes first | Paired performance work | Exit gate |
+| --- | --- | --- | --- | --- |
+| **P0 — correctness floor** | Deterministic crash simulator; unified operation outcome/error model; `TransactAsync`; dirty-generation tracking; maximum dirty-age and durability-risk reporting; explicit degraded-mode/backpressure policy | All advanced capabilities depend on reliable retries, observable uncertainty and bounded unsaved state. | Baseline dirty/clean saves, serialization CPU, request count, save latency and scheduler fairness before tuning. | Crash-window tests pass; no false durable-success results; buffered memory is bounded; stale workers are fenced. |
+| **P0 — session/data safety** | Write-gate invariants, migration/future-version fencing, Profile Doctor read-only diagnosis and revision-checked restore | A corrupted record or a stale writer can defeat every later feature. | One-pass validation/codec work only after recovery behavior is characterized; bounded diagnostics avoid large allocations on hot paths. | Mixed-version tests, old-writer rejection, recovery preservation and revision-race tests pass. |
+| **P1 — high-value gameplay** | Purchase receipt processor, escrow transfer/trade engine, transaction result query, stable operation IDs | Solves common high-impact economy problems while reusing the P0 transaction and simulator foundations. | Receipt lookup coalescing only for read-only status; batch independent downstream fan-out only when the caller opts into transaction boundaries. | Duplicate receipt, uncertain write, concurrent sender and destination-late-commit tests pass; conservation holds. |
+| **P1 — operating safety** | Session contention observer, operation trace, bounded retention/maintenance runner, explicit queue/profile health contracts | Reduces time to diagnose stuck sessions and growing backlogs, while preventing maintenance from competing with critical saves. | Fair scheduler, separate read/write gates, background work cursors, bounded trace buffers and retention batch sizes. | Critical save/release cannot starve; diagnostics declare completeness and do not authorize writes/purges. |
+| **P1/P2 — data lifecycle** | Schema migration automation, user-data erasure, safe restoration; every data family gets an owner/retention/deletion strategy | These are necessary for long-lived production deployments, but they must wait for migration compatibility and data inventory. | Low-priority bounded migration/erasure slices, size-aware batches, coalesced progress summaries and resumable cursors. | RTBF templates/inventory cover every applicable sidecar; partial runs resume safely; old versions fail closed. |
+| **P2 — read/query scale** | Durable secondary indexes and materialized views | High value when the game actually needs cross-profile queries, but they add write amplification and eventual-consistency complexity. | Outbox-fed projections, sharded indexes, bounded replay/compaction and read coalescing only where freshness semantics permit. | Rebuild from declared authoritative history, handle duplicate/out-of-order events, and revalidate sensitive actions against source state. |
+| **P2 — codec and throughput tuning** | Compact encoding/compression, more aggressive coalescing, cache tuning and advanced queue scan optimization | These can create compatibility costs and are not automatically beneficial for DataStore-bound workloads. | CodSpeed simulation for Luau CPU, wall-time for I/O where comparable, and actual Studio/service-budget tests. | Measurable workload-specific benefit, preserved historical decoding and no correctness/default-semantic change. |
+
+P0 means a prerequisite for safe implementation of downstream features, not that every proposed API must launch publicly in the first release. P1/P2 are gated by observed application value; do not ship a generic projection or compression subsystem solely because it appears sophisticated.
+
+### 27.2 Additional P0/P1 designs
+
+The following are additional designs beyond sections 17–26. They close practical gaps between safe algorithms and an operationally usable persistence library.
+
+#### A. Durability SLO and unsaved-data risk API — P0
+
+Expose a bounded, explicit answer to: "How much local state is currently dirty, how old is the oldest mutation, and when was this Record last durably confirmed?"
+
+Proposed fields for `Record:GetDurabilityStatus()` and server-level `RecordStore.get_health_snapshot()`:
+
+- Record state and last confirmed durable revision;
+- dirty generation and durable generation, when the API can track them reliably;
+- oldest dirty age, last successful persistence time and next due save deadline;
+- in-flight operation count, retry category and whether a write outcome is uncertain;
+- maximum configured dirty age and whether it has been exceeded;
+- whether values are exact, estimated or unavailable, with observation time.
+
+Provide a signal such as `OnDurabilityRisk` when thresholds are crossed or an uncertain write remains unresolved. Signals must be edge-triggered/coalesced and bounded; they must not fire once per heartbeat or require a DataStore write each time. Do not label an in-memory mutation as durable until the matching stored result/revision is verified.
+
+Pair with deadline-aware autosave, bounded jitter, dirty-generation tracking and an internal critical-work reserve from section 26. The scheduler must keep attempting necessary persistence and expose failure; an SLO alert is not a substitute for saving. If direct mutable tables can bypass tracking, report dirty status as unknown or disable no-op-save elision for that access path rather than invent a clean state.
+
+#### B. Unified typed persistence outcomes and retry classifier — P0
+
+Define one documented outcome vocabulary across open/load/save/transaction/queue/migration/maintenance APIs. Preserve existing compatibility result codes where required, but let new APIs return a structured result with:
+
+- `committed` / `loaded` / `created` / `duplicate` for confirmed durable outcomes;
+- `fenced`, `conflict`, `invalid`, `unsupported_schema`, `capacity` and `cancelled` for known non-commit/business outcomes;
+- `retryable` only when the previous attempt is known not to have committed;
+- `unknown` when an attempt may have committed and must be reconciled by its stable operation ID;
+- a stable error category, safe-to-retry hint, attempt count and optional retry-after/backoff suggestion.
+
+The library must not map every exception to `retryable`, because a commit-then-error response can otherwise duplicate rewards or transfers. A classifier's guidance is advisory: the operation's idempotency contract and canonical durable record remain authoritative. Do not include raw player data, receipt tokens or full payloads in default error messages.
+
+Pair with typed circuit breakers, bounded retry budgets, in-flight read coalescing only for read-only calls, and error-category metrics. These reduce retry amplification under an outage but must never turn an unknown commit into a presumed failure or swallow a required save/release error.
+
+#### C. Explicit degraded-mode, admission and backpressure contract — P0
+
+Define server/Record states such as `healthy`, `degraded`, `read_only` and `closing`, with explicit reasons and recovery transitions. The state machine reflects what the library knows; it must not infer that all experience storage is healthy from one local budget value.
+
+When DataStore requests fail or dirty state exceeds configured limits, expose a policy chosen by the caller:
+
+- `reject_noncritical`: reject new optional queue/maintenance/low-value operations before accepting a partial durable intent;
+- `bounded_buffer`: permit a limited amount of local dirty work, with hard item/byte/age limits and a result that clearly says it is not yet durable;
+- `read_only`: disallow mutations until an operator/application policy permits recovery.
+
+Never silently fall back to an unbounded memory queue. Critical purchase receipts, accepted durable messages, and profile releases must follow their documented durable/unknown contract; a process-local buffer cannot justify acknowledging them as committed. On overflow, return backpressure rather than evicting accepted intent or acknowledging work that has not been durably recorded.
+
+Pair with read/write budget admission, reserved critical concurrency, deadline-aware flush scheduling and per-owner fairness. Performance acceptance measures how gracefully the system sheds optional work while preserving critical persistence, not how many requests it can suppress by dropping data.
+
+#### D. Session contention and takeover diagnostics — P1
+
+Provide a bounded `RecordStore.get_session_status_async(...)` or session-wait result that distinguishes: no known competing session, competing session observed, wait/retry scheduled, cancellation requested, ownership acquired, and ownership fenced/lost. Include observed time and known source data only; do not reveal secrets or claim a globally current owner from a stale read.
+
+For a waiting caller, report elapsed contention time and the next retry window/rationale when known. Provide cancellation and timeout without abandoning an ambiguous ownership write. Any takeover remains governed by the existing CAS/session-fencing rules, never by the diagnostic endpoint. Diagnostics cannot grant permission to force-steal a session.
+
+Pair with jittered load retries, a fair bounded waiter scheduler, read-only coalescing of compatible status reads and per-key retry suppression. Measure acquisition latency and DataStore request amplification under many concurrent servers. Do not add periodic high-rate polling for every waiting player; use bounded intervals and a maximum retry cadence.
+
+#### E. Resumable retention compactor and offline maintenance runner — P1
+
+Create a shared maintenance runner for safe retention, index cleanup, migration backfills, erasure, projection rebuild and other bounded jobs. Each task declares a version, stable operation ID, key-family scope, page cursor, expected revision/generation, request budget, concurrency class, retention/deletion rule and resumable checkpoint.
+
+The runner must:
+- use bounded pages/item/byte/time limits and persist progress only at a well-defined safe checkpoint;
+- revalidate canonical state, index references, live workflow/outbox dependencies and lease/fencing tokens before deletion;
+- reconcile unknown delete/update results before advancing its cursor;
+- stop or yield when critical profile save/release work needs the scheduler;
+- support dry-run counts, pause/resume, cancellation, per-family progress and an explicit incomplete result;
+- never make a whole-keyspace scan part of a request path;
+- never compact the only evidence that protects idempotency or future recovery;
+- preserve a recovery source until a migration/compaction's result has been verified.
+
+Pair with cursor-based incremental scans, sharded maintenance lanes, bounded cleanup batches, backpressure and a budget-aware scheduler. Track bytes/keys processed, request count per item, oldest maintenance age and impact on critical-save latency. Faster cleanup is unacceptable if it can delete an item still referenced by an active index or pending transfer.
+
+### 27.3 Non-negotiable implementation order
+
+1. Lock down the state/outcome contracts and build the production-path deterministic fault simulator.
+2. Implement transaction receipts, dirty-generation durability tracking, and the degraded/backpressure policy with bounded scheduling.
+3. Prove migration, session fencing, Profile Doctor preview/restore and legacy compatibility.
+4. Build receipt handling and escrow transfers using the tested transaction/workflow primitives.
+5. Add session diagnostics, traces and the maintenance runner; then do RTBF coverage before claiming complete erasure support.
+6. Add projections and advanced codec/caching optimizations only for measured use cases.
+
+This is a dependency order, not a promise to release everything as one monolithic subsystem. Keep each public feature independently gated wherever compatibility allows.
+
+### 27.4 Priority-specific acceptance gates
+
+- Dirty age, last durable revision and uncertain writes are distinguishable; no-op-save elision never infers a clean Record from incomplete mutation tracking.
+- Every API's retry classification distinguishes confirmed non-commit from unknown commit. Tests inject commit-then-error at each supported write boundary.
+- A full local dirty buffer or maintenance queue returns visible capacity/backpressure; no accepted durable intent is silently evicted.
+- The critical scheduler reserve prevents queue/maintenance saturation from indefinitely blocking final profile saves/releases under the tested workload.
+- Session wait diagnostics cannot grant ownership, force takeover or override the fenced state machine.
+- Compaction/maintenance resumes after crashes, never skips a page whose previous result is unknown, and never removes evidence required by a live workflow or advertised idempotency guarantee.
+- Each new P0/P1 feature has a focused benchmark paired with the correctness suite; the performance optimization remains off unless its target workload and adjacent critical-save workloads meet the measurement gate.
+
+## 28. Final adversarial audit: remaining risks and required controls
 
 This section is the final review checklist, not evidence that the future implementation has passed it.
 
