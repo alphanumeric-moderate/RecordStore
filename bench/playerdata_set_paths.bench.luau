@@ -4,6 +4,7 @@ local create_harness = require("./playerdata_set_harness")
 
 -- This first run is the legacy lookup baseline. The follow-up commit switches
 -- the same benchmark URI to the cached implementation for a controlled diff.
+-- The repeated value stabilizes persistence work so this measures Set path lookup.
 local USE_CACHED_PATHS = false
 local ITERATIONS = 25000
 
