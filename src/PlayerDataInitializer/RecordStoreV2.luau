@@ -303,11 +303,13 @@ local function new_outbox()
 	function service.DispatchBatches(record, dispatcher, batch_size, max_batches)
 		batch_size = math.clamp(math.floor(batch_size or 8), 1, 16)
 		max_batches = math.clamp(math.floor(max_batches or 4), 1, 32)
-		if type(record) ~= "table" or type(record.DispatchOutboxAsync) ~= "function" then return { code = "invalid", dispatched = 0 } end
+		if type(record) ~= "table" or (type(record.DispatchOutboxBatchAsync) ~= "function" and type(record.DispatchOutboxAsync) ~= "function") then return { code = "invalid", dispatched = 0 } end
 		local total = 0
 		for batch = 1, max_batches do
-			local count, code, message = record:DispatchOutboxAsync(dispatcher, batch_size)
+			local method = if type(record.DispatchOutboxBatchAsync) == "function" then record.DispatchOutboxBatchAsync else record.DispatchOutboxAsync
+			local count, code, message = method(record, dispatcher, batch_size)
 			total += count or 0
+			if code == "duplicate" then return { code = "committed", dispatched = total, batches = batch - 1 } end
 			if code ~= "success" then return { code = normalize_result(code, message).code, dispatched = total, message = message } end
 			if message then return { code = "retryable", dispatched = total, message = message } end
 			if (count or 0) < batch_size then return { code = "committed", dispatched = total, batches = batch } end
