@@ -38,6 +38,8 @@ export type ResultCode =
 | "deleted"
 | "enqueued"
 | "processed"
+| "duplicate"
+| "capacity"
 | "empty"
 | "locked"
 | "already_open"
@@ -277,6 +279,47 @@ type SessionEnvelope = {
 	lease_until: number,
 }
 
+export type TransactionTransform = (value: JsonValue?) -> JsonValue
+export type OutboxEventInput = {
+	EventId: string,
+	DestinationStoreName: string,
+	DestinationScope: string,
+	DestinationProfileKey: string,
+	MessageType: string,
+	Data: JsonValue?,
+}
+export type OutboxEvent = OutboxEventInput & {
+	OperationId: string,
+	State: "pending" | "dispatched",
+	CreatedAt: number,
+	Attempts: number,
+	LastError: string?,
+	DestinationReceiptId: string?,
+}
+export type OutboxDispatcher = (event: OutboxEvent) -> (boolean, string?)
+
+type InboxReceiptRecord = {
+	operation_id: string,
+	request_fingerprint: string,
+	write_id: string,
+	revision: number,
+	committed_at: number,
+}
+type OutboxEntryRecord = {
+	event_id: string,
+	operation_id: string,
+	destination_store_name: string,
+	destination_scope: string,
+	destination_profile_key: string,
+	message_type: string,
+	payload: JsonValue?,
+	state: "pending" | "dispatched",
+	created_at: number,
+	attempts: number,
+	last_error: string?,
+	destination_receipt_id: string?,
+}
+
 type Envelope = {
 	implementation_version: number,
 	schema_version: number,
@@ -288,6 +331,8 @@ type Envelope = {
 	user_ids: { number }?,
 	tombstone: Tombstone?,
 	session: SessionEnvelope?,
+	inbox_receipts: { [string]: InboxReceiptRecord }?,
+	outbox: { [string]: OutboxEntryRecord }?,
 	write_id: string,
 }
 
@@ -481,6 +526,13 @@ export type Record = {
 	Update: (self: Record, callback: (JsonValue?) -> JsonValue?) -> (ResultCode, string?),
 	Reconcile: (self: Record, template: JsonValue) -> (ResultCode, string?),
 	Save: (self: Record, reason: string?) -> (ResultCode, string?),
+	TransactAsync: (self: Record, operation_id: string, request_fingerprint: string, transform: TransactionTransform) -> (ResultCode, string?),
+	ApplyInboxAsync: (self: Record, operation_id: string, request_fingerprint: string, transform: TransactionTransform) -> (ResultCode, string?),
+	CommitWithOutboxAsync: (self: Record, operation_id: string, request_fingerprint: string, transform: TransactionTransform, events: { OutboxEventInput }) -> (ResultCode, string?),
+	GetOutboxAsync: (self: Record, max_items: number?) -> ({ OutboxEvent }, ResultCode, string?),
+	DispatchOutboxAsync: (self: Record, dispatcher: OutboxDispatcher, max_items: number?) -> (number, ResultCode, string?),
+	PruneTransactionReceiptsAsync: (self: Record, committed_before_ms: number, max_items: number?) -> (number, ResultCode, string?),
+	PruneOutboxAsync: (self: Record, dispatched_before_ms: number, max_items: number?) -> (number, ResultCode, string?),
 	MessageAsync: (self: Record, message_type: string, data: JsonValue?) -> (ResultCode, string?),
 	EnqueueAsync: (self: Record, message_type: string, data: JsonValue?) -> (ResultCode, string?),
 	ProcessQueueAsync: (self: Record, max_messages: number?) -> (ResultCode, string?),
@@ -501,6 +553,9 @@ local DEFAULT_LEASE_DURATION = 180
 local DEFAULT_LEASE_RENEWAL = 60
 local DEFAULT_RETRY_ATTEMPTS = 5
 local MAX_RETRY_ATTEMPTS = 12
+local MAX_INBOX_RECEIPTS = 128
+local MAX_OUTBOX_EVENTS = 32
+local MAX_OUTBOX_EVENTS_PER_COMMIT = 8
 local DEFAULT_OPERATION_DEADLINE = 20
 local DEFAULT_SHUTDOWN_DEADLINE = 25
 local DEFAULT_SHUTDOWN_ATTEMPTS = 2
@@ -1261,6 +1316,12 @@ local function encode_envelope_for_storage(envelope: Envelope): JsonValue
 	end
 	if envelope.session ~= nil then
 		stored.session = copy_value(envelope.session) :: JsonValue
+	end
+	if envelope.inbox_receipts ~= nil then
+		stored.inbox_receipts = copy_value(envelope.inbox_receipts :: JsonValue) :: JsonValue
+	end
+	if envelope.outbox ~= nil then
+		stored.outbox = copy_value(envelope.outbox :: JsonValue) :: JsonValue
 	end
 	return stored
 end
