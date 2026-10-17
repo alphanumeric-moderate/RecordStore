@@ -1991,6 +1991,8 @@ function MockStore.new()
 		get_calls = 0,
 		remove_calls = 0,
 		fail_next_mode = nil,
+		fail_update_call = nil,
+		fail_update_call_mode = nil,
 		replay_next_update = 0,
 	}, MockStore)
 end
@@ -2002,8 +2004,16 @@ end
 
 function MockStore:UpdateAsync(key: string, transform: (unknown, unknown?) -> (unknown, { number }?, Dict?)): unknown
 	self.update_calls += 1
-	if self.fail_next_mode == "before" then
+	local failure_mode = nil
+	if self.fail_update_call == self.update_calls then
+		failure_mode = self.fail_update_call_mode
+		self.fail_update_call = nil
+		self.fail_update_call_mode = nil
+	elseif self.fail_next_mode ~= nil then
+		failure_mode = self.fail_next_mode
 		self.fail_next_mode = nil
+	end
+	if failure_mode == "before" then
 		error("injected failure before commit")
 	end
 	local old_value = clone_json(self.values[key])
@@ -2016,8 +2026,7 @@ function MockStore:UpdateAsync(key: string, transform: (unknown, unknown?) -> (u
 		self.values[key] = clone_json(proposed)
 	end
 	local result = clone_json(self.values[key])
-	if self.fail_next_mode == "after" then
-		self.fail_next_mode = nil
+	if failure_mode == "after" then
 		error("injected response loss after commit")
 	end
 	return result
@@ -2035,6 +2044,14 @@ end
 
 function MockStore:ReplayNextUpdate()
 	self.replay_next_update += 1
+end
+
+function MockStore:FailUpdateAt(update_call: number, mode: string)
+	assert(type(update_call) == "number" and update_call == math.floor(update_call)
+		and update_call > self.update_calls, "update_call must target a future UpdateAsync call")
+	assert(mode == "before" or mode == "after", "mode must be before or after")
+	self.fail_update_call = update_call
+	self.fail_update_call_mode = mode
 end
 
 function MailboxV2.MockStore()
