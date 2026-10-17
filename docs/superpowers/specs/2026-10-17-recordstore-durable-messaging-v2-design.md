@@ -221,7 +221,7 @@ A saga is eventually consistent, not a cross-key ACID transaction. Never name it
 
 ### 4.1 Record families
 
-Use the configured queue DataStore name and scope with a versioned mailbox namespace. The full record owner is `(store_name, scope, profile_key)`. Every route, receipt, segment, message, dead-letter and manifest value must store and validate the full owner; a hashed key prefix is only a routing aid.
+Use the configured queue DataStore name and scope with a versioned mailbox namespace. The full record owner is `(store_name, scope, profile_key)`. Every route, segment, message, dead-letter and manifest value must store and validate the full owner; a hashed key is only a routing aid. Producer idempotency uses the canonical message record itself rather than a separate receipt key.
 
 The layout consists of:
 
@@ -239,7 +239,7 @@ Roblox DataStore key names are limited to 50 characters. Define and test a stabl
 
 - Use a versioned deterministic route codec. For example, a canonical message key is `m2i-<32-hex-digest>` when a producer key is supplied and `m2g-<32-hex-guid>` otherwise; both are 36 characters. The idempotency digest covers a length-prefixed canonical tuple of store, scope, profile key and producer key. Document the exact pure-Luau digest algorithm and fixed test vectors; do not assume Roblox provides a built-in cryptographic hash.
 - On every read/update, compare the complete stored owner, producer key (when present), message ID and exact canonical request to the requested values.
-- An idempotent message's record key is derived from a deterministic owner fingerprint and producer-key digest, so the same logical submission maps directly to its canonical message record without a second receipt lookup. A submission without an idempotency key uses a generated ID and cannot deduplicate an ambiguous retry.
+- An idempotent message's record key is derived from a versioned digest of the full length-prefixed owner tuple plus producer key, so the same logical submission maps directly to its canonical message record without a second receipt lookup. A submission without an idempotency key uses a generated ID and cannot deduplicate an ambiguous retry.
 - If two inputs map to the same routing key but differ in full identity or request, fail closed with an explicit route-collision/conflict result. Never read, mutate, or overwrite the other owner's record.
 - Digests are routing aids, not proof of equality or authentication. A collision must be detected against the stored full identity and exact canonical request; it must never silently alias idempotency keys. Keep an implementation with fixed test vectors and fit every encoded key within 50 characters.
 - Test maximum-size store, scope and profile keys as well as generated IDs. Verify encoded serialized bytes, not character estimates.
@@ -454,14 +454,14 @@ Resolve effective settings in this order:
 4. **Server profile** selected by the developer or `auto`: `latency`, `balanced`, `budget_safe`, or `background`.
 5. **Adaptive local overlay** calculated from this server's observed budgets, latency, throttling and workload.
 
-New `Options` fields should be snake_case and additive: `runtime_profile`, `server_role`, `adaptive_runtime_enabled`, `adaptive_sample_interval`, `adaptive_min_queue_poll_interval`, `adaptive_max_queue_poll_interval`, `adaptive_min_concurrent_requests`, `adaptive_max_concurrent_requests`, `adaptive_read_budget_floor`, `adaptive_write_budget_floor`, `adaptive_queue_budget_share`, `adaptive_hysteresis_seconds`, and `runtime_policy_refresh_interval`. Defaults keep adaptive control disabled or conservative until its benchmarks and Studio acceptance tests pass.
+New `Options` fields should be snake_case and additive: `runtime_profile`, `server_role`, `adaptive_runtime_enabled`, `adaptive_sample_interval`, `adaptive_min_queue_poll_interval`, `adaptive_max_queue_poll_interval`, `adaptive_min_concurrent_requests`, `adaptive_max_concurrent_requests`, `adaptive_read_budget_floor`, `adaptive_write_budget_floor`, `adaptive_queue_budget_share`, `adaptive_hysteresis_seconds`, `runtime_policy_refresh_interval`, and an optional `runtime_policy_provider` callback. Defaults keep adaptive control disabled or conservative until its benchmarks and Studio acceptance tests pass.
 
 `server_role` is developer-provided (`gameplay`, `hub`, `match`, `background`, `studio_test`, or `custom`). `auto` may observe Studio versus live server, current player count, active Record count, server age, current work and measured service behavior, but it must not guess application semantics from JobId or private/reserved status alone. The same server can host both latency-sensitive profile saves and low-priority maintenance; role is a hint, never a correctness decision.
 
 Add module-level APIs consistent with existing naming:
 - `RecordStore.apply_runtime_policy(revision, policy)`: validate and install an immutable policy snapshot in this server. Repeating the same revision and canonical policy is a no-op; reusing a revision with different contents is a conflict; lower/stale revisions are rejected.
 - `RecordStore.get_runtime_snapshot()`: return the effective settings, bounds, source of each setting, policy revision, controller state, sample time, and a short reason for each adaptive change.
-- An optional `on_runtime_config_changed` observer runs outside all DataStore transforms and cannot block or roll back configuration.
+- An optional `on_runtime_config_changed` observer runs outside all DataStore transforms and cannot block or roll back configuration. The optional `runtime_policy_provider` is a bounded, non-yielding callback that returns a revision plus the application's already-cached policy snapshot; it is invoked only at the configured refresh interval and outside all DataStore transforms. Remote config I/O belongs in the application's own refresh task, which can call `apply_runtime_policy()` when it has validated a new snapshot. A provider that throws, yields, or returns invalid data is ignored and the last-known-good policy remains active.
 
 The experience may keep remote policy storage in its own config service or DataStore key. RecordStore should not issue remote config reads on every operation. A local versioned snapshot is refreshed at a jittered, bounded interval; MessagingService is only an invalidation hint; missed hints are recovered by periodic refresh. Keep the last-known-good snapshot when the provider is unavailable. Validate the entire new snapshot before atomically replacing the old one. Unknown schema versions, invalid numbers, unsupported fields, unsafe limits or a stale revision reject the whole snapshot rather than applying a partial config.
 
@@ -516,8 +516,8 @@ Apply acceleration where it reduces actual Roblox service calls or wasted work. 
 - A maximum cache age and mandatory reconciliation poll prevent missed invalidations from suppressing work indefinitely. Stale cache entries may waste a read but may never suppress recovery forever or make an invalid message claimable.
 
 **E. Fair multi-lane scheduling**
-- Separate critical profile persistence and lease work from urgent durable messages, routine messages/outbox fan-out, and maintenance/diagnostics.
-- Use weighted fair scheduling and bounded per-owner slices so a noisy profile or poison message cannot starve other profiles. Preserve ordering for the same configured ordering key.
+- Separate critical profile persistence and lease work from durable-message processing, outbox fan-out, and maintenance/diagnostics.
+- Use weighted fair scheduling and bounded per-owner slices so a noisy profile or poison message cannot starve other profiles. Preserve ordering for the same configured ordering key. Per-message priority values remain a later opt-in scheduling feature; do not imply that they are active in the initial mailbox release.
 - Under pressure, drop only ephemeral hints/cache entries, not accepted durable messages. Delay low-priority work rather than consuming the reserved budget.
 - Keep queue and maintenance concurrency in one shared request governor; do not create independent semaphores per feature that oversubscribe the same DataStore budget.
 
@@ -750,6 +750,6 @@ This section is the final review checklist, not evidence that the future impleme
 | **Rollback across envelope versions can lose sidecars** | Old binaries may strip inbox/outbox fields or mutate a format they do not understand. | Old-writer freeze sentinel, version compatibility matrix, retained source copy and explicit reverse migration only when quiesced and verified. |
 | **The design is not yet a performance result** | More safety states and per-message records create overhead, and existing CodSpeed baselines lack these workloads. | Add representative CodSpeed workloads, then run isolated Studio/server tests for real request budgets, throttling and cross-server delivery. Keep adaptive/acceleration defaults conservative until measured. |
 
-The most important unresolved design gate is the preparation recovery path: because DataStore has no transactional index across keys and routine recovery must not enumerate the whole keyspace, implementation must provide a bounded way to discover preparing submissions left between message creation and index append. If that bounded recovery structure cannot be proved safe under crash/concurrency tests, do not implement or enable the v2 mailbox yet.
+The preparation gap has an explicit outcome: a `preparing` message is not accepted and cannot execute. A caller retry with the same idempotency key resumes the same canonical record; a transactional outbox keeps retrying until destination acceptance is verified. A message with no idempotency key cannot recover an ambiguous whole-call retry and must be documented as unsuitable for irreversible work. Automatic background recovery of unaccepted `preparing` records is not promised; if a future API promises such recovery, it must add a bounded preparation journal rather than scan the whole DataStore keyspace.
 
 Known implementation limitation: the API can enforce validation, yielding rules where supported, version fences and bounded calls; it cannot prove arbitrary consumer callback purity, guarantee external API side effects exactly once, or infer all experience-wide request consumption from one server. Those limitations must remain explicit in API docs.
