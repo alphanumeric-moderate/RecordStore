@@ -305,7 +305,7 @@ Canonical message states:
 - `dead_lettering`: terminal failure is recorded; recovery finishes DLQ indexing without invoking the handler again.
 - `acknowledged`, `dead_lettered`, `discarded`, `expired`: terminal states.
 
-Allowed transitions are validated in the canonical message's UpdateAsync transform. A stale claim cannot acknowledge, renew, retry, discard or dead-letter a message. Terminal states are monotonic except an explicit replay operation, which increments the replay generation and creates a new active placement. Old index entries have older placement generations and are ignored.
+Allowed transitions are validated in the canonical message's UpdateAsync transform. Handler-owned transitions require the current claim token, live lease and current session generation. Recovery after lease expiry uses a separate CAS that checks the stored expired token/deadline plus the clock-skew grace, then atomically invalidates the old token before installing a new claim or a terminal recovery state. A stale claim cannot acknowledge, renew, retry, discard or dead-letter a message. Terminal states are monotonic except an explicit replay operation, which increments the replay generation and creates a new active placement. Old index entries have older placement generations and are ignored.
 
 ### 4.6 Claim, retry and acknowledgement
 
@@ -316,14 +316,14 @@ Allowed transitions are validated in the canonical message's UpdateAsync transfo
 **Retry:** under the live token, persist `ready`, cleared lock fields, normalized last error, attempt counters and an explicit next `available_at`. Use capped exponential backoff with deterministic/injected jitter. Limit total attempts and delivery age. The next handler must not run before the stored time. If the message's `expires_at` has passed, transition to `expired`; at attempt/age limits, transition to `dead_lettering`.
 
 **Acknowledgement:**
-1. Persist `acknowledging` on the canonical message under the current token.
+1. Persist `acknowledging` on the canonical message only when the claim token matches, the lease remains live, and the owning session generation is current.
 2. Persist the canonical message as `acknowledged` with the same operation/claim identity.
 3. Recovery repeats step 2 idempotently and never invokes the handler for an `acknowledging` message. Because the canonical message record also serves as the producer receipt, there is no cross-key producer-receipt update.
 
 If the handler effect committed but the state never reached `acknowledging`, redelivery is possible. This is why the atomic inbox pattern is a first-class API.
 
 **Dead-lettering:**
-1. Persist `dead_lettering` on the canonical message under the current token.
+1. After a live handler fails/exhausts policy, persist `dead_lettering` under its current token; after an expired-claim recovery exhausts attempts/age, use the separate expiry-fenced CAS described above to enter `dead_lettering` without invoking the handler.
 2. Append the canonical message record key and terminal generation to the independent DLQ index idempotently.
 3. Persist `dead_lettered` on the canonical message.
 4. Recovery repeats the same transitions idempotently. `dead_lettering` is never eligible for user handler execution, and the canonical record remains queryable as the producer's outcome receipt.
@@ -641,6 +641,7 @@ Required test groups:
 17. **Transform purity**: instrumentation and review prove library-owned transforms do not yield or call MessagingService/MemoryStore, observers, GUID generation, or cross-key APIs. Consumer callbacks are separately documented as pure/non-yielding; no test can prove arbitrary callback code has no hidden external side effects.
 
 18. **Adaptive configuration**: budget traces with sustained low/healthy/flapping budgets, throttle bursts, changing player counts and Heartbeat delays; one governor coordinates all Records, downshifts promptly, recovers slowly and never changes correctness limits or starves its internal critical lane.
+24. **Lease expiry recovery**: expired claim under attempt limit transfers to a new claim token; expired claim at attempt/age limit enters DLQ without handler replay; an expired `expires_at` message becomes terminal without a late start; acknowledgement racing takeover has exactly one CAS winner.
 19. **Policy snapshots**: stale revisions, repeated identical revision, same-revision conflicting contents, invalid bounds/schema, provider failures, missing invalidation messages and cold start; last-known-good policy or built-in safe defaults remain effective without blocking profile startup.
 20. **Inbox batch and claim races**: repeated IDs inside one batch are rejected before writes; earlier matching receipts are duplicates; payload conflicts and capacity overflow abort all new mutations; claims that expire before the profile transaction are not acknowledged; crash after profile commit before queue ack replays as duplicates.
 21. **Outbox event identity and cleanup**: same commit key/payload from the same source returns the same events; the same commit key on different source profiles generates distinct event IDs; different payload under the same source commit key conflicts; partial destination success, cleanup crash and repeated dispatch remove only events whose destination receipts are verified.
