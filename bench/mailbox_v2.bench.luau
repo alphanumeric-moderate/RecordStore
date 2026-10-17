@@ -8,16 +8,29 @@ local MailboxV2 = luau.load(fs.readFile("src/PlayerDataInitializer/RecordStoreMa
 })()
 
 local MESSAGES = 12
+local function active_record_for(owner)
+	local ids = if owner.user_id ~= nil then { owner.user_id } else {}
+	return {
+		GetIdentity = function()
+			return { store_name = owner.store_name, scope = owner.scope, profile_key = owner.profile_key, user_ids = ids }
+		end,
+		IsOpen = function() return true end,
+		GetState = function() return "active" end,
+		Stats = function() return { state = "active", takeover_requested = 0, busy = 0, queue_busy = 0 } end,
+	}
+end
 local function run_workload()
 	local now = 5_000_000
 	local guid = 0
 	local store = MailboxV2.MockStore()
-	local mailbox = MailboxV2.new(store, {
+	local owner = {
 		store_name = "MailboxV2_CodSpeed",
 		scope = "global",
 		profile_key = "benchmark-owner",
 		user_id = 135792468,
-	}, {
+	}
+	local mailbox = MailboxV2.new(store, owner, {
+		active_record = active_record_for(owner),
 		now_ms = function()
 			return now
 		end,
