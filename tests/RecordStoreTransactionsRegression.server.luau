@@ -309,6 +309,47 @@ expect_pruned(eligible_receipts, eligible_receipts_code, "eligible transaction r
 local eligible_outbox, eligible_outbox_code = record:PruneOutboxAsync(future_cutoff_ms, 1)
 expect_pruned(eligible_outbox, eligible_outbox_code, "eligible outbox pruning")
 
+-- Retention is based on dispatch time, not creation time: an old event dispatched
+-- recently must remain available for the configured post-dispatch retention window.
+local fake_now = DateTime.now().UnixTimestampMillis / 1000
+RecordStore.Mock.set_test_clock(function()
+	return fake_now
+end)
+local dispatch_time_record = make_record("outbox-dispatch-time", { coins = 0 })
+local old_event = {
+	{
+		EventId = "old-created-recently-dispatched",
+		DestinationStoreName = "RecordStoreDestination",
+		DestinationScope = "global",
+		DestinationProfileKey = "recipient-retention",
+		MessageType = "retention-test",
+		Data = { value = 1 },
+	},
+}
+local old_event_commit, old_event_message = dispatch_time_record:CommitWithOutboxAsync(
+	"tx-old-event",
+	"retention-event",
+	increment("coins", 1),
+	old_event
+)
+assert(old_event_commit == "success", tostring(old_event_message))
+fake_now += 120
+local time_dispatch_count, time_dispatch_code, time_dispatch_message =
+	dispatch_time_record:DispatchOutboxAsync(function(event)
+		assert(event.EventId == "old-created-recently-dispatched", "wrong retention event dispatched")
+		return true, "retention-destination-receipt"
+	end, 1)
+assert(time_dispatch_count == 1 and time_dispatch_code == "success", tostring(time_dispatch_message))
+local post_dispatch_cutoff_ms = (fake_now - 10) * 1000
+local recently_dispatched_pruned, recently_dispatched_code =
+	dispatch_time_record:PruneOutboxAsync(post_dispatch_cutoff_ms, 1)
+expect_retained(recently_dispatched_pruned, recently_dispatched_code, "post-dispatch retention")
+local old_dispatch_cutoff_ms = (fake_now + 10) * 1000
+local old_dispatched_pruned, old_dispatched_code =
+	dispatch_time_record:PruneOutboxAsync(old_dispatch_cutoff_ms, 1)
+expect_pruned(old_dispatched_pruned, old_dispatched_code, "eligible post-dispatch retention")
+RecordStore.Mock.set_test_clock(nil)
+
 RecordStore.Mock.reset()
 
 if #retention_failures > 0 then
