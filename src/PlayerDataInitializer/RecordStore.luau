@@ -6320,6 +6320,9 @@ local function bind_mailbox_v2(self: Record, mailbox: unknown): (ResultCode, str
 	if state == nil then return "invalid", "record does not exist" end
 	if state.state ~= "active" then return "fenced", "V2 mailbox binding requires an active Record" end
 	if state.takeover_requested then return "closing", "session takeover has been requested" end
+	if state.mailbox_v2 ~= nil and state.mailbox_v2 ~= mailbox then
+		return "conflict", "this Record is already bound to a different V2 mailbox"
+	end
 	if type(mailbox) ~= "table" or type((mailbox :: any).GetOwner) ~= "function"
 		or type((mailbox :: any).EnqueueAsync) ~= "function"
 	then
@@ -6363,6 +6366,9 @@ local function enqueue(self: Record, message_type: string, data: JsonValue?, enq
 		local owner_fields = owner :: { [string]: unknown }
 		if owner_fields.store_name ~= state.name or owner_fields.scope ~= state.scope or owner_fields.profile_key ~= state.key then
 			return "fenced", "bound V2 mailbox identity changed after binding"
+		end
+		if #state.user_ids > 0 and owner_fields.user_id == nil then
+			return "fenced", "bound mailbox lost the UserId required for this Record"
 		end
 		if owner_fields.user_id ~= nil then
 			local found = false
