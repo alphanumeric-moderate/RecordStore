@@ -259,6 +259,8 @@ local V2 = RecordStoreV2.new(RecordStore, MailboxV2, {
     acceleration_module = Acceleration,
 })
 local wakeups = Acceleration.new({
+    request_runner = RecordStore,
+    operation_deadline_seconds = 5,
     memory_map = MemoryStoreService:GetHashMap("RecordStoreV2Wake"),
 })
 local started, start_error = wakeups:Start()
@@ -312,8 +314,9 @@ supply a caller-stable `idempotency_key` in the optional enqueue options.
 The DataStore adapter preserves key UserIds/metadata on updates and uses the shared RecordStore
 request gate. It intentionally exposes no unconditional physical-delete method. The wake-up
 accelerator uses fixed shard topics, a bounded local candidate set, optional expiring MemoryStore
-hints, and periodic per-owner polling. A hint is never an acceptance receipt or permission to execute
-work. Each dispatch requires a bound active Record whose store, scope, profile key, UserIds and session
+hints, and periodic per-owner polling. Pass `request_runner = RecordStore` to route MessagingService
+and MemoryStore operations through the shared work-class/concurrency gate. A hint is never an
+acceptance receipt or permission to execute work. Each dispatch requires a bound active Record whose store, scope, profile key, UserIds and session
 state match the mailbox owner.
 
 The library reserves the `__recordstore_v2_` prefix for its optional profile-data ledgers. Do not
