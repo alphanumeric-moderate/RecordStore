@@ -1266,6 +1266,10 @@ function MailboxV2.BindWakeups(self: Mailbox, wakeups: unknown): (boolean, strin
 	return true, nil
 end
 
+function MailboxV2.GetOwner(self: Mailbox): Owner
+	return clone_owner(self.owner)
+end
+
 function MailboxV2.EnqueueAsync(self: Mailbox, message_type: string, payload: unknown, enqueue_options: Dict?): Result
 	if type(message_type) ~= "string" or message_type == "" or #message_type > 100 then
 		return ok("invalid", nil, nil, "message_type must be 1 to 100 bytes")
