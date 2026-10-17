@@ -84,6 +84,8 @@ The unique value is the combination of capabilities below. Statements about Prof
 Primary comparison references:
 - ProfileStore README: https://github.com/MadStudioRoblox/ProfileStore/blob/main/README.md
 - ProfileStore API: https://github.com/MadStudioRoblox/ProfileStore/blob/main/docs/api.md
+- MarketplaceService receipt processing: https://create.roblox.com/docs/reference/engine/classes/MarketplaceService
+- Roblox Right to Be Forgotten for data stores: https://create.roblox.com/docs/cloud-services/data-stores/right-to-be-forgotten
 
 The differentiators should be released as individually useful APIs. The mailbox remains useful without sagas; outbox/inbox remains useful without MemoryStore; the optional accelerator can be removed without changing durable semantics.
 
@@ -652,6 +654,16 @@ Required test groups:
 
 The regression test must fail against the old implementation for the reason it claims to cover. A passing unit fake does not replace a Studio server playtest for real DataStore and service throttling behavior.
 
+
+25. **Developer product receipt races**: duplicate receipt on two servers, missing player/profile, ambiguous profile transaction, same PurchaseId with mismatched identity/product, retry after commit-before-error, and receipt decision before versus after durable grant state.
+26. **General transaction API**: repeated operation ID/same request, ID/request conflicts, reducer retry determinism, receipt capacity, expired dedup window, dirty-memory flush failure and concurrent session fencing.
+27. **Application schema migration**: idempotent resume after every write window, target-version commit ambiguity, unsupported future schema, validation quarantine, canary gate, old-writer rejection and restore from a verified version.
+28. **Escrow transfer conservation**: crash after reservation/credit/settlement, destination unknown outcome, duplicate transfer ID, concurrent spending, item mutation while reserved and operator reconciliation; the sum of spendable assets plus escrow remains conserved.
+29. **Profile Doctor safety**: preview/apply revision race, truncated large diff, malformed and future versions, protocol sidecar preservation, verified recovery point and restore during old-session attempts.
+30. **Erasure coverage**: render each RTBF key template, identify every user-associated sidecar, shared/multi-user payload separation, retries after partial removal, active session fencing, cache invalidation and explicit unknown/uncovered legacy keys.
+31. **Secondary indexes and tracing**: duplicate/out-of-order projection events, rebuild from checkpoint, deleted source, stale query confirmation, trace truncation/privacy, trace-sink failure and proof that tracing adds no separate hot-path write.
+32. **Performance optimizations preserve contracts**: no-op save only when clean is proven; coalescing obeys maximum dirty age; read singleflight never merges session acquisition; compression round-trips all supported codecs; queue cursors recover dropped hints; budget reserves prevent starvation; benchmark toggles do not alter durable state semantics.
+
 ## 13. CodSpeed and service-budget validation
 
 The existing main CodSpeed run has no dedicated durable-mailbox, outbox, inbox or saga benchmark. Existing hosted WallTime results have environment-noise warnings and some simulation cases are syscall dominated; do not reuse those numbers as queue latency evidence.
@@ -752,6 +764,17 @@ The design is implementable only when tests and runtime evidence demonstrate all
 - Optional wake-up topics and local candidate caches are bounded, coalesced and non-authoritative; polling recovers dropped notifications.
 - No default code path modifies engine-level DataStore rate limits or assumes a server-local budget proves game-wide headroom.
 
+
+- Purchase receipt handling uses stable transaction IDs, commits a verified durable grant before acknowledging completion, and has an explicit retention/lifetime-idempotency policy.
+- `TransactAsync` commits profile mutation and operation receipt to one profile key; duplicate and conflict outcomes are distinguishable and unknown writes are reconcilable.
+- Application schema migration is separately versioned from the serialization envelope, resumable, validated and fail-closed on future schemas.
+- Escrow transfer tests demonstrate asset conservation through every crash/unknown-result window and never compensate before a destination outcome is reconciled.
+- Profile Doctor defaults to read-only, guards restoration by revision/session fencing, and preserves protocol metadata and a verifiable recovery path.
+- Every persistent user-associated sidecar has a declared RTBF/deletion strategy; no coverage claim relies only on opaque hashed keys or whole-keyspace scans.
+- The deterministic crash simulator can replay injected failures and validates production-path invariants; Studio/platform contract tests remain separate.
+- Secondary indexes are eventually consistent, rebuildable and never substitute for authoritative validation; operation tracing is bounded and adds no mandatory separate write per hot-path event.
+- Each performance optimization has a baseline, target metric, representative CodSpeed workload, correctness tests, rollback/disable path where practical, and no claim of real service improvement from mocks alone.
+
 ## 16. Roblox and comparison references
 
 - Roblox DataStore limits: https://create.roblox.com/docs/cloud-services/data-stores/error-codes-and-limits
@@ -764,7 +787,347 @@ The design is implementable only when tests and runtime evidence demonstrate all
 - ProfileStore API: https://github.com/MadStudioRoblox/ProfileStore/blob/main/docs/api.md
 
 
-## 17. Final adversarial audit: remaining risks and required controls
+
+## 17. First-class purchase receipt processor
+
+**Status: design proposal only.** This adapter builds on the idempotent transaction and inbox/outbox primitives; it is not a second persistence protocol.
+
+### 17.1 API shape and receipt integration
+
+Propose an opt-in adapter such as:
+
+- `ReceiptProcessor.new(config)`;
+- `ReceiptProcessor:CreateHandler(grant_reducer)` to create a callback without changing global MarketplaceService behavior;
+- explicit integration helpers for `MarketplaceService:BindReceiptHandler()` when supported by the runtime and for the legacy `MarketplaceService.ProcessReceipt` callback;
+- `ReceiptProcessor:GetStatusAsync(receipt_id)` for the durable state and last known outcome.
+
+The adapter must never silently replace a game's global `ProcessReceipt` callback or register an implicit catch-all handler at module require time. The game remains responsible for registering one compatible integration and for mapping the product catalog to server-authoritative grant definitions. If a runtime supports multiple receipt handlers, registration conflicts must fail visibly. A callback must not rely on a Player instance remaining present after any yield.
+
+Use `PurchaseId` as the stable idempotency identity for developer-product receipts. Support other MarketplaceService receipt types only through explicit receipt-type adapters with their own stable identifier contracts; do not assume that every receipt has `PurchaseId`. For Robux transfer receipts, for example, correlate using the documented transfer request identity and separate sender/receiver decisions.
+
+### 17.2 Correctness contract
+
+- Validate receipt type, transaction ID, player/user identity, product ID and configured grant definition. Never accept a grant amount or product definition from an untrusted client.
+- If the profile session is not open, has been fenced, or cannot safely accept the grant, return the platform's unresolved/retry decision instead of pretending to succeed.
+- Use `Record:TransactAsync()` for a same-profile grant when the complete grant mutation and its deduplication receipt can be committed together to that profile key.
+- Repeated delivery of the same transaction with the same canonical request returns the prior durable outcome. The same transaction identity with a different user, receipt type, product or payload is a conflict that fails closed and raises an operator-visible diagnostic.
+- If a durable write outcome is unknown, reconcile the same transaction ID before deciding. Never blindly add the reward a second time.
+- Mark a receipt processed only after the reward is durably represented according to the application's declared grant semantics. For a conventional immediate currency/item grant, this means the profile mutation and receipt result are committed. A durable pending-entitlement ledger may count as the grant only when the game explicitly treats that ledger as the entitlement source of truth and the entitlement is safely redeemable.
+- A grant reducer returns data only. No yielding, network calls, event firing, inventory Instance mutation or other external side effects may occur inside the UpdateAsync transform. Apply in-memory presentation changes only after the durable transaction result is confirmed.
+- Cross-profile rewards use a durable, idempotent workflow. Do not claim a two-profile atomic transaction. The receipt can be acknowledged before a recipient-side projection only if the application's persistent entitlement/order record is already the authoritative grant and reconciliation is guaranteed; otherwise leave it unresolved until the defined grant-completion condition holds.
+
+### 17.3 Receipt retention is a design decision
+
+A bounded operation-receipt window cannot guarantee duplicate suppression forever. Receipt processing must expose its retention contract and must not silently purge tombstones while a transaction may still be delivered again. Long-lived purchase uniqueness requires either a compact permanent purchase ledger or a durable entitlement model keyed by transaction ID. The design must explicitly account for storage growth and provide bounded archival/compaction only when the application can prove older IDs cannot grant again or their permanent effect is represented in another authoritative ledger. A separate receipt key and profile reward mutation are not atomic by themselves; any split-key design must use a recoverable purchase-intent state machine and must not imply cross-key atomicity.
+
+Official API references are listed in section 16. No automatic MarketplaceService callback registration or live purchase processing is implemented by this spec.
+
+## 18. General idempotent profile transaction API
+
+**Status: design proposal only.** This is the common gameplay primitive intended to support purchases, rewards, crafting, quest completion and safe retries independently of queue delivery.
+
+### 18.1 Proposed API
+
+```lua
+local result, status = record:TransactAsync(
+    "reward:daily:2026-10-17",
+    function(current_data)
+        -- Pure, deterministic, non-yielding transformation.
+        local next_data = copy_data(current_data)
+        next_data.coins += 100
+        next_data.last_daily_reward = "2026-10-17"
+
+        return next_data, { coins_granted = 100 }
+    end,
+    {
+        request = { reward = "daily", day = "2026-10-17" },
+        receipt_retention_seconds = 30 * 24 * 60 * 60,
+    }
+)
+```
+
+The name and exact parameter shape are provisional. A caller-supplied operation ID must remain stable across retries. The API canonicalizes and validates the request, compares the exact request identity stored with the receipt, and returns the prior stored result when the operation was already committed. Reusing the ID for a different request returns `conflict`, not a duplicate success.
+
+### 18.2 Atomicity and in-memory coherence
+
+The profile mutation, operation receipt and bounded serializable result must be written within the same profile-key UpdateAsync. Serialize the operation through the existing per-Record write gate; flush or reconcile pending local dirty state before starting; validate owner/session token and fencing generation in the transform; and rebase the in-memory snapshot after a confirmed commit. A failed or ambiguous prerequisite flush must stop the transaction instead of using stale memory.
+
+The reducer may be invoked more than once by UpdateAsync. It must be deterministic for equal inputs, non-yielding and free from irreversible external effects. Prepare stable IDs and timestamps before entering the transform. Consumer callbacks cannot be made safe merely by wrapping them in pcall; the contract and adversarial tests must make this limitation explicit.
+
+### 18.3 Receipt capacity and result semantics
+
+Define typed outcomes for `committed`, `duplicate`, `conflict`, `capacity`, `fenced`, `retryable` and `unknown`. On `unknown`, the same operation ID resolves uncertainty; a new ID does not. If the operation receipt cannot fit, abort before committing the mutation. Do not evict the oldest receipt silently.
+
+The operation receipt includes a versioned canonical request identity, operation result (within a strict encoded-size cap), committed profile revision and timestamp. Large results must be represented by a stable reference or compact summary. Receipt retention is part of the public guarantee: after expiration, old retries may execute again unless a domain ledger continues to enforce uniqueness. Applications that require lifetime idempotency must keep the required domain key for life or use a bounded business model that proves safe compaction.
+
+### 18.4 Relationship to inbox/outbox
+
+Share the internal mutation/receipt engine with `ApplyInboxAsync` where the contracts truly match, but preserve distinct API semantics and error codes. Inbox IDs identify delivered messages; transaction IDs identify caller-defined business operations. Do not fake queue envelopes for direct transactions or create separate receipt keys that introduce a dual-write gap.
+
+## 19. Crash-safe application schema migration engine
+
+**Status: design proposal only.** The application data schema is distinct from the RecordStore serialization-envelope version and from the mailbox protocol version.
+
+### 19.1 Version model and migration registration
+
+Add an explicit application `data_schema_version` in the profile envelope and a registry of ordered migration steps, each with a stable migration ID, source version, target version, declared compatibility range and validation function. Migrations must not be inferred from missing fields alone.
+
+Proposed API concepts:
+
+- `RecordStore.register_migration(store_name, from_version, to_version, migration_id, migrate, validate)`;
+- `Record:MigrateAsync(target_schema_version, options)`;
+- `RecordStore.preview_migration_async(store_name, scope, profile_key, target_schema_version)`;
+- `RecordStore.get_migration_status_async(operation_id)`.
+
+The exact API is not fixed. Migration registration must reject duplicate IDs with different code fingerprints, gaps, cycles, unsupported backwards edges, and ambiguous paths to the requested target.
+
+### 19.2 Execution and recovery
+
+- Run a bounded, deterministic, non-yielding transformation against the latest durable profile envelope while holding the Record write gate and validating current session ownership.
+- Commit the migrated data and new schema version in the same profile-key UpdateAsync. An interrupted/unknown result must be reconciled by rereading the stored schema version and migration ID; do not run a second incompatible migration from stale memory.
+- Each migration is idempotent or atomic at one profile key. A migration that cannot fit normal transform time/size limits must use an explicit staged protocol and remain unavailable to gameplay until the target version is validated and activated.
+- Preserve the original data version through Roblox version history where available and/or a separately verified backup process. A backup written to another key is not atomic with the profile update and needs its own recovery protocol.
+- Failed validation moves the profile into a visible read-only/quarantined state. Preserve the original source; do not replace malformed or future-version data with a template or guessed structure.
+- Dry-run previews operate on a read-only copy and report path-level changes, estimated encoded size, validation failures and unsupported fields without opening a write transaction.
+- Large migrations are scheduled with bounded concurrency and low priority, but cannot be starved indefinitely or bypass the profile's session fence.
+- Old binaries encountering an unsupported future `data_schema_version` fail closed. Compatibility checks must cover overlapping deployments and rollback, not just current-version tests.
+
+### 19.3 Operational controls
+
+Support canary migrations in a disposable namespace, per-store activation gates, progress summaries, retryable failure categories, explicit operator pause/resume and migration audit IDs. Reversing a migration requires a separately declared inverse or verified restore; the library must not synthesize inverse code for arbitrary transformations.
+
+The data envelope version remains independent. Upgrading a serializer must not automatically migrate game inventory/economy semantics, and changing a game's schema must not require an unrelated mailbox-format rewrite.
+
+## 20. Escrow-based transfer and trade engine
+
+**Status: design proposal only.** This is an optional domain-level helper built on transactions, outbox/inbox and saga recovery. It does not create a multi-key database transaction.
+
+### 20.1 Transfer state machine
+
+Propose an opt-in `RecordStoreTransfer` coordinator with a caller-stable transfer ID and explicit durable states:
+
+`requested -> reserved -> credit_pending -> credited -> settled`
+
+Terminal/exception states include `rejected`, `expired_before_reservation`, `compensation_pending` and `reconciliation_required`. The transfer record tracks source/target identity, amount or item manifest, schema version, source and target operation receipts, deadlines, retry count and the last verified step. Sensitive account fields should be minimal and owner-scoped.
+
+### 20.2 Conservation invariant
+
+1. In one transaction on the sender's profile key, validate available assets, move the amount from spendable balance into a reserved escrow field, and record the stable transfer ID.
+2. Apply the destination credit on the destination profile key through an idempotent inbox/transaction operation keyed by the transfer ID. Duplicate attempts cannot credit twice.
+3. After a verified destination receipt, settle the source reservation. A stale or repeated coordinator step is idempotent.
+4. If a destination result is unknown, reconcile/retry the same operation before any compensation. Never release the source escrow while the destination credit may still commit.
+5. When the operation cannot safely converge, keep assets reserved and expose `reconciliation_required`; provide an operator workflow with auditable, fenced decisions.
+
+The invariant is conservation across spendable balances plus escrow and committed destination assets. For items, reserve a versioned item identity/count and reject mutation of the reserved item until settlement. Currency precision, negative values, overflow, duplicate item identifiers and schema changes must be validated.
+
+The sender reservation and recipient credit live on separate DataStore keys, so temporary pending states are expected. The design must not promise instantaneous all-or-nothing visibility, exactly-once arbitrary effects, or atomic cross-profile commit. A user-facing UI should expose pending status where relevant. Compensation is a separate business operation, not a blind reversal of an uncertain write.
+
+## 21. Profile Doctor and guarded restoration
+
+**Status: design proposal only.** This is an operator-facing diagnostic workflow. Its default mode is strictly read-only.
+
+### 21.1 Inspection
+
+Propose read-only tools such as:
+
+- `RecordStore.inspect_profile_async(...)` for envelope/data-schema classification and validated size/count summaries;
+- `RecordStore.diff_profile_versions_async(...)` for bounded path-level differences between the current record and supported historical versions;
+- `RecordStore.preview_repair_async(...)` for a proposed repair without committing it;
+- `RecordStore.restore_profile_version_async(...)` for an explicit, guarded restore.
+
+Inspection reports distinguish confirmed parse failures from unsupported future formats, missing data, owner/session mismatches, failed migrations, missing sidecars, size-limit risk and inconclusive reads. Diffs are bounded by node count and encoded bytes; truncation is explicit. Redact personal/sensitive values by default, with path names and hashes preferred to raw content.
+
+### 21.2 Repair and restoration protocol
+
+- Never auto-reconcile malformed, future-version or owner-mismatched data into the current template.
+- Require a named repair rule with a stable ID, input schema range, preview, validation and expected current revision. Generic arbitrary table edits are not a safe repair language.
+- Before a write, recheck owner, session/fencing token and expected revision in UpdateAsync. If the source changed after preview, return a conflict and require a new preview.
+- Preserve a verifiable recovery point before destructive repair. Document whether protection relies on DataStore version history or a separately verified backup; never describe a non-atomic second-key backup as atomic with the restore.
+- Store repair audit identity, operator reason, before/after revision and outcome. Avoid storing raw full snapshots in an unbounded audit log.
+- A restore is a new guarded write based on an historical snapshot; it must not erase current session locks, fencing generations, inbox/outbox receipts or unknown sidecars. Merge/restore data fields separately from protocol metadata.
+- Require explicit confirmation in the operator layer for destructive operations. The library can provide the guardrails/API, but it cannot provide a secure admin UI or authorization model automatically.
+
+ProfileStore already provides historical reads/version queries. The differentiator here is safe diagnosis, bounded comparison, preview and guarded restoration rather than version history alone.
+
+## 22. User-data erasure and retention coordinator
+
+**Status: design proposal only.** This feature must complement Roblox's automated Right to Be Forgotten (RTBF) mechanisms, not claim to replace them.
+
+### 22.1 Data inventory and ownership
+
+Every persistent RecordStore data family must declare whether it can contain data associated with a Roblox user, the owner/subject identity, retention class and deletion strategy. Profile data, queue messages, inbox/outbox receipts, saga records, purchase intents, indexes and diagnostic traces must not be omitted simply because they live in sidecar stores.
+
+The existing hashed route-key proposal creates a material compatibility risk: a UserId stored only inside an opaque hashed value is not discoverable by a key-pattern RTBF template. **Before the v2 layout can claim RTBF coverage, revise/validate the route design so user-associated records are directly matchable by documented owner-scoped key templates or are covered by a verifiable and operationally valid explicit deletion manifest.** Do not ship a compliance guarantee based only on scanning DataStore contents or relying on a manifest that the automated RTBF process may itself delete before the application consumes it.
+
+Where appropriate, require an explicit `subject_user_id` for data associated with a player. Ensure key length remains within Roblox limits, use full stored owner identity checks, and keep collision fail-closed validation when route hashes are shortened to make room for a user route component. For shared/multi-user operations, minimize personal data, split user-specific payloads/receipts into individually erasable records, and keep shared coordinator state free of unnecessary identifying data. Do not promise that one owner-prefixed key handles automatic erasure for every participant.
+
+### 22.2 Resumable erasure protocol
+
+Propose `RecordStore.plan_erasure_async(user_id)`, `RecordStore.execute_erasure_async(erasure_id)` and `RecordStore.get_erasure_status_async(erasure_id)`. The plan is read-only and returns the discovered key families, counts/uncertainties and retention exceptions before execution. The actual operation is resumable, idempotent and bounded.
+
+- Use a documented user-to-record inventory or matchable key layouts. Never enumerate an entire DataStore keyspace on a request path.
+- Stop or fence new application writes that would recreate data covered by the request; coordinate with active sessions and old writers.
+- Delete or redact eligible sidecar records and verify every operation. Unknown outcomes are reconciled before reporting completion.
+- Preserve non-personal shared workflow state only when its schema can be safely redacted and policy permits. A mixed payload must not retain personal information merely because another participant still needs the transaction.
+- Respect legal/platform retention exceptions and minimum required audit data; explain what was deleted versus retained and why.
+- Apply the same policy to local traces, cached copies, memory hints and indexes. Ephemeral caches are invalidated; metrics must not retain identifiers after deletion.
+- Use Roblox RTBF templates for automatic platform deletion and test every configured data-store/key pattern against representative UserIds. RecordStore's own coordinator remains useful for application-initiated cleanup, audit and sidecar reconciliation but cannot assume it will receive a callback when Roblox runs automated RTBF.
+
+### 22.3 Acceptance gate
+
+No RTBF-completeness claim until there is a machine-verifiable inventory for each persistent family, a test that renders all configured templates, tests for both one-user and shared/multi-user workflows, and a recovery procedure for partial deletion. Unidentified legacy sidecars must be reported as an explicit unresolved scope, not silently treated as erased.
+
+## 23. Deterministic crash simulator and state-machine verifier
+
+**Status: proposed test infrastructure; production RecordStore semantics remain unchanged.**
+
+Extend the fake DataStore used by section 12 to include a deterministic scheduler and replayable fault script. A test case is defined by initial state, operations, event ordering, injected failures and expected invariants. It must execute the real production-path persistence code through an adapter, not only test a separate model that reimplements the algorithm.
+
+### 23.1 Required simulator controls
+
+- Explicit virtual time and clock sources for server A/server B, including bounded and extreme clock skew.
+- Per-key atomic UpdateAsync behavior with configurable transform retries, commit-before-error, fail-before-commit, request throttling and budget recovery.
+- Deterministic scheduling of concurrent tasks, interrupted/yielding handlers, shutdown and reconnect.
+- Crash cutpoints after every durable protocol transition. Restarting a simulated server discards its local memory and reconstructs state from durable storage.
+- MessagingService and MemoryStore stubs that can drop, duplicate, reorder, delay, expire or throttle all hints.
+- Stable random seeds and serialized fault scripts so any failure can be reproduced exactly.
+- Trace capture that identifies the operation, key family, expected state, actual state and first invariant violation without dumping raw user data.
+- Model-based assertions for message at-least-once delivery, no duplicate inbox mutation, stale-claim fencing, transaction idempotency, migration safety, escrow conservation and index rebuild correctness.
+
+### 23.2 Verification layers
+
+Keep the abstract state-machine model independent enough to catch implementation mistakes rather than copying its logic. Run property-based sequences at small scale and curated deterministic scenarios for important failure windows. Minimize a failing sequence to the shortest reproducible trace.
+
+The simulator is necessary but not sufficient. Add real Studio/server contract tests for APIs whose behavior depends on Roblox DataStore throttling, platform receipt callbacks, version history or cross-server timing. Performance results from a fake service must not be presented as real Roblox service latency.
+
+## 24. Durable secondary indexes and materialized views
+
+**Status: design proposal only.** This is an opt-in projection system for query patterns that do not fit direct profile-key access.
+
+### 24.1 API and architecture
+
+Propose named, versioned projections with an input event schema, deterministic projector, partition/shard layout, unique entry identity, source revision or event cursor, and rebuild strategy. Example application queries include guild membership, ownership lookup, marketplace listings and player-to-group membership.
+
+Updates are driven from a transactional outbox or another durable change stream. Each projection update is idempotent by source operation/event ID and records progress so a restart can safely replay. Use bounded shards; never funnel every player through one global hot index key. If a projection requires pagination, expose bounded page size and cursor semantics rather than materializing every result.
+
+### 24.2 Consistency and recovery contract
+
+- Materialized views are explicitly eventually consistent and may be stale or incomplete. A sensitive trade/permission/economy operation must validate the authoritative profile/transaction state before committing.
+- Projection updates never run inside a profile UpdateAsync transform. They are a downstream consumer with retry/DLQ handling and idempotent offsets.
+- Deleting a projection row is not proof that its authoritative source data was deleted; rebuild/replay must also respect erasure and retention state.
+- Rebuild from a bounded source of durable events or a declared snapshot-and-cursor protocol. If the source history has expired, return an explicit incomplete rebuild result rather than claim correctness.
+- Unique constraints need durable arbitration, not merely checking the local in-memory index before inserting.
+- Index schema migration uses versioned projections and dual-read/dual-write only where the cutover protocol, deduplication and rollback have been tested. Never silently read an index built from an incompatible projection version.
+
+Use a view only when query value outweighs additional writes, storage, eventual consistency and rebuild complexity. RecordStore should not become a general-purpose search database by default.
+
+## 25. End-to-end operation tracing
+
+**Status: design proposal only.** Extend section 10's bounded stats and message transition history to correlate a business operation across profile persistence, queues, outbox/inbox and workflow steps.
+
+### 25.1 Trace model
+
+A trace event may include stable `operation_id`, correlation/causation IDs, component and protocol version, operation type, bounded state transition, attempt number, duration bucket, result category, record revision and timestamp. Provide `RecordStore.get_operation_trace_async(operation_id)` with a paginated/truncated result and a completeness label.
+
+Trace data should answer where an operation is waiting, what durable step was last confirmed, which retry class occurred, and what can safely be retried. Distinguish verified durable transitions from process-local events and unknown outcomes.
+
+### 25.2 Overhead and privacy
+
+- Do not issue a separate DataStore write for every trace event on a hot path. Append protocol state/transition evidence to an already-required durable envelope update where size and semantics permit, and keep optional high-volume spans in a bounded server-local ring buffer or external sink.
+- Sample successful high-frequency operations when needed, but always retain high-value failure/unknown/corruption diagnostics within configured bounds.
+- Trace storage has independent size and retention limits; truncation is explicit. Never allow tracing to make a profile or accepted message unsavable.
+- Redact payloads, credentials, purchase identifiers and personal data by default. Access control for a remote diagnostics UI is the game's responsibility.
+- Correlation IDs are not authority tokens and do not replace claim tokens, session fencing or receipt identity.
+- A trace assembled from several keys is not a linearizable snapshot; include observed time and missing-step warnings.
+
+## 26. Additional performance engineering roadmap
+
+**Status: hypotheses to measure, not promised optimizations.** Every item requires a baseline, an isolated implementation, correctness regression tests, and a fresh CodSpeed comparison. Roblox DataStore UpdateAsync consumes both read and write budget and is slower than SetAsync because it reads before writing; this makes unnecessary request reduction important, but not every local CPU optimization reduces service latency.
+
+### 26.1 No-op save elimination and dirty-generation tracking
+
+Maintain an explicit mutation/dirty generation from RecordStore-owned mutation APIs. A save can be skipped when the generation has not changed since the last verified durable revision and no session/lease/protocol refresh is due. Do not deep-compare an entire large profile on every autosave just to prove equality. If compatibility permits direct mutable table access, no-op elision must be disabled or guarded for that access path; silently skipping an untracked mutation is a data-loss bug.
+
+Test direct and nested updates, repeated assignment of equal values, reverted mutations, uncertain saves and ownership refresh. Measure UpdateAsync calls saved per session-hour and the additional CPU/memory cost of tracking dirty state.
+
+### 26.2 Deadline-aware autosave scheduling and startup jitter
+
+Replace synchronized per-Record timers with one bounded per-server scheduler that tracks dirty age, last durable save, configured maximum dirty interval, session/lease deadlines and shutdown urgency. Add bounded random/deterministic jitter to routine autosaves and startup maintenance so a cohort of players does not trigger writes at the same instant. Jitter must never exceed the durability target or overlap an unsafe lease deadline.
+
+Routine saves, explicit high-priority transactions, session release and critical recovery use priority classes with weighted fairness. A low-priority queue cannot occupy every slot. Make delay and starvation visible; urgent work preempts by scheduling, not by cancelling an UpdateAsync that may still commit.
+
+### 26.3 Separate read/write budget gates with a critical reserve
+
+Use the shared governor to track Read, Write and, where needed, List/Remove request classes separately because an UpdateAsync consumes both read and write budget. Reserve a configurable fraction of RecordStore's internal concurrency for critical profile save/release and durable transaction work, while bounding queue, index rebuild, erasure and maintenance traffic. Do not assume engine request budgets are reserved exclusively for RecordStore; unrelated scripts and Open Cloud activity can consume shared experience budget.
+
+Never automatically alter DataStoreService's engine-level rate limits as a library optimization. The governor controls RecordStore's own admission/concurrency and backs off on actual throttling even when the local budget snapshot looks healthy.
+
+### 26.4 Safe in-flight read coalescing
+
+For explicitly read-only operations whose cache/freshness contract allows sharing, coalesce identical in-flight requests on the same server by full datastore name, effective scope, key and requested version. When the request completes, independent callers receive independent safe snapshots. Clean up the in-flight entry on success, error, timeout and shutdown; never retain a failed promise forever.
+
+Do not coalesce session acquisition, owner fencing, claim acquisition, mutation transactions or any call whose semantics require a fresh UpdateAsync. Read coalescing is an optimization only: cache and stale reads never prove session ownership or authorization.
+
+### 26.5 One-pass codec and serialization work
+
+Profile encode/decode and cloning before changing them. Where evidence supports it, combine validation, canonical size accounting and deterministic encoding into one traversal rather than cloning/encoding/measuring the same structure multiple times. Cache encoded or hashed fragments only for provably immutable/unchanged subtrees, with explicit invalidation and schema-version keys. Keep special-value sidecars and envelope migrations compatible.
+
+A canonical codec change requires versioned test vectors for nested maps/arrays, exact numbers, special values, key-order permutations and near-limit payloads. Do not trade deterministic request fingerprints or strict validation for speed. Reusable tables/buffers must not leak mutable references across Records.
+
+### 26.6 Threshold-based compact encoding or compression
+
+Benchmark optional compact encoding/compression for large profiles and outbox payloads. Activate only above a measured size threshold where saved serialization/throughput cost outweighs CPU time, allocations and historical-read complexity. Include codec/version markers, integrity checks, decompression bounds and a supported raw fallback. Never compress twice, and never treat compressed opaque bytes as a reason to skip schema validation.
+
+Compression remains off by default until representative workloads show a durable size benefit and acceptable CPU/p95 latency. Verify compatibility with historical versions, backups, inspection tools and migrations; future/unknown codecs must fail closed while preserving the source.
+
+### 26.7 Per-profile mutation coalescing without semantic merging
+
+Continue coalescing ordinary local mutations into one pending snapshot write where the public API already defines them as changes to the same in-memory Record. Add a bounded flush window and maximum dirty-age guard so rapid updates can share a save without allowing unbounded loss exposure. An explicit `TransactAsync` or `ApplyInboxBatchAsync` remains its own atomic transaction boundary: the optimizer must not merge distinct caller transactions, reorder same-key operations or change all-or-none semantics.
+
+Measure writes per logical mutation, p50/p95 save wait and maximum dirty duration. Under capacity pressure, report backpressure/unknown explicitly rather than silently dropping a mutation from the coalescing buffer.
+
+### 26.8 Payload sizing and large-record decision support
+
+Record encoded bytes, clone/encode CPU and high-water profile sizes using bounded, low-overhead diagnostics. Warn before a profile approaches a configured serialization or API limit; do not wait for a production save to fail. Use size thresholds for expensive diagnostics and sample successes while retaining failure summaries.
+
+Do not automatically split one profile into several authoritative keys just because it grows. Splitting changes atomicity, migration and recovery semantics. If a large high-churn subdomain needs its own record, make it an explicit application data-model choice with a documented consistency boundary and transfer/recovery plan.
+
+### 26.9 Queue scan cost controls
+
+In addition to the section 8 candidate cache and sharded wakeups, benchmark bounded scan cursors, stale-index filtering cost, polling backoff by oldest eligible age, and request-budget-aware page sizes. Cache entries may reduce duplicate discovery reads but cannot authorize claim or suppress reconciliation indefinitely. Keep index repair and compaction in low-priority bounded slices. A queue with no eligible messages should not scan at the same frequency as one with an old due message, subject to a strict maximum idle-poll interval.
+
+Compare polling-only, hint-assisted and cache-assisted modes under dropped notifications, high backlog, DLQ growth and hot-owner workloads. Include request count and scan amplification, not latency alone.
+
+### 26.10 Memory and allocation budget
+
+Measure peak memory and allocation pressure for large profiles, queued payloads, traces, migration diffs and batch buffers. Put explicit caps on local candidate caches, trace rings, diff output, pending batches and workflow inspection pages. Release references on completion, cancellation and shutdown. Never evict active authoritative session data or an accepted durable intent to satisfy an optimization budget.
+
+Avoid pooling mutable user-data tables unless ownership and lifetime can be proven. A small reduction in allocations does not justify aliasing bugs or cross-record data contamination.
+
+### 26.11 Benchmark matrix and acceptance policy
+
+Add dedicated CodSpeed scenarios for:
+
+- clean save/no-op save versus dirty save;
+- 1/10/100 concurrent Record sessions with jittered autosaves and mixed critical work;
+- same-key repeated read coalescing versus independent reads;
+- small/medium/near-limit payload encode, decode, clone and validation;
+- codec/compression thresholds across payload size and table shape;
+- bursty mutation coalescing at several rates, with maximum dirty-age assertions;
+- queue scan at empty/low/high backlog, stale-index ratio, DLQ size and dropped hint rates;
+- inbox batch sizes 1/4/8/16 only for callers that explicitly opted into atomic batching;
+- outbox fan-out, grouped cleanup, migration, erasure and index rebuild under bounded concurrency;
+- peak memory/allocation and worst-case trace/diff truncation.
+
+Track CPU simulation separately from wall-time. Simulation is useful for Luau compute but does not model real Roblox DataStore throttling or network latency. Use wall-time through CodSpeed for applicable measurements and consistent runners; then validate request budgets, payload sizes, throttling and cross-server behavior in Studio/live test namespaces. Report request count per logical operation, encoded bytes, CPU/allocation metrics, throughput, p50/p95 latency, oldest work age, budget headroom and failure recovery. Never translate mock service speed into a claim about real DataStore latency.
+
+Adopt an optimization only when a comparable baseline and head run show a repeatable material improvement in its target workload (initial decision threshold: greater than 5%) without correctness failures or unacceptable regressions in adjacent workloads. If the signal is below measurement noise or only helps simulation while harming wall-time, leave the simpler implementation. Every optimization is independently switchable where practical, and disabling it must not alter persisted semantics.
+
+### 26.12 Explicitly rejected performance shortcuts
+
+Do not: reduce lease/fencing safety to save requests; skip canonical request comparison after a hash match; move a receipt to a second key without recovery protocol; batch distinct business transactions implicitly; let MemoryStore/MessagingService become truth; remove old-version support to speed up decode without a migration plan; run unbounded concurrent UpdateAsync calls; use an unlimited in-memory pending queue; scan the entire keyspace to recover one missing entry; or change correctness defaults based on a benchmark-only profile.
+
+## 27. Final adversarial audit: remaining risks and required controls
 
 This section is the final review checklist, not evidence that the future implementation has passed it.
 
