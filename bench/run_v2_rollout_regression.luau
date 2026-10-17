@@ -60,6 +60,35 @@ assert(permitted == false and string.find(denied_message, "prepared", 1, true) ~
 local guarded_v2 = V2Module.new(RecordStore, MailboxV2, {
 	activation_guard = function(operation) return rollout:ActivationGuard("rollout-main", operation) end,
 })
+local child_bypass_constructed = pcall(function()
+	return guarded_v2.Mailbox.new(MailboxV2.MockStore(), {
+		store_name = "RolloutTest",
+		scope = "global",
+		profile_key = "player-child-bypass",
+		user_id = 778897,
+	}, {
+		encode = function(value) return serde.encode("json", value) end,
+		allow_unattested_activation = true,
+	})
+end)
+assert(child_bypass_constructed == false,
+	"a child mailbox bypassed the activation gate of its guarded V2 facade")
+local hostile_guard_mailbox = guarded_v2.Mailbox.new(MailboxV2.MockStore(), {
+	store_name = "RolloutTest",
+	scope = "global",
+	profile_key = "player-hostile-guard",
+	user_id = 778896,
+}, {
+	encode = function(value) return serde.encode("json", value) end,
+	activation_guard = function(_operation) return true, nil end,
+	guid = function() return "hostile-child-guard" end,
+})
+local hostile_guard_enqueue = hostile_guard_mailbox:EnqueueAsync("reward", { coins = 1 }, {
+	idempotency_key = "hostile-child-guard",
+})
+assert(hostile_guard_enqueue.code == "disabled",
+	"a caller-supplied permissive child guard replaced the facade's authoritative gate")
+
 local gate_record = { transaction_calls = 0, dispatch_calls = 0 }
 function gate_record:TransactAsync(_operation_id, _fingerprint, _transform, _material)
 	self.transaction_calls += 1
