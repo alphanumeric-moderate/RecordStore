@@ -8678,27 +8678,34 @@ local function wait_for_session_async(self: Record, default_data: JsonValue?, wa
 			ReadResult = "invalid", Message = "record does not exist",
 		}, "invalid", "record does not exist"
 	end
+	if wait_options ~= nil and type(wait_options) ~= "table" then
+		return {
+			Outcome = "session_status_unavailable", Attempt = 0, ObservedAtUnix = now_unix(),
+			SessionJobId = nil, LeaseUntilUnix = nil, RetryAfterSeconds = nil, RetryScheduled = false,
+			ReadResult = "invalid", Message = "wait_options must be a table",
+		}, "invalid", "wait_options must be a table"
+	end
 	local options = wait_options or {}
-	local max_wait = options.max_wait_seconds or DEFAULT_OPERATION_DEADLINE
-	local max_attempts = options.max_attempts or 8
-	local retry_interval = options.retry_interval_seconds or MIN_RETRY_DELAY
-	local max_retry_interval = options.max_retry_interval_seconds or MAX_RETRY_DELAY
-	if not math.isfinite(max_wait) or max_wait <= 0 or max_wait > 1200 then
+	local max_wait = if options.max_wait_seconds == nil then DEFAULT_OPERATION_DEADLINE else options.max_wait_seconds
+	local max_attempts = if options.max_attempts == nil then 8 else options.max_attempts
+	local retry_interval = if options.retry_interval_seconds == nil then MIN_RETRY_DELAY else options.retry_interval_seconds
+	local max_retry_interval = if options.max_retry_interval_seconds == nil then MAX_RETRY_DELAY else options.max_retry_interval_seconds
+	if type(max_wait) ~= "number" or not math.isfinite(max_wait) or max_wait <= 0 or max_wait > 1200 then
 		return {
 			Outcome = "session_status_unavailable", Attempt = 0, ObservedAtUnix = now_unix(),
 			SessionJobId = nil, LeaseUntilUnix = nil, RetryAfterSeconds = nil, RetryScheduled = false,
 			ReadResult = "invalid", Message = "max_wait_seconds must be between 0 and 1200",
 		}, "invalid", "max_wait_seconds must be between 0 and 1200"
 	end
-	if not math.isfinite(max_attempts) or math.floor(max_attempts) ~= max_attempts or max_attempts < 1 or max_attempts > 32 then
+	if type(max_attempts) ~= "number" or not math.isfinite(max_attempts) or math.floor(max_attempts) ~= max_attempts or max_attempts < 1 or max_attempts > 32 then
 		return {
 			Outcome = "session_status_unavailable", Attempt = 0, ObservedAtUnix = now_unix(),
 			SessionJobId = nil, LeaseUntilUnix = nil, RetryAfterSeconds = nil, RetryScheduled = false,
 			ReadResult = "invalid", Message = "max_attempts must be an integer from 1 to 32",
 		}, "invalid", "max_attempts must be an integer from 1 to 32"
 	end
-	if not math.isfinite(retry_interval) or retry_interval <= 0 or retry_interval > 30
-		or not math.isfinite(max_retry_interval) or max_retry_interval < retry_interval or max_retry_interval > 30
+	if type(retry_interval) ~= "number" or not math.isfinite(retry_interval) or retry_interval <= 0 or retry_interval > 30
+		or type(max_retry_interval) ~= "number" or not math.isfinite(max_retry_interval) or max_retry_interval < retry_interval or max_retry_interval > 30
 	then
 		return {
 			Outcome = "session_status_unavailable", Attempt = 0, ObservedAtUnix = now_unix(),
@@ -8766,11 +8773,12 @@ local function wait_for_session_async(self: Record, default_data: JsonValue?, wa
 		return result
 	end
 
-	local function cancellation_requested(): boolean
-		if state.takeover_requested then return true end
-		if options.cancelled == nil then return false end
+	local function cancellation_requested(): (boolean, string?)
+		if state.takeover_requested then return true, nil end
+		if options.cancelled == nil then return false, nil end
 		local ok, value = pcall(options.cancelled)
-		return not ok or value == true
+		if not ok then return false, "cancellation callback failed: " .. tostring(value) end
+		return value == true, nil
 	end
 
 	local function observe_competitor(attempt: number): (SessionWaitOutcome, string?, number?, ResultCode?, string?)
@@ -8805,7 +8813,12 @@ local function wait_for_session_async(self: Record, default_data: JsonValue?, wa
 	end
 
 	for attempt = 1, max_attempts do
-		if cancellation_requested() then
+		local cancelled, cancellation_error = cancellation_requested()
+		if cancellation_error ~= nil then
+			local result = report("session_status_unavailable", attempt, last_job_id, last_lease_until, nil, false, "invalid", cancellation_error)
+			return result, "invalid", cancellation_error
+		end
+		if cancelled then
 			local result = report("cancellation_requested", attempt, last_job_id, last_lease_until, nil, false, "closing", "session wait was cancelled or takeover was requested")
 			return result, "closing", result.Message
 		end
@@ -8856,29 +8869,34 @@ local function wait_for_session_async(self: Record, default_data: JsonValue?, wa
 			return result, open_code, open_message
 		end
 
-		local observed_outcome: SessionWaitOutcome = "no_known_competing_session"
+		local can_retry = open_code == "locked" or open_code == "busy" or open_code == "budget" or is_retryable_result(open_code, "open")
+		if not can_retry then
+			local result = report("session_status_unavailable", attempt, nil, nil, nil, false, open_code, open_message)
+			return result, open_code, open_message
+		end
+		local observed_outcome: SessionWaitOutcome
 		local observed_job_id: string? = nil
 		local observed_lease_until: number? = nil
-		local observed_code: ResultCode? = open_code
-		local observed_message: string? = open_message
-		if open_code == "locked" then
-			observed_outcome, observed_job_id, observed_lease_until, observed_code, observed_message = observe_competitor(attempt)
-			if observed_outcome == "ownership_acquired" then
-				local result = report("ownership_acquired", attempt, observed_job_id, observed_lease_until, nil, false, "success", nil)
-				return result, "success", nil
-			end
-			if observed_outcome == "ownership_fenced_or_lost" then
-				local result = report(observed_outcome, attempt, nil, nil, nil, false, observed_code, observed_message)
-				return result, observed_code or "tombstoned", observed_message
-			end
-			if observed_outcome == "session_status_unavailable" then
-				local result = report(observed_outcome, attempt, nil, nil, nil, false, observed_code, observed_message)
-				return result, observed_code or "unknown", observed_message
-			end
+		local observed_code: ResultCode? = nil
+		local observed_message: string? = nil
+		observed_outcome, observed_job_id, observed_lease_until, observed_code, observed_message = observe_competitor(attempt)
+		if observed_outcome == "ownership_acquired" then
+			local result = report("ownership_acquired", attempt, observed_job_id, observed_lease_until, nil, false, "success", nil)
+			return result, "success", nil
+		end
+		if observed_outcome == "ownership_fenced_or_lost" then
+			local result = report(observed_outcome, attempt, nil, nil, nil, false, observed_code, observed_message)
+			return result, observed_code or "tombstoned", observed_message
+		end
+		if observed_outcome == "session_status_unavailable" then
+			local result = report(observed_outcome, attempt, nil, nil, nil, false, observed_code, observed_message)
+			return result, observed_code or "unknown", observed_message
 		end
 		last_outcome, last_job_id, last_lease_until = observed_outcome, observed_job_id, observed_lease_until
+		last_code = if observed_outcome == "competing_session_observed" then "locked" else "retry_exhausted"
+		last_message = if observed_outcome == "competing_session_observed" then observed_message else "no competing live session was observed; acquisition will be retried"
 		if observed_outcome == "competing_session_observed" then
-			report(observed_outcome, attempt, observed_job_id, observed_lease_until, nil, false, observed_code, observed_message)
+			report(observed_outcome, attempt, observed_job_id, observed_lease_until, nil, false, "locked", observed_message)
 		end
 		local remaining = math.max(0, deadline - now_local())
 		if attempt >= max_attempts or remaining <= 0 then break end

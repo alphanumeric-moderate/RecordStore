@@ -395,6 +395,9 @@ local cancelled_wait, cancelled_wait_code = cancelled_wait_record:WaitForSession
 })
 assert(cancelled_wait_code == "closing" and cancelled_wait.Outcome == "cancellation_requested",
 	"session wait did not distinguish explicit cancellation")
+local invalid_wait, invalid_wait_code = risk_record:WaitForSessionAsync(nil, "not-options")
+assert(invalid_wait_code == "invalid" and invalid_wait.Outcome == "session_status_unavailable",
+	"session wait accepted a non-table options argument")
 local risk_update, risk_update_message = risk_record:Update(function(current)
 	local next_data = table.clone(current)
 	next_data.coins += 1
