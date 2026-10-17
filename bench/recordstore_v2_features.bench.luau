@@ -73,6 +73,23 @@ local function run_transactions_and_workflows()
 	end, 8, 4)
 	expect(dispatch, "committed")
 
+	local bridge_mailbox = MailboxV2.new(MailboxV2.MockStore(), {
+		store_name = "V2_FeatureBench",
+		scope = "global",
+		profile_key = "target",
+	}, {
+		encode = function(value) return serde.encode("json", value) end,
+	})
+	local bind_code, bind_message = target:BindMailboxV2(bridge_mailbox)
+	assert(bind_code == "success", tostring(bind_code) .. " " .. tostring(bind_message))
+	local bridge_code = target:EnqueueAsync("bench-bridge", { amount = 2 }, {
+		idempotency_key = "bench-bridge-idempotency",
+	})
+	assert(bridge_code == "enqueued")
+	assert(target:EnqueueAsync("bench-bridge", { amount = 2 }, {
+		idempotency_key = "bench-bridge-idempotency",
+	}) == "duplicate")
+
 	local migrations = V2.Migrations.new()
 	assert(migrations:Register("V2_FeatureBench", 0, 1, "bench-migration-0-1", "rev1", function(data)
 		local changed = table.clone(data)
