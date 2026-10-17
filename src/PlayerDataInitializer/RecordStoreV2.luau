@@ -1796,9 +1796,9 @@ local function new_erasure(store, families, options)
 		for _, template in ipairs(templates) do
 			if type(template) ~= "table" then error("RTBF template must be table", 2) end
 			if not valid_text(template.name, 50) or not valid_text(template.key, 50)
-				or (template.scope ~= nil and not valid_text(template.scope, 50))
+				or (template.scope ~= nil and (type(template.scope) ~= "string" or #template.scope > 50))
 			then
-				error("RTBF templates require bounded DataStore name/key and optional bounded scope", 2)
+				error("RTBF templates require bounded DataStore name/key and bounded optional scope", 2)
 			end
 			local matchable = false
 			for _, field in ipairs({ "name", "scope", "key" }) do
@@ -1829,14 +1829,50 @@ local function new_erasure(store, families, options)
 		return result, nil
 	end
 	function coordinator:PlanAsync(user_id, erasure_id)
-		if not finite(user_id) or user_id < 1 or math.floor(user_id) ~= user_id or not valid_text(erasure_id, 96) then return { code = "invalid" } end
+		if not finite(user_id) or user_id < 1 or math.floor(user_id) ~= user_id or not valid_text(erasure_id, 96) then
+			return { code = "invalid", message = "valid UserId and stable erasure ID are required" }
+		end
+
+		local rendered, render_error = self:RenderTemplates(user_id)
+		if rendered == nil then return { code = "invalid", message = render_error or "RTBF templates could not be rendered safely" } end
+		local template_ok = if type(options.verify_templates) == "function"
+			then io_call(options.verify_templates, user_id, rendered) else false
+
+		local expected_by_family = {}
+		local seen_expected = {}
+		for _, target in ipairs(rendered) do
+			local template = target.template
+			local signature = target.family .. "\0" .. template.name .. "\0" .. tostring(template.scope or "") .. "\0" .. template.key
+			if seen_expected[signature] then
+				return { code = "invalid", message = "rendered RTBF templates collide for this UserId" }
+			end
+			seen_expected[signature] = true
+			expected_by_family[target.family] = expected_by_family[target.family] or {}
+			table.insert(expected_by_family[target.family], {
+				store_name = template.name,
+				scope = template.scope or "",
+				key = template.key,
+			})
+		end
+
 		local entries, coverage = {}, {}
 		for _, family in ipairs(self.families) do
+			local expected = expected_by_family[family.name] or {}
 			if type(family.inventory) ~= "function" then
-				coverage[family.name] = { status = "unresolved", count = 0 }
+				coverage[family.name] = {
+					status = "unresolved", count = 0, expected_count = #expected,
+					templates_verified = family.templates_verified == true,
+					inventory_verified = false,
+				}
 			else
-				local items, message = io_call(family.inventory, user_id, MAX_ERASURE_ITEMS)
-				if type(items) ~= "table" then coverage[family.name] = { status = "unresolved", count = 0, message = message }
+				local items, inventory_error = io_call(family.inventory, user_id, MAX_ERASURE_ITEMS)
+				if type(items) ~= "table" then
+					coverage[family.name] = {
+						status = "unresolved", count = 0, expected_count = #expected,
+						message = inventory_error,
+						templates_verified = family.templates_verified == true,
+						inventory_verified = family.inventory_verified == true,
+					}
 				else
 					local item_count = 0
 					for index in pairs(items) do
@@ -1844,36 +1880,83 @@ local function new_erasure(store, families, options)
 							return { code = "invalid", message = "inventory must be a dense array" }
 						end
 						item_count += 1
-						if item_count > MAX_ERASURE_ITEMS then return { code = "capacity", message = "family inventory exceeds bounded item count" } end
+						if item_count > MAX_ERASURE_ITEMS then
+							return { code = "capacity", message = "family inventory exceeds bounded item count" }
+						end
 					end
 					for index = 1, item_count do
 						if items[index] == nil then return { code = "invalid", message = "inventory must be a dense array" } end
 					end
+
+					local expected_by_identity, observed = {}, {}
+					for _, target in ipairs(expected) do
+						local identity = target.store_name .. "\0" .. target.scope .. "\0" .. target.key
+						expected_by_identity[identity] = target
+					end
+					local unmatched = 0
 					for index = 1, item_count do
 						local item = items[index]
-						if type(item) ~= "table" or not valid_text(item.key, 50) or not finite(item.generation) then return { code = "invalid", message = "inventory items require key and observed generation" } end
-						table.insert(entries, { family = family.name, item = copy(item) })
-						if #entries > MAX_ERASURE_ITEMS then return { code = "capacity", message = "erasure plan exceeds bounded item count" } end
+						if type(item) ~= "table"
+							or not valid_text(item.store_name, 50)
+							or type(item.scope) ~= "string" or #item.scope > 50
+							or not valid_text(item.key, 50)
+							or not finite(item.generation) or math.floor(item.generation) ~= item.generation
+							or item.generation < 0
+							or (item.exists ~= nil and type(item.exists) ~= "boolean")
+						then
+							return { code = "invalid", message = "inventory items require exact store_name/scope/key, integer generation and optional exists flag" }
+						end
+						local exists = if item.exists == nil then true else item.exists
+						if (exists and item.generation < 1) or (not exists and item.generation ~= 0) then
+							return { code = "invalid", message = "existing inventory rows need a positive generation; absent rows must use exists=false and generation=0" }
+						end
+						local identity = item.store_name .. "\0" .. item.scope .. "\0" .. item.key
+						if observed[identity] then
+							return { code = "invalid", message = "inventory repeats a DataStore name/scope/key identity" }
+						end
+						observed[identity] = true
+						if expected_by_identity[identity] == nil then
+							unmatched += 1
+						end
+						local normalized_item = copy(item)
+						normalized_item.exists = exists
+						table.insert(entries, { family = family.name, item = normalized_item })
+						if #entries > MAX_ERASURE_ITEMS then
+							return { code = "capacity", message = "erasure plan exceeds bounded item count" }
+						end
 					end
+					local missing = 0
+					for identity in pairs(expected_by_identity) do
+						if not observed[identity] then missing += 1 end
+					end
+					local structurally_complete = unmatched == 0 and missing == 0 and item_count == #expected
+					local attested = family.templates_verified == true and family.inventory_verified == true
+					local family_verified = structurally_complete and attested
 					coverage[family.name] = {
-						status = if family.templates_verified == true and family.inventory_verified == true
-							then "coverage_verified_by_integrator" else "coverage_unverified",
+						status = if family_verified then "coverage_verified_by_integrator" else "coverage_unverified",
 						count = item_count,
+						expected_count = #expected,
+						matched_count = item_count - unmatched,
+						missing_count = missing,
+						unmatched_count = unmatched,
 						templates_verified = family.templates_verified == true,
 						inventory_verified = family.inventory_verified == true,
+						structurally_complete = structurally_complete,
 					}
 				end
 			end
 		end
-		local rendered, render_error = self:RenderTemplates(user_id)
-		if rendered == nil then return { code = "invalid", message = render_error or "RTBF templates could not be rendered safely" } end
-		local template_ok = if type(options.verify_templates) == "function" then io_call(options.verify_templates, user_id, rendered) else false
-		local verified = #self.families > 0
-		for _, row in pairs(coverage) do if row.status ~= "coverage_verified_by_integrator" then verified = false end end
+
+		local verified = #self.families > 0 and template_ok == true
+		for _, row in pairs(coverage) do
+			if row.status ~= "coverage_verified_by_integrator" then verified = false end
+		end
+		local created_at = os.time()
 		local manifest = {
 			version = 1, user_id = user_id, erasure_id = erasure_id, status = "planned", cursor = 0,
 			completed_count = 0, entries = entries, coverage = coverage,
-			rtbf_coverage_verified = verified and template_ok == true, created_at = os.time(), updated_at = os.time(),
+			rtbf_coverage_verified = verified, template_verification_passed = template_ok == true,
+			created_at = created_at, updated_at = created_at,
 		}
 		local value, message = adapter_call(store, "UpdateAsync", manifest_key(user_id), function(old)
 			-- The erasure ID owns one immutable plan. A retry must not reset progress
@@ -1883,12 +1966,19 @@ local function new_erasure(store, families, options)
 		end)
 		if message then
 			local old = adapter_call(store, "GetAsync", manifest_key(user_id))
-			if type(old) == "table" and old.user_id == user_id and old.erasure_id == erasure_id then old.code = "unknown_reconciled"; return copy(old) end
+			if type(old) == "table" and old.user_id == user_id and old.erasure_id == erasure_id then
+				local reconciled = copy(old)
+				reconciled.code = "unknown_reconciled"
+				return reconciled
+			end
 			return { code = "unknown", message = message }
 		end
-		if type(value) ~= "table" or value.user_id ~= user_id or value.erasure_id ~= erasure_id then return { code = "conflict", message = "different erasure already owns this manifest key" } end
-		value.code = "success"
-		return copy(value)
+		if type(value) ~= "table" or value.user_id ~= user_id or value.erasure_id ~= erasure_id then
+			return { code = "conflict", message = "different erasure already owns this manifest key" }
+		end
+		local result = copy(value)
+		result.code = "success"
+		return result
 	end
 	function coordinator:ExecuteAsync(user_id, erasure_id, max_items)
 		if not finite(user_id) or user_id < 1 or math.floor(user_id) ~= user_id or not valid_text(erasure_id, 96) then return { code = "invalid" } end
