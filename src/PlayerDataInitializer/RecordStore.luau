@@ -351,6 +351,12 @@ export type Options = {
 }
 
 
+export type RuntimeGovernorHooks = {
+	admit: (work_class: string, request_kind: string, mutating: boolean) -> { [string]: unknown },
+	release: (ticket: unknown) -> (),
+	observe: (request_kind: string, success: boolean, duration_ms: number, error_message: string?) -> (),
+}
+
 export type RuntimeOptions = {
 	revision: number?,
 	runtime_profile: string?,
@@ -807,6 +813,7 @@ local runtime_queue_tokens_updated = 0
 local runtime_external_in_flight: { [string]: number } = {
 	interactive = 0, messaging = 0, migration = 0, maintenance = 0, tracing = 0,
 }
+local runtime_external_governor_hooks: RuntimeGovernorHooks? = nil
 local runtime_breakers: { [string]: { failures: number, open_until: number, probe_in_flight: boolean } } = {
 	read = { failures = 0, open_until = 0, probe_in_flight = false },
 	write = { failures = 0, open_until = 0, probe_in_flight = false },
@@ -9648,6 +9655,58 @@ function RecordStore.get_health_snapshot(max_records: number?): { [string]: unkn
 	}
 end
 
+function RecordStore.register_runtime_governor_hooks(hooks: RuntimeGovernorHooks?): (ResultCode, string?)
+	if hooks == nil then
+		runtime_external_governor_hooks = nil
+		return "success", nil
+	end
+	if type(hooks) ~= "table"
+		or type(hooks.admit) ~= "function"
+		or type(hooks.release) ~= "function"
+		or type(hooks.observe) ~= "function"
+	then
+		return "invalid", "runtime governor hooks require admit, release and observe functions"
+	end
+	runtime_external_governor_hooks = hooks
+	return "success", nil
+end
+
+local function external_governor_admit(
+	hooks: RuntimeGovernorHooks?,
+	work_class: string,
+	request_kind: string,
+	mutating: boolean
+): (unknown, ResultCode?, string?)
+	if hooks == nil then return nil, nil, nil end
+	local ok, admission = pcall(hooks.admit, work_class, request_kind, mutating)
+	if not ok then return nil, "budget", "external governor admission failed: " .. tostring(admission) end
+	if type(admission) ~= "table" then return nil, "unknown", "external governor returned no admission result" end
+	if admission.code ~= "admitted" then
+		local code: ResultCode = if admission.code == "invalid" then "invalid" else "budget"
+		return nil, code, tostring(admission.message or admission.reason or admission.code or "external governor denied request")
+	end
+	if admission.ticket == nil then return nil, "unknown", "external governor admitted without a release ticket" end
+	return admission.ticket, nil, nil
+end
+
+local function external_governor_release(hooks: RuntimeGovernorHooks?, ticket: unknown)
+	if hooks == nil or ticket == nil then return end
+	local ok, message = pcall(hooks.release, ticket)
+	if not ok then runtime_metrics.last_policy_error = "external governor release failed: " .. tostring(message) end
+end
+
+local function external_governor_observe(
+	hooks: RuntimeGovernorHooks?,
+	request_kind: string,
+	success: boolean,
+	duration_ms: number,
+	message: string?
+)
+	if hooks == nil then return end
+	local ok, observe_message = pcall(hooks.observe, request_kind, success, duration_ms, message)
+	if not ok then runtime_metrics.last_policy_error = "external governor observation failed: " .. tostring(observe_message) end
+end
+
 function RecordStore.run_runtime_request(
 	kind: string,
 	callback: () -> unknown,
@@ -9685,7 +9744,15 @@ function RecordStore.run_runtime_request(
 			runtime_metrics.budget_rejections += 1
 			return nil, "budget", "shared runtime service circuit is open"
 		end
+		local hooks = runtime_external_governor_hooks
+		local governor_ticket, governor_code, governor_message = external_governor_admit(hooks, class, "service", true)
+		if governor_code ~= nil then
+			runtime_breaker_cancel_probe("service")
+			runtime_metrics.budget_rejections += 1
+			return nil, governor_code, governor_message
+		end
 		if not acquire_slot(deadline :: number, false) then
+			external_governor_release(hooks, governor_ticket)
 			runtime_breaker_cancel_probe("service")
 			runtime_metrics.budget_rejections += 1
 			return nil, "budget", "shared runtime service concurrency reserve is exhausted"
@@ -9693,9 +9760,12 @@ function RecordStore.run_runtime_request(
 		runtime_external_in_flight[class] += 1
 		local service_started = now_local()
 		local service_ok, service_result = pcall(callback)
+		local service_duration = (now_local() - service_started) * 1000
 		release_slot()
 		runtime_external_in_flight[class] = math.max(0, runtime_external_in_flight[class] - 1)
-		observe_runtime_request("service", service_ok, if service_ok then nil else tostring(service_result), (now_local() - service_started) * 1000)
+		external_governor_release(hooks, governor_ticket)
+		external_governor_observe(hooks, "service", service_ok, service_duration, if service_ok then nil else tostring(service_result))
+		observe_runtime_request("service", service_ok, if service_ok then nil else tostring(service_result), service_duration)
 		if not service_ok then return nil, "unknown", tostring(service_result) end
 		return service_result, nil, nil
 	end
@@ -9705,20 +9775,31 @@ function RecordStore.run_runtime_request(
 		runtime_metrics.budget_rejections += 1
 		return nil, "budget", "shared runtime governor deferred maintenance to preserve foreground headroom"
 	end
+	local hooks = runtime_external_governor_hooks
+	local governor_kind = if kind == "read" then "read" else "write"
+	local governor_ticket, governor_code, governor_message = external_governor_admit(hooks, class, governor_kind, kind ~= "read")
+	if governor_code ~= nil then
+		runtime_metrics.budget_rejections += 1
+		return nil, governor_code, governor_message
+	end
 	runtime_external_in_flight[class] += 1
 	local request_type = if kind == "read" then Enum.DataStoreRequestType.StandardRead
 		elseif kind == "write" then Enum.DataStoreRequestType.StandardWrite else nil
 	local acquired = acquire_request(nil, deadline :: number, kind ~= "read", request_type)
 	if not acquired then
+		external_governor_release(hooks, governor_ticket)
 		runtime_external_in_flight[class] = math.max(0, runtime_external_in_flight[class] - 1)
 		runtime_metrics.budget_rejections += 1
 		return nil, "budget", "shared runtime request admission was unavailable before the operation deadline"
 	end
 	local started_at = now_local()
 	local ok, result = pcall(callback)
+	local duration_ms = (now_local() - started_at) * 1000
 	release_slot()
 	runtime_external_in_flight[class] = math.max(0, runtime_external_in_flight[class] - 1)
-	observe_runtime_request(if kind == "read" then "read" else "write", ok, if ok then nil else tostring(result), (now_local() - started_at) * 1000)
+	external_governor_release(hooks, governor_ticket)
+	external_governor_observe(hooks, governor_kind, ok, duration_ms, if ok then nil else tostring(result))
+	observe_runtime_request(governor_kind, ok, if ok then nil else tostring(result), duration_ms)
 	if not ok then return nil, "unknown", tostring(result) end
 	return result, nil, nil
 end

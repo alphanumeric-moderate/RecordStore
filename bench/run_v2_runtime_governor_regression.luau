@@ -81,5 +81,38 @@ local final_snapshot = V2.GetRuntimeSnapshot()
 assert(final_snapshot.policy.revision == live_revision and final_snapshot.active_requests == 0,
 	"runtime snapshot did not remain consistent after profile persistence")
 
-print("[PASS] RecordStoreV2 runtime policy delegates to shared RecordStore gate.")
+local Adapter = require("../src/PlayerDataInitializer/RecordStoreV2DataStoreAdapter")
+local adapter = Adapter.new(RecordStore, "V2RuntimeGovernorProbe", "global", 5, Shim.FakeDataStore)
+local shared_governor = V2.RuntimeGovernor.get_shared()
+local scheduler_before = shared_governor:Stats()
+local invalid_scheduler_code = V2.ApplySchedulerPolicy({
+	revision = scheduler_before.policy.revision + 1,
+	unsupported_field = true,
+})
+assert(invalid_scheduler_code == "invalid", "advanced scheduler policy accepted an unknown field")
+local reject_revision = scheduler_before.policy.revision + 1
+local reject_code, reject_message = V2.ApplySchedulerPolicy({
+	revision = reject_revision,
+	mode = "reject_noncritical",
+})
+assert(reject_code == "success", tostring(reject_message))
+local before_fake_gets = Shim.FakeDataStore:Stats().calls.get
+local admitted, admission_message = pcall(function()
+	adapter:GetAsync("should-be-rejected")
+end)
+assert(not admitted and string.find(tostring(admission_message), "budget", 1, true) ~= nil,
+	"advanced governor did not reject noncritical adapter work in reject_noncritical mode")
+assert(Shim.FakeDataStore:Stats().calls.get == before_fake_gets,
+	"rejected governor admission still invoked the DataStore callback")
+local normal_code, normal_message = V2.ApplySchedulerPolicy({
+	revision = reject_revision + 1,
+	mode = "normal",
+})
+assert(normal_code == "success", tostring(normal_message))
+local completed_before = shared_governor:Stats().stats.completed
+adapter:GetAsync("admitted-after-recovery")
+assert(shared_governor:Stats().stats.completed == completed_before + 1,
+	"successful adapter request did not release its governor ticket")
+
+print("[PASS] RecordStoreV2 runtime policy and advanced adapter admission hooks.")
 Shim.close()

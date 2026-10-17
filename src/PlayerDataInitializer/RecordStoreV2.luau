@@ -379,6 +379,15 @@ local function new_governor(options)
 	end
 	function governor:SetPolicy(patch)
 		if type(patch) ~= "table" or not finite(patch.revision) or patch.revision <= self.policy.revision then return false, "policy revision must increase" end
+		local allowed = {
+			revision = true, mode = true, max_in_flight = true, critical_reserve = true, queue_capacity = true,
+			max_batch = true, batch_window_ms = true, batch_latency_ceiling_ms = true, high_burst = true,
+			retry_token_capacity = true, retry_tokens_per_second = true, minimum_budget = true,
+			circuit_threshold = true, circuit_cooldown_ms = true,
+		}
+		for key in pairs(patch) do
+			if not allowed[key] then return false, "unsupported scheduler policy field: " .. tostring(key) end
+		end
 		local next_policy = copy(self.policy)
 		for key, value in pairs(patch) do next_policy[key] = value end
 		local valid, message = policy_valid(next_policy)
@@ -1463,10 +1472,42 @@ function V2.new(record_store, mailbox_module, options)
 	options = options or {}
 	if type(record_store) ~= "table" or type(record_store.new) ~= "function" then error("RecordStoreV2 requires RecordStore", 2) end
 	if type(mailbox_module) ~= "table" or type(mailbox_module.new) ~= "function" then error("RecordStoreV2 requires RecordStoreMailboxV2", 2) end
-	if type(record_store.apply_runtime_policy) ~= "function" or type(record_store.get_runtime_stats) ~= "function" then
+	if type(record_store.apply_runtime_policy) ~= "function" or type(record_store.get_runtime_stats) ~= "function"
+		or type(record_store.register_runtime_governor_hooks) ~= "function"
+	then
 		error("RecordStoreV2 requires the shared RecordStore runtime governor APIs", 2)
 	end
 	local runtime_governor = shared_runtime_governor(record_store, options.runtime)
+	local registered, registration_error = record_store.register_runtime_governor_hooks({
+		admit = function(work_class, request_kind, mutating)
+			return runtime_governor:Admit(work_class, request_kind, 1, mutating)
+		end,
+		release = function(ticket)
+			runtime_governor:Release(ticket)
+		end,
+		observe = function(request_kind, success, duration_ms, error_message)
+			local stats = record_store.get_runtime_stats()
+			local budget = if request_kind == "read" then stats.read_budget
+				elseif request_kind == "service" then nil else stats.write_budget
+			local error_class = nil
+			if not success then
+				local normalized = string.lower(tostring(error_message or ""))
+				if string.find(normalized, "thrott", 1, true) ~= nil
+					or string.find(normalized, "request limit", 1, true) ~= nil
+					or string.find(normalized, "rate limit", 1, true) ~= nil
+					or string.find(normalized, "429", 1, true) ~= nil
+				then
+					error_class = "throttled"
+				elseif string.find(normalized, "budget", 1, true) ~= nil then
+					error_class = "budget"
+				else
+					error_class = "request_error"
+				end
+			end
+			runtime_governor:Observe(request_kind, success, duration_ms, error_class, budget)
+		end,
+	})
+	if registered ~= "success" then error("failed to register shared runtime governor: " .. tostring(registration_error), 2) end
 	local api = {
 		Version = 2,
 		DeliveryGuarantee = "at-least-once",
@@ -1506,6 +1547,11 @@ function V2.new(record_store, mailbox_module, options)
 	-- second request-admission loop inside V2.
 	api.ApplyRuntimePolicy = function(policy)
 		return record_store.apply_runtime_policy(policy)
+	end
+	api.ApplySchedulerPolicy = function(policy)
+		if type(policy) ~= "table" then return "invalid", "scheduler policy must be a table" end
+		local applied, message = runtime_governor:SetPolicy(policy)
+		return if applied then "success" else "invalid", message
 	end
 	api.GetRuntimeSnapshot = function()
 		return record_store.get_runtime_stats()
