@@ -4475,6 +4475,8 @@ local function save_internal(state: InternalState, reason: string?, operation_de
 	state.busy = true
 	state.state = "saving"
 	local last_error: string? = nil
+	local last_result: ResultCode? = nil
+	local write_may_have_committed = false
 	local confirmed: Envelope? = nil
 	local confirmed_info: BackendInfo? = nil
 	for attempt = 1, attempts do
@@ -4568,10 +4570,24 @@ local function save_internal(state: InternalState, reason: string?, operation_de
 		if result_code ~= nil then
 			decision = result_code
 			decision_message = result_message
+			last_result = result_code
+			last_error = result_message
 		end
 		if state.retired or state.state ~= "saving" then
 			state.busy = false
 			return "closing", "save was invalidated before its result could be applied"
+		end
+		if result_code == "budget" and result == nil then
+			-- The shared gate refused admission before DataStore UpdateAsync started.
+			-- There is no ambiguous write to reconcile, so keep the local dirty state retryable.
+			if attempt < attempts and now_local() < deadline then
+				task.wait(math.min(retry_delay(attempt), math.max(0, deadline - now_local())))
+				continue
+			end
+			break
+		end
+		if result_code == nil or result_code == "unknown" then
+			write_may_have_committed = true
 		end
 		if result ~= nil then
 			local returned = parse_envelope(result)
@@ -4610,6 +4626,13 @@ local function save_internal(state: InternalState, reason: string?, operation_de
 	end
 	if confirmed == nil then
 		state.busy = false
+		if not write_may_have_committed then
+			state.state = "active"
+			local result_code = last_result or "budget"
+			local result_message = last_error or "save deadline expired before a write request was admitted"
+			observe(state, "save", result_code, result_message)
+			return result_code, result_message
+		end
 		state.state = "unknown"
 		observe(state, "save", "unknown", last_error or "save outcome is unresolved")
 		return "unknown", last_error or "save outcome is unresolved"
