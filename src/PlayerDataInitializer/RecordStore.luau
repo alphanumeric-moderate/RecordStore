@@ -8348,6 +8348,49 @@ function RecordStore.get_runtime_stats(): { [string]: unknown }
 	}
 end
 
+function RecordStore.run_runtime_request(
+	kind: string,
+	callback: () -> unknown,
+	operation_deadline: number?,
+	work_class: string?
+): (unknown, ResultCode?, string?)
+	if kind ~= "read" and kind ~= "write" and kind ~= "update" then
+		return nil, "invalid", "kind must be read, write or update"
+	end
+	if type(callback) ~= "function" then return nil, "invalid", "callback must be a function" end
+	local class = work_class or "interactive"
+	if class ~= "interactive" and class ~= "messaging" and class ~= "migration"
+		and class ~= "maintenance" and class ~= "tracing"
+	then
+		return nil, "invalid", "unsupported external work class"
+	end
+	local deadline, deadline_error = resolve_operation_deadline(operation_deadline)
+	if deadline == nil then return nil, "invalid", deadline_error end
+	if runtime_options.adaptive_runtime_enabled then
+		if class == "messaging" and not consume_runtime_queue_token() then
+			runtime_metrics.budget_rejections += 1
+			return nil, "budget", "shared runtime governor rejected messaging work under its bounded retry/wake budget"
+		end
+		if class == "maintenance" and active_requests >= math.max(1, runtime_effective_concurrent_requests - runtime_options.critical_request_reserve - 1) then
+			runtime_metrics.budget_rejections += 1
+			return nil, "budget", "shared runtime governor deferred maintenance to preserve foreground headroom"
+		end
+	end
+	local request_type = if kind == "read" then Enum.DataStoreRequestType.StandardRead
+		elseif kind == "write" then Enum.DataStoreRequestType.StandardWrite else nil
+	local acquired = acquire_request(nil, deadline :: number, kind ~= "read", request_type)
+	if not acquired then
+		runtime_metrics.budget_rejections += 1
+		return nil, "budget", "shared runtime request admission was unavailable before the operation deadline"
+	end
+	local started_at = now_local()
+	local ok, result = pcall(callback)
+	release_slot()
+	observe_runtime_request(if kind == "read" then "read" else "write", ok, if ok then nil else tostring(result), (now_local() - started_at) * 1000)
+	if not ok then return nil, "unknown", tostring(result) end
+	return result, nil, nil
+end
+
 function RecordStore.new(name: string, scope: string, key: string, options: Options): Record
 	if closing then
 		error("RecordStore is shutting down", 2)
