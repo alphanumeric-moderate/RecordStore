@@ -1320,20 +1320,55 @@ local function new_erasure(store, families, options)
 			completed += 1
 			local updated, progress_error = adapter_call(store, "UpdateAsync", key, function(old)
 				if type(old) ~= "table" or old.erasure_id ~= erasure_id then return old end
-				local value = copy(old); value.cursor = index; value.completed_count = completed; value.status = "in_progress"; value.updated_at = os.time(); value.last_error = nil; return value
+				local old_cursor = old.cursor or 0
+				-- Concurrent workers may run a generation-safe action more than once, but
+				-- checkpoint progress is monotonic and may never move backwards.
+				if old_cursor >= index then return old end
+				if old_cursor ~= index - 1 then return old end
+				local value = copy(old)
+				value.cursor = index
+				value.completed_count = (old.completed_count or 0) + 1
+				value.status = "in_progress"
+				value.updated_at = os.time()
+				value.last_error = nil
+				return value
 			end)
-			if progress_error or type(updated) ~= "table" or updated.cursor ~= index then return { code = "unknown", cursor = index - 1, completed_count = completed, message = "action succeeded; repeat idempotently because cursor is unresolved" } end
+			if progress_error then
+				return { code = "unknown", cursor = index - 1, completed_count = completed,
+					message = "action succeeded; progress write outcome is unresolved and must be reconciled" }
+			end
+			if type(updated) ~= "table" or updated.erasure_id ~= erasure_id then
+				return { code = "unknown", cursor = index - 1, completed_count = completed,
+					message = "action succeeded; manifest ownership could not be verified" }
+			end
+			if not finite(updated.cursor) or updated.cursor < index then
+				return { code = "unknown", cursor = index - 1, completed_count = completed,
+					message = "action succeeded; checkpoint did not advance contiguously" }
+			end
+			completed = updated.completed_count or completed
+			if updated.cursor > index then
+				return { code = if updated.status == "completed" then "committed" else "incomplete",
+					cursor = updated.cursor, completed_count = completed, rtbf_coverage_verified = updated.rtbf_coverage_verified == true,
+					message = "another worker advanced the immutable erasure checkpoint" }
+			end
 		end
 		local final, final_error = adapter_call(store, "UpdateAsync", key, function(old)
 			if type(old) ~= "table" or old.erasure_id ~= erasure_id then return old end
-			local value = copy(old); value.completed_count = completed
+			local value = copy(old)
+			value.completed_count = math.max(old.completed_count or 0, completed)
 			value.status = if value.cursor >= #value.entries then "completed" else "in_progress"
-			value.completed_at = if value.status == "completed" then os.time() else nil
+			value.completed_at = if value.status == "completed" then (old.completed_at or os.time()) else nil
 			value.updated_at = os.time()
 			return value
 		end)
 		if final_error then return { code = "unknown", message = final_error } end
-		return { code = if final and final.status == "completed" then "committed" else "incomplete", cursor = final and final.cursor or cursor, completed_count = completed, rtbf_coverage_verified = final and final.rtbf_coverage_verified == true or false, message = if final and final.status ~= "completed" then "resume in bounded steps" else nil }
+		if type(final) ~= "table" or final.erasure_id ~= erasure_id then
+			return { code = "conflict", message = "erasure manifest changed ownership during finalization" }
+		end
+		return { code = if final.status == "completed" then "committed" else "incomplete",
+			cursor = final.cursor or cursor, completed_count = final.completed_count or completed,
+			rtbf_coverage_verified = final.rtbf_coverage_verified == true,
+			message = if final.status ~= "completed" then "resume in bounded steps" else nil }
 	end
 	function coordinator:GetStatus(user_id)
 		local result, message = adapter_call(store, "GetAsync", manifest_key(user_id))
