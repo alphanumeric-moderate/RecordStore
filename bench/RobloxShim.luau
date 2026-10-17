@@ -9,6 +9,7 @@ local luau = require("@lune/luau")
 local process = require("@lune/process")
 local serde = require("@lune/serde")
 local task = require("@lune/task")
+local FakeDataStoreService = require("./AtomicFakeDataStore").new()
 
 local Shim = {}
 
@@ -36,14 +37,7 @@ local HttpService = {
 	end,
 }
 
-local DataStoreService = {
-	GetDataStore = function()
-		error("DataStoreService is not available outside Roblox; use RecordStore.Mock", 2)
-	end,
-	GetRequestBudgetForRequestType = function()
-		return math.huge
-	end,
-}
+local DataStoreService = FakeDataStoreService
 
 local MessagingService = {
 	PublishAsync = function()
@@ -165,6 +159,9 @@ Shim.environment = {
 function Shim.load(source_path: string?): any
 	return load_record_store(source_path)
 end
+
+-- Shared fake service used by RecordStore.new() to exercise the live backend path.
+Shim.FakeDataStore = FakeDataStoreService
 
 -- Runs a Roblox-style script (e.g. the regression tests) inside the shimmed environment.
 function Shim.run_script(path: string)
