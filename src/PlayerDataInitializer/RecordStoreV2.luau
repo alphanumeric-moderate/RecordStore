@@ -297,7 +297,8 @@ local function new_inbox()
 		if batch_material == nil then return { code = "invalid", message = material_error } end
 		local receipt_key = BATCH_RECEIPT_PREFIX .. batch_id
 		local batch_received_at = if finite(options.now_unix) then options.now_unix else os.time()
-		local max_receipts = math.clamp(math.floor(options.max_receipts or MAX_INBOX_RECEIPTS), 1, MAX_INBOX_RECEIPTS)
+		local requested_max_receipts = if finite(options.max_receipts) then math.floor(options.max_receipts) else MAX_INBOX_RECEIPTS
+		local max_receipts = math.clamp(requested_max_receipts, 1, MAX_INBOX_RECEIPTS)
 		local invocation_token = digest(batch_id .. ":" .. tostring(os.clock()) .. ":" .. tostring(math.random()))
 		local before_data, before_error = record_data(record)
 		if type(before_data) ~= "table" then return { code = "unknown", message = before_error or "active profile data unavailable" } end
@@ -334,7 +335,7 @@ local function new_inbox()
 			local batch_applied, batch_duplicates = 0, 0
 			for _, message in ipairs(normalized) do
 				local prior = receipts[message.message_id]
-				if prior then
+				if prior ~= nil then
 					if type(prior) ~= "table" or prior.canonical_request ~= message.canonical_request then
 						error("message_id reused with different exact request material")
 					end
