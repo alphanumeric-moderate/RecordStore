@@ -636,7 +636,6 @@ Before migration/feature activation:
 Build a deterministic fake DataStore that drives the actual RecordStore production path, not only `RecordStore.Mock`. It must support per-key atomic UpdateAsync, controlled concurrency/time, configurable request budgets, failures before commit, commit-then-error outcomes, and failpoints after each durable step. The fake must not mutate state or perform side effects inside UpdateAsync transforms.
 
 Required test groups:
-
 1. **Canonicalization/idempotency**: nested objects with different insertion order compare equal; arrays/holes/mixed keys are validated; same key/same request returns original ID; same key/different request conflicts; hash/owner collisions fail closed.
 2. **Submission windows**: crash after canonical message creation, index append, and ready promotion; retry and recovery never lose a reported-accepted message or execute a preparing item. Same-key retry finds the same canonical message record without a separate receipt-key round trip. An unindexed preparing record does not pin a segment forever; its same-key retry safely retargets after generation retirement.
 3. **Ambiguous writes**: UpdateAsync failure before commit versus commit then error; retries hit the same message/segment; no route reassignment while index existence is unknown.
@@ -654,7 +653,6 @@ Required test groups:
 15. **Migration**: empty/non-empty v3, active and dead-letter records, malformed/future version, wrong owner, crash between each import, old writer races, freeze marker read by actual v3 code, feature gate and reverse migration.
 16. **Scale**: 0/100/1,000/10,000 DLQ items; segment counts at low and configured max; high retry backlog; scan fairness and bounded requests; inbox/outbox capacity and retention.
 17. **Transform purity**: instrumentation and review prove library-owned transforms do not yield or call MessagingService/MemoryStore, observers, GUID generation, or cross-key APIs. Consumer callbacks are separately documented as pure/non-yielding; no test can prove arbitrary callback code has no hidden external side effects.
-
 18. **Adaptive configuration**: budget traces with sustained low/healthy/flapping budgets, throttle bursts, changing player counts and Heartbeat delays; one governor coordinates all Records, downshifts promptly, recovers slowly and never changes correctness limits or starves its internal critical lane.
 19. **Policy snapshots**: stale revisions, repeated identical revision, same-revision conflicting contents, invalid bounds/schema, provider failures, missing invalidation messages and cold start; last-known-good policy or built-in safe defaults remain effective without blocking profile startup.
 20. **Inbox batch and claim races**: repeated IDs inside one batch are rejected before writes; earlier matching receipts are duplicates; payload conflicts and capacity overflow abort all new mutations; claims that expire before the profile transaction are not acknowledged; crash after profile commit before queue ack replays as duplicates.
@@ -662,10 +660,6 @@ Required test groups:
 22. **Acceleration and fairness**: all hints dropped, duplicated or reordered; cache invalidation missed; high-profile fan-out; per-owner hot spots; MemoryStore throttling/expiry; topic count remains fixed by shard configuration; low-priority maintenance cannot consume RecordStore's critical internal concurrency reserve.
 23. **Yielding handlers**: lease renewals under budget pressure, handler yield/error, uncertain service response, cooperative cancellation, session fencing, expired/replaced claims, server shutdown during yield, and redelivery after an external side effect may already have committed.
 24. **Lease expiry recovery**: expired claim under attempt limit transfers to a new claim token; expired claim at attempt/age limit enters DLQ without handler replay; an expired `expires_at` message becomes terminal without a late start; acknowledgement racing takeover has exactly one CAS winner.
-
-The regression test must fail against the old implementation for the reason it claims to cover. A passing unit fake does not replace a Studio server playtest for real DataStore and service throttling behavior.
-
-
 25. **Developer product receipt races**: duplicate receipt on two servers, missing player/profile, ambiguous profile transaction, same PurchaseId with mismatched identity/product, retry after commit-before-error, and receipt decision before versus after durable grant state.
 26. **General transaction API**: repeated operation ID/same request, ID/request conflicts, reducer retry determinism, receipt capacity, expired dedup window, dirty-memory flush failure and concurrent session fencing.
 27. **Application schema migration**: idempotent resume after every write window, target-version commit ambiguity, unsupported future schema, validation quarantine, canary gate, old-writer rejection and restore from a verified version.
@@ -674,9 +668,11 @@ The regression test must fail against the old implementation for the reason it c
 30. **Erasure coverage**: render each RTBF key template, identify every user-associated sidecar, shared/multi-user payload separation, retries after partial removal, active session fencing, cache invalidation and explicit unknown/uncovered legacy keys.
 31. **Secondary indexes and tracing**: duplicate/out-of-order projection events, rebuild from checkpoint, deleted source, stale query confirmation, trace truncation/privacy, trace-sink failure and proof that tracing adds no separate hot-path write.
 32. **Performance optimizations preserve contracts**: no-op save only when clean is proven; coalescing obeys maximum dirty age; read singleflight never merges session acquisition; compression round-trips all supported codecs; queue cursors recover dropped hints; budget reserves prevent starvation; benchmark toggles do not alter durable state semantics.
-
-
-
+33. **Durability SLO and dirty-state visibility**: nested mutation, direct-mutable-table tracking gap, successful commit versus unknown write, age threshold crossing, repeated alert coalescing, no DataStore write per alert and accurate unavailable/estimated status.
+34. **Unified outcome/retry policy**: inject definitive failure, commit-then-error, fenced session, schema conflict and capacity result for each API family; verify that unknown outcomes are reconciled by the same stable operation ID and never converted to presumed failure.
+35. **Degraded mode and backpressure**: write outage, prolonged dirty age, bounded-buffer item/byte/age limit, queue saturation, mode recovery, shutdown and critical reserve pressure; confirm optional work is rejected visibly and critical intents are not falsely acknowledged.
+36. **Session contention diagnostics**: many simultaneous open attempts, stale status read, cancellation during wait, timeout around ambiguous ownership write, takeover race and old owner resume; diagnostic reads never change lease authority and retries remain bounded/fair.
+37. **Retention compactor/maintenance runner**: crash before/after checkpoint, unknown deletion outcome, stale cursor, live index reference, pending saga/outbox dependency, active lease, budget starvation and resume; no evidence needed for idempotency/recovery is deleted.
 38. **Priority correctness and idempotency**: same stable enqueue idempotency key with differing priority yields the documented duplicate/conflict behavior; accepted priority is immutable unless the explicit reprioritize protocol is enabled; repeated/stale reprioritize IDs are idempotent.
 39. **Priority versus ordering**: high priority does not bypass an earlier message sharing an ordering key; unkeyed eligible messages can be selected by lane; delayed/preparing/claimed/expired items cannot be claimed merely due to priority.
 40. **Anti-starvation under load**: sustain a high-priority flood while normal/background messages are pending; assert bounded lane service under healthy service conditions, configured aging behavior, per-owner fairness and no unlimited high-lane monopolization.
@@ -684,8 +680,6 @@ The regression test must fail against the old implementation for the reason it c
 42. **Local work-class priority**: critical saves/releases during queue/outbox/maintenance pressure retain reserved internal capacity; maintenance yields; disabled priority scheduler falls back to fair FIFO/weighted scheduling without changing durable semantics.
 43. **No global server-priority assumption**: competing servers with different roles/budgets, lost and delayed hints, server death and replacement, stale role policy and background-only worker failure; any eligible healthy server can still recover/claim according to durable CAS/fencing.
 44. **Priority performance trade-offs**: compare enabled/disabled and multiple priority mixes with equal input volume; record queue wait by lane, scan amplification, request counts, critical-save p95 and background starvation under high load; no benefit is claimed from synthetic scheduling tests alone.
-
-
 45. **Cost-aware deficit round robin**: one high-cost owner versus many low-cost owners, missing/corrupt cost hints, conservative fallback, oversized legal work, cost-model revision and budget changes; large work eventually gets service without starving small work or critical persistence.
 46. **Deadline slack and service-age behavior**: urgent bursts, negative slack, no deadline estimate, expiry at claim boundary, overdue policy, starvation promotion and throttled service; SLO metadata never changes expires_at or lease authority.
 47. **Lease renewal under scheduler pressure**: expiry-margin ordering, slow UpdateAsync, throttle burst, old token renewal after takeover, maximum renewal horizon and critical-save contention; expired/replaced claims cannot revive.
@@ -697,11 +691,17 @@ The regression test must fail against the old implementation for the reason it c
 53. **Scheduling policy comparisons**: same deterministic inputs across FIFO, weighted fairness, DRR, deadline-aware, and batched policies; report queueing p95/p99, request amplification, starvation, memory, and critical save/release regressions.
 54. **Combined overload stress**: high-priority flood plus due-time burst, lease renewals, retries, outbox fan-out and maintenance at low budgets; verify per-class bounds, critical reserve, no accepted-work loss and recovery after budget restoration.
 
-33. **Durability SLO and dirty-state visibility**: nested mutation, direct-mutable-table tracking gap, successful commit versus unknown write, age threshold crossing, repeated alert coalescing, no DataStore write per alert and accurate unavailable/estimated status.
-34. **Unified outcome/retry policy**: inject definitive failure, commit-then-error, fenced session, schema conflict and capacity result for each API family; verify that unknown outcomes are reconciled by the same stable operation ID and never converted to presumed failure.
-35. **Degraded mode and backpressure**: write outage, prolonged dirty age, bounded-buffer item/byte/age limit, queue saturation, mode recovery, shutdown and critical reserve pressure; confirm optional work is rejected visibly and critical intents are not falsely acknowledged.
-36. **Session contention diagnostics**: many simultaneous open attempts, stale status read, cancellation during wait, timeout around ambiguous ownership write, takeover race and old owner resume; diagnostic reads never change lease authority and retries remain bounded/fair.
-37. **Retention compactor/maintenance runner**: crash before/after checkpoint, unknown deletion outcome, stale cursor, live index reference, pending saga/outbox dependency, active lease, budget starvation and resume; no evidence needed for idempotency/recovery is deleted.
+
+
+The regression test must fail against the old implementation for the reason it claims to cover. A passing unit fake does not replace a Studio server playtest for real DataStore and service throttling behavior.
+
+
+
+
+
+
+
+
 
 ## 13. CodSpeed and service-budget validation
 
