@@ -15,6 +15,7 @@ Build a durable messaging subsystem that is more than a replacement for `Profile
 4. **Operator-grade delivery tooling**: delivery receipts/status, transition history, schema-aware replay, paginated dead-letter inspection, health diagnostics, and bounded repair.
 5. **Optional acceleration**: MemoryStore and sharded MessagingService wake-ups, local candidate caching, explicit inbox batches, grouped outbox cleanup, fair lanes and typed circuit breakers may reduce waste and latency; they never own correctness.
 6. **Server-local adaptive governor**: one controller coordinates every Record in a server and adjusts only bounded scheduling/concurrency knobs from request budgets, observed latency and throttling. Versioned runtime policy snapshots and server profiles cannot weaken persistence invariants.
+7. **Additional gameplay and operator capabilities**: optional receipt processing, idempotent direct profile transactions, application-schema migrations, escrow transfers, guarded diagnostics/restoration, RTBF-aware erasure, deterministic crash simulation, eventual secondary indexes, and correlated operation tracing. These are later design extensions, not part of the initial mailbox activation.
 
 The previous proposal placed full message objects, active state, and dead letters in segmented envelopes. This revision separates the **canonical message record** from the **append-only segment index**. Claims, retries, acknowledgements, and terminal transitions update one message key rather than rewriting the segment. This reduces write amplification and makes cross-key recovery state explicit.
 
@@ -80,6 +81,15 @@ The unique value is the combination of capabilities below. Statements about Prof
 | Schema-aware message validation and safe dead-letter replay | No equivalent documented queue/replay API found | Versioned payload codecs, validation-before-replay, replay audit and operator-controlled retention |
 | Queue/outbox/inbox health snapshots | ProfileStore exposes critical-state/error signals for its profile operations | RecordStore adds bounded, explicitly approximate queue and workflow diagnostics without using metrics for correctness |
 | Server-local adaptive configuration and policy introspection | No equivalent documented public runtime governor API found | Shared budget-aware scheduler, versioned validated policy snapshots, server roles/profiles, last-known-good fallback and explainable effective settings |
+| Idempotent arbitrary profile-key business transaction with stored result | No equivalent documented transaction-receipt API found | One profile-key mutation and stable operation receipt with duplicate/conflict/unknown outcomes |
+| First-class MarketplaceService receipt adapter | No equivalent documented ProfileStore receipt adapter found | Opt-in receipt integration backed by idempotent profile transactions and explicit lifetime/retention policy |
+| Application-schema migration engine | No equivalent documented application-data migration registry found | Ordered, resumable migrations distinct from the serialization-envelope version, with validation and future-version fencing |
+| Escrow-based transfer coordinator | No equivalent documented conservation-aware transfer API found | Explicit pending/reserved/settled workflow using idempotent per-profile legs; no false cross-key atomicity claim |
+| Safe data diagnosis and guarded restore workflow | Historical reads are documented | Bounded path diffs, read-only diagnostics, repair preview, expected-revision checks and protocol-metadata preservation |
+| RTBF-aware sidecar inventory and erasure | No equivalent documented RecordStore-wide erasure coordinator found | Inventory and bounded deletion of user-associated sidecars, contingent on every key family being RTBF-matchable or otherwise operationally discoverable |
+| Deterministic crash/fault simulator | Mock profile operations are documented | Replayable concurrency/time/failure schedules and state-machine invariants across real production-path persistence code |
+| Durable secondary indexes/materialized views | No equivalent documented public projection API found | Optional outbox-fed, sharded, rebuildable eventually consistent query projections |
+| End-to-end operation tracing | Profile error/critical-state signals are documented | Correlated, bounded lifecycle traces spanning transactions, queue/outbox/inbox and workflow stages |
 
 Primary comparison references:
 - ProfileStore README: https://github.com/MadStudioRoblox/ProfileStore/blob/main/README.md
@@ -740,6 +750,32 @@ All performance measurements go through CodSpeed. Use Simulation for determinist
 - Verify mixed-version rejection and rollback.
 - Enable new layout and envelope features separately, each with a kill switch that stops new writes without discarding accepted messages.
 
+### Phase 7 — idempotent transactions and receipts
+
+- Land and verify the general single-profile `TransactAsync` mutation/receipt primitive before building the purchase adapter.
+- Define receipt retention, long-lived PurchaseId uniqueness, storage growth and unresolved/unknown outcome handling before registering any live MarketplaceService handler.
+- Test both same-profile immediate grants and explicitly modeled durable pending entitlements; never mark a receipt processed merely because an in-memory grant ran.
+
+### Phase 8 — application schema migration and Profile Doctor
+
+- Add schema-version metadata, deterministic migrations, read-only preview, validation and future-version fencing.
+- Build the crash simulator before enabling automatic migrations or guarded restore in production.
+- Require verified historical recovery, revision/session-fenced application and operator-visible quarantine before any destructive repair is exposed.
+
+### Phase 9 — escrow transfer and materialized views
+
+- Implement the generic workflow/inbox receipts first, then the escrow coordinator with conservation invariants and unknown-result reconciliation.
+- Treat projection/index updates as downstream rebuildable consumers with explicit eventual consistency and source-version checkpoints.
+- Do not enable asset transfer helpers or unique indexes until concurrent and crash-injected state-machine tests pass.
+
+### Phase 10 — erasure inventory and correlated tracing
+
+- Resolve RTBF-compatible key routing and inventory every persisted sidecar before claiming complete deletion coverage.
+- Ship tracing with bounded storage, redaction and no mandatory extra write per hot-path event.
+- Verify partial erasure, legacy sidecars and trace-sink failures without weakening core persistence.
+
+Performance improvements from section 26 are evaluated as isolated changes at every phase. They may not be used to bypass correctness gates, and their default activation is based on comparable measurements rather than assumed speedups.
+
 ## 15. Acceptance criteria
 
 The design is implementable only when tests and runtime evidence demonstrate all of the following:
@@ -1145,6 +1181,20 @@ This section is the final review checklist, not evidence that the future impleme
 | **Notification-only acceleration can lose wake-ups** | MessagingService and MemoryStore are transient/best-effort or expiring; per-profile subscriptions can scale poorly. | Fixed bounded topic shards, coalesced wakeups, TTL-limited hints, periodic polling, and tests that intentionally drop every hint. |
 | **Metrics can be inconsistent** | A multi-key stats scan is not a linearizable global snapshot. | Label scope/completeness/observation time. Metrics never authorize claims, acknowledgements, purge or migration. |
 | **Rollback across envelope versions can lose sidecars** | Old binaries may strip inbox/outbox fields or mutate a format they do not understand. | Old-writer freeze sentinel, version compatibility matrix, retained source copy and explicit reverse migration only when quiesced and verified. |
+| **Purchase receipt identity can outlive a bounded receipt window** | A platform may redeliver an unresolved purchase after an earlier grant was committed but its acknowledgement was not recorded. | Declare the exact guarantee and retention. Use a permanent/compact purchase ledger or authoritative entitlement keyed by receipt identity for lifetime uniqueness; never purge a receipt without proving the domain state still prevents re-granting. |
+| **Direct transaction receipts can be pruned too early** | An expired operation ID may be retried and apply again. | Publish receipt-window semantics and retain permanent domain-ledger IDs where the business operation requires lifetime idempotency. |
+| **Application schema migration can strand or rewrite data** | Envelope compatibility does not guarantee that game-level data remains readable; rollback binaries may not understand future fields. | Separate schema/envelope versions, preserve verifiable history, fence old writers, validate each migration and fail closed on future versions. |
+| **Escrow compensation can destroy conservation** | A destination credit may commit after the source decides an earlier request failed. | Reconcile/retry the same destination operation before compensation; retain escrow and expose manual reconciliation when the outcome remains unknown. |
+| **Diagnostic restore can overwrite newer data** | A repair preview can go stale or drop protocol sidecars if it restores the entire old envelope. | Recheck expected revision and session fence at commit, preserve protocol metadata, and require verified recovery plus an operator audit. |
+| **Hashed sidecar keys may be invisible to RTBF templates** | User IDs embedded only inside stored values cannot be matched by key-template deletion. | Block an RTBF completeness claim until each family has matchable key routing or a verified operational deletion inventory; test shared/multi-user payload redaction and legacy coverage. |
+| **Materialized views can become stale or unrebuildable** | Out-of-order events or expired source history may produce incorrect search results. | Mark projections eventually consistent, version events, checkpoint progress, rebuild from an authoritative source and revalidate sensitive decisions against source records. |
+| **Tracing can amplify writes or leak data** | Persisting every span as its own key increases hot-path request cost; raw identifiers/payloads may expose private data. | Use existing protocol writes or bounded local/external sinks, redact by default, limit retention and make trace completeness explicit. |
+| **No-op elision can miss untracked mutations** | Skipping a save based on a stale dirty flag can silently lose direct table mutations. | Track mutations at supported API seams; disable the optimization where mutation tracking cannot be proven complete and test nested/reverted edits. |
+| **Autosave jitter can exceed durability bounds** | Random delays may extend dirty data lifetime or overlap lease/release deadlines. | Bound jitter by configured maximum dirty age and deadlines; prioritize release/critical writes and test at worst-case scheduler load. |
+| **Read coalescing can accidentally share authority decisions** | Sharing a stale read/session attempt may bypass required ownership or freshness checks. | Limit singleflight to explicitly read-only, freshness-compatible calls; never coalesce leases, claims, mutations or session acquisition. |
+| **Compression/codec changes can break recoverability** | A faster or smaller encoding may make old versions unreadable or bypass validation. | Version codecs, bound decompression, preserve raw fallback and historical-read compatibility; keep the optimization disabled unless measured. |
+| **Local budget headroom can be misleading** | Other scripts/servers and Open Cloud requests share experience-level consumption. | Use local concurrency as a control, react to actual throttling, preserve critical internal capacity and make no universe-wide budget guarantee. |
+
 | **The design is not yet a performance result** | More safety states and per-message records create overhead, and existing CodSpeed baselines lack these workloads. | Add representative CodSpeed workloads, then run isolated Studio/server tests for real request budgets, throttling and cross-server delivery. Keep adaptive/acceleration defaults conservative until measured. |
 
 The preparation gap has an explicit outcome: a `preparing` message is not accepted and cannot execute. A caller retry with the same idempotency key resumes the same canonical record; a transactional outbox keeps retrying until destination acceptance is verified. A message with no idempotency key cannot recover an ambiguous whole-call retry and must be documented as unsuitable for irreversible work. Automatic background recovery of unaccepted `preparing` records is intentionally not promised; this does not lose an accepted message because acceptance is not returned until the record is indexed and ready. If a future API promises background recovery of unaccepted submissions, it must add a bounded preparation journal rather than scan the whole DataStore keyspace.
