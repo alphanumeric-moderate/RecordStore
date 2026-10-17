@@ -2340,14 +2340,24 @@ local function new_rollout(store, options)
 		local known_operations = {
 			read = true, enqueue = true, process = true, recover = true, renew_claim = true,
 			acknowledge = true, reconcile = true, replay = true, discard = true, maintenance = true,
+			dispatch = true, transact = true, inbox = true, purchase = true, saga = true,
+			erase = true, projection = true, migrate = true, restore = true, policy = true,
+			trace_flush = true, configure = true,
 		}
 		if not valid_text(operation, 32) or not known_operations[operation] then return false, "operation is invalid or unsupported" end
 		if operation == "read" then return true, "read-only diagnostics allowed" end
 		local manifest, read_error = read(id)
 		if not manifest then return false, "rollout state is unavailable: " .. tostring(read_error and read_error.code), read_error end
 		if manifest.phase == "active" then return true, manifest.phase, copy(manifest) end
+		-- Verified preflight may perform schema migration and revisioned policy setup
+		-- while writes remain otherwise closed. Attestation itself must already have
+		-- moved the rollout to ready.
+		local ready_operations = { migrate = true, policy = true, configure = true }
+		if manifest.phase == "ready" and ready_operations[operation] then
+			return true, manifest.phase, copy(manifest)
+		end
 		local drain_operations = {
-			process = true, recover = true, renew_claim = true, acknowledge = true, reconcile = true,
+			process = true, recover = true, renew_claim = true, acknowledge = true, reconcile = true, dispatch = true,
 		}
 		if (manifest.phase == "frozen" or manifest.phase == "rollback_pending") and drain_operations[operation] then
 			return true, manifest.phase, copy(manifest)
