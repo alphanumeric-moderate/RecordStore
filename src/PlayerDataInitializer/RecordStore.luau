@@ -2090,6 +2090,8 @@ local function parse_envelope(raw: unknown): (Envelope?, string?, boolean)
 	local raw_user_ids = get_string_field(raw, "user_ids")
 	local raw_tombstone = get_string_field(raw, "tombstone")
 	local raw_session = get_string_field(raw, "session")
+	local raw_inbox_receipts = get_string_field(raw, "inbox_receipts")
+	local raw_outbox = get_string_field(raw, "outbox")
 	if implementation_version == nil then
 		local legacy_marker = get_string_field(raw, "__recordStore")
 		if legacy_marker == "RecordStore" then
@@ -2302,6 +2304,106 @@ local function parse_envelope(raw: unknown): (Envelope?, string?, boolean)
 	if session ~= nil and session.generation ~= fencing_generation then
 		return nil, "session generation does not match fencing generation", false
 	end
+	local inbox_receipts: { [string]: InboxReceiptRecord } = {}
+	if raw_inbox_receipts ~= nil then
+		if type(raw_inbox_receipts) ~= "table" then
+			return nil, "invalid inbox_receipts sidecar", false
+		end
+		local receipt_count = 0
+		for operation_id, raw_receipt in raw_inbox_receipts :: { [string]: unknown } do
+			receipt_count += 1
+			if receipt_count > MAX_INBOX_RECEIPTS or type(operation_id) ~= "string" or operation_id == "" or #operation_id > 128 then
+				return nil, "inbox receipt count or operation_id exceeds its bound", false
+			end
+			if type(raw_receipt) ~= "table" then
+				return nil, "invalid inbox receipt entry", false
+			end
+			local raw_operation = get_string_field(raw_receipt, "operation_id")
+			local fingerprint = get_string_field(raw_receipt, "request_fingerprint")
+			local receipt_write_id = get_string_field(raw_receipt, "write_id")
+			local receipt_revision = get_string_field(raw_receipt, "revision")
+			local committed_at = get_string_field(raw_receipt, "committed_at")
+			if raw_operation ~= operation_id
+				or type(fingerprint) ~= "string" or fingerprint == "" or #fingerprint > 256
+				or type(receipt_write_id) ~= "string" or receipt_write_id == "" or #receipt_write_id > 128
+				or type(receipt_revision) ~= "number" or not math.isfinite(receipt_revision) or math.floor(receipt_revision) ~= receipt_revision or receipt_revision < 1
+				or type(committed_at) ~= "number" or not math.isfinite(committed_at)
+			then
+				return nil, "invalid inbox receipt fields", false
+			end
+			inbox_receipts[operation_id] = {
+				operation_id = operation_id,
+				request_fingerprint = fingerprint,
+				write_id = receipt_write_id,
+				revision = receipt_revision,
+				committed_at = committed_at,
+			}
+		end
+	end
+	local outbox: { [string]: OutboxEntryRecord } = {}
+	if raw_outbox ~= nil then
+		if type(raw_outbox) ~= "table" then
+			return nil, "invalid outbox sidecar", false
+		end
+		local outbox_count = 0
+		for event_id, raw_event in raw_outbox :: { [string]: unknown } do
+			outbox_count += 1
+			if outbox_count > MAX_OUTBOX_EVENTS or type(event_id) ~= "string" or event_id == "" or #event_id > 128 then
+				return nil, "outbox count or event_id exceeds its bound", false
+			end
+			if type(raw_event) ~= "table" then
+				return nil, "invalid outbox entry", false
+			end
+			local stored_event_id = get_string_field(raw_event, "event_id")
+			local operation_id = get_string_field(raw_event, "operation_id")
+			local destination_store = get_string_field(raw_event, "destination_store_name")
+			local destination_scope = get_string_field(raw_event, "destination_scope")
+			local destination_key = get_string_field(raw_event, "destination_profile_key")
+			local message_type = get_string_field(raw_event, "message_type")
+			local raw_payload = get_string_field(raw_event, "payload")
+			local status = get_string_field(raw_event, "state")
+			local created_at = get_string_field(raw_event, "created_at")
+			local attempts = get_string_field(raw_event, "attempts")
+			local last_error = get_string_field(raw_event, "last_error")
+			local receipt_id = get_string_field(raw_event, "destination_receipt_id")
+			if stored_event_id ~= event_id
+				or type(operation_id) ~= "string" or operation_id == "" or #operation_id > 128
+				or type(destination_store) ~= "string" or destination_store == "" or #destination_store > 50
+				or type(destination_scope) ~= "string" or destination_scope == "" or #destination_scope > 50
+				or type(destination_key) ~= "string" or destination_key == "" or #destination_key > 50
+				or type(message_type) ~= "string" or message_type == "" or #message_type > MAX_MESSAGE_TYPE_LENGTH
+				or (status ~= "pending" and status ~= "dispatched")
+				or type(created_at) ~= "number" or not math.isfinite(created_at)
+				or type(attempts) ~= "number" or not math.isfinite(attempts) or math.floor(attempts) ~= attempts or attempts < 0
+				or (last_error ~= nil and (type(last_error) ~= "string" or #last_error > MAX_QUEUE_ERROR_LENGTH))
+				or (receipt_id ~= nil and (type(receipt_id) ~= "string" or #receipt_id > 256))
+			then
+				return nil, "invalid outbox entry fields", false
+			end
+			local payload: JsonValue? = nil
+			if raw_payload ~= nil then
+				local copied_payload = copy_value(raw_payload :: JsonValue)
+				if copied_payload == nil then
+					return nil, "invalid outbox payload", false
+				end
+				payload = copied_payload
+			end
+			outbox[event_id] = {
+				event_id = event_id,
+				operation_id = operation_id,
+				destination_store_name = destination_store,
+				destination_scope = destination_scope,
+				destination_profile_key = destination_key,
+				message_type = message_type,
+				payload = payload,
+				state = status :: "pending" | "dispatched",
+				created_at = created_at,
+				attempts = attempts,
+				last_error = last_error :: string?,
+				destination_receipt_id = receipt_id :: string?,
+			}
+		end
+	end
 	local restored_data = data
 	if raw_non_finite_numbers ~= nil then
 		if data == nil then
@@ -2328,6 +2430,8 @@ local function parse_envelope(raw: unknown): (Envelope?, string?, boolean)
 		user_ids = ids,
 		tombstone = tombstone,
 		session = session,
+		inbox_receipts = inbox_receipts,
+		outbox = outbox,
 		write_id = write_id,
 	}, nil, true
 end
@@ -5767,6 +5871,11 @@ local function open_internal(state: InternalState, default_data: JsonValue?, rec
 					write_id = write_id,
 				}
 			elseif not current_format then
+				if type(raw) == "table" and (get_string_field(raw, "inbox_receipts") ~= nil or get_string_field(raw, "outbox") ~= nil) then
+					decision = "corrupt"
+					decision_message = "automatic recovery is blocked because the current envelope contains transaction sidecars that could not be validated"
+					return nil, nil, nil
+				end
 				if parse_error == "future implementation version" then
 					decision = "future_schema"
 					decision_message = parse_error
