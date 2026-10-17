@@ -51,6 +51,7 @@ function FakeService.new()
 		budgets = { StandardRead = math.huge, StandardWrite = math.huge, StandardList = math.huge, StandardRemove = math.huge },
 		calls = { get = 0, update = 0, list_versions = 0, get_version = 0, get_version_at_time = 0, remove = 0 },
 		clock = nil,
+		last_updated_ms = 0,
 		transform_replays = 0,
 		transform_attempts = 0,
 		trace = {},
@@ -173,6 +174,7 @@ end
 function FakeService:Reset()
 	table.clear(self.stores); table.clear(self.faults); table.clear(self.fault_script); table.clear(self.trace)
 	self.fault_script_cursor, self.next_version, self.next_trace = 1, 0, 1
+	self.last_updated_ms = 0
 	self.transform_replays, self.transform_attempts = 0, 0
 	self.calls = { get = 0, update = 0, list_versions = 0, get_version = 0, get_version_at_time = 0, remove = 0 }
 	self.budgets = { StandardRead = math.huge, StandardWrite = math.huge, StandardList = math.huge, StandardRemove = math.huge }
@@ -201,7 +203,8 @@ end
 
 local function row_version(service, prior, value, user_ids, metadata, deleted)
 	service.next_version += 1
-	local updated_at = now_ms(service)
+	local updated_at = math.max(now_ms(service), service.last_updated_ms + 1)
+	service.last_updated_ms = updated_at
 	local created_at = if prior ~= nil then prior.CreatedTime else updated_at
 	local version = ("%013d-%06d"):format(updated_at, service.next_version)
 	return { Version = version, Value = clone(value), UserIds = clone(user_ids or (prior and prior.UserIds) or {}),
@@ -247,7 +250,7 @@ function FakeStore:UpdateAsync(key, transform)
 	end
 	if next_value == nil then
 		service:_event("update_cancelled", self.name, self.scope, key)
-		return raw, info
+		return nil, nil
 	end
 	local updated = row_version(service, row, next_value, next_user_ids, next_metadata, false)
 	updated.Versions = clone(row and row.Versions or {})

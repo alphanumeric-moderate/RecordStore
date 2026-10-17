@@ -29,6 +29,8 @@ local function new_record(module, key)
 		operation_deadline = 5,
 		user_ids = { USER_ID },
 		metadata = { fixture = "actual-live-backend" },
+		messaging_enabled = false,
+		takeover_enabled = false,
 	})
 end
 
@@ -84,6 +86,9 @@ group("05 commit-then-error during Save is reconciled", function()
 	assert(saved == "success" or saved == "saved", tostring(save_message))
 	assert(Fake:GetRaw(STORE, SCOPE, "profile-main").data.coins == 7,
 		"ambiguous save did not persist the snapshot exactly once")
+	local info = Fake:GetKeyInfo(STORE, SCOPE, "profile-main")
+	assert(info ~= nil and info.UserIds[1] == USER_ID and info.Metadata.fixture == "actual-live-backend",
+		"repeated Save failed to preserve DataStore key metadata/UserIds")
 end)
 
 group("06 before-commit Save failure preserves the retry", function()
@@ -114,14 +119,65 @@ group("07 UpdateAsync transform replay applies one snapshot", function()
 		"UpdateAsync transform replay applied the mutation more than once")
 end)
 
-group("08 saved generations are confirmed", function()
+group("08 DataStore budget exhaustion does not advance durable data", function()
+	local budget_record = new_record(RecordStoreA, "profile-budget")
+	local opened, open_message = budget_record:Open({ coins = 0 })
+	assert(opened == "created" or opened == "loaded", tostring(open_message))
+	local changed, change_message = budget_record:Update(function(current)
+		local next_data = table.clone(current)
+		next_data.coins = 3
+		return next_data
+	end)
+	assert(changed == "success", tostring(change_message))
+	Fake:SetBudget("StandardWrite", 0)
+	local blocked, _ = budget_record:Save("budget-exhausted")
+	assert(blocked ~= "success" and blocked ~= "saved",
+		"Save reported success when the DataStore write budget was exhausted")
+	local raw_before_retry = Fake:GetRaw(STORE, SCOPE, "profile-budget")
+	assert(raw_before_retry ~= nil and raw_before_retry.data.coins == 0,
+		"budget rejection changed the durable snapshot")
+	Fake:SetBudget("StandardWrite", math.huge)
+	local recovered, recover_message = budget_record:Save("budget-recovered")
+	assert(recovered == "success" or recovered == "saved", tostring(recover_message))
+	assert(Fake:GetRaw(STORE, SCOPE, "profile-budget").data.coins == 3,
+		"dirty snapshot was not retained for a retry after budget recovery")
+	budget_record:Close()
+end)
+
+group("09 ambiguous release response is reconciled", function()
+	local release_record = new_record(RecordStoreA, "profile-release-ambiguous")
+	local opened, open_message = release_record:Open({ coins = 2 })
+	assert(opened == "created" or opened == "loaded", tostring(open_message))
+	Fake:ScheduleFault("update", STORE, SCOPE, "profile-release-ambiguous", "after")
+	local released, release_message = release_record:Close()
+	assert(released == "closed", tostring(release_message))
+	local raw = Fake:GetRaw(STORE, SCOPE, "profile-release-ambiguous")
+	assert(raw ~= nil and raw.session == nil,
+		"ambiguous release was not reconciled to a durable released session")
+end)
+
+group("10 canceled UpdateAsync does not create a version", function()
+	local store = Fake:GetDataStore(STORE, SCOPE)
+	local before = Fake:GetKeyInfo(STORE, SCOPE, "profile-main")
+	local before_value = Fake:GetRaw(STORE, SCOPE, "profile-main")
+	local cancelled = store:UpdateAsync("profile-main", function()
+		return nil
+	end)
+	local after = Fake:GetKeyInfo(STORE, SCOPE, "profile-main")
+	local after_value = Fake:GetRaw(STORE, SCOPE, "profile-main")
+	assert(cancelled == nil, "nil transform result should cancel UpdateAsync")
+	assert(before.Version == after.Version and before_value.data.coins == after_value.data.coins,
+		"canceled UpdateAsync changed durable value/version")
+end)
+
+group("11 saved generations are confirmed", function()
 	local status, code, message = record:GetDurabilityStatus()
 	assert(code == "success", tostring(message))
 	assert(status ~= nil and not status.dirty and status.dirty_generation == status.durable_generation,
 		"Save returned without confirming the current dirty generation")
 end)
 
-group("09 live history listing and version reads", function()
+group("12 live history listing and version reads", function()
 	local history, code, message = RecordStoreA.list_versions_async(
 		STORE, SCOPE, "profile-main", Shim.environment.Enum.SortDirection.Descending, nil, nil, 10
 	)
@@ -139,7 +195,7 @@ group("09 live history listing and version reads", function()
 	assert(by_time ~= nil and type(version_at_time) == "string", "GetVersionAtTimeAsync did not return a version")
 end)
 
-group("10 another server sees contention without gaining authority", function()
+group("13 another server sees contention without gaining authority", function()
 	local contender = new_record(RecordStoreB, "profile-main")
 	local wait_result, wait_code, wait_message = contender:WaitForSessionAsync({ coins = 99 }, {
 		max_wait_seconds = 5,
