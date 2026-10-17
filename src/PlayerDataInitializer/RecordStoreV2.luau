@@ -1256,6 +1256,7 @@ local function saga_coordinator(store, options)
 					if type(held) ~= "table" or held.amount ~= amount or held.transfer_id ~= id then
 						error("source escrow is missing or inconsistent; compensation cannot be proven")
 					end
+					if not finite(next_data[balance_field]) then error("source balance is invalid during compensation") end
 					escrow[id] = nil
 					next_data[escrow_field] = escrow
 					next_data[balance_field] += amount
@@ -1393,7 +1394,7 @@ local function saga_coordinator(store, options)
 					if not finite(next_data[balance_field]) then error("recipient balance missing or invalid") end
 					next_data[balance_field] += amount
 					received[id] = amount
-					decisions[id] = { state = "credited", transfer_id = id, amount = amount, decided_at = os.time() }
+					decisions[id] = { state = "credited", transfer_id = id, amount = amount, decided_at = credit_decided_at }
 					next_data[received_field] = received
 					next_data[decision_field] = decisions
 					return next_data
