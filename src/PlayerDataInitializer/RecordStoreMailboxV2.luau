@@ -49,6 +49,7 @@ type Options = {
 	retry_base_ms: number?,
 	retry_max_ms: number?,
 	priority_aging_ms: number?,
+	lease_renewal_scheduler: ((string, number, number, () -> unknown, (unknown) -> ()) -> unknown)?,
 	activation_guard: ((string) -> (boolean, string?))?,
 	allow_unattested_activation: boolean?,
 }
@@ -1346,6 +1347,17 @@ function MailboxV2.BindWakeups(self: Mailbox, wakeups: unknown): (boolean, strin
 	return true, nil
 end
 
+function MailboxV2.SetLeaseRenewalScheduler(
+	self: Mailbox,
+	scheduler: unknown
+): (boolean, string?)
+	if scheduler ~= nil and type(scheduler) ~= "function" then
+		return false, "lease renewal scheduler must be a function or nil"
+	end
+	self.options.lease_renewal_scheduler = scheduler :: ((string, number, number, () -> unknown, (unknown) -> ()) -> unknown)?
+	return true, nil
+end
+
 function MailboxV2.GetOwner(self: Mailbox): Owner
 	return clone_owner(self.owner)
 end
@@ -1950,7 +1962,48 @@ local function process_next_internal(self: Mailbox, handler: (unknown, Dict, Han
 				if lease_lost then
 					return ok("lease_lost", route, nil, cancellation_reason or "claim lease has been lost")
 				end
-				local renewal = self:RenewClaimAsync(route, token)
+				local renewal: Result
+				local renewal_scheduler = self.options.lease_renewal_scheduler
+				if type(renewal_scheduler) == "function" then
+					local completed = false
+					local scheduled_result: Result? = nil
+					local lease_remaining_ms = math.max(0, lease_until - self:_now())
+					local call_ok, submission = pcall(
+						renewal_scheduler,
+						route,
+						0,
+						lease_remaining_ms,
+						function(): Result
+							return self:RenewClaimAsync(route, token)
+						end,
+						function(result_value: unknown)
+							if type(result_value) == "table" then
+								scheduled_result = result_value :: Result
+							else
+								scheduled_result = ok("unknown", route, nil, "scheduler returned no structured renewal result")
+							end
+							completed = true
+						end
+					)
+					if not call_ok then
+						return ok("unknown", route, nil, "lease renewal scheduler raised: " .. tostring(submission))
+					end
+					if type(submission) ~= "table" or (submission :: Dict).code ~= "accepted" then
+						local reason = if type(submission) == "table" then tostring((submission :: Dict).message or (submission :: Dict).code)
+							else "scheduler rejected renewal"
+						return ok("unknown", route, nil, "lease renewal was not accepted by the shared scheduler: " .. reason)
+					end
+					local wait_deadline = os.clock() + math.max(0.01, lease_remaining_ms / 1000)
+					while not completed and not lease_lost and os.clock() < wait_deadline do
+						wait_scheduled(0.001)
+					end
+					if not completed then
+						return ok("unknown", route, nil, "lease renewal did not complete before the local wait deadline")
+					end
+					renewal = scheduled_result or ok("unknown", route, nil, "lease renewal completion was missing")
+				else
+					renewal = self:RenewClaimAsync(route, token)
+				end
 				if renewal.code == "renewed" then
 					local renewed_snapshot = as_dict(renewal.message)
 					if renewed_snapshot ~= nil and is_finite(renewed_snapshot.LeaseUntil) then
