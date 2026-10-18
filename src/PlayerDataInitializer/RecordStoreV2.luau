@@ -2118,13 +2118,36 @@ local function new_erasure(store, families, options)
 				return { code = "corrupt", message = "erasure manifest entries must be a dense bounded array" }
 			end
 		end
+		local expected_entries = {}
+		for _, target in ipairs(current_templates) do
+			local template = target.template
+			local identity = template.name .. "\0" .. tostring(template.scope or "") .. "\0" .. template.key
+			expected_entries[identity] = target.family
+		end
+		if entry_count ~= #current_templates then
+			return { code = "corrupt", message = "erasure manifest entry count no longer matches its declared template contract" }
+		end
+		local observed_entries = {}
 		for index = 1, entry_count do
 			local entry = manifest.entries[index]
-			if type(entry) ~= "table" or not valid_text(entry.family, 48) or type(entry.item) ~= "table"
+			local item = if type(entry) == "table" then entry.item else nil
+			if type(entry) ~= "table" or not valid_text(entry.family, 48) or type(item) ~= "table"
 				or by_name[entry.family] == nil
+				or not valid_text(item.store_name, 50) or type(item.scope) ~= "string" or #item.scope > 50
+				or not valid_text(item.key, 50) or not finite(item.generation)
+				or math.floor(item.generation) ~= item.generation or item.generation < 0
+				or type(item.exists) ~= "boolean"
 			then
 				return { code = "corrupt", message = "erasure manifest contains a malformed or unknown entry" }
 			end
+			if (item.exists and item.generation < 1) or (not item.exists and item.generation ~= 0) then
+				return { code = "corrupt", message = "erasure manifest contains an invalid generation/existence pair" }
+			end
+			local identity = item.store_name .. "\0" .. item.scope .. "\0" .. item.key
+			if observed_entries[identity] or expected_entries[identity] ~= entry.family then
+				return { code = "corrupt", message = "erasure manifest entry is duplicated or outside the verified template contract" }
+			end
+			observed_entries[identity] = true
 		end
 		if manifest.status == "completed" then
 			if manifest.cursor ~= entry_count or manifest.completed_count ~= entry_count then
