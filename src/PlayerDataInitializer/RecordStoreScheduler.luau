@@ -1239,7 +1239,7 @@ local function new_dispatcher(governor, options)
 		if item.lane ~= "lease_renewal" then dispatcher.normal_in_flight += 1 end
 		dispatcher.metrics.max_in_flight = math.max(dispatcher.metrics.max_in_flight, dispatcher.in_flight)
 		spawn_scheduled(function()
-			if dispatcher.closed then
+			if dispatcher.closed or dispatcher.closing then
 				finish_scheduled_item(item, "cancelled", entry, true, nil, true)
 				return
 			end
@@ -1273,7 +1273,7 @@ local function new_dispatcher(governor, options)
 		end)
 	end
 	kick_dispatcher = function()
-		if dispatcher.closed or dispatcher.running then return end
+		if dispatcher.closed or dispatcher.closing or dispatcher.running then return end
 		dispatcher.running = true
 		spawn_scheduled(function()
 			local policy = governor:Stats().policy
@@ -1299,7 +1299,7 @@ local function new_dispatcher(governor, options)
 		batchable = true, on_complete = true, mutating = true,
 	}
 	function dispatcher:Schedule(owner_id, work_id, callback, schedule_options)
-		if self.closed then return { code = "closed", message = "scheduler dispatcher is closed" } end
+		if self.closed or self.closing then return { code = "closed", message = "scheduler dispatcher is closing or closed" } end
 		if not valid_text(owner_id, 512) or not valid_text(work_id, 96) or type(callback) ~= "function" then
 			return { code = "invalid", message = "owner_id, work_id and callback are required" }
 		end
