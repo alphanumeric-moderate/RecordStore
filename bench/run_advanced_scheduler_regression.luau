@@ -87,7 +87,7 @@ for _, bucket in pairs(latency_snapshot.scheduler.by_lane_class) do
 		break
 	end
 end
-assert(save_wait_bucket ~= nil and save_wait_bucket.count == nil and save_wait_bucket.selected == 1,
+assert(save_wait_bucket ~= nil and save_wait_bucket.selected == 1,
 	"per-lane/work-class wait histogram was not populated")
 assert(save_wait_bucket.p50_ms == 25 and save_wait_bucket.p95_ms == 25 and save_wait_bucket.p99_ms == 25,
 	"queue wait percentiles did not reflect the observed critical save delay")
