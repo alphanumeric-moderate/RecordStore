@@ -18,7 +18,7 @@ end
 
 local function new_store()
 	local values = {}
-	local store = { replay_next = false, fail_after_next = false, update_calls = 0 }
+	local store = { replay_next = false, fail_after_next = false, update_calls = 0, values = values }
 	function store:GetAsync(key)
 		return clone(values[key])
 	end
@@ -111,20 +111,24 @@ local conflict_reservation = reservations:ReserveUnique("username", "Barcode", "
 assert(conflict_reservation.code == "conflict", "unique reservation allowed a second entity to claim the same value")
 
 local corrupt_store = new_store()
-corrupt_store:Seed("rv2p-" .. V2.Fingerprint("player_balance_v1:player-bad"), {
-	projection_name = "player_balance_v1",
-	version = 1,
-	entity_id = "player-bad",
-	value = {},
-	source_revision = "invalid",
-	recent_events = {},
-})
 local corrupt_projection = V2.Projections.new(corrupt_store)
 assert(corrupt_projection:Register("player_balance_v1", 1, function(current) return current end))
+local seed_corrupt_row = corrupt_projection:ApplyAsync("player_balance_v1", {
+	event_id = "projection-seed-corrupt-row",
+	entity_id = "player-bad",
+	source_revision = 1,
+})
+assert(seed_corrupt_row.code == "committed", "could not seed the projection row for corruption testing")
+local corrupt_key = nil
+for key, row in pairs(corrupt_store.values) do
+	if type(row) == "table" and row.entity_id == "player-bad" then corrupt_key = key; break end
+end
+assert(corrupt_key ~= nil, "projection seed row was not discoverable in the fake store")
+corrupt_store.values[corrupt_key].source_revision = "invalid"
 local corrupt = corrupt_projection:ApplyAsync("player_balance_v1", {
 	event_id = "projection-corrupt-row",
 	entity_id = "player-bad",
-	source_revision = 1,
+	source_revision = 2,
 })
 assert(corrupt.code == "corrupt", "projection did not fail closed on a malformed durable row")
 
