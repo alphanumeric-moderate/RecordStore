@@ -153,6 +153,15 @@ group("04 inbox batch is atomic and message-idempotent", function()
 		return changed
 	end
 
+	local malformed_option_record = open_record("inbox-batch-malformed-limit")
+	local malformed_option_result = V2.Inbox.ApplyBatch(
+		malformed_option_record, "batch-malformed-limit", items, reducer, { max_batch_items = "not-a-number" }
+	)
+	assert(malformed_option_result.code == "committed",
+		"malformed optional batch limit raised or corrupted the inbox result")
+	assert(malformed_option_record:Get().coins == 7,
+		"safe default batch limit did not process the bounded valid batch")
+
 	schedule_update_fault(key, "after")
 	local first = V2.Inbox.ApplyBatch(record, "batch-operation-1", items, reducer)
 	assert(first.code == "committed", tostring(first.message))
