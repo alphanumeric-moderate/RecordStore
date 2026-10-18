@@ -4247,8 +4247,10 @@ function V2.new(record_store, mailbox_module, options)
 		if not valid_text(operation, 32) or not known_operations[operation] then
 			return { code = "invalid", message = "activation_operation is invalid or unsupported" }
 		end
-		local queued_options = copy(schedule_options)
-		queued_options.activation_operation = nil
+		local queued_options = {}
+		for key, value in pairs(schedule_options) do
+			if key ~= "activation_operation" then queued_options[key] = value end
+		end
 		local lane = queued_options.lane or "normal"
 		return enqueue_scheduled_callback(owner, lane, "work:" .. work_id, function()
 			local blocked = activation_block(operation)
