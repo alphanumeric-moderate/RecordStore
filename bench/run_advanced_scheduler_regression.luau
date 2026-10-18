@@ -278,6 +278,34 @@ assert(real_choice ~= nil and real_status == "success", "real selector failed af
 assert(shadow:MarkCompleted(real_choice.id, "committed"))
 assert(shadow:Stats().stats.shadow_samples >= 1, "shadow sample metric was not recorded")
 
+-- Shadow decisions must evaluate batchable items using a detached state snapshot.
+local shadow_batch = new_scheduler()
+local shadow_batch_policy = shadow_batch:Stats().policy
+assert(shadow_batch:SetPolicy({
+	revision = shadow_batch_policy.revision + 1,
+	algorithm = "drr",
+	shadow_algorithm = "fifo",
+	shadow_enabled = true,
+	shadow_sample_rate = 1,
+}), "batch shadow policy was rejected")
+enqueue(shadow_batch, {
+	id = "shadow-batch-candidate",
+	owner_id = "shadow-batch-owner",
+	lane = "normal",
+	work_class = "outbox_dispatch",
+	operation_class = "outbox_dispatch",
+	batchable = true,
+	batch_size = 4,
+	batch_backlog = 4,
+})
+local shadow_batch_queue_before = shadow_batch:Stats().queue_items
+local shadow_batch_decision = shadow_batch:ShadowDecision()
+assert(shadow_batch_decision.candidate_count == 1,
+	"shadow selector did not inspect the batchable candidate")
+assert(shadow_batch:Stats().queue_items == shadow_batch_queue_before,
+	"batch shadow sampling mutated the actual queue")
+take(shadow_batch, "shadow-batch-candidate")
+
 -- Retry rescheduling preserves the logical ID and cannot run before its due time.
 local retry_queue = new_scheduler()
 enqueue(retry_queue, { id = "stable-retry-id", owner_id = "retry-owner", lane = "normal", work_class = "outbox" })
