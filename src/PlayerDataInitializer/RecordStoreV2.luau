@@ -2585,7 +2585,7 @@ end
 local function new_projections(store, options)
 	options = options or {}
 	local service = { store = store, projections = {} }
-	local function key_for(name, entity_id) return "rv2p-" .. digest(name .. ":" .. entity_id) end
+	local function key_for(name, entity_id) return "rv2p-" .. digest(canonical({ name = name, entity_id = entity_id })) end
 	local function verify_subjects(subject_user_ids)
 		if subject_user_ids == nil then return true, nil end
 		if type(subject_user_ids) ~= "table" then
@@ -2786,7 +2786,7 @@ local function new_projections(store, options)
 		local subjects_ok, subject_error = verify_subjects(subject_snapshot)
 		if not subjects_ok then return subject_error end
 		local normalized_subjects = if subject_snapshot == nil then {} else subject_snapshot
-		local key = "rv2u-" .. digest(namespace .. ":" .. unique_value)
+		local key = "rv2u-" .. digest(canonical({ namespace = namespace, unique_value = unique_value }))
 		local attempt_id = digest(operation_id .. ":" .. tostring(os.clock()) .. ":" .. tostring(math.random()))
 		local created_at = os.time()
 		local value, write_error = adapter_call(store, "UpdateAsync", key, function(old)
