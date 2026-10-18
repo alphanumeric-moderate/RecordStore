@@ -1880,6 +1880,21 @@ local function new_erasure(store, families, options)
 		end
 		return result, nil
 	end
+	local function contract_digest_for(user_id, rendered)
+		local family_contract = {}
+		for _, family in ipairs(self.families) do
+			table.insert(family_contract, {
+				name = family.name,
+				templates_verified = family.templates_verified == true,
+				inventory_verified = family.inventory_verified == true,
+				history_inventory_verified = family.history_inventory_verified == true,
+				templates = copy(family.templates or {}),
+			})
+		end
+		local ok, material = pcall(canonical, { user_id = user_id, rendered = rendered, families = family_contract })
+		if not ok then return nil, tostring(material) end
+		return digest(material), nil
+	end
 	function coordinator:PlanAsync(user_id, erasure_id)
 		if not finite(user_id) or user_id < 1 or math.floor(user_id) ~= user_id or not valid_text(erasure_id, 96) then
 			return { code = "invalid", message = "valid UserId and stable erasure ID are required" }
@@ -1887,6 +1902,8 @@ local function new_erasure(store, families, options)
 
 		local rendered, render_error = self:RenderTemplates(user_id)
 		if rendered == nil then return { code = "invalid", message = render_error or "RTBF templates could not be rendered safely" } end
+		local template_contract_digest, contract_error = contract_digest_for(user_id, rendered)
+		if template_contract_digest == nil then return { code = "invalid", message = contract_error or "RTBF template contract could not be canonicalized" } end
 		local template_ok = if type(options.verify_templates) == "function"
 			then io_call(options.verify_templates, user_id, rendered) else false
 
@@ -2011,6 +2028,7 @@ local function new_erasure(store, families, options)
 		local created_at = os.time()
 		local manifest = {
 			version = 1, user_id = user_id, erasure_id = erasure_id, status = "planned", cursor = 0,
+			template_contract_digest = template_contract_digest,
 			completed_count = 0, entries = entries, coverage = coverage,
 			rtbf_coverage_verified = verified, template_verification_passed = template_ok == true,
 			created_at = created_at, updated_at = created_at,
@@ -2051,8 +2069,15 @@ local function new_erasure(store, families, options)
 		local valid_status = { planned = true, in_progress = true, unknown = true, completed = true }
 		if manifest.version ~= 1 or not valid_text(manifest.status, 32) or not valid_status[manifest.status]
 			or type(manifest.coverage) ~= "table" or type(manifest.rtbf_coverage_verified) ~= "boolean"
+			or not valid_text(manifest.template_contract_digest, 128)
 		then
 			return { code = "unsupported_schema", message = "erasure manifest has an unsupported version or malformed state" }
+		end
+		local current_templates, current_templates_error = self:RenderTemplates(user_id)
+		if current_templates == nil then return { code = "blocked", message = current_templates_error or "current RTBF templates are invalid" } end
+		local current_contract_digest = contract_digest_for(user_id, current_templates)
+		if current_contract_digest ~= manifest.template_contract_digest then
+			return { code = "conflict", message = "RTBF template or attestation contract changed after the immutable plan was created" }
 		end
 		if manifest.rtbf_coverage_verified ~= true then
 			return { code = "blocked", cursor = manifest.cursor or 0, completed_count = manifest.completed_count or 0,
