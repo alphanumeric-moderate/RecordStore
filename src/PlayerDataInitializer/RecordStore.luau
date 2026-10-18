@@ -6935,6 +6935,9 @@ local function shutdown()
 	end
 	shutdown_started = true
 	closing = true
+	-- Cancel timers and notify queued work before record release begins. In-flight
+	-- persistence callbacks are not preempted and still release their reservations.
+	scheduler_dispatcher:Close()
 	local closing_records: { Record } = {}
 	for record, state in private do
 		if state.state ~= "closed" and state.state ~= "tombstoned" and state.state ~= "fenced" and state.state ~= "corrupt" and state.state ~= "future" then
