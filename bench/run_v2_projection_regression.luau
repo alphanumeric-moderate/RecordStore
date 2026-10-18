@@ -248,6 +248,8 @@ local corrupt = corrupt_projection:ApplyAsync("player_balance_v1", {
 	source_revision = 2,
 })
 assert(corrupt.code == "corrupt", "projection did not fail closed on a malformed durable row")
+local corrupt_read = corrupt_projection:GetAsync("player_balance_v1", "player-bad")
+assert(corrupt_read.code == "corrupt", "projection read returned a malformed durable row as success")
 
 print("[PASS] Projection transform purity, event idempotency, stale revisions, ambiguous writes and unique-key reservations.")
 Shim.close()
