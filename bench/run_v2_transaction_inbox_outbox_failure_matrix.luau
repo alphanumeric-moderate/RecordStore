@@ -272,6 +272,18 @@ group("06 batched outbox dispatch retries source write without repeating callbac
 	assert(#pending == 0, "batch-dispatched events remained pending")
 end)
 
+group("08 outbox helper inputs fail closed", function()
+	local dispatch = V2.Outbox.DispatchBatches(nil, nil, "invalid", "invalid")
+	assert(dispatch.code == "invalid" and dispatch.dispatched == 0,
+		"outbox batch dispatch did not reject missing record/dispatcher")
+	local prune_outbox = V2.Outbox.PruneBatches(nil, "invalid", "invalid", "invalid")
+	assert(prune_outbox.code == "invalid" and prune_outbox.pruned == 0,
+		"outbox retention helper did not reject malformed inputs")
+	local prune_receipts = V2.Outbox.PruneTransactionReceiptsBatches(nil, "invalid", "invalid", "invalid")
+	assert(prune_receipts.code == "invalid" and prune_receipts.pruned == 0,
+		"transaction receipt retention helper did not reject malformed inputs")
+end)
+
 group("07 consumer reducers cannot modify RecordStore reserved sidecars", function()
 	Fake:Reset()
 	local record = open_record("reserved-sidecar-guard")
