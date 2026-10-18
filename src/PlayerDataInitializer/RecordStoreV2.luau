@@ -3332,7 +3332,7 @@ function V2.new(record_store, mailbox_module, options)
 		DeliveryGuarantee = "at-least-once",
 		OrderingContract = "strict ordering_key is not enabled; priority is a hint among eligible messages",
 		Canonicalize = canonical,
-		Fingerprint = function(value) local ok, material = pcall(canonical, value); return if ok then digest(material) else nil end end,
+		Fingerprint = function(value) local ok, material = pcall(canonical, value); return if ok then digest(material) else nil end,
 		Mailbox = { new = function(store, owner, mailbox_options) return mailbox_module.new(store, owner, mailbox_options) end },
 		Transactions = {},
 		Inbox = new_inbox(),
