@@ -402,7 +402,8 @@ local function new_governor(options)
 				local owner_active = self.active_owner[item.owner_id] or 0
 				local effective_lane = scheduled_lane(item, now)
 				local renewal_count = self.active_renewals_by_owner[item.owner_id] or 0
-				local owner_can_renew = effective_lane ~= "lease_renewal" or renewal_count < self.policy.max_per_owner_in_flight
+				-- At most one renewal may be active for a single claim/owner at a time.
+				local owner_can_renew = effective_lane ~= "lease_renewal" or renewal_count < 1
 				if owner_can_renew and (effective_lane == "lease_renewal" or owner_active < self.policy.max_per_owner_in_flight) then
 					eligible[#eligible + 1] = { index = index, item = item, effective_lane = effective_lane }
 				end
