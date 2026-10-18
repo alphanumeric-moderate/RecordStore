@@ -2060,6 +2060,19 @@ local function new_erasure(store, families, options)
 			rtbf_coverage_verified = verified, template_verification_passed = template_ok == true,
 			created_at = created_at, updated_at = created_at,
 		}
+		local plan_ok, plan_material = pcall(canonical, {
+			version = manifest.version,
+			user_id = manifest.user_id,
+			erasure_id = manifest.erasure_id,
+			template_contract_digest = manifest.template_contract_digest,
+			entries = manifest.entries,
+			coverage = manifest.coverage,
+			rtbf_coverage_verified = manifest.rtbf_coverage_verified,
+			template_verification_passed = manifest.template_verification_passed,
+			created_at = manifest.created_at,
+		})
+		if not plan_ok then return { code = "invalid", message = "erasure plan is not canonicalizable: " .. tostring(plan_material) } end
+		manifest.plan_material = plan_material
 		local value, message = adapter_call(store, "UpdateAsync", manifest_key(user_id), function(old)
 			-- The erasure ID owns one immutable plan. A retry must not reset progress
 			-- or replace the authoritative inventory with a later, different snapshot.
@@ -2096,9 +2109,24 @@ local function new_erasure(store, families, options)
 		local valid_status = { planned = true, in_progress = true, unknown = true, completed = true }
 		if manifest.version ~= 1 or not valid_text(manifest.status, 32) or not valid_status[manifest.status]
 			or type(manifest.coverage) ~= "table" or type(manifest.rtbf_coverage_verified) ~= "boolean"
-			or not valid_text(manifest.template_contract_digest, 128)
+			or not valid_text(manifest.template_contract_digest, 128) or type(manifest.template_verification_passed) ~= "boolean"
+			or not valid_text(manifest.plan_material, MAX_REQUEST_BYTES * 64)
 		then
 			return { code = "unsupported_schema", message = "erasure manifest has an unsupported version or malformed state" }
+		end
+		local plan_ok, expected_plan_material = pcall(canonical, {
+			version = manifest.version,
+			user_id = manifest.user_id,
+			erasure_id = manifest.erasure_id,
+			template_contract_digest = manifest.template_contract_digest,
+			entries = manifest.entries,
+			coverage = manifest.coverage,
+			rtbf_coverage_verified = manifest.rtbf_coverage_verified,
+			template_verification_passed = manifest.template_verification_passed,
+			created_at = manifest.created_at,
+		})
+		if not plan_ok or expected_plan_material ~= manifest.plan_material then
+			return { code = "corrupt", message = "erasure manifest immutable plan material failed integrity reconciliation" }
 		end
 		local current_templates, current_templates_error = self:RenderTemplates(user_id)
 		if current_templates == nil then return { code = "blocked", message = current_templates_error or "current RTBF templates are invalid" } end
