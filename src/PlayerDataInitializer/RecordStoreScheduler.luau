@@ -39,6 +39,32 @@ end
 
 local dirty_seen = setmetatable({}, { __mode = "k" })
 
+local operation_dimension_defaults = {
+	default = { read = 1, write = 1, bytes = 16384, handlers = 1 },
+	read = { read = 1, write = 0, bytes = 16384, handlers = 1 },
+	update_async = { read = 1, write = 1, bytes = 16384, handlers = 1 },
+	mailbox_claim = { read = 1, write = 1, bytes = 16384, handlers = 1 },
+	lease_renewal = { read = 1, write = 1, bytes = 16384, handlers = 1 },
+	outbox_dispatch = { read = 1, write = 1, bytes = 16384, handlers = 1 },
+	maintenance = { read = 1, write = 1, bytes = 8192, handlers = 1 },
+	migration = { read = 1, write = 1, bytes = 16384, handlers = 1 },
+	projection = { read = 1, write = 1, bytes = 8192, handlers = 1 },
+	tracing = { read = 0, write = 0, bytes = 1024, handlers = 1 },
+	batch = { read = 1, write = 1, bytes = 65536, handlers = 1 },
+}
+
+local function estimate_dimensions(item)
+	local request_kind = if type(item.operation_class) == "string" then item.operation_class
+		elseif type(item.work_class) == "string" then item.work_class else "default"
+	local defaults = operation_dimension_defaults[request_kind] or operation_dimension_defaults.default
+	return {
+		read_units = math.max(defaults.read, if finite(item.read_units) then item.read_units else 0),
+		write_units = math.max(defaults.write, if finite(item.write_units) then item.write_units else 0),
+		estimated_bytes = math.max(defaults.bytes, if finite(item.estimated_bytes) then item.estimated_bytes else 0),
+		handler_slots = math.max(defaults.handlers, if finite(item.handler_slots) then item.handler_slots else 1),
+	}
+end
+
 local function new_governor(options)
 	options = options or {}
 	local function now_ms()
@@ -51,11 +77,17 @@ local function new_governor(options)
 			batch_latency_ceiling_ms = 40, high_burst = 4, retry_token_capacity = 32,
 			retry_tokens_per_second = 4, minimum_budget = 2, circuit_threshold = 5, circuit_cooldown_ms = 15000,
 			max_scheduled_in_flight = 8, scheduler_critical_reserve = 1, max_per_owner_in_flight = 2,
+			max_read_units_in_flight = 32, max_write_units_in_flight = 32,
+			read_critical_reserve = 4, write_critical_reserve = 4,
+			max_estimated_bytes_in_flight = 16777216, max_handler_slots_in_flight = 16,
 			drr_quantum = 4, max_item_cost = 64, urgent_deadline_burst = 4,
 			priority_inheritance_max_ms = 1000, retry_jitter_percent = 20,
 			algorithm = "drr", shadow_algorithm = "weighted", shadow_enabled = false, shadow_sample_rate = 0,
 		},
 		in_flight = 0, by_class = {}, queue = {}, due = {}, due_heap = {}, queued_due_heap = {},
+		read_units_in_flight = 0, write_units_in_flight = 0,
+		estimated_bytes_in_flight = 0, handler_slots_in_flight = 0,
+		request_budgets = { read = nil, write = nil, sampled_at_ms = nil },
 		completed = {}, completed_order = {}, known = {}, active_owner = {}, active_renewals_by_owner = {},
 		drr_deficit = {}, drr_cursor_key = nil, high_streak = 0, urgent_streak = 0,
 		failed = {}, failed_order = {}, retry_cooldown_until = {}, retry_tokens_by_class = {},
@@ -69,7 +101,16 @@ local function new_governor(options)
 	local limits = { critical = 32, profile_save = 32, profile_release = 32, interactive = 24, messaging = 20, migration = 4, maintenance = 8, tracing = 1 }
 	local function policy_valid(policy)
 		if type(policy) ~= "table" then return false, "policy must be a table" end
-		local fields = { "revision", "max_in_flight", "critical_reserve", "queue_capacity", "max_batch", "batch_window_ms", "batch_latency_ceiling_ms", "high_burst", "retry_token_capacity", "retry_tokens_per_second", "minimum_budget", "circuit_threshold", "circuit_cooldown_ms", "max_scheduled_in_flight", "scheduler_critical_reserve", "max_per_owner_in_flight", "drr_quantum", "max_item_cost", "urgent_deadline_burst", "priority_inheritance_max_ms", "retry_jitter_percent", "shadow_sample_rate" }
+		local fields = {
+			"revision", "max_in_flight", "critical_reserve", "queue_capacity", "max_batch",
+			"batch_window_ms", "batch_latency_ceiling_ms", "high_burst", "retry_token_capacity",
+			"retry_tokens_per_second", "minimum_budget", "circuit_threshold", "circuit_cooldown_ms",
+			"max_scheduled_in_flight", "scheduler_critical_reserve", "max_per_owner_in_flight",
+			"max_read_units_in_flight", "max_write_units_in_flight", "read_critical_reserve",
+			"write_critical_reserve", "max_estimated_bytes_in_flight", "max_handler_slots_in_flight",
+			"drr_quantum", "max_item_cost", "urgent_deadline_burst", "priority_inheritance_max_ms",
+			"retry_jitter_percent", "shadow_sample_rate"
+		}
 		for _, field in ipairs(fields) do if not finite(policy[field]) then return false, "policy." .. field .. " must be finite" end end
 		if policy.mode ~= "normal" and policy.mode ~= "reject_noncritical" and policy.mode ~= "bounded_buffer" and policy.mode ~= "read_only" then return false, "invalid degraded mode" end
 		if policy.algorithm ~= "drr" and policy.algorithm ~= "weighted" and policy.algorithm ~= "fifo" and policy.algorithm ~= "deadline" then return false, "invalid scheduler algorithm" end
@@ -105,6 +146,25 @@ local function new_governor(options)
 		if policy.max_scheduled_in_flight < 1 or policy.max_scheduled_in_flight > 64 or math.floor(policy.max_scheduled_in_flight) ~= policy.max_scheduled_in_flight then return false, "invalid max_scheduled_in_flight" end
 		if policy.scheduler_critical_reserve < 0 or policy.scheduler_critical_reserve >= policy.max_scheduled_in_flight or math.floor(policy.scheduler_critical_reserve) ~= policy.scheduler_critical_reserve then return false, "scheduler_critical_reserve must be below max_scheduled_in_flight" end
 		if policy.max_per_owner_in_flight < 1 or policy.max_per_owner_in_flight > 16 or math.floor(policy.max_per_owner_in_flight) ~= policy.max_per_owner_in_flight then return false, "invalid max_per_owner_in_flight" end
+		for _, field in ipairs({ "max_read_units_in_flight", "max_write_units_in_flight", "max_handler_slots_in_flight" }) do
+			if policy[field] < 1 or policy[field] > 256 or math.floor(policy[field]) ~= policy[field] then
+				return false, field .. " must be an integer from 1 to 256"
+			end
+		end
+		for _, pair in ipairs({
+			{ "read_critical_reserve", "max_read_units_in_flight" },
+			{ "write_critical_reserve", "max_write_units_in_flight" },
+		}) do
+			local reserve, maximum = policy[pair[1]], policy[pair[2]]
+			if reserve < 0 or reserve >= maximum or math.floor(reserve) ~= reserve then
+				return false, pair[1] .. " must be an integer below " .. pair[2]
+			end
+		end
+		if policy.max_estimated_bytes_in_flight < 16384 or policy.max_estimated_bytes_in_flight > 67108864
+			or math.floor(policy.max_estimated_bytes_in_flight) ~= policy.max_estimated_bytes_in_flight
+		then
+			return false, "max_estimated_bytes_in_flight must be an integer from 16384 to 67108864"
+		end
 		if policy.drr_quantum < 1 or policy.drr_quantum > 32 or math.floor(policy.drr_quantum) ~= policy.drr_quantum then return false, "drr_quantum must be an integer from 1 to 32" end
 		if policy.max_item_cost < 1 or policy.max_item_cost > 256 or math.floor(policy.max_item_cost) ~= policy.max_item_cost then return false, "max_item_cost must be an integer from 1 to 256" end
 		if policy.urgent_deadline_burst < 1 or policy.urgent_deadline_burst > 64 or math.floor(policy.urgent_deadline_burst) ~= policy.urgent_deadline_burst then return false, "invalid urgent_deadline_burst" end
@@ -121,6 +181,9 @@ local function new_governor(options)
 			retry_token_capacity = true, retry_tokens_per_second = true, minimum_budget = true,
 			circuit_threshold = true, circuit_cooldown_ms = true,
 			max_scheduled_in_flight = true, scheduler_critical_reserve = true, max_per_owner_in_flight = true,
+			max_read_units_in_flight = true, max_write_units_in_flight = true,
+			read_critical_reserve = true, write_critical_reserve = true,
+			max_estimated_bytes_in_flight = true, max_handler_slots_in_flight = true,
 			drr_quantum = true, max_item_cost = true, urgent_deadline_burst = true,
 			priority_inheritance_max_ms = true, retry_jitter_percent = true,
 			algorithm = true, shadow_algorithm = true, shadow_enabled = true, shadow_sample_rate = true,
@@ -157,10 +220,18 @@ local function new_governor(options)
 		end
 		return true
 	end
-	local function admission_decision(self, work_class, request_kind, cost, mutating, critical_override)
+	local function admission_decision(self, work_class, request_kind, cost, mutating, critical_override, dimensions)
 		work_class, request_kind, cost = work_class or "interactive", request_kind or "default", cost or 1
 		if not finite(cost) or math.floor(cost) ~= cost or cost < 1 then
 			return { code = "invalid", terminal = true }, false, false
+		end
+		dimensions = dimensions or estimate_dimensions({ operation_class = request_kind })
+		local read_units, write_units = dimensions.read_units or 0, dimensions.write_units or 0
+		local estimated_bytes, handler_slots = dimensions.estimated_bytes or 0, dimensions.handler_slots or 1
+		if not finite(read_units) or read_units < 0 or not finite(write_units) or write_units < 0
+			or not finite(estimated_bytes) or estimated_bytes < 0 or not finite(handler_slots) or handler_slots < 1
+		then
+			return { code = "invalid", terminal = true, message = "invalid multi-dimensional admission estimate" }, false, false
 		end
 		local critical = critical_override == true or work_class == "critical"
 			or work_class == "profile_save" or work_class == "profile_release"
@@ -187,29 +258,59 @@ local function new_governor(options)
 		local observed_budget = self.last_budget_by_kind[request_kind]
 		if finite(observed_budget) and observed_budget < self.policy.minimum_budget and not critical then
 			return { code = "backpressure", transient = true, budget_limited = true, retry_after_ms = 250,
-				message = "request budget is below configured minimum" }, false, true
+				message = "operation budget is below configured minimum" }, false, true
+		end
+		local budgets = self.request_budgets
+		local budget_fresh = finite(budgets.sampled_at_ms) and now_ms() - budgets.sampled_at_ms <= 1000
+		if budget_fresh and not critical then
+			if read_units > 0 and finite(budgets.read) and budgets.read < math.max(self.policy.minimum_budget, read_units) then
+				return { code = "backpressure", transient = true, budget_limited = true, retry_after_ms = 250,
+					message = "StandardRead budget is below the configured admission threshold" }, false, true
+			end
+			if write_units > 0 and finite(budgets.write) and budgets.write < math.max(self.policy.minimum_budget, write_units) then
+				return { code = "backpressure", transient = true, budget_limited = true, retry_after_ms = 250,
+					message = "StandardWrite budget is below the configured admission threshold" }, false, true
+			end
 		end
 		if self.in_flight + cost > self.policy.max_in_flight then
-			return { code = "capacity", transient = true, message = "global in-flight request budget reached" }, false, true
+			return { code = "capacity", transient = true, message = "global estimated-work capacity reached" }, false, true
 		end
 		if not critical and self.in_flight + cost > self.policy.max_in_flight - self.policy.critical_reserve then
-			return { code = "backpressure", transient = true, message = "critical save/release reserve protected" }, false, true
+			return { code = "backpressure", transient = true, message = "critical persistence reserve protected" }, false, true
+		end
+		if self.read_units_in_flight + read_units > self.policy.max_read_units_in_flight then
+			return { code = "capacity", transient = true, message = "StandardRead admission capacity reached" }, false, true
+		end
+		if not critical and self.read_units_in_flight + read_units > self.policy.max_read_units_in_flight - self.policy.read_critical_reserve then
+			return { code = "backpressure", transient = true, message = "critical StandardRead reserve protected" }, false, true
+		end
+		if self.write_units_in_flight + write_units > self.policy.max_write_units_in_flight then
+			return { code = "capacity", transient = true, message = "StandardWrite admission capacity reached" }, false, true
+		end
+		if not critical and self.write_units_in_flight + write_units > self.policy.max_write_units_in_flight - self.policy.write_critical_reserve then
+			return { code = "backpressure", transient = true, message = "critical StandardWrite reserve protected" }, false, true
+		end
+		if self.estimated_bytes_in_flight + estimated_bytes > self.policy.max_estimated_bytes_in_flight then
+			return { code = "capacity", transient = true, message = "estimated in-flight byte capacity reached" }, false, true
+		end
+		if self.handler_slots_in_flight + handler_slots > self.policy.max_handler_slots_in_flight then
+			return { code = "capacity", transient = true, message = "handler-slot admission capacity reached" }, false, true
 		end
 		if (self.by_class[work_class] or 0) + cost > math.min(limits[work_class] or limits.interactive, self.policy.max_in_flight) then
 			return { code = "capacity", transient = true, message = "work-class cap reached" }, false, true
 		end
 		return {
 			code = "admitted", work_class = work_class, request_kind = request_kind,
-			cost = cost, critical = critical,
+			cost = cost, critical = critical, dimensions = dimensions,
 		}, probe_needed, false
 	end
-	function governor:CanAdmit(work_class, request_kind, cost, mutating, critical_override)
-		local decision = admission_decision(self, work_class, request_kind, cost, mutating, critical_override)
+	function governor:CanAdmit(work_class, request_kind, cost, mutating, critical_override, dimensions)
+		local decision = admission_decision(self, work_class, request_kind, cost, mutating, critical_override, dimensions)
 		return decision
 	end
-	function governor:Admit(work_class, request_kind, cost, mutating, critical_override)
+	function governor:Admit(work_class, request_kind, cost, mutating, critical_override, dimensions)
 		local decision, probe_needed, counted_rejection =
-			admission_decision(self, work_class, request_kind, cost, mutating, critical_override)
+			admission_decision(self, work_class, request_kind, cost, mutating, critical_override, dimensions)
 		if decision.code ~= "admitted" then
 			if counted_rejection then self.stats.rejected += 1 end
 			return decision
@@ -221,6 +322,11 @@ local function new_governor(options)
 		end
 		self.in_flight += decision.cost
 		self.by_class[decision.work_class] = (self.by_class[decision.work_class] or 0) + decision.cost
+		local dimensions_value = decision.dimensions
+		self.read_units_in_flight += dimensions_value.read_units
+		self.write_units_in_flight += dimensions_value.write_units
+		self.estimated_bytes_in_flight += dimensions_value.estimated_bytes
+		self.handler_slots_in_flight += dimensions_value.handler_slots
 		self.stats.admitted += 1
 		return {
 			code = "admitted",
@@ -228,6 +334,10 @@ local function new_governor(options)
 			cost = decision.cost,
 			work_class = decision.work_class,
 			request_kind = decision.request_kind,
+			read_units = dimensions_value.read_units,
+			write_units = dimensions_value.write_units,
+			estimated_bytes = dimensions_value.estimated_bytes,
+			handler_slots = dimensions_value.handler_slots,
 			probe = probe_needed,
 		}
 	end
@@ -235,10 +345,12 @@ local function new_governor(options)
 		if type(ticket) ~= "table" or ticket.code ~= "admitted" then return false end
 		self.in_flight = math.max(0, self.in_flight - (ticket.cost or 1))
 		self.by_class[ticket.work_class] = math.max(0, (self.by_class[ticket.work_class] or 0) - (ticket.cost or 1))
+		self.read_units_in_flight = math.max(0, self.read_units_in_flight - (ticket.read_units or 0))
+		self.write_units_in_flight = math.max(0, self.write_units_in_flight - (ticket.write_units or 0))
+		self.estimated_bytes_in_flight = math.max(0, self.estimated_bytes_in_flight - (ticket.estimated_bytes or 0))
+		self.handler_slots_in_flight = math.max(0, self.handler_slots_in_flight - (ticket.handler_slots or 0))
 		local circuit = self.circuits[ticket.request_kind]
 		if ticket.probe == true and circuit ~= nil and circuit.state == "half_open" and circuit.probe == true then
-			-- Core admission can fail after the advanced governor reserved this probe.
-			-- If no outcome was observed, release the probe reservation for the next attempt.
 			circuit.probe = false
 		end
 		self.stats.released += 1
@@ -275,6 +387,19 @@ local function new_governor(options)
 		self.retry_tokens -= 1
 		bucket.tokens -= 1
 		return true, 0
+	end
+	function governor:ObserveRequestBudgets(read_budget, write_budget)
+		if not finite(read_budget) or read_budget < 0 or not finite(write_budget) or write_budget < 0 then
+			return false
+		end
+		self.request_budgets = { read = read_budget, write = write_budget, sampled_at_ms = now_ms() }
+		return true
+	end
+	function governor:RefreshRequestBudgets()
+		if type(options.get_request_budgets) ~= "function" then return false end
+		local ok, budgets = pcall(options.get_request_budgets)
+		if not ok or type(budgets) ~= "table" then return false end
+		return self:ObserveRequestBudgets(budgets.read, budgets.write)
 	end
 	function governor:ChooseBatchSize(requested, latency_ms)
 		local maximum = math.min(bounded_integer(requested, self.policy.max_batch, 1, 16), self.policy.max_batch)
@@ -402,17 +527,13 @@ local function new_governor(options)
 		return (left.enqueued_at_ms or 0) < (right.enqueued_at_ms or 0)
 	end
 	local function effective_cost(item)
-		local operation_cost = {
-			default = 3, read = 2, update_async = 4, mailbox_claim = 4,
-			lease_renewal = 4, outbox_dispatch = 4, maintenance = 3,
-			migration = 4, projection = 3, tracing = 1, batch = 4,
-		}
-		local estimated = operation_cost[item.operation_class or "default"] or operation_cost.default
-		if finite(item.read_units) then estimated = math.max(estimated, item.read_units) end
-		if finite(item.write_units) then estimated = math.max(estimated, item.write_units) end
-		if finite(item.read_units) and finite(item.write_units) then estimated = math.max(estimated, item.read_units + item.write_units) end
-		if finite(item.estimated_bytes) then estimated = math.max(estimated, math.ceil(item.estimated_bytes / 16384)) end
-		if finite(item.handler_slots) then estimated = math.max(estimated, item.handler_slots * 4) end
+		local dimensions = estimate_dimensions(item)
+		local estimated = math.max(
+			1,
+			dimensions.read_units + dimensions.write_units,
+			math.ceil(dimensions.estimated_bytes / 16384),
+			dimensions.handler_slots * 4
+		)
 		if finite(item.cost) then estimated = math.max(estimated, math.floor(item.cost)) end
 		return math.clamp(math.ceil(estimated), 1, 256)
 	end
@@ -450,7 +571,7 @@ local function new_governor(options)
 				if owner_can_renew and (effective_lane == "lease_renewal" or owner_active < self.policy.max_per_owner_in_flight) then
 					local admission = admission_decision(self,
 						item.work_class, item.operation_class, effective_cost(item), item.mutating ~= false,
-						item.service_class == "critical" or item.lane == "lease_renewal"
+						item.service_class == "critical" or item.lane == "lease_renewal", estimate_dimensions(item)
 					)
 					if admission.code == "admitted" then
 						eligible[#eligible + 1] = { index = index, item = item, effective_lane = effective_lane }
@@ -671,7 +792,7 @@ local function new_governor(options)
 			else
 				local admission = admission_decision(self,
 					item.work_class, item.operation_class, effective_cost(item), item.mutating ~= false,
-					item.service_class == "critical" or item.lane == "lease_renewal"
+					item.service_class == "critical" or item.lane == "lease_renewal", estimate_dimensions(item)
 				)
 				if admission.terminal then
 					self.stats.rejected += 1
@@ -813,8 +934,10 @@ local function new_governor(options)
 			drr_deficit = copy(self.drr_deficit), drr_cursor_key = self.drr_cursor_key,
 			high_streak = self.high_streak, urgent_streak = self.urgent_streak,
 			policy = copy(self.policy), in_flight = self.in_flight, by_class = copy(self.by_class),
-			last_budget_by_kind = copy(self.last_budget_by_kind), circuits = copy(self.circuits),
-			stats = copy(self.stats),
+			read_units_in_flight = self.read_units_in_flight, write_units_in_flight = self.write_units_in_flight,
+			estimated_bytes_in_flight = self.estimated_bytes_in_flight, handler_slots_in_flight = self.handler_slots_in_flight,
+			request_budgets = copy(self.request_budgets), last_budget_by_kind = copy(self.last_budget_by_kind),
+			circuits = copy(self.circuits), stats = copy(self.stats),
 		}
 	end
 	function governor:MarkCompleted(id, outcome)
@@ -964,6 +1087,10 @@ local function new_governor(options)
 		end
 		return {
 			policy = copy(self.policy), in_flight = self.in_flight, queue_items = #self.queue,
+			read_units_in_flight = self.read_units_in_flight, write_units_in_flight = self.write_units_in_flight,
+			estimated_bytes_in_flight = self.estimated_bytes_in_flight,
+			handler_slots_in_flight = self.handler_slots_in_flight,
+			request_budgets = copy(self.request_budgets),
 			lanes = lanes, classes = copy(self.by_class), stats = copy(self.stats),
 			latency_ewma = copy(self.latency_ewma), circuits = copy(self.circuits),
 			last_budget_by_kind = copy(self.last_budget_by_kind), retry_tokens = self.retry_tokens,
@@ -1212,7 +1339,7 @@ local function new_dispatcher(governor, options)
 		end
 		local admission = governor:Admit(
 			item.work_class, item.operation_class, item.cost or 1, item.mutating ~= false,
-			item.service_class == "critical" or item.lane == "lease_renewal"
+			item.service_class == "critical" or item.lane == "lease_renewal", estimate_dimensions(item)
 		)
 		if admission.code ~= "admitted" then
 			-- Admission is checked during selection and cannot race in this
@@ -1282,6 +1409,7 @@ local function new_dispatcher(governor, options)
 		if dispatcher.closed or dispatcher.closing or dispatcher.running then return end
 		dispatcher.running = true
 		spawn_scheduled(function()
+			governor:RefreshRequestBudgets()
 			local policy = governor:Stats().policy
 			local maximum = policy.max_scheduled_in_flight
 			local normal_limit = math.max(0, maximum - policy.scheduler_critical_reserve)
