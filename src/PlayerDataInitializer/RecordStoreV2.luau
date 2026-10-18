@@ -2334,8 +2334,13 @@ local function new_rollout(store, options)
 		if type(value) ~= "table" or value.rollout_id ~= id or value.matrix_digest ~= matrix_digest then
 			return { code = "conflict", message = "rollout ID is already bound to another matrix digest" }
 		end
-		local result = copy(value)
-		result.code = if value.phase == "prepared" then "prepared" else "duplicate"
+		local validated, validation_error = read(id)
+		if not validated then return validation_error end
+		if validated.matrix_digest ~= matrix_digest then
+			return { code = "conflict", message = "rollout ID is already bound to another matrix digest" }
+		end
+		local result = copy(validated)
+		result.code = if validated.phase == "prepared" then "prepared" else "duplicate"
 		return result
 	end
 	function api:AttestAsync(id)
