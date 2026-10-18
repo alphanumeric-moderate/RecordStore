@@ -330,9 +330,16 @@ for _, algorithm in ipairs({"weighted", "deadline"}) do
 		lane = "normal",
 		deadline_ms = now_ms + 100,
 	})
+	enqueue(bounded_urgent, {
+		id = algorithm .. "-tight-4",
+		owner_id = algorithm .. "-owner",
+		lane = "normal",
+		deadline_ms = now_ms + 50,
+	})
+	take(bounded_urgent, algorithm .. "-tight-4")
 	take(bounded_urgent, algorithm .. "-tight-3")
-	take(bounded_urgent, algorithm .. "-tight-2")
 	take(bounded_urgent, algorithm .. "-oldest")
+	take(bounded_urgent, algorithm .. "-tight-2")
 end
 
 -- a lease renewal even while a normal callback is yielding.
