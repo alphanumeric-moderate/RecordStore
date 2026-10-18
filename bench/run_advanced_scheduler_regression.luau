@@ -633,6 +633,31 @@ assert(budget_callback_ran, "work did not resume after budget recovery")
 assert(budget_governor:Stats().stats.throttled >= 1, "budget backpressure was not measured")
 budget_dispatcher:Close()
 
+-- Closing a dispatcher drains callbacks and cancels its outstanding wake timer.
+local closing_governor = new_scheduler()
+local closing_dispatcher = Scheduler.new_dispatcher(closing_governor, {
+	now_ms = function() return now_ms end,
+})
+local closing_callback_ran, closing_completion = false, nil
+local closing_job = closing_dispatcher:Schedule(
+	"closing-owner", "future-callback", function()
+		closing_callback_ran = true
+		return { code = "committed" }
+	end,
+	{
+		lane = "background",
+		due_at_ms = now_ms + 60000,
+		on_complete = function(result) closing_completion = result end,
+	}
+)
+assert(closing_job.code == "accepted", "future close fixture was rejected")
+closing_dispatcher:Close()
+assert(not closing_callback_ran, "closing dispatcher executed a future callback")
+assert(type(closing_completion) == "table" and closing_completion.code == "cancelled",
+	"closing dispatcher did not provide the cancellation result")
+assert(closing_governor:Stats().queue_items == 0, "closing dispatcher retained queued work")
+assert(closing_dispatcher:Stats().closed, "dispatcher close state was not published")
+
 -- The main RecordStore module resolves the same scheduler through its
 -- ModuleScript parent. Runtime scheduling remains opt-in.
 local RecordStore = Shim.load()
