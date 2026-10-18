@@ -154,6 +154,112 @@ local selected, selected_status = shadow:TakeNext()
 assert(selected ~= nil and selected_status == "success", "real scheduler stopped after shadow sampling")
 assert(shadow:Stats().stats.shadow_samples >= 2, "shadow sampling was not recorded")
 
+-- Retry rescheduling retains the logical ID, honors cooldown and is not runnable early.
+local retry_queue = new_scheduler()
+enqueue(retry_queue, { id = "stable-retry-id", owner_id = "retry-owner", lane = "normal", work_class = "outbox" })
+local retry_first, retry_status = retry_queue:TakeNext()
+assert(retry_first ~= nil and retry_status == "success", "retry fixture was not selectable")
+local requeued, requeue_error, retry_due = retry_queue:Reschedule(retry_first.id, now_ms + 50)
+assert(requeued, "same-ID retry was not requeued: " .. tostring(requeue_error))
+assert(retry_queue:Stats().queue_items == 1, "retry requeue changed bounded queue accounting")
+assert(retry_queue:TakeNext() == nil, "retry became eligible before its due time")
+now_ms = retry_due
+local retry_second, retry_second_status = retry_queue:TakeNext()
+assert(retry_second ~= nil and retry_second_status == "success" and retry_second.id == retry_first.id and retry_second.is_retry,
+	"retry did not preserve its logical ID and retry state")
+assert(retry_queue:MarkCompleted(retry_second.id, "committed"), "retry did not release scheduler state")
+assert(next(retry_queue:Stats().scheduler.active_by_owner) == nil, "completed owner state leaked")
+
+-- A high-priority dependent grants only a bounded scheduling boost to a ready
+-- background prerequisite. The business lane and item identity stay unchanged.
+local inheritance = new_scheduler()
+enqueue(inheritance, { id = "ready-prerequisite", owner_id = "workflow-owner", work_class = "saga", lane = "background" })
+local inheritance_policy = inheritance:Stats().policy
+enqueue(inheritance, { id = "urgent-dependent", owner_id = "workflow-owner", work_class = "saga", lane = "high",
+	dependencies = { "ready-prerequisite" } })
+local inherited, inherited_status = inheritance:TakeNext()
+assert(inherited ~= nil and inherited_status == "success" and inherited.id == "ready-prerequisite",
+	"dependency inheritance selected work out of order")
+assert(inherited.lane == "background" and inherited.inherited_lane == "normal",
+	"priority inheritance changed the durable/original lane or failed to raise temporary urgency")
+assert(inherited.inherited_until_ms <= now_ms + inheritance_policy.priority_inheritance_max_ms,
+	"priority inheritance exceeded its duration bound")
+assert(inheritance:MarkCompleted(inherited.id, "committed"), "inherited prerequisite did not complete")
+take(inheritance, "urgent-dependent")
+
+-- Deadline boosts are bounded. After the configured urgent streak the selector
+-- returns the oldest queued item in that owner's lane rather than chasing slack.
+local urgent = new_scheduler()
+local urgent_policy = urgent:Stats().policy
+assert(urgent:SetPolicy({ revision = urgent_policy.revision + 1, urgent_deadline_burst = 2 }), "urgent burst policy was rejected")
+enqueue(urgent, { id = "oldest-urgent-lane", owner_id = "urgent-owner", work_class = "interactive", lane = "normal", deadline_ms = now_ms + 4500 })
+now_ms += 1
+enqueue(urgent, { id = "near-deadline-1", owner_id = "urgent-owner", work_class = "interactive", lane = "normal", deadline_ms = now_ms + 100 })
+now_ms += 1
+enqueue(urgent, { id = "near-deadline-2", owner_id = "urgent-owner", work_class = "interactive", lane = "normal", deadline_ms = now_ms + 100 })
+now_ms += 1
+enqueue(urgent, { id = "near-deadline-3", owner_id = "urgent-owner", work_class = "interactive", lane = "normal", deadline_ms = now_ms + 100 })
+take(urgent, "near-deadline-3")
+take(urgent, "near-deadline-2")
+take(urgent, "oldest-urgent-lane")
+
+-- Shared dispatch runs yielding work concurrently and reserves a slot for
+-- claim-lease renewal rather than letting long handlers block renewals.
+local shared = V2.RuntimeGovernor.get_shared()
+local shared_policy = shared:Stats().policy
+local applied_policy, applied_message = V2.ApplySchedulerPolicy({
+	revision = shared_policy.revision + 1,
+	max_scheduled_in_flight = 2,
+	scheduler_critical_reserve = 1,
+	max_per_owner_in_flight = 2,
+})
+assert(applied_policy == "success", "bounded dispatcher policy failed: " .. tostring(applied_message))
+local slow_started, slow_finished = false, false
+local renewal_finished, parallel_finished, parallel_during_slow = false, false, false
+local slow_job = V2.ScheduleMaintenance("dispatch-owner", "slow-yielding-step", function()
+	slow_started = true
+	task.wait(0.08)
+	slow_finished = true
+	return { code = "committed" }
+end, { lane = "normal", on_complete = function() end })
+assert(slow_job.code == "accepted", "yielding maintenance callback was not scheduled")
+for _ = 1, 100 do
+	if slow_started then break end
+	task.wait(0.001)
+end
+assert(slow_started, "dispatcher did not start the first yielding callback")
+local renewal_job = V2.ScheduleMaintenance("dispatch-owner", "reserved-lease-renewal", function()
+	renewal_finished = not slow_finished
+	return { code = "renewed" }
+end, {
+	lane = "lease_renewal",
+	service_class = "critical",
+	work_class = "lease_renewal",
+	operation_class = "lease_renewal",
+	deadline_ms = now_ms + 5000,
+	expires_at_ms = now_ms + 10000,
+	on_complete = function() end,
+})
+assert(renewal_job.code == "accepted", "lease-renewal lane did not accept work")
+for _ = 1, 100 do
+	if renewal_finished then break end
+	task.wait(0.001)
+end
+assert(renewal_finished, "reserved lease renewal waited behind a yielding normal callback")
+local parallel_job = V2.ScheduleMaintenance("dispatch-owner", "parallel-normal-step", function()
+	parallel_during_slow = not slow_finished
+	parallel_finished = true
+	return { code = "committed" }
+end, { lane = "normal", on_complete = function() end })
+assert(parallel_job.code == "accepted", "parallel maintenance callback was not scheduled")
+for _ = 1, 100 do
+	if parallel_finished and slow_finished then break end
+	task.wait(0.002)
+end
+assert(parallel_finished and slow_finished, "bounded concurrent dispatcher failed to finish callbacks")
+assert(parallel_during_slow, "yielding scheduled callbacks did not overlap when capacity allowed")
+assert(V2.GetSchedulerDispatchStats().max_in_flight >= 2, "dispatcher did not report concurrent active work")
+
 local bad_algorithm = shadow:SetPolicy({ revision = shadow:Stats().policy.revision + 1, algorithm = "imaginary" })
 assert(not bad_algorithm, "unsupported active scheduler algorithm was accepted")
 local bad_cost = shadow:Enqueue({ id = "excess-cost", owner_id = "cost-owner", lane = "normal", read_units = 64, write_units = 64 })
