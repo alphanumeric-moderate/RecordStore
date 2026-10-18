@@ -8,7 +8,7 @@ local RecordStore = Shim.load()
 local MailboxV2 = luau.load(fs.readFile("src/PlayerDataInitializer/RecordStoreMailboxV2.luau"), { debugName = "RecordStoreMailboxV2" })()
 local V2Module = luau.load(fs.readFile("src/PlayerDataInitializer/RecordStoreV2.luau"), { debugName = "RecordStoreV2" })()
 local Simulator = luau.load(fs.readFile("src/PlayerDataInitializer/RecordStoreV2Simulator.luau"), { debugName = "RecordStoreV2Simulator" })()
-local V2 = V2Module.new(RecordStore, MailboxV2)
+local V2 = V2Module.new(RecordStore, MailboxV2, { allow_unattested_activation = true })
 
 local function expect(result, ...)
 	for _, wanted in ipairs({ ... }) do if result.code == wanted then return end end
@@ -62,6 +62,7 @@ local function run_transactions_and_workflows()
 		scope = "global",
 		profile_key = "target",
 	}, {
+		allow_unattested_activation = true,
 		guid = function() return "bench-destination-guid" end,
 		encode = function(value) return serde.encode("json", value) end,
 	})
@@ -79,6 +80,7 @@ local function run_transactions_and_workflows()
 		profile_key = "target",
 	}, {
 		active_record = target,
+		allow_unattested_activation = true,
 		encode = function(value) return serde.encode("json", value) end,
 	})
 	local bind_code, bind_message = target:BindMailboxV2Async(bridge_mailbox)
