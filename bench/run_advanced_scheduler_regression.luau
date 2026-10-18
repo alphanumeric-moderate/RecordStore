@@ -211,8 +211,8 @@ take(urgent, "near-deadline-2")
 take(urgent, "oldest-urgent-lane")
 take(urgent, "near-deadline-1")
 
--- The async dispatcher reserves a worker slot for lease renewals even while a
--- normal maintenance callback yields. Arbitrary callback exceptions become unknown.
+-- A strict reserved slot remains unused by normal work and remains available to
+-- a lease renewal even while a normal callback is yielding.
 local shared = new_scheduler()
 local shared_policy = shared:Stats().policy
 assert(shared:SetPolicy({
@@ -220,10 +220,10 @@ assert(shared:SetPolicy({
 	max_scheduled_in_flight = 2,
 	scheduler_critical_reserve = 1,
 	max_per_owner_in_flight = 2,
-}), "bounded dispatcher policy failed")
+}), "reserved dispatcher policy failed")
 local dispatcher = Scheduler.new_dispatcher(shared, { now_ms = function() return now_ms end })
 local slow_started, slow_finished = false, false
-local renewal_finished, parallel_finished, parallel_during_slow = false, false, false
+local renewal_finished, blocked_normal_finished = false, false
 local slow_job = dispatcher:Schedule("dispatch-owner", "slow-yielding-step", function()
 	slow_started = true
 	task.wait(0.08)
@@ -233,26 +233,60 @@ end, { lane = "normal" })
 assert(slow_job.code == "accepted", "yielding callback was not accepted")
 for _ = 1, 100 do if slow_started then break end; task.wait(0.001) end
 assert(slow_started, "dispatcher did not start the first yielding callback")
+local blocked_normal = dispatcher:Schedule("dispatch-owner", "must-not-use-reserve", function()
+	blocked_normal_finished = true
+	return { code = "committed" }
+end, { lane = "normal" })
+assert(blocked_normal.code == "accepted", "bounded normal callback was rejected")
+task.wait(0.015)
+assert(not blocked_normal_finished, "ordinary work consumed the reserved lease-renewal slot")
 local renewal_job = dispatcher:Schedule("dispatch-owner", "reserved-lease-renewal", function()
 	renewal_finished = not slow_finished
 	return { code = "renewed" }
 end, {
 	lane = "lease_renewal", service_class = "critical", work_class = "lease_renewal",
-	operation_class = "lease_renewal", deadline_ms = now_ms + 5000, expires_at_ms = now_ms + 10000,
+	operation_class = "lease_renewal", deadline_ms = now_ms + 5000,
 })
 assert(renewal_job.code == "accepted", "lease-renewal lane rejected work")
 for _ = 1, 100 do if renewal_finished then break end; task.wait(0.001) end
 assert(renewal_finished, "reserved lease renewal waited behind a yielding normal callback")
-local parallel_job = dispatcher:Schedule("dispatch-owner", "parallel-normal-step", function()
-	parallel_during_slow = not slow_finished
-	parallel_finished = true
+assert(not blocked_normal_finished, "normal work took the reserve after the renewal finished")
+for _ = 1, 150 do if slow_finished and blocked_normal_finished then break end; task.wait(0.002) end
+assert(slow_finished and blocked_normal_finished, "queued normal work did not run after capacity became available")
+assert(dispatcher:Stats().max_in_flight == 2, "reserved dispatcher exceeded its bounded concurrency")
+
+-- Non-reserved concurrency still allows two normal callbacks to overlap when
+-- policy explicitly permits two normal slots plus one reserved slot.
+local parallel_governor = new_scheduler()
+local parallel_policy = parallel_governor:Stats().policy
+assert(parallel_governor:SetPolicy({
+	revision = parallel_policy.revision + 1,
+	max_scheduled_in_flight = 3,
+	scheduler_critical_reserve = 1,
+	max_per_owner_in_flight = 3,
+}), "parallel dispatcher policy failed")
+local parallel_dispatcher = Scheduler.new_dispatcher(parallel_governor, { now_ms = function() return now_ms end })
+local first_normal_started, first_normal_finished = false, false
+local second_normal_started, overlapped = false, false
+local first_normal = parallel_dispatcher:Schedule("parallel-owner", "normal-one", function()
+	first_normal_started = true
+	task.wait(0.06)
+	first_normal_finished = true
 	return { code = "committed" }
 end, { lane = "normal" })
-assert(parallel_job.code == "accepted", "parallel callback was not accepted")
-for _ = 1, 100 do if parallel_finished and slow_finished then break end; task.wait(0.002) end
-assert(parallel_finished and slow_finished, "bounded concurrent dispatcher failed to finish callbacks")
-assert(parallel_during_slow, "yielding callbacks did not overlap when capacity allowed")
-assert(dispatcher:Stats().max_in_flight >= 2, "dispatcher did not record concurrent work")
+assert(first_normal.code == "accepted")
+for _ = 1, 100 do if first_normal_started then break end; task.wait(0.001) end
+assert(first_normal_started, "first parallel normal callback did not start")
+local second_normal = parallel_dispatcher:Schedule("parallel-owner", "normal-two", function()
+	second_normal_started = true
+	overlapped = not first_normal_finished
+	return { code = "committed" }
+end, { lane = "normal" })
+assert(second_normal.code == "accepted")
+for _ = 1, 100 do if second_normal_started and first_normal_finished then break end; task.wait(0.002) end
+assert(second_normal_started and first_normal_finished and overlapped, "permitted normal concurrency did not overlap")
+assert(parallel_dispatcher:Stats().max_in_flight >= 2, "dispatcher did not report bounded concurrency")
+parallel_dispatcher:Close()
 local callback_attempts = 0
 local retry_done = false
 local retry_job = dispatcher:Schedule("retry-owner", "retryable-callback", function()
