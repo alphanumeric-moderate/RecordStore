@@ -511,6 +511,49 @@ assert(batched_calls == 1, "due batch callback did not execute")
 dispatcher:Close()
 batch_dispatcher:Close()
 
+-- Batch sizing is applied to the explicitly batchable callback itself; it does not
+-- merge independent business callbacks. High service latency should collapse to one.
+local adaptive_batch_governor = new_scheduler()
+local adaptive_batch_policy = adaptive_batch_governor:Stats().policy
+assert(adaptive_batch_governor:SetPolicy({
+	revision = adaptive_batch_policy.revision + 1,
+	max_batch = 8,
+	batch_window_ms = 10,
+	batch_latency_ceiling_ms = 40,
+}), "adaptive batch policy was rejected")
+adaptive_batch_governor:Observe("outbox_dispatch", true, 100)
+local adaptive_batch_dispatcher = Scheduler.new_dispatcher(adaptive_batch_governor, {
+	now_ms = function() return now_ms end,
+})
+local chosen_batch_size = nil
+local adaptive_batch_job = adaptive_batch_dispatcher:Schedule(
+	"adaptive-batch-owner", "bounded-outbox-batch", function(batch_size)
+		chosen_batch_size = batch_size
+		return { code = "committed" }
+	end,
+	{
+		batchable = true,
+		batch_size = 8,
+		batch_backlog = 8,
+		batch_window_ms = 0,
+		operation_class = "outbox_dispatch",
+		work_class = "outbox_dispatch",
+		read_units = 1,
+		write_units = 1,
+		estimated_bytes = 16384,
+		handler_slots = 1,
+	}
+)
+assert(adaptive_batch_job.code == "accepted", "adaptive batch callback was rejected")
+for _ = 1, 100 do if chosen_batch_size ~= nil then break end; task.wait(0.001) end
+assert(chosen_batch_size == 1,
+	"batchable callback did not receive the latency-capped batch size")
+assert(adaptive_batch_dispatcher:Stats().batch_calls == 1,
+	"adaptive batch invocation was not measured")
+assert(adaptive_batch_dispatcher:Stats().max_batch_size == 1,
+	"adaptive batch metrics did not record the bounded selected size")
+adaptive_batch_dispatcher:Close()
+
 -- Operation admission must cap estimated request work, not just callback count.
 local admission_governor = new_scheduler()
 local admission_policy = admission_governor:Stats().policy
