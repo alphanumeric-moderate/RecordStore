@@ -425,21 +425,24 @@ local function new_governor(options)
 		if not ok or type(budgets) ~= "table" then return false end
 		return self:ObserveRequestBudgets(budgets.read, budgets.write)
 	end
-	function governor:ChooseBatchSize(requested, latency_ms, backlog, oldest_age_ms, budget_headroom)
-		local maximum = math.min(bounded_integer(requested, self.policy.max_batch, 1, 16), self.policy.max_batch)
+	local function calculate_batch_size(policy, requested, latency_ms, backlog, oldest_age_ms, budget_headroom)
+		local maximum = math.min(bounded_integer(requested, policy.max_batch, 1, 16), policy.max_batch)
 		if finite(backlog) then
-			maximum = math.min(maximum, bounded_integer(backlog, 1, 1, self.policy.queue_capacity))
+			maximum = math.min(maximum, bounded_integer(backlog, 1, 1, policy.queue_capacity))
 		end
 		latency_ms = if finite(latency_ms) then latency_ms else 0
-		if finite(budget_headroom) and budget_headroom < self.policy.minimum_budget then return 1 end
-		if latency_ms >= self.policy.batch_latency_ceiling_ms then return 1 end
-		if latency_ms >= self.policy.batch_latency_ceiling_ms * 0.75 then
+		if finite(budget_headroom) and budget_headroom < policy.minimum_budget then return 1 end
+		if latency_ms >= policy.batch_latency_ceiling_ms then return 1 end
+		if latency_ms >= policy.batch_latency_ceiling_ms * 0.75 then
 			maximum = math.max(1, math.floor(maximum / 2))
 		end
-		if finite(oldest_age_ms) and oldest_age_ms >= self.policy.batch_window_ms then
+		if finite(oldest_age_ms) and oldest_age_ms >= policy.batch_window_ms then
 			return maximum
 		end
 		return maximum
+	end
+	function governor:ChooseBatchSize(requested, latency_ms, backlog, oldest_age_ms, budget_headroom)
+		return calculate_batch_size(self.policy, requested, latency_ms, backlog, oldest_age_ms, budget_headroom)
 	end
 	local function selected_batch_size(self, item)
 		if item.batchable ~= true then return nil end
@@ -457,7 +460,7 @@ local function new_governor(options)
 		local oldest_age = math.max(0, now - (item.enqueued_at_ms or now))
 		local requested = item.batch_size or 1
 		local backlog = item.batch_backlog or requested
-		local count = self:ChooseBatchSize(requested, latency, backlog, oldest_age, budget_headroom)
+		local count = calculate_batch_size(self.policy, requested, latency, backlog, oldest_age, budget_headroom)
 		local unit = estimate_dimensions(item, 1)
 		local critical = item.service_class == "critical" or item.lane == "lease_renewal"
 		local read_limit = self.policy.max_read_units_in_flight - self.read_units_in_flight
@@ -1074,6 +1077,8 @@ local function new_governor(options)
 			read_units_in_flight = self.read_units_in_flight, write_units_in_flight = self.write_units_in_flight,
 			estimated_bytes_in_flight = self.estimated_bytes_in_flight, handler_slots_in_flight = self.handler_slots_in_flight,
 			request_budgets = copy(self.request_budgets), last_budget_by_kind = copy(self.last_budget_by_kind),
+			latency_ewma = copy(self.latency_ewma), latency_samples_by_operation = copy(self.latency_samples_by_operation),
+			scheduler_metrics = copy(self.scheduler_metrics),
 			circuits = copy(self.circuits), stats = copy(self.stats),
 		}
 	end
