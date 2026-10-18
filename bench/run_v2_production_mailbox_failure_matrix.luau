@@ -204,6 +204,25 @@ local yielded_delivery, yielded_status = yielding_mailbox:GetDeliveryAsync(yield
 assert(yielded_status.code == "success" and yielded_delivery ~= nil and yielded_delivery.State == "acknowledged",
 	"yielding handler's renewed claim did not reach terminal acknowledgement")
 
+-- A failed canonical read must not be turned into a successful but incomplete queue view.
+local read_failure_message = yielding_mailbox:EnqueueAsync("read-failure-probe", { coins = 1 }, {
+	idempotency_key = "mailbox-canonical-read-failure",
+})
+assert(read_failure_message.code == "accepted", tostring(read_failure_message.error))
+local active_rows, active_rows_error = yielding_mailbox:_rows("active")
+assert(active_rows_error == nil and #active_rows > 0, "read-failure fixture did not retain an active index row")
+local read_failure_route = tostring(active_rows[1].route)
+Fake:ScheduleFault("get", MAILBOX_STORE, SCOPE, read_failure_route, "before")
+local partial_queue, partial_queue_result = yielding_mailbox:GetQueueAsync()
+assert(partial_queue_result.code == "unknown" and #partial_queue == 0,
+	"GetQueueAsync hid a canonical-record read failure as a successful partial result")
+
+-- Preparation counts are exact only when every shard has been read successfully.
+Fake:ScheduleFault("get", MAILBOX_STORE, SCOPE, yielding_mailbox:_registry_key(1), "before")
+local partial_stats, partial_stats_result = yielding_mailbox:GetStatsAsync()
+assert(partial_stats_result.code == "unknown" and next(partial_stats) == nil,
+	"GetStatsAsync reported success when a preparation-registry read failed")
+
 active_record:Close()
 print("[PASS] V2 production mailbox: shared request gate, idempotent submission, ambiguous reservation/ack, stale claim fencing and yielding-handler renewal.")
 Shim.close()
