@@ -2718,21 +2718,46 @@ local function new_projections(store, options)
 	function service:ReserveUnique(namespace, unique_value, entity_id, operation_id)
 		if not valid_text(namespace, 32) or not valid_text(unique_value, 128) or not valid_text(entity_id, 128) or not valid_text(operation_id, 128) then return { code = "invalid" } end
 		local key = "rv2u-" .. digest(namespace .. ":" .. unique_value)
-		local decision = "unknown"
-		local value, message = adapter_call(store, "UpdateAsync", key, function(old)
-			if old ~= nil then
-				decision = if old.namespace == namespace and old.unique_value == unique_value and old.entity_id == entity_id then "duplicate" else "conflict"
-				return old
-			end
-			decision = "committed"
-			return { namespace = namespace, unique_value = unique_value, entity_id = entity_id, operation_id = operation_id, created_at = os.time() }
+		local attempt_id = digest(operation_id .. ":" .. tostring(os.clock()) .. ":" .. tostring(math.random()))
+		local created_at = os.time()
+		local value, write_error = adapter_call(store, "UpdateAsync", key, function(old)
+			if old ~= nil then return old end
+			return {
+				namespace = namespace,
+				unique_value = unique_value,
+				entity_id = entity_id,
+				operation_id = operation_id,
+				last_attempt_id = attempt_id,
+				created_at = created_at,
+			}
 		end)
-		if message then
-			local observed = adapter_call(store, "GetAsync", key)
-			if type(observed) == "table" and observed.namespace == namespace and observed.unique_value == unique_value and observed.entity_id == entity_id then return { code = "committed", reservation = observed, reconciled = true } end
-			return { code = "unknown", message = message }
+		local function classify(observed, ambiguous)
+			if observed == nil then return { code = "unknown", message = write_error or "unique reservation returned no row" } end
+			if type(observed) ~= "table" then return { code = "corrupt", message = "unique reservation row is not a table" } end
+			if observed.namespace ~= namespace or observed.unique_value ~= unique_value then
+				return { code = "conflict", message = "unique reservation key collision" }
+			end
+			if not valid_text(observed.entity_id, 128) or not valid_text(observed.operation_id, 128)
+				or not valid_text(observed.last_attempt_id, 128) or not finite(observed.created_at)
+			then
+				return { code = "corrupt", message = "unique reservation row is malformed" }
+			end
+			if observed.entity_id ~= entity_id then
+				return { code = "conflict", reservation = observed }
+			end
+			if observed.last_attempt_id == attempt_id and observed.operation_id == operation_id then
+				return { code = "committed", reservation = observed, reconciled = ambiguous or nil }
+			end
+			return { code = "duplicate", reservation = observed }
 		end
-		return { code = decision, reservation = value }
+		if write_error then
+			local observed, read_error = adapter_call(store, "GetAsync", key)
+			if read_error then return { code = "unknown", message = write_error .. "; reconciliation read failed: " .. tostring(read_error) } end
+			local result = classify(observed, true)
+			if result.code == "unknown" then result.message = write_error end
+			return result
+		end
+		return classify(value, false)
 	end
 	return service
 end
