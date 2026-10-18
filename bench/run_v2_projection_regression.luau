@@ -143,6 +143,21 @@ local erased_event = erased_projections:ApplyAsync("subject_projection_v1", {
 	subject_user_ids = { 987654321 },
 })
 assert(erased_event.code == "erased", "projection recreated data for a durably erased subject")
+local mutable_subjects = { 987654321 }
+local snapshot_store = new_store()
+local snapshot_reservations = V2.Projections.new(snapshot_store, {
+	is_erased = function(user_id)
+		assert(user_id == 987654321, "erasure verifier received a changed subject ID")
+		mutable_subjects[1] = 123
+		return false
+	end,
+})
+local snapshot_reservation = snapshot_reservations:ReserveUnique(
+	"subject-username", "SnapshotName", "player-snapshot", "reserve-snapshot", mutable_subjects
+)
+assert(snapshot_reservation.code == "committed", "subject-bound reservation failed after erasure verification")
+assert(snapshot_reservation.reservation.subject_user_ids[1] == 987654321,
+	"subject list changed between erasure verification and reservation persistence")
 
 local corrupt_store = new_store()
 local corrupt_projection = V2.Projections.new(corrupt_store)
