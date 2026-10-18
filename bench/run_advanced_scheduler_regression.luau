@@ -322,6 +322,94 @@ assert(retry_second ~= nil and retry_second_status == "success" and retry_second
 assert(retry_queue:MarkCompleted(retry_second.id, "committed"), "retry did not release scheduler state")
 assert(next(retry_queue:Stats().scheduler.active_by_owner) == nil, "completed owner state leaked")
 
+-- Explicit throttled retries respect retry_after_ms, use the class-specific backoff,
+-- and report attempt classes without retrying an uncertain outcome.
+local typed_retry_governor = new_scheduler()
+local typed_retry_dispatcher = Scheduler.new_dispatcher(typed_retry_governor, {
+	now_ms = function() return now_ms end,
+})
+local typed_retry_attempts, typed_retry_completion = 0, nil
+local typed_retry_start = now_ms
+local typed_retry_job = typed_retry_dispatcher:Schedule(
+	"typed-retry-owner", "throttled-safe-operation", function()
+		typed_retry_attempts += 1
+		if typed_retry_attempts == 1 then
+			return { code = "retryable", retry_class = "throttled", retry_after_ms = 400 }
+		end
+		return { code = "committed" }
+	end,
+	{
+		work_class = "maintenance",
+		operation_class = "tracing",
+		read_units = 0,
+		write_units = 0,
+		estimated_bytes = 1024,
+		handler_slots = 1,
+		mutating = false,
+		max_retries = 1,
+		retry_delay_ms = 50,
+		retry_jitter_percent = 0,
+		on_complete = function(result) typed_retry_completion = result end,
+	}
+)
+assert(typed_retry_job.code == "accepted", "throttled retry fixture was rejected")
+for _ = 1, 100 do
+	if typed_retry_dispatcher:Stats().retries >= 1 then break end
+	task.wait(0.001)
+end
+assert(typed_retry_dispatcher:Stats().retries == 1, "throttled result did not enter the bounded retry queue")
+local typed_retry_due = typed_retry_governor:Stats().scheduler.next_due_at_ms
+assert(typed_retry_due ~= nil and typed_retry_due >= typed_retry_start + 400,
+	"retry ignored the server/request retry-after delay")
+now_ms = typed_retry_due + 1
+typed_retry_dispatcher:Kick()
+for _ = 1, 100 do
+	if typed_retry_completion ~= nil then break end
+	task.wait(0.001)
+end
+assert(typed_retry_attempts == 2 and type(typed_retry_completion) == "table"
+	and typed_retry_completion.code == "committed",
+	"typed throttled retry did not resume after the due boundary")
+assert(typed_retry_dispatcher:Stats().outcome_classes.throttled >= 1
+	and typed_retry_dispatcher:Stats().outcome_classes.success >= 1,
+	"typed retry outcomes were not counted")
+typed_retry_dispatcher:Close()
+
+-- A contradictory permanent/unknown retry class is terminal and must not replay.
+local unsafe_retry_governor = new_scheduler()
+local unsafe_retry_dispatcher = Scheduler.new_dispatcher(unsafe_retry_governor, {
+	now_ms = function() return now_ms end,
+})
+local unsafe_retry_attempts, unsafe_retry_completion = 0, nil
+local unsafe_retry_job = unsafe_retry_dispatcher:Schedule(
+	"unsafe-retry-owner", "permanent-outcome", function()
+		unsafe_retry_attempts += 1
+		return { code = "retryable", retry_class = "permanent" }
+	end,
+	{
+		work_class = "maintenance",
+		operation_class = "tracing",
+		read_units = 0,
+		write_units = 0,
+		estimated_bytes = 1024,
+		handler_slots = 1,
+		mutating = false,
+		max_retries = 3,
+		on_complete = function(result) unsafe_retry_completion = result end,
+	}
+)
+assert(unsafe_retry_job.code == "accepted", "permanent class fixture was rejected")
+for _ = 1, 100 do
+	if unsafe_retry_completion ~= nil then break end
+	task.wait(0.001)
+end
+assert(unsafe_retry_attempts == 1 and type(unsafe_retry_completion) == "table"
+	and unsafe_retry_completion.code == "retry_rejected",
+	"permanent-class work was blindly replayed")
+assert(unsafe_retry_dispatcher:Stats().outcome_classes.permanent >= 1,
+	"permanent outcome class was not measured")
+unsafe_retry_dispatcher:Close()
+
 -- A high-priority workflow may temporarily raise a ready prerequisite's urgency,
 -- but cannot change the prerequisite's original lane or business identity.
 local inheritance = new_scheduler()
