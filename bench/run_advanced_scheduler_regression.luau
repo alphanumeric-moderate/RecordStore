@@ -299,4 +299,61 @@ assert(batched_calls == 1, "due batch callback did not execute")
 dispatcher:Close()
 batch_dispatcher:Close()
 
-print("[PASS] RecordStore advanced scheduling fairness, deadlines, lease reserve, due heap, retries, batching, dependencies and shadow replay.")
+-- The main RecordStore module resolves the same scheduler through its
+-- ModuleScript parent. Runtime scheduling remains opt-in.
+local RecordStore = Shim.load()
+local initial_snapshot = RecordStore.get_scheduler_snapshot()
+assert(initial_snapshot.enabled == false, "advanced core scheduling must start disabled")
+local configured, configure_message = RecordStore.configure_scheduler_policy({
+	revision = initial_snapshot.policy.revision + 1,
+	shadow_enabled = true,
+	shadow_sample_rate = 1,
+})
+assert(configured == "success", "core scheduler rejected policy: " .. tostring(configure_message))
+local enabled, enable_message = RecordStore.set_scheduler_enabled(true)
+assert(enabled, "core scheduler did not enable: " .. tostring(enable_message))
+
+local public_callback_ran = false
+local public_job = RecordStore.schedule_work("integration-owner", "public-scheduler-api", function()
+	public_callback_ran = true
+	return { code = "success" }
+end, { lane = "normal", work_class = "integration-test" })
+assert(public_job.code == "accepted", "public schedule_work API rejected bounded work")
+for _ = 1, 200 do
+	if public_callback_ran then break end
+	task.wait(0.001)
+end
+assert(public_callback_ran, "public scheduled callback did not run")
+assert(RecordStore.get_scheduler_snapshot().dispatcher.completed >= 1,
+	"public scheduler API did not publish completion metrics")
+
+-- A dirty mock Record is autosaved through the selector when explicitly enabled.
+local core_record = RecordStore.Mock.new("SchedulerRegression", "global", "scheduler-player", {
+	schema_version = 1,
+	autosave_interval = 0.05,
+})
+local open_code, open_message = core_record:Open({ coins = 0 })
+assert(open_code == "created" or open_code == "loaded", tostring(open_message))
+local update_code = core_record:Update(function(current)
+	local changed = table.clone(current)
+	changed.coins += 1
+	return changed
+end)
+assert(update_code == "success", "mock Record update failed")
+local saved = false
+for _ = 1, 300 do
+	local stats = core_record:Stats()
+	if stats.dirty == 0 and stats.busy == 0 then saved = true; break end
+	task.wait(0.002)
+end
+assert(saved, "core background autosave did not complete through the selector")
+local dispatch_snapshot = RecordStore.get_scheduler_snapshot().dispatcher
+assert(dispatch_snapshot.accepted >= 2 and dispatch_snapshot.completed >= 2,
+	"core background autosave was not represented in scheduler metrics")
+local closed_code = core_record:Close()
+assert(closed_code == "closed", "scheduler regression fixture failed to close")
+assert(RecordStore.set_scheduler_enabled(false), "core scheduling kill switch failed")
+
+print("[PASS] RecordStore advanced scheduling unit and core integration regressions.")
+Shim.close()
+
