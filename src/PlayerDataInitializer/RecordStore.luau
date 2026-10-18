@@ -9205,7 +9205,7 @@ function record_impl.make_record(name: string, scope: string, key: string, optio
 	return record
 end
 
-local function start_scheduler()
+function record_impl.start_scheduler()
 	if scheduler_started then
 		return
 	end
@@ -9277,7 +9277,7 @@ local function start_scheduler()
 	end)
 end
 
-local function shutdown()
+function record_impl.shutdown()
 	if shutdown_started then
 		return
 	end
@@ -9310,7 +9310,7 @@ local function shutdown()
 	end
 end
 
-local function normalize_options(options: Options): (Options?, string?)
+function record_impl.normalize_options(options: Options): (Options?, string?)
 	if type(options) ~= "table" then
 		return nil, "options must be a table"
 	end
@@ -9411,37 +9411,37 @@ local function normalize_options(options: Options): (Options?, string?)
 	if type(queue_max_attempts) ~= "number" or not math.isfinite(queue_max_attempts) or queue_max_attempts < 1 or queue_max_attempts > MAX_QUEUE_ATTEMPTS or math.floor(queue_max_attempts) ~= queue_max_attempts then
 		return nil, "queue_max_attempts must be an integer from 1 to " .. tostring(MAX_QUEUE_ATTEMPTS)
 	end
-	local function valid_positive_number(value: unknown): boolean
+	function record_impl.valid_positive_number(value: unknown): boolean
 		return type(value) == "number" and math.isfinite(value) and value > 0
 	end
-	local function valid_nonnegative_number(value: unknown): boolean
+	function record_impl.valid_nonnegative_number(value: unknown): boolean
 		return type(value) == "number" and math.isfinite(value) and value >= 0
 	end
 	if type(copied.schema_version) ~= "number" or not math.isfinite(copied.schema_version) or copied.schema_version < 0 or math.floor(copied.schema_version) ~= copied.schema_version then
 		return nil, "schema_version must be a non-negative integer"
 	end
-	if not valid_positive_number(copied.autosave_interval) then
+	if not record_impl.valid_positive_number(copied.autosave_interval) then
 		return nil, "autosave_interval must be a positive finite number"
 	end
-	if not valid_positive_number(copied.lease_duration) then
+	if not record_impl.valid_positive_number(copied.lease_duration) then
 		return nil, "lease_duration must be a positive finite number"
 	end
-	if not valid_positive_number(copied.lease_renewal) then
+	if not record_impl.valid_positive_number(copied.lease_renewal) then
 		return nil, "lease_renewal must be a positive finite number"
 	end
-	if not valid_positive_number(copied.operation_deadline) then
+	if not record_impl.valid_positive_number(copied.operation_deadline) then
 		return nil, "operation_deadline must be a positive finite number"
 	end
 	if copied.lease_duration <= copied.lease_renewal + copied.operation_deadline then
 		return nil, "lease_duration must exceed lease_renewal plus operation_deadline"
 	end
-	if not valid_positive_number(copied.shutdown_deadline) then
+	if not record_impl.valid_positive_number(copied.shutdown_deadline) then
 		return nil, "shutdown_deadline must be a positive finite number"
 	end
-	if not valid_nonnegative_number(copied.budget_wait) then
+	if not record_impl.valid_nonnegative_number(copied.budget_wait) then
 		return nil, "budget_wait must be a finite non-negative number"
 	end
-	if not valid_positive_number(copied.takeover_wait) then
+	if not record_impl.valid_positive_number(copied.takeover_wait) then
 		return nil, "takeover_wait must be a positive finite number"
 	end
 	if copied.shutdown_attempts ~= nil and (type(copied.shutdown_attempts) ~= "number" or not math.isfinite(copied.shutdown_attempts) or copied.shutdown_attempts < 1 or copied.shutdown_attempts > MAX_RETRY_ATTEMPTS or math.floor(copied.shutdown_attempts) ~= copied.shutdown_attempts) then
@@ -9494,7 +9494,7 @@ local function normalize_options(options: Options): (Options?, string?)
 	return copied, nil
 end
 
-local function enqueue_static(name: string, scope: string, key: string, message_type: string, data: JsonValue?, mock: boolean, queue_store_name: string?, operation_deadline: number?): (ResultCode, string?)
+function record_impl.enqueue_static(name: string, scope: string, key: string, message_type: string, data: JsonValue?, mock: boolean, queue_store_name: string?, operation_deadline: number?): (ResultCode, string?)
 	local valid_identity, identity_message = validate_store_identity(name, scope, key)
 	if not valid_identity then
 		return "invalid", identity_message
@@ -9603,11 +9603,11 @@ local function enqueue_static(name: string, scope: string, key: string, message_
 end
 
 function RecordStore.enqueue_async(name: string, scope: string, key: string, message_type: string, data: JsonValue?, queue_store_name: string?, operation_deadline: number?): (ResultCode, string?)
-	return enqueue_static(name, scope, key, message_type, data, false, queue_store_name, operation_deadline)
+	return record_impl.enqueue_static(name, scope, key, message_type, data, false, queue_store_name, operation_deadline)
 end
 
 
-local function runtime_class_limit(work_class: string): number
+function record_impl.runtime_class_limit(work_class: string): number
 	local maximum = runtime_effective_concurrent_requests
 	local foreground_limit = math.max(1, maximum - runtime_options.critical_request_reserve)
 	if work_class == "interactive" then return foreground_limit end
@@ -9686,8 +9686,8 @@ function RecordStore.get_runtime_stats(): { [string]: unknown }
 		},
 		work_class_in_flight = table.clone(runtime_external_in_flight),
 		work_class_limits = {
-			interactive = runtime_class_limit("interactive"), messaging = runtime_class_limit("messaging"),
-			migration = runtime_class_limit("migration"), maintenance = runtime_class_limit("maintenance"), tracing = runtime_class_limit("tracing"),
+			interactive = record_impl.runtime_class_limit("interactive"), messaging = record_impl.runtime_class_limit("messaging"),
+			migration = record_impl.runtime_class_limit("migration"), maintenance = record_impl.runtime_class_limit("maintenance"), tracing = record_impl.runtime_class_limit("tracing"),
 		},
 		next_budget_sample = runtime_next_budget_sample,
 	}
@@ -9756,7 +9756,7 @@ function RecordStore.register_runtime_governor_hooks(hooks: RuntimeGovernorHooks
 	return "success", nil
 end
 
-local function external_governor_admit(
+function record_impl.external_governor_admit(
 	hooks: RuntimeGovernorHooks?,
 	work_class: string,
 	request_kind: string,
@@ -9776,13 +9776,13 @@ local function external_governor_admit(
 	return admission, nil, nil
 end
 
-local function external_governor_release(hooks: RuntimeGovernorHooks?, ticket: unknown)
+function record_impl.external_governor_release(hooks: RuntimeGovernorHooks?, ticket: unknown)
 	if hooks == nil or ticket == nil then return end
 	local ok, message = pcall(hooks.release, ticket)
 	if not ok then runtime_metrics.last_policy_error = "external governor release failed: " .. tostring(message) end
 end
 
-local function external_governor_observe(
+function record_impl.external_governor_observe(
 	hooks: RuntimeGovernorHooks?,
 	request_kind: string,
 	success: boolean,
@@ -9812,7 +9812,7 @@ function RecordStore.run_runtime_request(
 	end
 	local deadline, deadline_error = resolve_operation_deadline(operation_deadline)
 	if deadline == nil then return nil, "invalid", deadline_error end
-	local class_limit = runtime_class_limit(class)
+	local class_limit = record_impl.runtime_class_limit(class)
 	if runtime_external_in_flight[class] >= class_limit then
 		runtime_metrics.budget_rejections += 1
 		return nil, "budget", "shared runtime governor reached the " .. class .. " work-class concurrency cap"
@@ -9832,14 +9832,14 @@ function RecordStore.run_runtime_request(
 			return nil, "budget", "shared runtime service circuit is open"
 		end
 		local hooks = runtime_external_governor_hooks
-		local governor_ticket, governor_code, governor_message = external_governor_admit(hooks, class, "service", true)
+		local governor_ticket, governor_code, governor_message = record_impl.external_governor_admit(hooks, class, "service", true)
 		if governor_code ~= nil then
 			runtime_breaker_cancel_probe("service")
 			runtime_metrics.budget_rejections += 1
 			return nil, governor_code, governor_message
 		end
 		if not acquire_slot(deadline :: number, false) then
-			external_governor_release(hooks, governor_ticket)
+			record_impl.external_governor_release(hooks, governor_ticket)
 			runtime_breaker_cancel_probe("service")
 			runtime_metrics.budget_rejections += 1
 			return nil, "budget", "shared runtime service concurrency reserve is exhausted"
@@ -9850,8 +9850,8 @@ function RecordStore.run_runtime_request(
 		local service_duration = (now_local() - service_started) * 1000
 		release_slot()
 		runtime_external_in_flight[class] = math.max(0, runtime_external_in_flight[class] - 1)
-		external_governor_observe(hooks, "service", service_ok, service_duration, if service_ok then nil else tostring(service_result))
-		external_governor_release(hooks, governor_ticket)
+		record_impl.external_governor_observe(hooks, "service", service_ok, service_duration, if service_ok then nil else tostring(service_result))
+		record_impl.external_governor_release(hooks, governor_ticket)
 		observe_runtime_request("service", service_ok, if service_ok then nil else tostring(service_result), service_duration)
 		if not service_ok then return nil, "unknown", tostring(service_result) end
 		return service_result, nil, nil
@@ -9864,7 +9864,7 @@ function RecordStore.run_runtime_request(
 	end
 	local hooks = runtime_external_governor_hooks
 	local governor_kind = if kind == "read" then "read" else "write"
-	local governor_ticket, governor_code, governor_message = external_governor_admit(hooks, class, governor_kind, kind ~= "read")
+	local governor_ticket, governor_code, governor_message = record_impl.external_governor_admit(hooks, class, governor_kind, kind ~= "read")
 	if governor_code ~= nil then
 		runtime_metrics.budget_rejections += 1
 		return nil, governor_code, governor_message
@@ -9874,7 +9874,7 @@ function RecordStore.run_runtime_request(
 		elseif kind == "write" then Enum.DataStoreRequestType.StandardWrite else nil
 	local acquired = acquire_request(nil, deadline :: number, kind ~= "read", request_type)
 	if not acquired then
-		external_governor_release(hooks, governor_ticket)
+		record_impl.external_governor_release(hooks, governor_ticket)
 		runtime_external_in_flight[class] = math.max(0, runtime_external_in_flight[class] - 1)
 		runtime_metrics.budget_rejections += 1
 		return nil, "budget", "shared runtime request admission was unavailable before the operation deadline"
@@ -9884,8 +9884,8 @@ function RecordStore.run_runtime_request(
 	local duration_ms = (now_local() - started_at) * 1000
 	release_slot()
 	runtime_external_in_flight[class] = math.max(0, runtime_external_in_flight[class] - 1)
-	external_governor_observe(hooks, governor_kind, ok, duration_ms, if ok then nil else tostring(result))
-	external_governor_release(hooks, governor_ticket)
+	record_impl.external_governor_observe(hooks, governor_kind, ok, duration_ms, if ok then nil else tostring(result))
+	record_impl.external_governor_release(hooks, governor_ticket)
 	observe_runtime_request(governor_kind, ok, if ok then nil else tostring(result), duration_ms)
 	if not ok then return nil, "unknown", tostring(result) end
 	return result, nil, nil
@@ -9899,7 +9899,7 @@ function RecordStore.new(name: string, scope: string, key: string, options: Opti
 	if not valid_identity then
 		error(identity_message, 2)
 	end
-	local normalized, options_message = normalize_options(options)
+	local normalized, options_message = record_impl.normalize_options(options)
 	if normalized == nil then
 		error(options_message, 2)
 	end
@@ -9908,12 +9908,12 @@ function RecordStore.new(name: string, scope: string, key: string, options: Opti
 		error("normalized options are missing", 2)
 	end
 	local record = record_impl.make_record(name, scope, key, valid_options, false)
-	start_scheduler()
+	record_impl.start_scheduler()
 	return record
 end
 
 RecordStore.Mock = (function()
-	local function mock_new(name: string, scope: string, key: string, options: Options): Record
+	function record_impl.mock_new(name: string, scope: string, key: string, options: Options): Record
 		if closing then
 			error("RecordStore is shutting down", 2)
 		end
@@ -9921,7 +9921,7 @@ RecordStore.Mock = (function()
 		if not valid_identity then
 			error(identity_message, 2)
 		end
-		local normalized, options_message = normalize_options(options)
+		local normalized, options_message = record_impl.normalize_options(options)
 		if normalized == nil then
 			error(options_message, 2)
 		end
@@ -9931,11 +9931,11 @@ RecordStore.Mock = (function()
 		end
 		valid_options.messaging_enabled = false
 		valid_options.takeover_enabled = false
-		start_scheduler()
+		record_impl.start_scheduler()
 		return record_impl.make_record(name, scope, key, valid_options, true)
 	end
 
-	local function read_async_mock(name: string, scope: string, key: string, operation_deadline: number?, legacy_decoder: LegacyDecoder?): (Snapshot?, ResultCode, string?)
+	function record_impl.read_async_mock(name: string, scope: string, key: string, operation_deadline: number?, legacy_decoder: LegacyDecoder?): (Snapshot?, ResultCode, string?)
 		if legacy_decoder ~= nil and type(legacy_decoder) ~= "function" then
 			return nil, "invalid", "legacy_decoder must be a function"
 		end
@@ -9972,19 +9972,19 @@ RecordStore.Mock = (function()
 		return snapshot_from_envelope(key, envelope, info), "success", nil
 	end
 
-	local function list_versions_mock(name: string, scope: string, key: string, sort_direction: Enum.SortDirection?, min_date_ms: number?, max_date_ms: number?, max_versions: number?, operation_deadline: number?): ({ HistoryEntry }?, ResultCode, string?)
+	function record_impl.list_versions_mock(name: string, scope: string, key: string, sort_direction: Enum.SortDirection?, min_date_ms: number?, max_date_ms: number?, max_versions: number?, operation_deadline: number?): ({ HistoryEntry }?, ResultCode, string?)
 		return list_versions_internal(name, scope, key, sort_direction, min_date_ms, max_date_ms, max_versions, operation_deadline, true)
 	end
 
-	local function get_version_mock(name: string, scope: string, key: string, version: string, operation_deadline: number?, legacy_decoder: LegacyDecoder?): (Snapshot?, ResultCode, string?)
+	function record_impl.get_version_mock(name: string, scope: string, key: string, version: string, operation_deadline: number?, legacy_decoder: LegacyDecoder?): (Snapshot?, ResultCode, string?)
 		return get_version_internal(name, scope, key, version, operation_deadline, legacy_decoder, true)
 	end
 
-	local function get_version_at_time_mock(name: string, scope: string, key: string, timestamp_ms: number, operation_deadline: number?, legacy_decoder: LegacyDecoder?): (Snapshot?, string?, ResultCode, string?)
+	function record_impl.get_version_at_time_mock(name: string, scope: string, key: string, timestamp_ms: number, operation_deadline: number?, legacy_decoder: LegacyDecoder?): (Snapshot?, string?, ResultCode, string?)
 		return get_version_at_time_internal(name, scope, key, timestamp_ms, operation_deadline, legacy_decoder, true)
 	end
 
-	local function mock_seed_queue_value(
+	function record_impl.mock_seed_queue_value(
 		name: string,
 		scope: string,
 		key: string,
@@ -10018,7 +10018,7 @@ RecordStore.Mock = (function()
 		return "success", nil
 	end
 
-	local function mock_get_queue_raw(
+	function record_impl.mock_get_queue_raw(
 		name: string,
 		scope: string,
 		key: string,
@@ -10034,7 +10034,7 @@ RecordStore.Mock = (function()
 		return if entry == nil then nil else copy_value(entry.Value)
 	end
 
-	local function mock_seed_record_raw(name: string, scope: string, key: string, value: unknown): (ResultCode, string?)
+	function record_impl.mock_seed_record_raw(name: string, scope: string, key: string, value: unknown): (ResultCode, string?)
 		local valid_identity, identity_message = validate_store_identity(name, scope, key)
 		if not valid_identity then
 			return "invalid", identity_message
@@ -10059,13 +10059,13 @@ RecordStore.Mock = (function()
 		return "success", nil
 	end
 
-	local function mock_get_record_raw(name: string, scope: string, key: string): unknown
+	function record_impl.mock_get_record_raw(name: string, scope: string, key: string): unknown
 		local store = get_mock_store(name, scope)
 		local entry = store[key]
 		return if entry == nil then nil else copy_value(entry.Value)
 	end
 
-	local function mock_get_record_version_raw(name: string, scope: string, key: string, version: string): unknown
+	function record_impl.mock_get_record_version_raw(name: string, scope: string, key: string, version: string): unknown
 		local store = get_mock_store(name, scope)
 		local entry = store[key]
 		if entry == nil then
@@ -10075,7 +10075,7 @@ RecordStore.Mock = (function()
 		return if historical == nil then nil else copy_value(historical.Value)
 	end
 
-	local function mock_set_test_clock(clock: (() -> number)?)
+	function record_impl.mock_set_test_clock(clock: (() -> number)?)
 		if clock ~= nil and type(clock) ~= "function" then
 			error("test clock must be a function or nil", 2)
 		end
@@ -10083,7 +10083,7 @@ RecordStore.Mock = (function()
 		mock_test_clock_offset = 0
 	end
 
-	local function mock_set_update_replay(retries: number, advance_seconds: number)
+	function record_impl.mock_set_update_replay(retries: number, advance_seconds: number)
 		if type(retries) ~= "number"
 			or not math.isfinite(retries)
 			or math.floor(retries) ~= retries
@@ -10103,7 +10103,7 @@ RecordStore.Mock = (function()
 		mock_update_replay_advance_seconds = advance_seconds
 	end
 
-	local function mock_set_update_failures(count: number, result: ResultCode?, message: string?)
+	function record_impl.mock_set_update_failures(count: number, result: ResultCode?, message: string?)
 		if type(count) ~= "number"
 			or not math.isfinite(count)
 			or math.floor(count) ~= count
@@ -10128,7 +10128,7 @@ RecordStore.Mock = (function()
 		mock_update_failure_message = message
 	end
 
-	local function mock_set_update_response_losses(count: number, message: string?)
+	function record_impl.mock_set_update_response_losses(count: number, message: string?)
 		if type(count) ~= "number"
 			or not math.isfinite(count)
 			or math.floor(count) ~= count
@@ -10144,7 +10144,7 @@ RecordStore.Mock = (function()
 		mock_update_response_lost_message = message
 	end
 
-	local function mock_claim_queue_message(record: Record): (MockQueueClaim?, ResultCode, string?)
+	function record_impl.mock_claim_queue_message(record: Record): (MockQueueClaim?, ResultCode, string?)
 		local state = private[record]
 		if state == nil or not state.backend.mock then
 			return nil, "invalid", "queue claim requires a live mock record"
@@ -10163,7 +10163,7 @@ RecordStore.Mock = (function()
 		}, result, message
 	end
 
-	local function mock_dead_letter_queue_message(record: Record, message_id: string, lock_token: string, error_message: string): (ResultCode, string?)
+	function record_impl.mock_dead_letter_queue_message(record: Record, message_id: string, lock_token: string, error_message: string): (ResultCode, string?)
 		local state = private[record]
 		if state == nil or not state.backend.mock then
 			return "invalid", "dead-letter mutation requires a live mock record"
@@ -10180,7 +10180,7 @@ RecordStore.Mock = (function()
 	end
 
 	local Mock = {
-		new = mock_new,
+		new = record_impl.mock_new,
 		renew = function(record: Record): (ResultCode, string?)
 			local state = private[record]
 			if state == nil or not state.backend.mock then
@@ -10190,7 +10190,7 @@ RecordStore.Mock = (function()
 			sync_public(record)
 			return result, message
 		end,
-		read_async = read_async_mock,
+		read_async = record_impl.read_async_mock,
 		check_durability_risks = function()
 			local checked = 0
 			for record in active_records do
@@ -10202,28 +10202,28 @@ RecordStore.Mock = (function()
 			end
 			return checked
 		end,
-		claim_queue_message = mock_claim_queue_message,
-		dead_letter_queue_message = mock_dead_letter_queue_message,
-		list_versions_async = list_versions_mock,
-		get_version_async = get_version_mock,
-		get_version_at_time_async = get_version_at_time_mock,
+		claim_queue_message = record_impl.mock_claim_queue_message,
+		dead_letter_queue_message = record_impl.mock_dead_letter_queue_message,
+		list_versions_async = record_impl.list_versions_mock,
+		get_version_async = record_impl.get_version_mock,
+		get_version_at_time_async = record_impl.get_version_at_time_mock,
 		enqueue_async = function(name: string, scope: string, key: string, message_type: string, data: JsonValue?, queue_store_name: string?, operation_deadline: number?): (ResultCode, string?)
-			return enqueue_static(name, scope, key, message_type, data, true, queue_store_name, operation_deadline)
+			return record_impl.enqueue_static(name, scope, key, message_type, data, true, queue_store_name, operation_deadline)
 		end,
 		seed_queue_raw = function(name: string, scope: string, key: string, value: unknown, queue_store_name: string?): (ResultCode, string?)
-			return mock_seed_queue_value(name, scope, key, value, false, queue_store_name)
+			return record_impl.mock_seed_queue_value(name, scope, key, value, false, queue_store_name)
 		end,
 		seed_legacy_queue = function(name: string, scope: string, key: string, value: unknown, queue_store_name: string?): (ResultCode, string?)
-			return mock_seed_queue_value(name, scope, key, value, true, queue_store_name)
+			return record_impl.mock_seed_queue_value(name, scope, key, value, true, queue_store_name)
 		end,
-		get_queue_raw = mock_get_queue_raw,
-		seed_record_raw = mock_seed_record_raw,
-		get_record_raw = mock_get_record_raw,
-		get_record_version_raw = mock_get_record_version_raw,
-		set_test_clock = mock_set_test_clock,
-		set_update_replay = mock_set_update_replay,
-		set_update_failures = mock_set_update_failures,
-		set_update_response_losses = mock_set_update_response_losses,
+		get_queue_raw = record_impl.mock_get_queue_raw,
+		seed_record_raw = record_impl.mock_seed_record_raw,
+		get_record_raw = record_impl.mock_get_record_raw,
+		get_record_version_raw = record_impl.mock_get_record_version_raw,
+		set_test_clock = record_impl.mock_set_test_clock,
+		set_update_replay = record_impl.mock_set_update_replay,
+		set_update_failures = record_impl.mock_set_update_failures,
+		set_update_response_losses = record_impl.mock_set_update_response_losses,
 		reset = function()
 			local mock_records: { { id: string, record: Record } } = {}
 			for id, record in pairs(records) do
