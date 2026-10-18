@@ -207,7 +207,7 @@ local function run_erasure_compaction_and_simulator_construction()
 
 	-- Compile and construct only; the simulator's fault APIs are not invoked in the feature phase.
 	local simulator = Simulator.new()
-	assert(type(simulator.Store("syntax-check").UpdateAsync) == "function")
+	assert(type(simulator:Store("syntax-check").UpdateAsync) == "function")
 end
 
 for _ = 1, 2 do
