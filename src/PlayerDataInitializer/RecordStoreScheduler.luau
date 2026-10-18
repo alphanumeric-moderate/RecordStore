@@ -1203,7 +1203,7 @@ local function new_dispatcher(governor, options)
 			dispatcher.metrics.retries += 1
 		end
 		local admission = governor:Admit(
-			item.work_class, item.operation_class, effective_cost(item), item.mutating ~= false,
+			item.work_class, item.operation_class, item.cost or 1, item.mutating ~= false,
 			item.service_class == "critical" or item.lane == "lease_renewal"
 		)
 		if admission.code ~= "admitted" then
