@@ -1920,6 +1920,7 @@ local function new_erasure(store, families, options)
 			return canonical({ user_id = user_id, rendered = rendered, families = family_contract })
 		end)
 		if not ok then return nil, tostring(material) end
+		if #material > MAX_REQUEST_BYTES * 4 then return nil, "RTBF template contract exceeds its bounded material limit" end
 		return digest(material), material
 	end
 	function coordinator:PlanAsync(user_id, erasure_id)
@@ -2120,7 +2121,7 @@ local function new_erasure(store, families, options)
 		if manifest.version ~= 1 or not valid_text(manifest.status, 32) or not valid_status[manifest.status]
 			or type(manifest.coverage) ~= "table" or type(manifest.rtbf_coverage_verified) ~= "boolean"
 			or not valid_text(manifest.template_contract_digest, 128)
-			or not valid_text(manifest.template_contract_material, MAX_REQUEST_BYTES)
+			or not valid_text(manifest.template_contract_material, MAX_REQUEST_BYTES * 4)
 			or type(manifest.template_verification_passed) ~= "boolean"
 			or not valid_text(manifest.plan_material, MAX_REQUEST_BYTES * 64)
 		then
