@@ -444,8 +444,8 @@ unsafe_retry_dispatcher:Close()
 
 end
 
--- A high-priority workflow may temporarily raise a ready prerequisite's urgency,
 do
+-- A high-priority workflow may temporarily raise a ready prerequisite's urgency,
 -- but cannot change the prerequisite's original lane or business identity.
 local inheritance = new_scheduler()
 enqueue(inheritance, { id = "ready-prerequisite", owner_id = "workflow-owner", work_class = "saga", lane = "background" })
@@ -1085,8 +1085,8 @@ assert(closing_dispatcher:Stats().closed, "dispatcher close state was not publis
 
 end
 
--- The main RecordStore module resolves the same scheduler through its
 do
+-- The main RecordStore module resolves the same scheduler through its
 -- ModuleScript parent. Runtime scheduling remains opt-in.
 local RecordStore = Shim.load()
 local initial_snapshot = RecordStore.get_scheduler_snapshot()
