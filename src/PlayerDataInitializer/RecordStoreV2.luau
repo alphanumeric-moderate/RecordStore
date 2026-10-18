@@ -2595,6 +2595,27 @@ local function new_projections(store, options)
 		if not def then return { code = "not_found" } end
 		if type(event) ~= "table" or not valid_text(event.event_id, 128) or not valid_text(event.entity_id, 128)
 			or not finite(event.source_revision) or event.source_revision < 0 or math.floor(event.source_revision) ~= event.source_revision then return { code = "invalid" } end
+		if event.subject_user_ids ~= nil then
+			if type(event.subject_user_ids) ~= "table" then return { code = "invalid", message = "subject_user_ids must be a bounded dense array" } end
+			local subject_count = key_count(event.subject_user_ids)
+			if subject_count > 100 then return { code = "capacity", message = "projection subject list exceeds the supported bound" } end
+			for index in pairs(event.subject_user_ids) do
+				if type(index) ~= "number" or not finite(index) or math.floor(index) ~= index or index < 1 or index > subject_count then
+					return { code = "invalid", message = "subject_user_ids must be a dense array" }
+				end
+			end
+			local seen_subjects = {}
+			for index = 1, subject_count do
+				local user_id = event.subject_user_ids[index]
+				if not finite(user_id) or user_id < 1 or math.floor(user_id) ~= user_id or seen_subjects[user_id] then
+					return { code = "invalid", message = "subject_user_ids must contain unique positive integer UserIds" }
+				end
+				seen_subjects[user_id] = true
+			end
+			if subject_count > 0 and type(options.is_erased) ~= "function" then
+				return { code = "unsupported", message = "projection events with subject UserIds require an authoritative erasure-status adapter" }
+			end
+		end
 		if type(options.is_erased) == "function" then
 			for _, user_id in ipairs(event.subject_user_ids or {}) do
 				local erased, error_value = io_call(options.is_erased, user_id)
