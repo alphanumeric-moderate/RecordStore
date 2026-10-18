@@ -445,6 +445,25 @@ assert(old_generation_delete.code == "deleted",
 assert(stale_record:Stats().generation == before_erase.generation + 1,
 	"repeated erasure changed the tombstone generation")
 
+local tampered_manifest_store = new_store()
+local tampered_manifest = V2.Erasure.new(tampered_manifest_store, { family(true) }, {
+	verify_templates = function(_user_id, rendered) return type(rendered) == "table" and #rendered == 1 end,
+})
+local tampered_plan = tampered_manifest:PlanAsync(128, "erasure-tampered-entry")
+assert(tampered_plan.code == "success" and tampered_plan.rtbf_coverage_verified == true,
+	"tampered-manifest fixture did not create a verified plan")
+tampered_manifest_store:UpdateAsync("rv2erase-u128", function(old)
+	local changed = clone(old)
+	changed.entries[1].item.key = "Unverified_128"
+	return changed
+end)
+local deletes_before_tamper = delete_calls
+local tampered_result = tampered_manifest:ExecuteAsync(128, "erasure-tampered-entry", 1)
+assert(tampered_result.code == "corrupt",
+	"erasure accepted a persisted entry outside the verified template inventory")
+assert(delete_calls == deletes_before_tamper,
+	"erasure performed a destructive action using a tampered manifest entry")
+
 local mutating_adapter_family = family(true)
 local mutating_adapter_calls = 0
 mutating_adapter_family.redact_or_delete_if_generation = function(item, _user_id, _erasure_id)
