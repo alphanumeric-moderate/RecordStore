@@ -1260,7 +1260,9 @@ local function new_dispatcher(governor, options)
 			local result_code = if type(callback_result) == "table" then callback_result.code
 				elseif callback_ok and (callback_result == true or callback_result == nil) then "success"
 				elseif not callback_ok then "unknown" else tostring(callback_result)
-			local operation_kind = if type(entry) == "table" then entry.operation_class or entry.work_class else "scheduled_callback"
+			-- Keep observations keyed exactly like admission. Missing operation_class
+			-- uses the same "default" request-kind key as the governor.
+			local operation_kind = if type(entry) == "table" then entry.operation_class or "default" else "scheduled_callback"
 			local failed = not callback_ok or result_code == "unknown" or result_code == "budget"
 				or result_code == "retryable" or result_code == "retry_rejected" or result_code == "retry_exhausted"
 			local observed_budget = if type(callback_result) == "table" and finite(callback_result.budget)
