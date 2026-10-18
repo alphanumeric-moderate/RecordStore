@@ -274,5 +274,28 @@ assert(corrupt.code == "corrupt", "projection did not fail closed on a malformed
 local corrupt_read = corrupt_projection:GetAsync("player_balance_v1", "player-bad")
 assert(corrupt_read.code == "corrupt", "projection read returned a malformed durable row as success")
 
+local receipt_seed = corrupt_projection:ApplyAsync("player_balance_v1", {
+	event_id = "projection-seed-bad-receipt",
+	entity_id = "player-bad-receipt",
+	source_revision = 1,
+})
+assert(receipt_seed.code == "committed", "could not seed a row for latest-event receipt validation")
+local receipt_key = nil
+for key, row in pairs(corrupt_store.values) do
+	if type(row) == "table" and row.entity_id == "player-bad-receipt" then receipt_key = key; break end
+end
+assert(receipt_key ~= nil, "latest-event receipt fixture row was not stored")
+corrupt_store.values[receipt_key].last_event_id = "missing-event-receipt"
+local corrupt_receipt_apply = corrupt_projection:ApplyAsync("player_balance_v1", {
+	event_id = "projection-after-bad-receipt",
+	entity_id = "player-bad-receipt",
+	source_revision = 2,
+})
+assert(corrupt_receipt_apply.code == "corrupt",
+	"projection update accepted a latest-event receipt missing from its event ledger")
+local corrupt_receipt_read = corrupt_projection:GetAsync("player_balance_v1", "player-bad-receipt")
+assert(corrupt_receipt_read.code == "corrupt",
+	"projection read accepted a latest-event receipt missing from its event ledger")
+
 print("[PASS] Projection transform purity, event idempotency, stale revisions, ambiguous writes and unique-key reservations.")
 Shim.close()
