@@ -338,12 +338,10 @@ The authoritative section-by-section design map is
 [`docs/superpowers/specs/2026-10-17-recordstore-v2-implementation-matrix.md`](docs/superpowers/specs/2026-10-17-recordstore-v2-implementation-matrix.md).
 It separates code presence from compilation, failure-test, benchmark and Roblox acceptance status.
 
-PR #35 currently uses a `[benchmark-only]` phase marker. During that phase the CodSpeed workflow
-skips regression/failure suites and benchmarks successful paths, including the shared request gate,
-grouped outbox dispatch and wake-up acceleration workloads. These are configured workloads, not
-results: a fresh run on the current head is not yet verified. Remove the marker only in the separate
-verification pass. Lune/Mock measurements are not real Roblox service latency or production acceptance
-evidence.
+PR #36 is the active implementation branch. Its CodSpeed workflow registers the regression,
+failure and benchmark suites, but no run on the current head has been verified. Keep that distinction
+explicit until the separate verification pass records actual results. Lune/Mock measurements are not
+real Roblox service latency or production acceptance evidence.
 
 ## Durability status and session waiting
 
