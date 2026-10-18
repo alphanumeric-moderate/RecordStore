@@ -352,6 +352,9 @@ end)
 local unsupported = V2.Erasure.new(unsupported_store, {}, {})
 local unsupported_result = unsupported:IsErased(119)
 assert(unsupported_result == nil, "unknown/future erasure state did not fail closed")
+local unsupported_execute = unsupported:ExecuteAsync(119, "future-erasure", 1)
+assert(unsupported_execute.code == "unsupported_schema",
+	"erasure execution accepted an unsupported manifest version")
 
 Fake:Reset()
 local profile_options = {
