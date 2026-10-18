@@ -2753,14 +2753,18 @@ local function new_projections(store, options)
 		max_pages = bounded_integer(max_pages, 4, 1, 64)
 		local processed = 0
 		for _ = 1, max_pages do
-			local items, next_cursor, complete = io_call(fetch_page, cursor, 64)
+			local cursor_ok, cursor_snapshot = pcall(copy, cursor)
+			if not cursor_ok then return { code = "invalid", processed = processed, cursor = nil, message = "rebuild cursor must be an acyclic value" } end
+			local items, next_cursor, complete = io_call(fetch_page, cursor_snapshot, 64)
 			if type(items) ~= "table" then return { code = "unknown", processed = processed, cursor = cursor } end
+			local next_cursor_ok, next_cursor_snapshot = pcall(copy, next_cursor)
+			if not next_cursor_ok then return { code = "invalid", processed = processed, cursor = cursor, message = "fetch_page returned a cyclic cursor" } end
 			for _, event in ipairs(items) do
 				local result = self:ApplyAsync(name, event)
 				if result.code ~= "committed" and result.code ~= "duplicate" and result.code ~= "stale" then return { code = result.code, processed = processed, cursor = cursor } end
 				processed += 1
 			end
-			cursor = next_cursor
+			cursor = next_cursor_snapshot
 			if complete == true or cursor == nil then return { code = "committed", processed = processed, cursor = cursor, complete = true } end
 		end
 		return { code = "incomplete", processed = processed, cursor = cursor, complete = false }
