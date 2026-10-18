@@ -1120,8 +1120,10 @@ local function new_governor(options)
 	local function make_shadow_state(self)
 		return {
 			queue = copy(self.queue), completed = copy(self.completed), known = copy(self.known),
-			active_owner = copy(self.active_owner), drr_deficit = copy(self.drr_deficit),
-			drr_cursor_key = self.drr_cursor_key, high_streak = self.high_streak,
+			failed = copy(self.failed), active_owner = copy(self.active_owner),
+			active_renewals_by_owner = copy(self.active_renewals_by_owner),
+			drr_deficit = copy(self.drr_deficit), drr_cursor_key = self.drr_cursor_key,
+			high_streak = self.high_streak, urgent_streak = self.urgent_streak,
 			policy = copy(self.policy),
 		}
 	end
