@@ -38,8 +38,9 @@ local function verifier(name, enabled)
 	end
 end
 
-local function rollout_options()
+local function rollout_options(expected_matrix_digest)
 	return {
+		expected_matrix_digest = expected_matrix_digest or "matrix-digest-v2",
 		verify_compatibility = verifier("compatibility"),
 		verify_writers_drained = verifier("writers-drained"),
 		verify_activation_frozen = verifier("activation-freeze"),
@@ -195,6 +196,16 @@ local activated = rollout:ActivateAsync("rollout-main", "activate-main-1")
 assert(activated.code == "committed" and activated.phase == "active", "verified rollout did not activate")
 local duplicate_activation = rollout:ActivateAsync("rollout-main", "activate-main-1")
 assert(duplicate_activation.code == "duplicate", "activation retry was not idempotent")
+
+local mismatched_rollout = V2.Rollout.new(store, rollout_options("old-matrix-digest"))
+local mismatched_allowed, mismatched_message = mismatched_rollout:CanUseAsync("rollout-main", "enqueue")
+assert(mismatched_allowed == false and string.find(tostring(mismatched_message), "matrix digest", 1, true) ~= nil,
+	"a runtime with a mismatched compatibility digest authorized V2 writes")
+local unpinned_rollout = V2.Rollout.new(store, {})
+local unpinned_allowed, unpinned_message = unpinned_rollout:CanUseAsync("rollout-main", "enqueue")
+assert(unpinned_allowed == false and string.find(tostring(unpinned_message), "expected_matrix_digest", 1, true) ~= nil,
+	"a rollout guard without an expected compatibility digest authorized V2 writes")
+
 local accepted = mailbox:EnqueueAsync("reward", { coins = 3 }, { idempotency_key = "post-activation" })
 assert(accepted.code == "accepted", "active rollout did not authorize mailbox enqueue: " .. tostring(accepted.error))
 local allowed_transaction = guarded_v2.Transactions.Run(
@@ -260,6 +271,7 @@ assert(conflicting.code == "conflict", "rollout ID was allowed to change the com
 
 local blocked_store = new_store()
 local blocked = V2.Rollout.new(blocked_store, {
+	expected_matrix_digest = "matrix-digest",
 	verify_compatibility = verifier("compatibility"),
 	verify_writers_drained = verifier("writers-drained", false),
 	verify_activation_frozen = verifier("activation-freeze"),
@@ -279,7 +291,7 @@ local unavailable = V2.Rollout.new(unavailable_store, rollout_options())
 local unavailable_allowed = unavailable:CanUseAsync("rollout-unavailable", "enqueue")
 assert(unavailable_allowed == false, "unavailable rollout manifest did not fail closed")
 
-local incomplete = V2.Rollout.new(new_store(), {})
+local incomplete = V2.Rollout.new(new_store(), { expected_matrix_digest = "matrix" })
 assert(incomplete:PrepareAsync("rollout-no-verifiers", "matrix").code == "prepared")
 assert(incomplete:AttestAsync("rollout-no-verifiers").code == "unsupported",
 	"rollout activated without required compatibility/drain/fencing verifiers")
