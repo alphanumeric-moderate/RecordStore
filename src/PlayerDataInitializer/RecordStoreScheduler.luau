@@ -233,6 +233,18 @@ local function new_governor(options)
 		then
 			return { code = "invalid", terminal = true, message = "invalid multi-dimensional admission estimate" }, false, false
 		end
+		if read_units > self.policy.max_read_units_in_flight then
+			return { code = "capacity", terminal = true, message = "work item exceeds the StandardRead admission cap" }, false, true
+		end
+		if write_units > self.policy.max_write_units_in_flight then
+			return { code = "capacity", terminal = true, message = "work item exceeds the StandardWrite admission cap" }, false, true
+		end
+		if estimated_bytes > self.policy.max_estimated_bytes_in_flight then
+			return { code = "capacity", terminal = true, message = "work item exceeds the estimated byte admission cap" }, false, true
+		end
+		if handler_slots > self.policy.max_handler_slots_in_flight then
+			return { code = "capacity", terminal = true, message = "work item exceeds the handler-slot admission cap" }, false, true
+		end
 		local critical = critical_override == true or work_class == "critical"
 			or work_class == "profile_save" or work_class == "profile_release"
 		if self.policy.mode == "read_only" and mutating and not critical then
