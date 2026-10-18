@@ -537,12 +537,15 @@ local update_code = core_record:Update(function(current)
 end)
 assert(update_code == "success", "mock Record update failed")
 local saved = false
-for _ = 1, 300 do
+-- The RecordStore mock runs its background selector on a one-second cadence.
+-- Allow multiple ticks instead of timing this integration assertion below one tick.
+local save_deadline = os.clock() + 3
+while not saved and os.clock() < save_deadline do
 	local stats = core_record:Stats()
 	if stats.dirty == 0 and stats.busy == 0 then saved = true; break end
 	task.wait(0.002)
 end
-assert(saved, "core background autosave did not complete through the selector")
+assert(saved, "core background autosave did not complete through the selector within three seconds")
 local dispatch_snapshot = RecordStore.get_scheduler_snapshot().dispatcher
 assert(dispatch_snapshot.accepted >= 3 and dispatch_snapshot.completed >= 3,
 	"public, delayed, and core background work were not represented in scheduler metrics")
