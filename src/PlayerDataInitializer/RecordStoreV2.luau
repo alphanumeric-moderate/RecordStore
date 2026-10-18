@@ -2090,7 +2090,7 @@ local function new_erasure(store, families, options)
 			created_at = manifest.created_at,
 		})
 		if not plan_ok then return { code = "invalid", message = "erasure plan is not canonicalizable: " .. tostring(plan_material) } end
-		if #plan_material > MAX_REQUEST_BYTES * 64 then
+		if #plan_material > MAX_REQUEST_BYTES * 63 then
 			return { code = "capacity", message = "immutable erasure plan material exceeds the bounded manifest limit" }
 		end
 		manifest.plan_material = plan_material
