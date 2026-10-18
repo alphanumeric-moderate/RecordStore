@@ -111,6 +111,29 @@ assert(duplicate_reservation.code == "duplicate", "same entity did not receive d
 local conflict_reservation = reservations:ReserveUnique("username", "Barcode", "player-2", "reserve-op-3")
 assert(conflict_reservation.code == "conflict", "unique reservation allowed a second entity to claim the same value")
 
+local protected_store = new_store()
+local protected_projections = V2.Projections.new(protected_store)
+assert(protected_projections:Register("subject_projection_v1", 1, function(current) return current end))
+local missing_erasure_gate = protected_projections:ApplyAsync("subject_projection_v1", {
+	event_id = "projection-erasure-gate",
+	entity_id = "player-erased",
+	source_revision = 1,
+	subject_user_ids = { 987654321 },
+})
+assert(missing_erasure_gate.code == "unsupported",
+	"subject-bound projection bypassed the required authoritative erasure adapter")
+local erased_projections = V2.Projections.new(protected_store, {
+	is_erased = function(_user_id) return true end,
+})
+assert(erased_projections:Register("subject_projection_v1", 1, function(current) return current end))
+local erased_event = erased_projections:ApplyAsync("subject_projection_v1", {
+	event_id = "projection-erased-event",
+	entity_id = "player-erased",
+	source_revision = 1,
+	subject_user_ids = { 987654321 },
+})
+assert(erased_event.code == "erased", "projection recreated data for a durably erased subject")
+
 local corrupt_store = new_store()
 local corrupt_projection = V2.Projections.new(corrupt_store)
 assert(corrupt_projection:Register("player_balance_v1", 1, function(current) return current end))
