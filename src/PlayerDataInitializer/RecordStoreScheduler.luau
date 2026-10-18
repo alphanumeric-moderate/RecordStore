@@ -763,6 +763,22 @@ local function new_governor(options)
 		local valid_service_classes = { critical = true, interactive = true, normal = true, bulk = true, best_effort = true }
 		if value.service_class ~= nil and not valid_service_classes[value.service_class] then return { code = "invalid", message = "unsupported service_class" } end
 		if value.mutating ~= nil and type(value.mutating) ~= "boolean" then return { code = "invalid", message = "mutating must be boolean" } end
+		if value.batchable ~= nil and type(value.batchable) ~= "boolean" then return { code = "invalid", message = "batchable must be boolean" } end
+		if value.batchable == true then
+			local batch_size = if value.batch_size == nil then math.min(4, self.policy.max_batch) else value.batch_size
+			local batch_backlog = if value.batch_backlog == nil then batch_size else value.batch_backlog
+			if not finite(batch_size) or math.floor(batch_size) ~= batch_size or batch_size < 1 or batch_size > self.policy.max_batch then
+				return { code = "invalid", message = "batch_size must fit max_batch" }
+			end
+			if not finite(batch_backlog) or math.floor(batch_backlog) ~= batch_backlog
+				or batch_backlog < 1 or batch_backlog > self.policy.queue_capacity
+			then
+				return { code = "invalid", message = "batch_backlog must fit queue_capacity" }
+			end
+			value.batch_size, value.batch_backlog = batch_size, batch_backlog
+		elseif value.batch_size ~= nil or value.batch_backlog ~= nil then
+			return { code = "invalid", message = "batch sizing requires batchable = true" }
+		end
 		local dependencies = value.dependencies or {}
 		if type(dependencies) ~= "table" or #dependencies > 32 then return { code = "invalid", message = "dependencies must be an array of at most 32 IDs" } end
 		local dependency_count, seen_dependencies = 0, {}
@@ -1625,8 +1641,9 @@ local function new_dispatcher(governor, options)
 			dependencies = schedule_options.dependencies, read_units = schedule_options.read_units,
 			write_units = schedule_options.write_units, estimated_bytes = schedule_options.estimated_bytes,
 			handler_slots = schedule_options.handler_slots, cost = schedule_options.cost,
-			mutating = schedule_options.mutating, batchable = schedule_options.batchable,
-			batch_size = batch_size, batch_backlog = batch_backlog,
+			mutating = schedule_options.mutating, batchable = schedule_options.batchable == true,
+			batch_size = if schedule_options.batchable == true then batch_size else nil,
+			batch_backlog = if schedule_options.batchable == true then batch_backlog else nil,
 		}
 		local accepted = governor:Enqueue(item)
 		if type(accepted) ~= "table" or accepted.code ~= "accepted" then
