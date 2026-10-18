@@ -1896,17 +1896,19 @@ local function new_erasure(store, families, options)
 		return result, nil
 	end
 	local function contract_digest_for(user_id, rendered)
-		local family_contract = {}
-		for _, family in ipairs(coordinator.families) do
-			table.insert(family_contract, {
-				name = family.name,
-				templates_verified = family.templates_verified == true,
-				inventory_verified = family.inventory_verified == true,
-				history_inventory_verified = family.history_inventory_verified == true,
-				templates = copy(family.templates or {}),
-			})
-		end
-		local ok, material = pcall(canonical, { user_id = user_id, rendered = rendered, families = family_contract })
+		local ok, material = pcall(function()
+			local family_contract = {}
+			for _, family in ipairs(coordinator.families) do
+				table.insert(family_contract, {
+					name = family.name,
+					templates_verified = family.templates_verified == true,
+					inventory_verified = family.inventory_verified == true,
+					history_inventory_verified = family.history_inventory_verified == true,
+					templates = copy(family.templates or {}),
+				})
+			end
+			return canonical({ user_id = user_id, rendered = rendered, families = family_contract })
+		end)
 		if not ok then return nil, tostring(material) end
 		return digest(material), nil
 	end
