@@ -259,6 +259,13 @@ local function new_governor(options)
 		end
 		local critical = critical_override == true or work_class == "critical"
 			or work_class == "profile_save" or work_class == "profile_release"
+		local class_limit = math.min(limits[work_class] or limits.interactive, self.policy.max_in_flight)
+		if cost > self.policy.max_in_flight then
+			return { code = "capacity", terminal = true, message = "work item cost exceeds max_in_flight" }, false, true
+		end
+		if cost > class_limit then
+			return { code = "capacity", terminal = true, message = "work item cost exceeds its work-class admission cap" }, false, true
+		end
 		if self.policy.mode == "read_only" and mutating and not critical then
 			return { code = "read_only", terminal = true, message = "mutating noncritical work is disabled" }, false, true
 		end
@@ -471,7 +478,7 @@ local function new_governor(options)
 		local write_limit = self.policy.max_write_units_in_flight - self.write_units_in_flight
 		local byte_limit = self.policy.max_estimated_bytes_in_flight - self.estimated_bytes_in_flight
 		local unit_cost = math.max(1, unit.read_units + unit.write_units, math.ceil(unit.estimated_bytes / 16384),
-			unit.handler_slots * 4, if finite(item.requested_cost) then item.requested_cost else 0)
+			if finite(item.requested_cost) then item.requested_cost else 0)
 		local global_cost_room = self.policy.max_in_flight - self.in_flight
 		local class_limit = math.min(limits[item.work_class] or limits.interactive, self.policy.max_in_flight)
 		local class_cost_room = class_limit - (self.by_class[item.work_class] or 0)
@@ -651,8 +658,7 @@ local function new_governor(options)
 		local estimated = math.max(
 			1,
 			dimensions.read_units + dimensions.write_units,
-			math.ceil(dimensions.estimated_bytes / 16384),
-			dimensions.handler_slots * 4
+			math.ceil(dimensions.estimated_bytes / 16384)
 		)
 		if finite(item.requested_cost) then estimated = math.max(estimated, math.floor(item.requested_cost)) end
 		return math.clamp(math.ceil(estimated), 1, 256)
