@@ -5,9 +5,9 @@ local luau = require("@lune/luau")
 local serde = require("@lune/serde")
 local Shim = require("./RobloxShim")
 local RecordStore = Shim.load()
-local MailboxV2 = luau.load(fs.readFile("src/PlayerDataInitializer/RecordStoreMailboxV2.luau"), { debugName = "RecordStoreMailboxV2" })()
-local V2Module = luau.load(fs.readFile("src/PlayerDataInitializer/RecordStoreV2.luau"), { debugName = "RecordStoreV2" })()
-local Simulator = luau.load(fs.readFile("src/PlayerDataInitializer/RecordStoreV2Simulator.luau"), { debugName = "RecordStoreV2Simulator" })()
+local MailboxV2 = luau.load(fs.readFile("src/PlayerDataInitializer/RecordStoreMailboxV2.luau"), { debugName = "RecordStoreMailboxV2", environment = Shim.environment })()
+local V2Module = luau.load(fs.readFile("src/PlayerDataInitializer/RecordStoreV2.luau"), { debugName = "RecordStoreV2", environment = Shim.environment })()
+local Simulator = luau.load(fs.readFile("src/PlayerDataInitializer/RecordStoreV2Simulator.luau"), { debugName = "RecordStoreV2Simulator", environment = Shim.environment })()
 local V2 = V2Module.new(RecordStore, MailboxV2, { allow_unattested_activation = true })
 
 local function expect(result, ...)
@@ -167,13 +167,24 @@ local function run_erasure_compaction_and_simulator_construction()
 			name = "profile-data",
 			templates = { { name = "PlayerRecords", scope = "global", key = "user-{user_id}" } },
 			templates_verified = true,
-			inventory = function(user_id) return { { key = "user-" .. user_id, generation = 7 } } end,
+			inventory_verified = true,
+			history_inventory_verified = true,
+			inventory = function(user_id)
+				return { {
+					store_name = "PlayerRecords",
+					scope = "global",
+					key = "user-" .. tostring(user_id),
+					exists = true,
+					generation = 7,
+				} }
+			end,
 			fence_user = function() return true end,
 			dependencies_clear = function() return true end,
 			redact_or_delete_if_generation = function(item, user_id, erasure_id)
 				deleted[user_id .. ":" .. item.key] = erasure_id
 				return "deleted"
 			end,
+			clear_history_if_generation = function() return true end,
 		},
 	}, { verify_templates = function() return true end })
 	expect(erasure:PlanAsync(13579, "bench-erasure"), "success")
