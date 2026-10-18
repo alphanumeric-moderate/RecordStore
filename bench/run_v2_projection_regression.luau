@@ -124,6 +124,24 @@ local changed_subject_reservation = subject_bound_reservations:ReserveUnique(
 assert(changed_subject_reservation.code == "conflict",
 	"unique reservation allowed its subject association to change after creation")
 
+local tuple_key_store = new_store()
+local tuple_key_projections = V2.Projections.new(tuple_key_store)
+local function identity_projector(current, event)
+	local changed = table.clone(current)
+	changed.value = event.event_id
+	return changed
+end
+assert(tuple_key_projections:Register("a:b", 1, identity_projector))
+assert(tuple_key_projections:Register("a", 1, identity_projector))
+local tuple_left = tuple_key_projections:ApplyAsync("a:b", {
+	event_id = "tuple-left", entity_id = "c", source_revision = 1,
+})
+local tuple_right = tuple_key_projections:ApplyAsync("a", {
+	event_id = "tuple-right", entity_id = "b:c", source_revision = 1,
+})
+assert(tuple_left.code == "committed" and tuple_right.code == "committed",
+	"projection tuple key encoding collided on delimiter-containing identities")
+
 local protected_store = new_store()
 local protected_projections = V2.Projections.new(protected_store)
 assert(protected_projections:Register("subject_projection_v1", 1, function(current) return current end))
