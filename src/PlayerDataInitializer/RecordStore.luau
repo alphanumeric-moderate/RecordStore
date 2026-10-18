@@ -625,7 +625,7 @@ type InternalState = {
 	retired: boolean,
 	takeover_requested: boolean,
 	queue_hint: boolean,
-	mailbox_v2: any?,
+	record_impl: any?,
 	message_topic: string,
 	message_subscription: RBXScriptConnection?,
 	last_error: string?,
@@ -6550,10 +6550,10 @@ local function message(self: Record, message_type: string, data: JsonValue?): (R
 end
 
 
-local mailbox_v2 = {}
+local record_impl = {}
 
-function mailbox_v2.bound_mailbox_for_state(state: InternalState): (any?, ResultCode?, string?)
-	local mailbox = state.mailbox_v2
+function record_impl.bound_mailbox_for_state(state: InternalState): (any?, ResultCode?, string?)
+	local mailbox = state.record_impl
 	if mailbox == nil then return nil, nil, nil end
 	if type(mailbox) ~= "table"
 		or type((mailbox :: any).GetOwner) ~= "function"
@@ -6594,7 +6594,7 @@ function mailbox_v2.bound_mailbox_for_state(state: InternalState): (any?, Result
 	return mailbox, nil, nil
 end
 
-function mailbox_v2.map_v2_result_code(code: unknown): ResultCode
+function record_impl.map_v2_result_code(code: unknown): ResultCode
 	if code == "success" then return "success" end
 	if code == "accepted" then return "enqueued" end
 	if code == "processed" or code == "dead_lettered" then return "processed" end
@@ -6613,7 +6613,7 @@ function mailbox_v2.map_v2_result_code(code: unknown): ResultCode
 	return "unknown"
 end
 
-function mailbox_v2.v2_result_message(result: any, fallback: string): string
+function record_impl.v2_result_message(result: any, fallback: string): string
 	if type(result) == "table" and type(result.error) == "string" and result.error ~= "" then
 		return result.error
 	end
@@ -6623,12 +6623,12 @@ function mailbox_v2.v2_result_message(result: any, fallback: string): string
 	return fallback
 end
 
-function mailbox_v2.bind_mailbox_v2(self: Record, mailbox: unknown): (ResultCode, string?)
+function record_impl.bind_mailbox_v2(self: Record, mailbox: unknown): (ResultCode, string?)
 	local state = private[self]
 	if state == nil then return "invalid", "record does not exist" end
 	if state.state ~= "active" then return "fenced", "V2 mailbox binding requires an active Record" end
 	if state.takeover_requested then return "closing", "session takeover has been requested" end
-	if state.mailbox_v2 ~= nil and state.mailbox_v2 ~= mailbox then
+	if state.record_impl ~= nil and state.record_impl ~= mailbox then
 		return "conflict", "this Record is already bound to a different V2 mailbox"
 	end
 	if type(mailbox) ~= "table" or type((mailbox :: any).GetOwner) ~= "function"
@@ -6663,18 +6663,18 @@ function mailbox_v2.bind_mailbox_v2(self: Record, mailbox: unknown): (ResultCode
 		for _, user_id in ipairs(state.user_ids) do if user_id == owner_fields.user_id then found = true; break end end
 		if not found then return "fenced", "mailbox UserId does not match the Record's persisted UserIds" end
 	end
-	state.mailbox_v2 = mailbox
+	state.record_impl = mailbox
 	return "success", nil
 end
 
-function mailbox_v2.enqueue(self: Record, message_type: string, data: JsonValue?, enqueue_options: { [string]: unknown }?): (ResultCode, string?)
+function record_impl.enqueue(self: Record, message_type: string, data: JsonValue?, enqueue_options: { [string]: unknown }?): (ResultCode, string?)
 	local state = private[self]
 	if state == nil then return "invalid", "record does not exist" end
 	if state.mailbox_v2_binding then return "busy", "V2 mailbox binding is checking the legacy queue" end
 	if state.state ~= "active" then return "fenced", "record is not actively owned" end
 	if state.takeover_requested then return "closing", "session takeover has been requested" end
-	if state.mailbox_v2 ~= nil then
-		local mailbox, bound_code, bound_message = mailbox_v2.bound_mailbox_for_state(state)
+	if state.record_impl ~= nil then
+		local mailbox, bound_code, bound_message = record_impl.bound_mailbox_for_state(state)
 		if mailbox == nil then return bound_code or "fenced", bound_message end
 		local call_ok, result = pcall(function()
 			return mailbox:EnqueueAsync(message_type, data, enqueue_options)
@@ -6687,17 +6687,17 @@ function mailbox_v2.enqueue(self: Record, message_type: string, data: JsonValue?
 		if type(result) ~= "table" then return "unknown", "V2 mailbox returned no structured result" end
 		if result.code == "accepted" then observe(state, "v2_enqueue", "success", message_type); return "enqueued", nil end
 		if result.code == "duplicate" then observe(state, "v2_enqueue", "duplicate", message_type); return "duplicate", nil end
-		if result.code == "capacity" then return "capacity", mailbox_v2.v2_result_message(result, "V2 mailbox capacity was reached") end
-		if result.code == "conflict" then return "conflict", mailbox_v2.v2_result_message(result, "V2 idempotency conflict") end
-		if result.code == "invalid" then return "invalid", mailbox_v2.v2_result_message(result, "V2 enqueue options are invalid") end
-		if result.code == "corrupt" then return "corrupt", mailbox_v2.v2_result_message(result, "V2 mailbox record is corrupt") end
-		if result.code == "not_found" then return "not_found", mailbox_v2.v2_result_message(result, "V2 message was not found") end
-		if result.code == "fenced" then return "fenced", mailbox_v2.v2_result_message(result, "V2 operation was fenced") end
+		if result.code == "capacity" then return "capacity", record_impl.v2_result_message(result, "V2 mailbox capacity was reached") end
+		if result.code == "conflict" then return "conflict", record_impl.v2_result_message(result, "V2 idempotency conflict") end
+		if result.code == "invalid" then return "invalid", record_impl.v2_result_message(result, "V2 enqueue options are invalid") end
+		if result.code == "corrupt" then return "corrupt", record_impl.v2_result_message(result, "V2 mailbox record is corrupt") end
+		if result.code == "not_found" then return "not_found", record_impl.v2_result_message(result, "V2 message was not found") end
+		if result.code == "fenced" then return "fenced", record_impl.v2_result_message(result, "V2 operation was fenced") end
 		if result.code == "busy" or result.code == "preparing" or result.code == "retry_scheduled" then
-			return "busy", mailbox_v2.v2_result_message(result, "V2 mailbox operation is still in progress")
+			return "busy", record_impl.v2_result_message(result, "V2 mailbox operation is still in progress")
 		end
-		if result.code == "retryable" then return "budget", mailbox_v2.v2_result_message(result, "V2 mailbox request was throttled") end
-		if result.code == "unknown" then return "unknown", mailbox_v2.v2_result_message(result, "V2 mailbox outcome is unknown") end
+		if result.code == "retryable" then return "budget", record_impl.v2_result_message(result, "V2 mailbox request was throttled") end
+		if result.code == "unknown" then return "unknown", record_impl.v2_result_message(result, "V2 mailbox outcome is unknown") end
 		return "unknown", "unmapped V2 mailbox result: " .. tostring(result.code)
 	end
 	if enqueue_options ~= nil then
@@ -6706,12 +6706,12 @@ function mailbox_v2.enqueue(self: Record, message_type: string, data: JsonValue?
 	return enqueue_internal(state, message_type, data)
 end
 
-function mailbox_v2.process_queue(self: Record, max_messages: number?): (ResultCode, string?)
+function record_impl.process_queue(self: Record, max_messages: number?): (ResultCode, string?)
 	local state = private[self]
 	if state == nil then return "invalid", "record does not exist" end
 	if state.mailbox_v2_binding then return "busy", "V2 mailbox binding is checking the legacy queue" end
-	if state.mailbox_v2 == nil then return process_queue_internal(state, max_messages or 1) end
-	local mailbox, bound_code, bound_message = mailbox_v2.bound_mailbox_for_state(state)
+	if state.record_impl == nil then return process_queue_internal(state, max_messages or 1) end
+	local mailbox, bound_code, bound_message = record_impl.bound_mailbox_for_state(state)
 	if mailbox == nil then return bound_code or "fenced", bound_message end
 	if state.state ~= "active" then return "fenced", "record is not actively owned" end
 	if state.takeover_requested then return "closing", "session takeover has been requested" end
@@ -6797,9 +6797,9 @@ function mailbox_v2.process_queue(self: Record, max_messages: number?): (ResultC
 				continue
 			end
 			if result.code == "retry_scheduled" then
-				return handler_failure_code or "unknown", handler_failure_message or mailbox_v2.v2_result_message(result, "V2 queue handler failed and the message was rescheduled")
+				return handler_failure_code or "unknown", handler_failure_message or record_impl.v2_result_message(result, "V2 queue handler failed and the message was rescheduled")
 			end
-			return mailbox_v2.map_v2_result_code(result.code), mailbox_v2.v2_result_message(result, "V2 queue processing returned " .. result.code)
+			return record_impl.map_v2_result_code(result.code), record_impl.v2_result_message(result, "V2 queue processing returned " .. result.code)
 		end
 		if processed == 0 then return "empty" :: ResultCode, nil end
 		return "processed" :: ResultCode, tostring(processed)
@@ -6809,13 +6809,13 @@ function mailbox_v2.process_queue(self: Record, max_messages: number?): (ResultC
 	return result_code :: ResultCode, result_message
 end
 
-function mailbox_v2.get_queue(self: Record): ({ QueueMessage }, ResultCode, string?)
+function record_impl.get_queue(self: Record): ({ QueueMessage }, ResultCode, string?)
 	local state = private[self]
 	if state == nil then
 		return {}, "invalid", "record does not exist"
 	end
-	if state.mailbox_v2 ~= nil then
-		local mailbox, bound_code, bound_message = mailbox_v2.bound_mailbox_for_state(state)
+	if state.record_impl ~= nil then
+		local mailbox, bound_code, bound_message = record_impl.bound_mailbox_for_state(state)
 		if mailbox == nil then return {}, bound_code or "fenced", bound_message end
 		local call_ok, rows, result = pcall(function()
 			return mailbox:GetQueueAsync()
@@ -6825,7 +6825,7 @@ function mailbox_v2.get_queue(self: Record): ({ QueueMessage }, ResultCode, stri
 			return {}, "unknown", "V2 mailbox returned no structured queue result"
 		end
 		if result.code ~= "success" then
-			return {}, mailbox_v2.map_v2_result_code(result.code), mailbox_v2.v2_result_message(result, "V2 queue read failed")
+			return {}, record_impl.map_v2_result_code(result.code), record_impl.v2_result_message(result, "V2 queue read failed")
 		end
 		local projected: { QueueMessage } = {}
 		for _, row_value in ipairs(rows) do
@@ -6889,12 +6889,12 @@ function mailbox_v2.get_queue(self: Record): ({ QueueMessage }, ResultCode, stri
 end
 
 
-function mailbox_v2.bind_mailbox_v2_async(self: Record, mailbox: unknown): (ResultCode, string?)
+function record_impl.bind_mailbox_v2_async(self: Record, mailbox: unknown): (ResultCode, string?)
 	local state = private[self]
 	if state == nil then return "invalid", "record does not exist" end
 	if state.state ~= "active" then return "fenced", "V2 mailbox binding requires an active Record" end
 	if state.takeover_requested then return "closing", "session takeover has been requested" end
-	if state.mailbox_v2 ~= nil then return mailbox_v2.bind_mailbox_v2(self, mailbox) end
+	if state.record_impl ~= nil then return record_impl.bind_mailbox_v2(self, mailbox) end
 	if type(mailbox) ~= "table"
 		or type((mailbox :: any).GetOwner) ~= "function"
 		or type((mailbox :: any).GetActiveRecord) ~= "function"
@@ -6916,7 +6916,7 @@ function mailbox_v2.bind_mailbox_v2_async(self: Record, mailbox: unknown): (Resu
 	state.mailbox_v2_binding = true
 	state.queue_busy = true
 	local call_ok, legacy_queue, queue_code, queue_message = pcall(function()
-		return mailbox_v2.get_queue(self)
+		return record_impl.get_queue(self)
 	end)
 	state.queue_busy = false
 	state.mailbox_v2_binding = false
@@ -6927,17 +6927,17 @@ function mailbox_v2.bind_mailbox_v2_async(self: Record, mailbox: unknown): (Resu
 	if #legacy_queue > 0 then
 		return "busy", "legacy queue contains pending messages; drain it before binding the V2 mailbox"
 	end
-	return mailbox_v2.bind_mailbox_v2(self, mailbox)
+	return record_impl.bind_mailbox_v2(self, mailbox)
 end
 
-function mailbox_v2.get_dead_letters(self: Record): ({ DeadLetterMessage }, ResultCode, string?)
+function record_impl.get_dead_letters(self: Record): ({ DeadLetterMessage }, ResultCode, string?)
 	local state = private[self]
 	if state == nil then
 		return {}, "invalid", "record does not exist"
 	end
 	if state.mailbox_v2_binding then return {}, "busy", "V2 mailbox binding is checking the legacy queue" end
-	if state.mailbox_v2 ~= nil then
-		local mailbox, bound_code, bound_message = mailbox_v2.bound_mailbox_for_state(state)
+	if state.record_impl ~= nil then
+		local mailbox, bound_code, bound_message = record_impl.bound_mailbox_for_state(state)
 		if mailbox == nil then return {}, bound_code or "fenced", bound_message end
 		local result_rows: { DeadLetterMessage } = {}
 		local cursor: string? = nil
@@ -6951,7 +6951,7 @@ function mailbox_v2.get_dead_letters(self: Record): ({ DeadLetterMessage }, Resu
 				return {}, "unknown", "V2 mailbox returned no structured dead-letter result"
 			end
 			if result.code ~= "success" then
-				return {}, mailbox_v2.map_v2_result_code(result.code), mailbox_v2.v2_result_message(result, "V2 dead-letter read failed")
+				return {}, record_impl.map_v2_result_code(result.code), record_impl.v2_result_message(result, "V2 dead-letter read failed")
 			end
 			for _, row_value in ipairs(page) do
 				if type(row_value) ~= "table" or type(row_value.Id) ~= "string" or type(row_value.Type) ~= "string"
@@ -7022,14 +7022,14 @@ function mailbox_v2.get_dead_letters(self: Record): ({ DeadLetterMessage }, Resu
 	return result, "success", nil
 end
 
-function mailbox_v2.claim_dead_letter(self: Record, message_id: string): (DeadLetterMessage?, ResultCode, string?)
+function record_impl.claim_dead_letter(self: Record, message_id: string): (DeadLetterMessage?, ResultCode, string?)
 	local state = private[self]
 	if state == nil then
 		return nil, "invalid", "record does not exist"
 	end
 	if state.mailbox_v2_binding then return nil, "busy", "V2 mailbox binding is checking the legacy queue" end
-	if state.mailbox_v2 ~= nil then
-		local mailbox, bound_code, bound_message = mailbox_v2.bound_mailbox_for_state(state)
+	if state.record_impl ~= nil then
+		local mailbox, bound_code, bound_message = record_impl.bound_mailbox_for_state(state)
 		if mailbox == nil then return nil, bound_code or "fenced", bound_message end
 		return nil, "invalid", "V2 dead-letter claims use generation-aware V2 APIs; use MailboxV2 directly"
 	end
@@ -7132,14 +7132,14 @@ function mailbox_v2.claim_dead_letter(self: Record, message_id: string): (DeadLe
 	return nil, "conflict", "dead-letter claim expired or could not be verified"
 end
 
-function mailbox_v2.replay_dead_letter(self: Record, message_id: string, lock_token: string): (ResultCode, string?)
+function record_impl.replay_dead_letter(self: Record, message_id: string, lock_token: string): (ResultCode, string?)
 	local state = private[self]
 	if state == nil then
 		return "invalid", "record does not exist"
 	end
 	if state.mailbox_v2_binding then return "busy", "V2 mailbox binding is checking the legacy queue" end
-	if state.mailbox_v2 ~= nil then
-		local mailbox, bound_code, bound_message = mailbox_v2.bound_mailbox_for_state(state)
+	if state.record_impl ~= nil then
+		local mailbox, bound_code, bound_message = record_impl.bound_mailbox_for_state(state)
 		if mailbox == nil then return bound_code or "fenced", bound_message end
 		return "invalid", "V2 replay requires a stable operation_id; use MailboxV2.ReplayDeadLetterAsync"
 	end
@@ -7242,14 +7242,14 @@ function mailbox_v2.replay_dead_letter(self: Record, message_id: string, lock_to
 	return "conflict", "dead-letter replay could not be verified"
 end
 
-function mailbox_v2.discard_dead_letter(self: Record, message_id: string, lock_token: string): (ResultCode, string?)
+function record_impl.discard_dead_letter(self: Record, message_id: string, lock_token: string): (ResultCode, string?)
 	local state = private[self]
 	if state == nil then
 		return "invalid", "record does not exist"
 	end
 	if state.mailbox_v2_binding then return "busy", "V2 mailbox binding is checking the legacy queue" end
-	if state.mailbox_v2 ~= nil then
-		local mailbox, bound_code, bound_message = mailbox_v2.bound_mailbox_for_state(state)
+	if state.record_impl ~= nil then
+		local mailbox, bound_code, bound_message = record_impl.bound_mailbox_for_state(state)
 		if mailbox == nil then return bound_code or "fenced", bound_message end
 		return "invalid", "V2 discard requires expected_replay_count; use MailboxV2.DiscardDeadLetterAsync"
 	end
@@ -7326,18 +7326,18 @@ function mailbox_v2.discard_dead_letter(self: Record, message_id: string, lock_t
 	return "success", nil
 end
 
-local function close_record(self: Record): (ResultCode, string?)
+function record_impl.close_record(self: Record): (ResultCode, string?)
 	local state = private[self]
 	if state == nil then
 		return "invalid", "record does not exist"
 	end
 	local result, message = close_internal(state, false)
-	evaluate_durability_risk(self, state)
+	record_impl.evaluate_durability_risk(self, state)
 	sync_public(self)
 	return result, message
 end
 
-local function delete_record(self: Record, erase_options: EraseOptions?): (ResultCode, string?)
+function record_impl.delete_record(self: Record, erase_options: EraseOptions?): (ResultCode, string?)
 	local state = private[self]
 	if state == nil then
 		return "invalid", "record does not exist"
@@ -7562,13 +7562,13 @@ local function delete_record(self: Record, erase_options: EraseOptions?): (Resul
 	if state.durability_risk_active then
 		state.durability_risk_active = false
 		state.durability_risk_reason = nil
-		dispatch_durability_risk(state, "resolved", "record_deleted")
+		record_impl.dispatch_durability_risk(state, "resolved", "record_deleted")
 	end
 	sync_public(self)
 	return "deleted", nil
 end
 
-local function erase_record(self: Record, options: EraseOptions): (ResultCode, string?)
+function record_impl.erase_record(self: Record, options: EraseOptions): (ResultCode, string?)
 	local state = private[self]
 	if state == nil then return "invalid", "record does not exist" end
 	if type(options) ~= "table"
@@ -7590,7 +7590,7 @@ local function erase_record(self: Record, options: EraseOptions): (ResultCode, s
 	if state.generation ~= options.expected_generation then
 		return "conflict", "Record generation changed after the erasure inventory snapshot"
 	end
-	local code, message = delete_record(self, options)
+	local code, message = record_impl.delete_record(self, options)
 	if code == "deleted" and state.state == "tombstoned"
 		and state.generation == options.expected_generation + 1
 	then
@@ -7637,7 +7637,7 @@ verify_release_write = function(state: InternalState, write_id: string, generati
 	return true, envelope, info
 end
 
-local function verify_open_write(state: InternalState, write_id: string, token: string, operation_deadline: number): (boolean, Envelope?, BackendInfo?)
+function record_impl.verify_open_write(state: InternalState, write_id: string, token: string, operation_deadline: number): (boolean, Envelope?, BackendInfo?)
 	local deadline = math.min(operation_deadline, now_local() + 5)
 	local raw, info, result_code = backend_get(state.backend, false, deadline, state)
 	if result_code ~= nil then
@@ -7650,8 +7650,8 @@ local function verify_open_write(state: InternalState, write_id: string, token: 
 	return true, envelope, info
 end
 
-local function open_internal(state: InternalState, default_data: JsonValue?, recreate: boolean?): (ResultCode, string?)
-	local function recover_corrupt_history(
+function record_impl.open_internal(state: InternalState, default_data: JsonValue?, recreate: boolean?): (ResultCode, string?)
+	function record_impl.recover_corrupt_history(
 		state: InternalState,
 		observed_version: string,
 		corrupt_reason: string,
@@ -8100,7 +8100,7 @@ local function open_internal(state: InternalState, default_data: JsonValue?, rec
 				final_decision_message = (observed_parse_error or "durable envelope is invalid") .. "; current version metadata is unavailable, so history recovery was refused"
 				break
 			end
-			local candidate, recovery_result, recovery_message = recover_corrupt_history(
+			local candidate, recovery_result, recovery_message = record_impl.recover_corrupt_history(
 				state,
 				observed_info.Version,
 				observed_parse_error or "durable envelope is invalid",
@@ -8170,7 +8170,7 @@ local function open_internal(state: InternalState, default_data: JsonValue?, rec
 			last_result = result_code
 			last_error = result_message
 		end
-		local verified, envelope, info_after = verify_open_write(state, write_id, token, deadline)
+		local verified, envelope, info_after = record_impl.verify_open_write(state, write_id, token, deadline)
 		if verified then
 			confirmed = envelope
 			confirmed_info = info_after
@@ -8229,7 +8229,7 @@ local function open_internal(state: InternalState, default_data: JsonValue?, rec
 	return unresolved_result, last_error or "session acquisition was not confirmed"
 end
 
-local function renew_internal(state: InternalState): (ResultCode, string?)
+function record_impl.renew_internal(state: InternalState): (ResultCode, string?)
 	if state.retired then
 		return "invalid", "record has been retired"
 	end
@@ -8608,18 +8608,18 @@ complete_deferred_takeover = function(state: InternalState)
 	end)
 end
 
-local function save(self: Record, reason: string?): (ResultCode, string?)
+function record_impl.save(self: Record, reason: string?): (ResultCode, string?)
 	local state = private[self]
 	if state == nil then
 		return "invalid", "record does not exist"
 	end
 	local result, message = save_internal(state, reason or "manual", nil, nil)
-	evaluate_durability_risk(self, state)
+	record_impl.evaluate_durability_risk(self, state)
 	sync_public(self)
 	return result, message
 end
 
-local function stats(self: Record): { [string]: number | string? }
+function record_impl.stats(self: Record): { [string]: number | string? }
 	local state = private[self]
 	if state == nil then
 		return {}
@@ -8659,7 +8659,7 @@ local function stats(self: Record): { [string]: number | string? }
 end
 
 
-local function durability_status_for_state(state: InternalState): DurabilityStatus
+function record_impl.durability_status_for_state(state: InternalState): DurabilityStatus
 	local observed_at = session_now_unix(state.backend.mock)
 	local dirty = state.change_sequence ~= state.saved_change_sequence
 	local dirty_since = state.dirty_since_unix
@@ -8691,9 +8691,9 @@ local function durability_status_for_state(state: InternalState): DurabilityStat
 	}
 end
 
-local function dispatch_durability_risk(state: InternalState, transition: "entered" | "changed" | "recovered" | "resolved", reason: "dirty_age_exceeded" | "write_outcome_uncertain" | "recovered" | "record_deleted")
+function record_impl.dispatch_durability_risk(state: InternalState, transition: "entered" | "changed" | "recovered" | "resolved", reason: "dirty_age_exceeded" | "write_outcome_uncertain" | "recovered" | "record_deleted")
 	if next(state.durability_risk_observers) == nil then return end
-	local status = durability_status_for_state(state)
+	local status = record_impl.durability_status_for_state(state)
 	local event: DurabilityRiskEvent = {
 		Transition = transition,
 		Reason = reason,
@@ -8719,8 +8719,8 @@ local function dispatch_durability_risk(state: InternalState, transition: "enter
 	end)
 end
 
-local function evaluate_durability_risk(_record: Record, state: InternalState)
-	local status = durability_status_for_state(state)
+function record_impl.evaluate_durability_risk(_record: Record, state: InternalState)
+	local status = record_impl.durability_status_for_state(state)
 	local next_reason: ("dirty_age_exceeded" | "write_outcome_uncertain")? = nil
 	if status.write_outcome_uncertain then
 		next_reason = "write_outcome_uncertain"
@@ -8731,29 +8731,29 @@ local function evaluate_durability_risk(_record: Record, state: InternalState)
 		if state.durability_risk_active then
 			state.durability_risk_active = false
 			state.durability_risk_reason = nil
-			dispatch_durability_risk(state, "recovered", "recovered")
+			record_impl.dispatch_durability_risk(state, "recovered", "recovered")
 		end
 		return
 	end
 	if not state.durability_risk_active then
 		state.durability_risk_active = true
 		state.durability_risk_reason = next_reason
-		dispatch_durability_risk(state, "entered", next_reason)
+		record_impl.dispatch_durability_risk(state, "entered", next_reason)
 	elseif state.durability_risk_reason ~= next_reason then
 		state.durability_risk_reason = next_reason
-		dispatch_durability_risk(state, "changed", next_reason)
+		record_impl.dispatch_durability_risk(state, "changed", next_reason)
 	end
 end
 
-local function get_durability_status(self: Record): (DurabilityStatus?, ResultCode, string?)
+function record_impl.get_durability_status(self: Record): (DurabilityStatus?, ResultCode, string?)
 	local state = private[self]
 	if state == nil then return nil, "invalid", "record does not exist" end
 	track_external_data_mutation(state)
-	evaluate_durability_risk(self, state)
-	return durability_status_for_state(state), "success", nil
+	record_impl.evaluate_durability_risk(self, state)
+	return record_impl.durability_status_for_state(state), "success", nil
 end
 
-local function subscribe_durability_risk(self: Record, observer: DurabilityRiskObserver): (ChangeSubscription?, ResultCode, string?)
+function record_impl.subscribe_durability_risk(self: Record, observer: DurabilityRiskObserver): (ChangeSubscription?, ResultCode, string?)
 	local state = private[self]
 	if state == nil then return nil, "invalid", "record does not exist" end
 	if type(observer) ~= "function" then return nil, "invalid", "durability-risk observer must be a function" end
@@ -8773,22 +8773,22 @@ local function subscribe_durability_risk(self: Record, observer: DurabilityRiskO
 			state.durability_risk_observers[id] = nil
 		end,
 	}
-	evaluate_durability_risk(self, state)
+	record_impl.evaluate_durability_risk(self, state)
 	return subscription, "success", nil
 end
 
-local function open(self: Record, default_data: JsonValue?, recreate: boolean?): (ResultCode, string?)
+function record_impl.open(self: Record, default_data: JsonValue?, recreate: boolean?): (ResultCode, string?)
 	local state = private[self]
 	if state == nil then
 		return "invalid", "record does not exist"
 	end
-	local result, message = open_internal(state, default_data, recreate)
+	local result, message = record_impl.open_internal(state, default_data, recreate)
 	sync_public(self)
 	return result, message
 end
 
 
-local function wait_for_session_async(self: Record, default_data: JsonValue?, wait_options: SessionWaitOptions?): (SessionWaitResult, ResultCode, string?)
+function record_impl.wait_for_session_async(self: Record, default_data: JsonValue?, wait_options: SessionWaitOptions?): (SessionWaitResult, ResultCode, string?)
 	local state = private[self]
 	if state == nil then
 		return {
@@ -8854,7 +8854,7 @@ local function wait_for_session_async(self: Record, default_data: JsonValue?, wa
 	local last_code: ResultCode? = nil
 	local last_message: string? = nil
 
-	local function make_result(
+	function record_impl.make_result(
 		outcome: SessionWaitOutcome,
 		attempt: number,
 		job_id: string?,
@@ -8877,7 +8877,7 @@ local function wait_for_session_async(self: Record, default_data: JsonValue?, wa
 		}
 	end
 
-	local function report(
+	function record_impl.report(
 		outcome: SessionWaitOutcome,
 		attempt: number,
 		job_id: string?,
@@ -8887,12 +8887,12 @@ local function wait_for_session_async(self: Record, default_data: JsonValue?, wa
 		read_result: ResultCode?,
 		message: string?
 	): SessionWaitResult
-		local result = make_result(outcome, attempt, job_id, lease_until, retry_after, retry_scheduled, read_result, message)
+		local result = record_impl.make_result(outcome, attempt, job_id, lease_until, retry_after, retry_scheduled, read_result, message)
 		if options.on_status ~= nil then pcall(options.on_status, result) end
 		return result
 	end
 
-	local function cancellation_requested(): (boolean, string?)
+	function record_impl.cancellation_requested(): (boolean, string?)
 		if state.takeover_requested then return true, nil end
 		if options.cancelled == nil then return false, nil end
 		local ok, value = pcall(options.cancelled)
@@ -8900,7 +8900,7 @@ local function wait_for_session_async(self: Record, default_data: JsonValue?, wa
 		return value == true, nil
 	end
 
-	local function observe_competitor(attempt: number): (SessionWaitOutcome, string?, number?, ResultCode?, string?)
+	function record_impl.observe_competitor(attempt: number): (SessionWaitOutcome, string?, number?, ResultCode?, string?)
 		local raw, _, read_code, read_message = backend_get(state.backend, false, deadline, state)
 		if read_code ~= nil then
 			return "session_status_unavailable", nil, nil, read_code, read_message
@@ -8934,35 +8934,35 @@ local function wait_for_session_async(self: Record, default_data: JsonValue?, wa
 	for attempt = 1, max_attempts do
 		if now_local() >= deadline then break end
 		if state.takeover_requested then
-			local result = report("cancellation_requested", attempt, last_job_id, last_lease_until, nil, false, "closing", "session takeover has been requested")
+			local result = record_impl.report("cancellation_requested", attempt, last_job_id, last_lease_until, nil, false, "closing", "session takeover has been requested")
 			return result, "closing", result.Message
 		end
 		if state.state == "active" and state.token ~= nil then
 			if state.durable_lease_until > session_now_unix(state.backend.mock) then
-				local result = report("ownership_acquired", attempt, server_id, state.durable_lease_until, nil, false, "success", nil)
+				local result = record_impl.report("ownership_acquired", attempt, server_id, state.durable_lease_until, nil, false, "success", nil)
 				return result, "success", nil
 			end
 			if not state.busy then
-				local result = report("ownership_fenced_or_lost", attempt, server_id, state.durable_lease_until, nil, false, "fenced", "the last confirmed local lease has expired")
+				local result = record_impl.report("ownership_fenced_or_lost", attempt, server_id, state.durable_lease_until, nil, false, "fenced", "the last confirmed local lease has expired")
 				return result, "fenced", result.Message
 			end
 		end
-		local cancelled, cancellation_error = cancellation_requested()
+		local cancelled, cancellation_error = record_impl.cancellation_requested()
 		if cancellation_error ~= nil then
-			local result = report("session_status_unavailable", attempt, last_job_id, last_lease_until, nil, false, "invalid", cancellation_error)
+			local result = record_impl.report("session_status_unavailable", attempt, last_job_id, last_lease_until, nil, false, "invalid", cancellation_error)
 			return result, "invalid", cancellation_error
 		end
 		if cancelled then
-			local result = report("cancellation_requested", attempt, last_job_id, last_lease_until, nil, false, "closing", "session wait was cancelled")
+			local result = record_impl.report("cancellation_requested", attempt, last_job_id, last_lease_until, nil, false, "closing", "session wait was cancelled")
 			return result, "closing", result.Message
 		end
 		if state.state == "fenced" or state.state == "tombstoned" then
 			local code: ResultCode = if state.state == "tombstoned" then "tombstoned" else "fenced"
-			local result = report("ownership_fenced_or_lost", attempt, nil, nil, nil, false, code, "local Record is not eligible to acquire ownership")
+			local result = record_impl.report("ownership_fenced_or_lost", attempt, nil, nil, nil, false, code, "local Record is not eligible to acquire ownership")
 			return result, code, result.Message
 		end
 		if state.state == "unknown" then
-			local result = report("session_status_unavailable", attempt, nil, nil, nil, false, "unknown", "prior open/save outcome is unresolved; do not blindly retry acquisition")
+			local result = record_impl.report("session_status_unavailable", attempt, nil, nil, nil, false, "unknown", "prior open/save outcome is unresolved; do not blindly retry acquisition")
 			return result, "unknown", result.Message
 		end
 
@@ -8971,30 +8971,30 @@ local function wait_for_session_async(self: Record, default_data: JsonValue?, wa
 		if state.busy or state.queue_busy then
 			open_code, open_message = "busy", "another Record operation is in flight"
 		else
-			open_code, open_message = open(self, default_data, options.recreate)
+			open_code, open_message = record_impl.open(self, default_data, options.recreate)
 		end
 		last_code, last_message = open_code, open_message
 		if open_code == "created" or open_code == "loaded" or open_code == "already_open" then
 			if state.state == "active" and state.token ~= nil and state.durable_lease_until > session_now_unix(state.backend.mock) then
-				local result = report("ownership_acquired", attempt, server_id, state.durable_lease_until, nil, false, "success", nil)
+				local result = record_impl.report("ownership_acquired", attempt, server_id, state.durable_lease_until, nil, false, "success", nil)
 				return result, "success", nil
 			end
-			local result = report("session_status_unavailable", attempt, nil, nil, nil, false, "unknown", "Open reported success without a confirmed live local lease")
+			local result = record_impl.report("session_status_unavailable", attempt, nil, nil, nil, false, "unknown", "Open reported success without a confirmed live local lease")
 			return result, "unknown", result.Message
 		end
 		if open_code == "fenced" or open_code == "tombstoned" then
 			local outcome: SessionWaitOutcome = "ownership_fenced_or_lost"
-			local result = report(outcome, attempt, nil, nil, nil, false, open_code, open_message)
+			local result = record_impl.report(outcome, attempt, nil, nil, nil, false, open_code, open_message)
 			return result, open_code, open_message
 		end
 		if open_code == "unknown" or open_code == "retry_exhausted" then
-			local result = report("session_status_unavailable", attempt, nil, nil, nil, false, open_code, open_message)
+			local result = record_impl.report("session_status_unavailable", attempt, nil, nil, nil, false, open_code, open_message)
 			return result, open_code, open_message
 		end
 
 		local can_retry = open_code == "locked" or open_code == "busy" or open_code == "budget" or is_retryable_result(open_code, "open")
 		if not can_retry then
-			local result = report("session_status_unavailable", attempt, nil, nil, nil, false, open_code, open_message)
+			local result = record_impl.report("session_status_unavailable", attempt, nil, nil, nil, false, open_code, open_message)
 			return result, open_code, open_message
 		end
 		local observed_outcome: SessionWaitOutcome
@@ -9002,24 +9002,24 @@ local function wait_for_session_async(self: Record, default_data: JsonValue?, wa
 		local observed_lease_until: number? = nil
 		local observed_code: ResultCode? = nil
 		local observed_message: string? = nil
-		observed_outcome, observed_job_id, observed_lease_until, observed_code, observed_message = observe_competitor(attempt)
+		observed_outcome, observed_job_id, observed_lease_until, observed_code, observed_message = record_impl.observe_competitor(attempt)
 		if observed_outcome == "ownership_acquired" then
-			local result = report("ownership_acquired", attempt, observed_job_id, observed_lease_until, nil, false, "success", nil)
+			local result = record_impl.report("ownership_acquired", attempt, observed_job_id, observed_lease_until, nil, false, "success", nil)
 			return result, "success", nil
 		end
 		if observed_outcome == "ownership_fenced_or_lost" then
-			local result = report(observed_outcome, attempt, nil, nil, nil, false, observed_code, observed_message)
+			local result = record_impl.report(observed_outcome, attempt, nil, nil, nil, false, observed_code, observed_message)
 			return result, observed_code or "tombstoned", observed_message
 		end
 		if observed_outcome == "session_status_unavailable" then
-			local result = report(observed_outcome, attempt, nil, nil, nil, false, observed_code, observed_message)
+			local result = record_impl.report(observed_outcome, attempt, nil, nil, nil, false, observed_code, observed_message)
 			return result, observed_code or "unknown", observed_message
 		end
 		last_outcome, last_job_id, last_lease_until = observed_outcome, observed_job_id, observed_lease_until
 		last_code = if observed_outcome == "competing_session_observed" then "locked" else "retry_exhausted"
 		last_message = if observed_outcome == "competing_session_observed" then observed_message else "no competing live session was observed; acquisition will be retried"
 		if observed_outcome == "competing_session_observed" then
-			report(observed_outcome, attempt, observed_job_id, observed_lease_until, nil, false, "locked", observed_message)
+			record_impl.report(observed_outcome, attempt, observed_job_id, observed_lease_until, nil, false, "locked", observed_message)
 		end
 		local remaining = math.max(0, deadline - now_local())
 		if attempt >= max_attempts or remaining <= 0 then break end
@@ -9029,17 +9029,17 @@ local function wait_for_session_async(self: Record, default_data: JsonValue?, wa
 			if lease_remaining > 0 then backoff = math.min(backoff, math.max(retry_interval, lease_remaining)) end
 		end
 		local delay = math.min(backoff, remaining)
-		report("wait_retry_scheduled", attempt, observed_job_id, observed_lease_until, delay, true, observed_code, observed_message)
+		record_impl.report("wait_retry_scheduled", attempt, observed_job_id, observed_lease_until, delay, true, observed_code, observed_message)
 		task.wait(delay)
 	end
 	local timed_out_code: ResultCode = if now_local() >= deadline then "budget" else (last_code or "retry_exhausted")
 	local timed_out_message = if now_local() >= deadline then "session wait deadline expired" else (last_message or "session wait attempt limit reached")
 	local final_outcome: SessionWaitOutcome = if last_outcome == "competing_session_observed" then "competing_session_observed" else "no_known_competing_session"
-	local result = report(final_outcome, max_attempts, last_job_id, last_lease_until, nil, false, timed_out_code, timed_out_message)
+	local result = record_impl.report(final_outcome, max_attempts, last_job_id, last_lease_until, nil, false, timed_out_code, timed_out_message)
 	return result, timed_out_code, timed_out_message
 end
 
-local function make_record(name: string, scope: string, key: string, options: Options, mock: boolean): Record
+function record_impl.make_record(name: string, scope: string, key: string, options: Options, mock: boolean): Record
 	local mode = if mock then "mock" else "live"
 	local id = HttpService:JSONEncode({ mode, name, scope, key })
 	local existing = records[id]
@@ -9125,7 +9125,7 @@ local function make_record(name: string, scope: string, key: string, options: Op
 		retired = false,
 		takeover_requested = false,
 		queue_hint = false,
-		mailbox_v2 = nil,
+		record_impl = nil,
 		message_topic = make_message_topic(options.message_topic_prefix or DEFAULT_MESSAGE_TOPIC_PREFIX, name, scope, key),
 		message_subscription = nil,
 		last_error = nil,
@@ -9148,7 +9148,7 @@ local function make_record(name: string, scope: string, key: string, options: Op
 		UpdatedAt = 0,
 		Tombstoned = false,
 		LastError = nil,
-		Open = open,
+		Open = record_impl.open,
 		Get = get_data,
 		GetKey = get_key,
 		GetIdentity = get_identity,
@@ -9162,9 +9162,9 @@ local function make_record(name: string, scope: string, key: string, options: Op
 		GetLastError = get_last_error_info,
 		GetHandoff = get_handoff,
 		SubscribeChanges = subscribe_changes,
-		GetDurabilityStatus = get_durability_status,
-		SubscribeDurabilityRisk = subscribe_durability_risk,
-		WaitForSessionAsync = wait_for_session_async,
+		GetDurabilityStatus = record_impl.get_durability_status,
+		SubscribeDurabilityRisk = record_impl.subscribe_durability_risk,
+		WaitForSessionAsync = record_impl.wait_for_session_async,
 		GetUserIds = get_user_ids,
 		SetUserIds = set_user_ids,
 		AddUserId = add_user_id,
@@ -9175,7 +9175,7 @@ local function make_record(name: string, scope: string, key: string, options: Op
 		Touch = touch,
 		Update = update,
 		Reconcile = reconcile,
-		Save = save,
+		Save = record_impl.save,
 		TransactAsync = transaction,
 		ApplyInboxAsync = apply_inbox,
 		CommitWithOutboxAsync = commit_with_outbox,
@@ -9185,18 +9185,18 @@ local function make_record(name: string, scope: string, key: string, options: Op
 		PruneTransactionReceiptsAsync = prune_transaction_receipts,
 		PruneOutboxAsync = prune_outbox,
 		MessageAsync = message,
-		BindMailboxV2Async = mailbox_v2.bind_mailbox_v2_async,
-		EnqueueAsync = mailbox_v2.enqueue,
-		ProcessQueueAsync = mailbox_v2.process_queue,
-		GetQueueAsync = mailbox_v2.get_queue,
-		GetDeadLettersAsync = mailbox_v2.get_dead_letters,
-		ClaimDeadLetterAsync = mailbox_v2.claim_dead_letter,
-		ReplayDeadLetterAsync = mailbox_v2.replay_dead_letter,
-		DiscardDeadLetterAsync = mailbox_v2.discard_dead_letter,
-		Close = close_record,
-		Delete = delete_record,
-		EraseAsync = erase_record,
-		Stats = stats,
+		BindMailboxV2Async = record_impl.bind_mailbox_v2_async,
+		EnqueueAsync = record_impl.enqueue,
+		ProcessQueueAsync = record_impl.process_queue,
+		GetQueueAsync = record_impl.get_queue,
+		GetDeadLettersAsync = record_impl.get_dead_letters,
+		ClaimDeadLetterAsync = record_impl.claim_dead_letter,
+		ReplayDeadLetterAsync = record_impl.replay_dead_letter,
+		DiscardDeadLetterAsync = record_impl.discard_dead_letter,
+		Close = record_impl.close_record,
+		Delete = record_impl.delete_record,
+		EraseAsync = record_impl.erase_record,
+		Stats = record_impl.stats,
 	}
 	state.public_record = record
 	private[record] = state
@@ -9222,7 +9222,7 @@ local function start_scheduler()
 			for record in active_records do
 				local state = private[record]
 				if state ~= nil then
-					evaluate_durability_risk(record, state)
+					record_impl.evaluate_durability_risk(record, state)
 					if state.state == "active" then
 					local handled_takeover = false
 					if state.takeover_requested and not state.busy and not state.queue_busy then
@@ -9236,7 +9236,7 @@ local function start_scheduler()
 					then
 						state.next_renewal = now + (state.options.lease_renewal or DEFAULT_LEASE_RENEWAL)
 						task.spawn(function()
-							renew_internal(state)
+							record_impl.renew_internal(state)
 							sync_public(record)
 						end)
 					elseif not handled_takeover and state.state == "active"
@@ -9706,8 +9706,8 @@ function RecordStore.get_health_snapshot(max_records: number?): { [string]: unkn
 		local state = private[record]
 		if state ~= nil then
 			scanned += 1
-			evaluate_durability_risk(record, state)
-			local status = durability_status_for_state(state)
+			record_impl.evaluate_durability_risk(record, state)
+			local status = record_impl.durability_status_for_state(state)
 			if status.dirty then dirty_records += 1 end
 			if status.dirty_age_exceeded == true then aged_dirty_records += 1 end
 			if status.write_outcome_uncertain then uncertain_writes += 1 end
@@ -9907,7 +9907,7 @@ function RecordStore.new(name: string, scope: string, key: string, options: Opti
 	if valid_options == nil then
 		error("normalized options are missing", 2)
 	end
-	local record = make_record(name, scope, key, valid_options, false)
+	local record = record_impl.make_record(name, scope, key, valid_options, false)
 	start_scheduler()
 	return record
 end
@@ -9932,7 +9932,7 @@ RecordStore.Mock = (function()
 		valid_options.messaging_enabled = false
 		valid_options.takeover_enabled = false
 		start_scheduler()
-		return make_record(name, scope, key, valid_options, true)
+		return record_impl.make_record(name, scope, key, valid_options, true)
 	end
 
 	local function read_async_mock(name: string, scope: string, key: string, operation_deadline: number?, legacy_decoder: LegacyDecoder?): (Snapshot?, ResultCode, string?)
@@ -10186,7 +10186,7 @@ RecordStore.Mock = (function()
 			if state == nil or not state.backend.mock then
 				return "invalid", "mock renewal requires a live mock record"
 			end
-			local result, message = renew_internal(state)
+			local result, message = record_impl.renew_internal(state)
 			sync_public(record)
 			return result, message
 		end,
@@ -10196,7 +10196,7 @@ RecordStore.Mock = (function()
 			for record in active_records do
 				local state = private[record]
 				if state ~= nil and state.backend.mock then
-					evaluate_durability_risk(record, state)
+					record_impl.evaluate_durability_risk(record, state)
 					checked += 1
 				end
 			end
