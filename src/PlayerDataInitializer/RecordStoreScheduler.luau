@@ -66,7 +66,7 @@ local function new_governor(options)
 			scheduled_selected = 0, scheduled_expired = 0, scheduled_overdue = 0, shadow_samples = 0 },
 		scheduler_metrics = { by_lane = {}, wait_ms = {}, last_shadow = nil },
 	}
-	local limits = { critical = 32, profile_save = 32, profile_release = 32, interactive = 24, messaging = 20, migration = 4, maintenance = 2, tracing = 1 }
+	local limits = { critical = 32, profile_save = 32, profile_release = 32, interactive = 24, messaging = 20, migration = 4, maintenance = 8, tracing = 1 }
 	local function policy_valid(policy)
 		if type(policy) ~= "table" then return false, "policy must be a table" end
 		local fields = { "revision", "max_in_flight", "critical_reserve", "queue_capacity", "max_batch", "batch_window_ms", "batch_latency_ceiling_ms", "high_burst", "retry_token_capacity", "retry_tokens_per_second", "minimum_budget", "circuit_threshold", "circuit_cooldown_ms", "max_scheduled_in_flight", "scheduler_critical_reserve", "max_per_owner_in_flight", "drr_quantum", "max_item_cost", "urgent_deadline_burst", "priority_inheritance_max_ms", "retry_jitter_percent", "shadow_sample_rate" }
