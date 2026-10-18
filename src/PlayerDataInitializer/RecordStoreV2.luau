@@ -1015,6 +1015,7 @@ local function new_governor(options)
 				table.remove(self.queue, index)
 				item.queued = false
 				self.known[item.id] = nil
+				self.retry_cooldown_until[item.owner_id] = nil
 				item.terminal_result = {
 					code = "dependency_failed", message = "prerequisite reached a non-success terminal outcome",
 					dependency_id = failed_dependency, dependency_code = self.failed[failed_dependency],
@@ -1025,6 +1026,7 @@ local function new_governor(options)
 				table.remove(self.queue, index)
 				item.queued = false
 				self.known[item.id] = nil
+				self.retry_cooldown_until[item.owner_id] = nil
 				self.stats.scheduled_expired += 1
 				item.terminal_result = { code = "expired", message = "scheduled work expired before it could start" }
 				remember_terminal(self, item.id, "expired")
@@ -1101,9 +1103,12 @@ local function new_governor(options)
 		item.queued = true
 		item.dispatch_state = nil
 		item.selected_at_ms = nil
-		self.active_owner[item.owner_id] = math.max(0, (self.active_owner[item.owner_id] or 1) - 1)
+		local owner_count = math.max(0, (self.active_owner[item.owner_id] or 1) - 1)
+		if owner_count == 0 then self.active_owner[item.owner_id] = nil else self.active_owner[item.owner_id] = owner_count end
 		if item.lane == "lease_renewal" then
-			self.active_renewals_by_owner[item.owner_id] = math.max(0, (self.active_renewals_by_owner[item.owner_id] or 1) - 1)
+			local renewal_count = math.max(0, (self.active_renewals_by_owner[item.owner_id] or 1) - 1)
+			if renewal_count == 0 then self.active_renewals_by_owner[item.owner_id] = nil
+			else self.active_renewals_by_owner[item.owner_id] = renewal_count end
 		end
 		table.insert(self.queue, item)
 		heap_push(self.queued_due_heap, { id = item.id, due_at_ms = item.due_at_ms, item = item })
@@ -1150,8 +1155,13 @@ local function new_governor(options)
 		if not valid_text(id, 128) then return false, "invalid id" end
 		local item = self.known[id]
 		if item ~= nil and item.dispatch_state == "in_flight" then
-			self.active_owner[item.owner_id] = math.max(0, (self.active_owner[item.owner_id] or 1) - 1)
-			if item.lane == "lease_renewal" then self.active_renewals_by_owner[item.owner_id] = math.max(0, (self.active_renewals_by_owner[item.owner_id] or 1) - 1) end
+			local owner_count = math.max(0, (self.active_owner[item.owner_id] or 1) - 1)
+			if owner_count == 0 then self.active_owner[item.owner_id] = nil else self.active_owner[item.owner_id] = owner_count end
+			if item.lane == "lease_renewal" then
+				local renewal_count = math.max(0, (self.active_renewals_by_owner[item.owner_id] or 1) - 1)
+				if renewal_count == 0 then self.active_renewals_by_owner[item.owner_id] = nil
+				else self.active_renewals_by_owner[item.owner_id] = renewal_count end
+			end
 		end
 		self.known[id] = nil
 		if item ~= nil then self.retry_cooldown_until[item.owner_id] = nil end
