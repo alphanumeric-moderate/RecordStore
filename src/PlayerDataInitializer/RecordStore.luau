@@ -6727,7 +6727,13 @@ function RecordStore.schedule_work(
 	schedule_options: { [string]: unknown }?
 ): { [string]: any }
 	if closing then return { code = "closed", message = "RecordStore is shutting down" } end
-	return scheduler_dispatcher:Schedule(owner_id, work_id, callback, schedule_options)
+	if not scheduler_enabled then return { code = "disabled", message = "advanced scheduling is disabled" } end
+	return scheduler_dispatcher:Schedule(owner_id, work_id, function()
+		if not scheduler_enabled then
+			return { code = "cancelled", message = "advanced scheduling was disabled before work started" }
+		end
+		return callback()
+	end, schedule_options)
 end
 
 function RecordStore.get_scheduler_snapshot(): { [string]: any }
