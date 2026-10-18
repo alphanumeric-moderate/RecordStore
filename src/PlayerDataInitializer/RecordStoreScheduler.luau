@@ -957,7 +957,11 @@ local function new_dispatcher(governor, options)
 		end
 		if token then
 			entry.retry_attempt += 1
+			entry.retry_waiting_for_token = false
 			dispatcher.metrics.retries += 1
+		else
+			-- Do not execute a retry until its class receives an admission token.
+			entry.retry_waiting_for_token = true
 		end
 		entry.last_result = copy(result)
 		schedule_wake_at(due_at_ms)
@@ -1015,6 +1019,24 @@ local function new_dispatcher(governor, options)
 		if status ~= "success" then
 			finish_scheduled_item(item, status, entry, true, nil, false)
 			return
+		end
+		if type(entry) == "table" and entry.retry_waiting_for_token == true then
+			local token, wait_ms = governor:AcquireRetryToken(entry.work_class)
+			if not token then
+				local retry_due_at = now_ms() + math.max(10, finite(wait_ms) and wait_ms or entry.retry_delay_ms)
+				local requeued, retry_error = governor:Reschedule(item.id, retry_due_at)
+				if requeued then
+					schedule_wake_at(retry_due_at)
+				else
+					finish_scheduled_item(item, "success", entry, true, {
+						code = "retry_rejected", message = tostring(retry_error or "retry admission failed"),
+					}, false)
+				end
+				return
+			end
+			entry.retry_waiting_for_token = false
+			entry.retry_attempt += 1
+			dispatcher.metrics.retries += 1
 		end
 		dispatcher.in_flight += 1
 		dispatcher.metrics.max_in_flight = math.max(dispatcher.metrics.max_in_flight, dispatcher.in_flight)
