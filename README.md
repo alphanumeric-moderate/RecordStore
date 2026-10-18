@@ -235,8 +235,11 @@ local current = RecordStore.get_scheduler_snapshot()
 The API supports revisioned policy updates, cost-aware DRR, bounded owner/work-class
 fairness, deadline and age-aware selection, a strictly reserved lease-renewal
 concurrency slot, delayed-work heaps, expiry/dependency outcomes, retry tokens with
-backoff/jitter, bounded callback concurrency, opt-in batch-formation windows,
-shadow comparisons, deterministic trace replay, and queue/latency metrics.
+backoff/jitter, bounded callback concurrency, opt-in batch windows for callbacks that
+already represent an application-defined batch, shadow comparisons, deterministic trace
+replay, and queue/latency metrics. It never combines separate callbacks into a new
+business transaction. Owner IDs are bounded to 512 bytes, work IDs to 96 bytes, and
+work classes to 64 bytes.
 
 `available_at`, an advisory scheduling deadline, `expires_at`, and the durable
 session/claim lease are distinct concepts. A deadline is not a completion guarantee.
@@ -253,7 +256,7 @@ with existing direct APIs; callers must deliberately route work through the sele
 they require scheduler ordering. Strict `ordering_key` semantics and global/server-instance
 priority are not provided.
 
-The focused scheduler regression suite runs under Lune and the CodSpeed configuration
+This implementation follows the scheduler requirements in [design #33, section 29](docs/superpowers/specs/2026-10-17-recordstore-durable-messaging-v2-design.md#29-advanced-scheduling-designs-with-correctness-and-performance-gates). The focused scheduler regression suite runs under Lune and the CodSpeed configuration
 includes a fixed synthetic owner/work-class selection workload. These establish local
 algorithm behavior and cost only; they do not prove Roblox DataStore latency, quota,
 cross-server behavior or production rollout safety.
