@@ -1965,7 +1965,7 @@ local function new_erasure(store, families, options)
 				if type(items) ~= "table" then
 					coverage[family.name] = {
 						status = "unresolved", count = 0, expected_count = #expected,
-						message = inventory_error,
+						message = text_error(inventory_error, 256),
 						templates_verified = family.templates_verified == true,
 						inventory_verified = family.inventory_verified == true,
 					}
