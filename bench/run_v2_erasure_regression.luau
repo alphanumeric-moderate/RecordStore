@@ -403,7 +403,7 @@ local dispatched_count, dispatch_code, dispatch_message = profile:DispatchOutbox
 	return true, "erase-fixture-destination-receipt"
 end, 1)
 assert(dispatched_count == 1 and dispatch_code == "success", tostring(dispatch_message))
-local before_raw = RecordStore.Mock.get_record_raw("RecordStoreErasureProfileTest", "global", "Player_123")
+local before_raw = Fake:GetRaw("RecordStoreErasureProfileTest", "global", "Player_123")
 assert(type(before_raw) == "table" and type(before_raw.inbox_receipts) == "table"
 	and before_raw.inbox_receipts["erase-seed-receipt"] ~= nil,
 	"erasure fixture did not persist an inbox transaction receipt")
@@ -424,7 +424,7 @@ assert(after_erase.state == "tombstoned" and after_erase.generation == before_er
 assert(#profile:GetUserIds() == 0, "erasure tombstone retained DataStore UserIds")
 assert(next(profile:GetMetadata()) == nil, "erasure tombstone retained custom DataStore metadata")
 assert(profile:Get() == nil, "erased profile data remained readable through the old Record")
-local after_raw = RecordStore.Mock.get_record_raw("RecordStoreErasureProfileTest", "global", "Player_123")
+local after_raw = Fake:GetRaw("RecordStoreErasureProfileTest", "global", "Player_123")
 assert(type(after_raw) == "table" and after_raw.tombstone ~= nil,
 	"generation-fenced core erasure did not persist its durable tombstone")
 assert(next(after_raw.inbox_receipts or {}) == nil,
