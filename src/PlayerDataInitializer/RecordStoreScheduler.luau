@@ -86,7 +86,7 @@ local function new_governor(options)
 			priority_inheritance_max_ms = 1000, retry_jitter_percent = 20,
 			algorithm = "drr", shadow_algorithm = "weighted", shadow_enabled = false, shadow_sample_rate = 0,
 		},
-		in_flight = 0, by_class = {}, queue = {}, due = {}, due_heap = {}, queued_due_heap = {},
+		in_flight = 0, by_class = {}, active_tickets = {}, queue = {}, due = {}, due_heap = {}, queued_due_heap = {},
 		read_units_in_flight = 0, write_units_in_flight = 0,
 		estimated_bytes_in_flight = 0, handler_slots_in_flight = 0,
 		request_budgets = { read = nil, write = nil, sampled_at_ms = nil },
@@ -363,9 +363,9 @@ local function new_governor(options)
 		self.estimated_bytes_in_flight += dimensions_value.estimated_bytes
 		self.handler_slots_in_flight += dimensions_value.handler_slots
 		self.stats.admitted += 1
-		return {
-			code = "admitted",
-			ticket = tostring(self.policy.revision) .. ":" .. tostring(self.stats.admitted),
+		local ticket_id = tostring(self.policy.revision) .. ":" .. tostring(self.stats.admitted)
+		local reservation = {
+			ticket = ticket_id,
 			cost = decision.cost,
 			work_class = decision.work_class,
 			request_kind = decision.request_kind,
@@ -375,17 +375,26 @@ local function new_governor(options)
 			handler_slots = dimensions_value.handler_slots,
 			probe = probe_needed,
 		}
+		self.active_tickets[ticket_id] = reservation
+		local returned = table.clone(reservation)
+		returned.code = "admitted"
+		return returned
 	end
 	function governor:Release(ticket)
-		if type(ticket) ~= "table" or ticket.code ~= "admitted" then return false end
-		self.in_flight = math.max(0, self.in_flight - (ticket.cost or 1))
-		self.by_class[ticket.work_class] = math.max(0, (self.by_class[ticket.work_class] or 0) - (ticket.cost or 1))
-		self.read_units_in_flight = math.max(0, self.read_units_in_flight - (ticket.read_units or 0))
-		self.write_units_in_flight = math.max(0, self.write_units_in_flight - (ticket.write_units or 0))
-		self.estimated_bytes_in_flight = math.max(0, self.estimated_bytes_in_flight - (ticket.estimated_bytes or 0))
-		self.handler_slots_in_flight = math.max(0, self.handler_slots_in_flight - (ticket.handler_slots or 0))
-		local circuit = self.circuits[ticket.request_kind]
-		if ticket.probe == true and circuit ~= nil and circuit.state == "half_open" and circuit.probe == true then
+		if type(ticket) ~= "table" or ticket.code ~= "admitted" or type(ticket.ticket) ~= "string" then
+			return false
+		end
+		local reservation = self.active_tickets[ticket.ticket]
+		if reservation == nil then return false end
+		self.active_tickets[ticket.ticket] = nil
+		self.in_flight = math.max(0, self.in_flight - reservation.cost)
+		self.by_class[reservation.work_class] = math.max(0, (self.by_class[reservation.work_class] or 0) - reservation.cost)
+		self.read_units_in_flight = math.max(0, self.read_units_in_flight - reservation.read_units)
+		self.write_units_in_flight = math.max(0, self.write_units_in_flight - reservation.write_units)
+		self.estimated_bytes_in_flight = math.max(0, self.estimated_bytes_in_flight - reservation.estimated_bytes)
+		self.handler_slots_in_flight = math.max(0, self.handler_slots_in_flight - reservation.handler_slots)
+		local circuit = self.circuits[reservation.request_kind]
+		if reservation.probe == true and circuit ~= nil and circuit.state == "half_open" and circuit.probe == true then
 			circuit.probe = false
 		end
 		self.stats.released += 1
@@ -1084,6 +1093,7 @@ local function new_governor(options)
 			drr_deficit = copy(self.drr_deficit), drr_cursor_key = self.drr_cursor_key,
 			high_streak = self.high_streak, urgent_streak = self.urgent_streak,
 			policy = copy(self.policy), in_flight = self.in_flight, by_class = copy(self.by_class),
+			active_tickets = copy(self.active_tickets),
 			read_units_in_flight = self.read_units_in_flight, write_units_in_flight = self.write_units_in_flight,
 			estimated_bytes_in_flight = self.estimated_bytes_in_flight, handler_slots_in_flight = self.handler_slots_in_flight,
 			request_budgets = copy(self.request_budgets), last_budget_by_kind = copy(self.last_budget_by_kind),
@@ -1258,6 +1268,7 @@ local function new_governor(options)
 		end
 		return {
 			policy = copy(self.policy), in_flight = self.in_flight, queue_items = #self.queue,
+			active_reservation_tickets = key_count(self.active_tickets),
 			read_units_in_flight = self.read_units_in_flight, write_units_in_flight = self.write_units_in_flight,
 			estimated_bytes_in_flight = self.estimated_bytes_in_flight,
 			handler_slots_in_flight = self.handler_slots_in_flight,
