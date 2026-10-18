@@ -436,12 +436,15 @@ local function new_governor(options)
 				local item = row.item
 				local age = math.min(60000, math.max(0, now - item.enqueued_at_ms))
 				local slack = if finite(item.deadline_ms) then item.deadline_ms - now else 60000
+				-- After a bounded urgent burst, preserve lane/service priority but age
+				-- rather than deadline slack decides the next candidate.
+				local urgency_score = if self.urgent_streak >= self.policy.urgent_deadline_burst then 0 else slack
 				local lane = row.effective_lane
 				local lane_weight = if lane == "lease_renewal" then 8 elseif lane == "high" then 4 elseif lane == "normal" then 2 else 1
 				local service_rank = if item.service_class == "critical" then 4 elseif item.service_class == "interactive" then 3 elseif item.service_class == "normal" then 2 elseif item.service_class == "bulk" then 1 else 0
 				local score = if algorithm == "deadline"
-					then -service_rank * 10000 - lane_weight * 1000 + slack - age * 0.25
-					else -lane_weight * 1000 - service_rank * 500 - age * 0.25 + slack * 0.01
+					then -service_rank * 10000 - lane_weight * 1000 + urgency_score - age * 0.25
+					else -lane_weight * 1000 - service_rank * 500 - age * 0.25 + urgency_score * 0.01
 				if best_score == nil or score < best_score then best, best_score = row, score end
 			end
 			return best and best.index or nil
@@ -565,6 +568,27 @@ local function new_governor(options)
 		return { code = "accepted", count = #self.queue }
 	end
 	local remember_terminal
+	function governor:CancelQueued(id, message)
+		if not valid_text(id, 128) then return nil, "invalid id" end
+		local item = self.known[id]
+		if item == nil or item.queued ~= true then return nil, "scheduled item is not queued" end
+		local queue_index
+		for index, queued in ipairs(self.queue) do
+			if queued == item then
+				queue_index = index
+				break
+			end
+		end
+		if queue_index == nil then return nil, "queued item was not present in the queue" end
+		table.remove(self.queue, queue_index)
+		item.queued = false
+		item.terminal_result = {
+			code = "cancelled",
+			message = if type(message) == "string" and message ~= "" then string.sub(message, 1, 200)
+				else "scheduled work was cancelled before it started",
+		}
+		return item, nil
+	end
 	function governor:TakeNext(renewal_mode)
 		local now = now_ms()
 		for index = #self.queue, 1, -1 do
@@ -897,9 +921,16 @@ end
 
 local function delay_scheduled(seconds, callback)
 	local api = get_task_api()
-	if api == nil or type(api.delay) ~= "function" then return false end
-	api.delay(seconds, callback)
-	return true
+	if api == nil or type(api.delay) ~= "function" then return nil end
+	return api.delay(seconds, callback)
+end
+
+local function cancel_scheduled(thread_to_cancel)
+	if thread_to_cancel == nil then return end
+	local api = get_task_api()
+	if api ~= nil and type(api.cancel) == "function" then
+		pcall(api.cancel, thread_to_cancel)
+	end
 end
 
 local function new_dispatcher(governor, options)
@@ -916,10 +947,11 @@ local function new_dispatcher(governor, options)
 		closed = false,
 		wake_generation = 0,
 		wake_due_ms = nil,
+		wake_thread = nil,
 		metrics = {
 			accepted = 0, rejected = 0, completed = 0, retries = 0, retry_deferred = 0,
 			expired = 0, dependency_failed = 0, callback_errors = 0,
-			max_in_flight = 0, last_error = nil,
+			max_in_flight = 0, cancelled = 0, last_error = nil,
 		},
 	}
 	local function now_ms()
@@ -932,10 +964,13 @@ local function new_dispatcher(governor, options)
 		if current ~= nil and current <= due_at_ms then return end
 		dispatcher.wake_generation += 1
 		local generation = dispatcher.wake_generation
+		cancel_scheduled(dispatcher.wake_thread)
+		dispatcher.wake_thread = nil
 		dispatcher.wake_due_ms = due_at_ms
 		local delay_ms = math.max(0, due_at_ms - now_ms())
-		delay_scheduled(delay_ms / 1000, function()
+		dispatcher.wake_thread = delay_scheduled(delay_ms / 1000, function()
 			if dispatcher.closed or generation ~= dispatcher.wake_generation then return end
+			dispatcher.wake_thread = nil
 			dispatcher.wake_due_ms = nil
 			kick_dispatcher()
 		end)
@@ -1038,6 +1073,32 @@ local function new_dispatcher(governor, options)
 			schedule_next_wake()
 		end
 	end
+	function dispatcher:CancelQueued(message)
+		if self.closed then return 0 end
+		local pending = {}
+		for _, item in ipairs(governor.queue) do
+			pending[#pending + 1] = item
+		end
+		local was_running = self.running
+		self.running = true
+		local cancelled_count = 0
+		for _, item in ipairs(pending) do
+			local cancelled = governor:CancelQueued(item.id, message)
+			if cancelled ~= nil then
+				cancelled_count += 1
+				self.metrics.cancelled += 1
+				finish_scheduled_item(cancelled, "cancelled", self.callbacks[cancelled.id], true, nil, false)
+			end
+		end
+		self.running = was_running
+		self.wake_generation += 1
+		cancel_scheduled(self.wake_thread)
+		self.wake_thread = nil
+		self.wake_due_ms = nil
+		if not was_running and not self.closed then self:Kick() end
+		return cancelled_count
+	end
+
 	local function dispatch_one(item, status)
 		local entry = dispatcher.callbacks[item.id]
 		if status ~= "success" then
@@ -1232,6 +1293,8 @@ local function new_dispatcher(governor, options)
 	function dispatcher:Close()
 		self.closed = true
 		self.wake_generation += 1
+		cancel_scheduled(self.wake_thread)
+		self.wake_thread = nil
 		self.wake_due_ms = nil
 	end
 	return dispatcher
