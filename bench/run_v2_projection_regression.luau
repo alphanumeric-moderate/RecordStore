@@ -101,6 +101,7 @@ assert(ambiguous.row.value.coins == 8 and ambiguous.row.source_revision == 2,
 
 local reservation_store = new_store()
 local reservations = V2.Projections.new(reservation_store)
+reservation_store.replay_next = true
 reservation_store.fail_after_next = true
 local reserved = reservations:ReserveUnique("username", "Barcode", "player-1", "reserve-op-1")
 assert(reserved.code == "committed" and reserved.reconciled == true,
