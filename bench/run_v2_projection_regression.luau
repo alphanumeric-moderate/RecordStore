@@ -30,7 +30,7 @@ local function new_store()
 			self.replay_next = false
 			local first = transform(clone(old))
 			local second = transform(clone(old))
-			assert(V2.canonical(first) == V2.canonical(second),
+			assert(V2.Canonicalize(first) == V2.Canonicalize(second),
 				"UpdateAsync transform returned different values when replayed against the same input")
 			next_value = second
 		else
