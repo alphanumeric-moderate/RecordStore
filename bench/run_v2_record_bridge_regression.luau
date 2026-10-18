@@ -148,3 +148,4 @@ assert(direct_result.code == "success" and #direct_dlq == 1 and next_cursor == n
 	"direct V2 dead-letter pagination failed")
 
 print("[PASS] Record/MailboxV2 binding, legacy queue drain guard, enqueue/read/process bridge, and DLQ semantic fencing.")
+Shim.close()
