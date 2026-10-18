@@ -1239,6 +1239,10 @@ local function new_dispatcher(governor, options)
 		if item.lane ~= "lease_renewal" then dispatcher.normal_in_flight += 1 end
 		dispatcher.metrics.max_in_flight = math.max(dispatcher.metrics.max_in_flight, dispatcher.in_flight)
 		spawn_scheduled(function()
+			if dispatcher.closed then
+				finish_scheduled_item(item, "cancelled", entry, true, nil, true)
+				return
+			end
 			-- A queued item can become expired after selection but before its
 			-- coroutine actually starts. Check the no-new-start boundary again here.
 			if finite(item.expires_at_ms) and item.expires_at_ms <= now_ms() then
