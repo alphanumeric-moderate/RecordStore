@@ -829,8 +829,8 @@ local function new_governor(options)
 		if item.operation_class == nil and finite(item.cost) then estimated = math.max(1, math.floor(item.cost)) end
 		return math.clamp(math.ceil(estimated), 1, 256)
 	end
-	local function lane_key(item)
-		return digest(item.owner_id .. "\0" .. tostring(item.work_class or "default") .. "\0" .. tostring(item.lane))
+	local function lane_key(item, now)
+		return digest(item.owner_id .. "\0" .. tostring(item.work_class or "default") .. "\0" .. tostring(scheduled_lane(item, now or now_ms())))
 	end
 	local function choose_index(self, algorithm, renewal_mode)
 		local now, eligible = now_ms(), {}
@@ -884,7 +884,7 @@ local function new_governor(options)
 		end
 		local lane_rows, lane_keys = {}, {}
 		for _, row in ipairs(eligible) do
-			local key = lane_key(row.item)
+			local key = lane_key(row.item, now)
 			if lane_rows[key] == nil then
 				lane_rows[key] = {}
 				lane_keys[#lane_keys + 1] = key
@@ -1053,7 +1053,7 @@ local function new_governor(options)
 		for _, item in ipairs(self.queue) do
 			local owner_at_cap = (self.active_owner[item.owner_id] or 0) >= self.policy.max_per_owner_in_flight
 			local renewal_can_run = item.lane == "lease_renewal" and
-				(self.active_renewals_by_owner[item.owner_id] or 0) < 1
+				(self.active_renewals_by_owner[item.owner_id] or 0) < self.policy.max_per_owner_in_flight
 			if dependencies_ready(self, item) and (renewal_can_run or not owner_at_cap) then
 				local candidate
 				if (item.due_at_ms or 0) > now then candidate = item.due_at_ms
@@ -1143,7 +1143,7 @@ local function new_governor(options)
 		end
 		local code = if type(outcome) == "table" then outcome.code else outcome
 		if code == nil or code == true or code == "success" or code == "committed"
-			or code == "acknowledged" or code == "processed" or code == "completed" or code == "duplicate"
+			or code == "acknowledged" or code == "processed" or code == "completed" or code == "duplicate" or code == "renewed"
 		then
 			self.completed[id] = true
 			self.failed[id] = nil
