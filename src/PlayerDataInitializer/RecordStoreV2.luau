@@ -2244,7 +2244,9 @@ local function new_erasure(store, families, options)
 			local entry, family = manifest.entries[index], by_name[manifest.entries[index].family]
 			if not family then return { code = "corrupt", message = "unknown family in erasure plan" } end
 			local clear, dependency_error = io_call(family.dependencies_clear, copy(entry.item), user_id)
-			if clear ~= true then return { code = "blocked", cursor = index - 1, message = dependency_error or "live dependency blocks deletion" }
+			if clear ~= true then
+				return { code = "blocked", cursor = index - 1, message = dependency_error or "live dependency blocks deletion" }
+			end
 			local status, action_error = io_call(family.redact_or_delete_if_generation, copy(entry.item), user_id, erasure_id)
 			if status ~= "deleted" and status ~= "redacted" then
 				local observed, state_error = adapter_call(store, "UpdateAsync", key, function(old)
