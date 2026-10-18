@@ -6603,7 +6603,7 @@ function record_impl.get_envelope_sidecar_stats(
 		local oldest_committed_at: number? = nil
 		local newest_committed_at: number? = nil
 		for operation_id, receipt in receipts do
-			if type(operation_id) ~= "string" or type(receipt) ~= "table" or not finite(receipt.committed_at) then
+			if type(operation_id) ~= "string" or type(receipt) ~= "table" or not math.isfinite(receipt.committed_at) then
 				return {}, "corrupt", "inbox receipt sidecar contains a malformed row"
 			end
 			count += 1
@@ -6626,7 +6626,7 @@ function record_impl.get_envelope_sidecar_stats(
 	local total_attempts, maximum_attempts = 0, 0
 	for event_id, event in outbox do
 		if type(event_id) ~= "string" or type(event) ~= "table"
-			or not finite(event.created_at) or not finite(event.attempts)
+			or not math.isfinite(event.created_at) or not math.isfinite(event.attempts)
 		then
 			return {}, "corrupt", "outbox sidecar contains a malformed row"
 		end
