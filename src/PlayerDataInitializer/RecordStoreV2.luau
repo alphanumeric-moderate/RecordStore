@@ -515,7 +515,7 @@ local function new_governor(options)
 		completed = {}, completed_order = {}, known = {}, active_owner = {}, active_renewals_by_owner = {},
 		drr_deficit = {}, drr_cursor_key = nil, high_streak = 0, urgent_streak = 0,
 		failed = {}, failed_order = {}, retry_cooldown_until = {}, retry_tokens_by_class = {},
-		last_token_time_by_class = {}, due_sequence = 0,
+		due_sequence = 0,
 		retry_tokens = 32, last_token_time = now_ms(),
 		last_budget = nil, last_budget_by_kind = {}, latency_ewma = {}, consecutive_errors = {}, circuits = {},
 		stats = { admitted = 0, rejected = 0, completed = 0, throttled = 0, errors = 0,
@@ -675,6 +675,13 @@ local function new_governor(options)
 		local class = if valid_text(work_class, 64) then work_class else "default"
 		local bucket = self.retry_tokens_by_class[class]
 		if bucket == nil then
+			if key_count(self.retry_tokens_by_class) >= 32 then
+				local oldest_key, oldest_time = nil, math.huge
+				for bucket_key, bucket_value in pairs(self.retry_tokens_by_class) do
+					if bucket_value.at_ms < oldest_time then oldest_key, oldest_time = bucket_key, bucket_value.at_ms end
+				end
+				if oldest_key ~= nil then self.retry_tokens_by_class[oldest_key] = nil end
+			end
 			bucket = { tokens = math.max(1, math.floor(self.policy.retry_token_capacity / 4)), at_ms = now }
 			self.retry_tokens_by_class[class] = bucket
 		end
@@ -830,7 +837,9 @@ local function new_governor(options)
 		return math.clamp(math.ceil(estimated), 1, 256)
 	end
 	local function lane_key(item, now)
-		return digest(item.owner_id .. "\0" .. tostring(item.work_class or "default") .. "\0" .. tostring(scheduled_lane(item, now or now_ms())))
+		local instant = now or now_ms()
+		return digest(item.owner_id .. "\0" .. tostring(item.work_class or "default")
+			.. "\0" .. tostring(scheduled_lane(item, instant)) .. "\0" .. tostring(item.service_class or "best_effort"))
 	end
 	local function choose_index(self, algorithm, renewal_mode)
 		local now, eligible = now_ms(), {}
@@ -906,7 +915,11 @@ local function new_governor(options)
 				local key = lane_keys[lane_index]
 				local rows = lane_rows[key]
 				local lane = rows[1].effective_lane
-				local weight = if lane == "lease_renewal" then 4 elseif lane == "high" then 4 elseif lane == "normal" then 2 else 1
+				local lane_weight = if lane == "lease_renewal" then 4 elseif lane == "high" then 4 elseif lane == "normal" then 2 else 1
+				local service_class = rows[1].item.service_class or "best_effort"
+				local service_weight = if service_class == "critical" then 4 elseif service_class == "interactive" then 3
+					elseif service_class == "normal" then 2 else 1
+				local weight = lane_weight * service_weight
 				self.drr_deficit[key] = math.min(self.policy.max_item_cost * 2, (self.drr_deficit[key] or 0) + self.policy.drr_quantum * weight)
 				local best = rows[1]
 				local has_urgent = false
@@ -937,6 +950,9 @@ local function new_governor(options)
 		local lane = item.lane or "normal"
 		if lane ~= "high" and lane ~= "normal" and lane ~= "background" and lane ~= "lease_renewal" then return { code = "invalid", message = "unsupported lane" } end
 		local value = copy(item)
+		if value.work_class ~= nil and not valid_text(value.work_class, 64) then return { code = "invalid", message = "work_class must be 1..64 bytes" } end
+		if value.operation_class ~= nil and not valid_text(value.operation_class, 64) then return { code = "invalid", message = "operation_class must be 1..64 bytes" } end
+		if value.available_at_ms ~= nil and not finite(value.available_at_ms) then return { code = "invalid", message = "available_at_ms must be finite" } end
 		if value.due_at_ms ~= nil and not finite(value.due_at_ms) then return { code = "invalid", message = "due_at_ms must be finite" } end
 		if value.deadline_ms ~= nil and not finite(value.deadline_ms) then return { code = "invalid", message = "deadline_ms must be finite" } end
 		if value.expires_at_ms ~= nil and not finite(value.expires_at_ms) then return { code = "invalid", message = "expires_at_ms must be finite" } end
@@ -966,6 +982,9 @@ local function new_governor(options)
 		if value.estimated_bytes ~= nil and (not finite(value.estimated_bytes) or value.estimated_bytes < 0 or value.estimated_bytes > 16777216) then
 			return { code = "invalid", message = "estimated_bytes must be in 0..16777216" }
 		end
+		if value.cost ~= nil and (not finite(value.cost) or value.cost < 1 or value.cost > self.policy.max_item_cost
+			or math.floor(value.cost) ~= value.cost)
+		then return { code = "invalid", message = "cost must be an integer within max_item_cost" } end
 		value.lane, value.original_lane = lane, lane
 		value.work_class = value.work_class or value.operation_class or "default"
 		value.enqueued_at_ms = now_ms()
@@ -1163,6 +1182,13 @@ local function new_governor(options)
 			self.completed[id] = nil
 			remember_terminal(self, id, tostring(code or "unknown"))
 		end
+		local active_lane_keys = {}
+		local instant = now_ms()
+		for _, queued in ipairs(self.queue) do active_lane_keys[lane_key(queued, instant)] = true end
+		for _, known_item in pairs(self.known) do
+			if known_item.dispatch_state == "in_flight" then active_lane_keys[lane_key(known_item, instant)] = true end
+		end
+		for key in pairs(self.drr_deficit) do if not active_lane_keys[key] then self.drr_deficit[key] = nil end end
 		self.stats.completed += 1
 		return true
 	end
@@ -4077,6 +4103,17 @@ function V2.new(record_store, mailbox_module, options)
 		local retry_delay_ms = if schedule_options.retry_delay_ms == nil then 100 else schedule_options.retry_delay_ms
 		local retry_jitter_percent = if schedule_options.retry_jitter_percent == nil
 			then runtime_governor.policy.retry_jitter_percent else schedule_options.retry_jitter_percent
+		for _, field in ipairs({ "due_at_ms", "available_at_ms", "deadline_ms", "expires_at_ms" }) do
+			local value = schedule_options[field]
+			if value ~= nil and not finite(value) then return { code = "invalid", message = field .. " must be finite" } end
+		end
+		for _, field in ipairs({ "work_class", "operation_class" }) do
+			local value = schedule_options[field]
+			if value ~= nil and not valid_text(value, 64) then return { code = "invalid", message = field .. " must be 1..64 bytes" } end
+		end
+		if schedule_options.batch_window_ms ~= nil and (not finite(schedule_options.batch_window_ms)
+			or schedule_options.batch_window_ms < 0 or schedule_options.batch_window_ms > runtime_governor.policy.batch_window_ms)
+		then return { code = "invalid", message = "batch_window_ms must be within the scheduler policy window" } end
 		if not finite(max_retries) or math.floor(max_retries) ~= max_retries or max_retries < 0 or max_retries > 8 then
 			return { code = "invalid", message = "max_retries must be an integer in 0..8" }
 		end
@@ -4106,7 +4143,12 @@ function V2.new(record_store, mailbox_module, options)
 			batch_window_ms = if finite(schedule_options.batch_window_ms)
 				then math.clamp(schedule_options.batch_window_ms, 0, runtime_governor.policy.batch_window_ms)
 				else runtime_governor.policy.batch_window_ms
-			local observed = runtime_governor.latency_ewma.outbox_dispatch or 0
+			local observed = math.max(
+				runtime_governor.latency_ewma.outbox_dispatch or 0,
+				runtime_governor.latency_ewma.write or 0,
+				runtime_governor.latency_ewma.update_async or 0,
+				runtime_governor.latency_ewma.service or 0
+			)
 			if observed >= runtime_governor.policy.batch_latency_ceiling_ms then batch_window_ms = 0
 			elseif observed >= runtime_governor.policy.batch_latency_ceiling_ms * 0.75 then batch_window_ms = math.floor(batch_window_ms / 2) end
 			if #runtime_governor.queue >= runtime_governor.policy.max_batch then batch_window_ms = 0 end
