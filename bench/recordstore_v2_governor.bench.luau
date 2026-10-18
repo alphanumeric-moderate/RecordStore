@@ -4,8 +4,8 @@ local fs = require("@lune/fs")
 local luau = require("@lune/luau")
 local Shim = require("./RobloxShim")
 local RecordStore = Shim.load()
-local MailboxV2 = luau.load(fs.readFile("src/PlayerDataInitializer/RecordStoreMailboxV2.luau"), { debugName = "RecordStoreMailboxV2" })()
-local V2 = luau.load(fs.readFile("src/PlayerDataInitializer/RecordStoreV2.luau"), { debugName = "RecordStoreV2" })().new(RecordStore, MailboxV2, { allow_unattested_activation = true })
+local MailboxV2 = luau.load(fs.readFile("src/PlayerDataInitializer/RecordStoreMailboxV2.luau"), { debugName = "RecordStoreMailboxV2", environment = Shim.environment })()
+local V2 = luau.load(fs.readFile("src/PlayerDataInitializer/RecordStoreV2.luau"), { debugName = "RecordStoreV2", environment = Shim.environment })().new(RecordStore, MailboxV2, { allow_unattested_activation = true })
 
 -- Exercise the actual core request gate with successful callbacks only.
 local runtime_code, runtime_error = RecordStore.configure_runtime({
@@ -36,6 +36,8 @@ for index = 1, 500 do
 	local lane = if index % 10 == 0 then "high" elseif index % 5 == 0 then "background" else "normal"
 	assert(governor:Enqueue({ id = "scheduled-" .. index, owner_id = "owner-" .. (index % 73), lane = lane, cost = 1, due_at_ms = 1000 + (index % 3) }).code == "accepted")
 end
+-- The mock clock is deterministic; advance to the last scheduled due time before draining.
+now += 2
 local taken = 0
 for _ = 1, 500 do if governor:TakeNext() then taken += 1 end end
 assert(taken == 500)
