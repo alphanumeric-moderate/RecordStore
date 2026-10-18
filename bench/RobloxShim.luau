@@ -96,6 +96,18 @@ local Instance = table.freeze({
 })
 
 local loaded_module: any = nil
+local loaded_scheduler_module: any = nil
+
+local function load_scheduler()
+	if loaded_scheduler_module ~= nil then return loaded_scheduler_module end
+	local source = fs.readFile(REPO_ROOT .. "/src/PlayerDataInitializer/RecordStoreScheduler.luau")
+	local chunk = luau.load(source, {
+		debugName = "RecordStoreScheduler",
+		environment = Shim.environment,
+	})
+	loaded_scheduler_module = chunk()
+	return loaded_scheduler_module
+end
 
 local function load_record_store(source_path: string?)
 	if loaded_module ~= nil then
@@ -111,6 +123,13 @@ local function load_record_store(source_path: string?)
 end
 
 local RecordStoreInstance = table.freeze({ Name = "RecordStore", ClassName = "ModuleScript" })
+local RecordStoreSchedulerInstance = table.freeze({ Name = "RecordStoreScheduler", ClassName = "ModuleScript" })
+local script = {
+	Parent = {
+		RecordStore = RecordStoreInstance,
+		RecordStoreScheduler = RecordStoreSchedulerInstance,
+	},
+}
 
 local ServerScriptService = {
 	RecordStore = RecordStoreInstance,
@@ -148,6 +167,8 @@ local game = {
 local function shim_require(target: any)
 	if target == RecordStoreInstance then
 		return load_record_store()
+	elseif target == RecordStoreSchedulerInstance then
+		return load_scheduler()
 	end
 	return require(target)
 end
@@ -158,6 +179,7 @@ Shim.environment = {
 	Enum = Enum,
 	DateTime = DateTime,
 	Instance = Instance,
+	script = script,
 	require = shim_require,
 }
 
