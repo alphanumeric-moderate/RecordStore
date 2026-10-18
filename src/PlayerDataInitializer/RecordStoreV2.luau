@@ -3590,6 +3590,9 @@ function V2.new(record_store, mailbox_module, options)
 	-- polled again after overload, restart, or a rejected wake-up.
 	api.ScheduleOutboxDispatch = function(owner, record, dispatcher, batch_size, max_batches, on_complete, schedule_options)
 		schedule_options = schedule_options or {}
+		if type(schedule_options) ~= "table" then
+			return { code = "invalid", message = "schedule_options must be a table" }
+		end
 		if type(record) ~= "table" or (type(record.DispatchOutboxBatchAsync) ~= "function"
 			and type(record.DispatchOutboxAsync) ~= "function")
 		then
@@ -3605,6 +3608,9 @@ function V2.new(record_store, mailbox_module, options)
 	-- callback code must process one bounded chunk and persist its own cursor.
 	api.ScheduleMaintenance = function(owner, maintenance_id, callback, schedule_options)
 		schedule_options = schedule_options or {}
+		if type(schedule_options) ~= "table" then
+			return { code = "invalid", message = "schedule_options must be a table" }
+		end
 		if not valid_text(maintenance_id, 96) then return { code = "invalid", message = "maintenance_id must be 1..96 bytes" } end
 		if type(callback) ~= "function" then return { code = "invalid", message = "maintenance callback is required" } end
 		local lane = schedule_options.lane or "background"
