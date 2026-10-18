@@ -393,6 +393,10 @@ batch_dispatcher:Close()
 local RecordStore = Shim.load()
 local initial_snapshot = RecordStore.get_scheduler_snapshot()
 assert(initial_snapshot.enabled == false, "advanced core scheduling must start disabled")
+local disabled_job = RecordStore.schedule_work("integration-owner", "must-stay-disabled", function()
+	error("scheduled callback ran while advanced scheduling was disabled")
+end, { lane = "normal" })
+assert(disabled_job.code == "disabled", "public scheduled work bypassed the opt-in gate")
 local configured, configure_message = RecordStore.configure_scheduler_policy({
 	revision = initial_snapshot.policy.revision + 1,
 	shadow_enabled = true,
@@ -467,6 +471,10 @@ assert(dispatch_snapshot.accepted >= 3 and dispatch_snapshot.completed >= 3,
 local closed_code = core_record:Close()
 assert(closed_code == "closed", "scheduler regression fixture failed to close")
 assert(RecordStore.set_scheduler_enabled(false), "core scheduling kill switch failed")
+local disabled_after_kill = RecordStore.schedule_work("integration-owner", "must-stay-disabled-after-kill", function()
+	error("scheduled callback ran after the scheduler kill switch")
+end, { lane = "normal" })
+assert(disabled_after_kill.code == "disabled", "public scheduler API ignored the kill switch")
 
 print("[PASS] RecordStore advanced scheduling unit and core integration regressions.")
 Shim.close()
