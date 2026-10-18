@@ -702,6 +702,59 @@ assert(budget_callback_ran, "work did not resume after budget recovery")
 assert(budget_governor:Stats().stats.throttled >= 1, "budget backpressure was not measured")
 budget_dispatcher:Close()
 
+-- The live governor consumes a fresh StandardRead/StandardWrite budget snapshot,
+-- and critical persistence may use its explicit reserve while background reads defer.
+local live_request_budget = 0
+local live_budget_governor = Scheduler.new({
+	now_ms = function() return now_ms end,
+	get_request_budgets = function()
+		return { read = live_request_budget, write = live_request_budget }
+	end,
+})
+local live_budget_policy = live_budget_governor:Stats().policy
+assert(live_budget_governor:SetPolicy({
+	revision = live_budget_policy.revision + 1,
+	minimum_budget = 2,
+}), "live budget policy was rejected")
+local live_budget_dispatcher = Scheduler.new_dispatcher(live_budget_governor, {
+	now_ms = function() return now_ms end,
+})
+local deferred_read_ran, critical_renewal_ran = false, false
+local live_deferred_read = live_budget_dispatcher:Schedule(
+	"live-budget-owner", "budget-constrained-read", function()
+		deferred_read_ran = true
+		return { code = "committed" }
+	end,
+	{ operation_class = "read", work_class = "maintenance", read_units = 1, write_units = 0, mutating = false }
+)
+assert(live_deferred_read.code == "accepted", "budget-constrained read was rejected at enqueue")
+assert(not deferred_read_ran, "noncritical read executed below the live StandardRead threshold")
+assert(live_budget_governor:Stats().request_budgets.read == 0,
+	"dispatcher did not publish the fresh StandardRead budget snapshot")
+local live_critical_renewal = live_budget_dispatcher:Schedule(
+	"live-budget-owner", "critical-lease-renewal", function()
+		critical_renewal_ran = true
+		return { code = "renewed" }
+	end,
+	{
+		lane = "lease_renewal",
+		service_class = "critical",
+		work_class = "profile_release",
+		operation_class = "lease_renewal",
+	}
+)
+assert(live_critical_renewal.code == "accepted", "critical renewal was rejected at enqueue")
+for _ = 1, 100 do if critical_renewal_ran then break end; task.wait(0.001) end
+assert(critical_renewal_ran, "critical lease renewal could not use its protected admission path")
+live_request_budget = 8
+now_ms += 251
+live_budget_dispatcher:Kick()
+for _ = 1, 100 do if deferred_read_ran then break end; task.wait(0.001) end
+assert(deferred_read_ran, "noncritical read did not resume after request budget recovery")
+assert(live_budget_governor:Stats().request_budgets.read == 8,
+	"dispatcher did not refresh request budget after the recovery observation")
+live_budget_dispatcher:Close()
+
 -- Closing a dispatcher drains callbacks and cancels its outstanding wake timer.
 local closing_governor = new_scheduler()
 local closing_dispatcher = Scheduler.new_dispatcher(closing_governor, {
