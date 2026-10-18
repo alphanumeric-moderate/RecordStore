@@ -4197,15 +4197,55 @@ function V2.new(record_store, mailbox_module, options)
 		local limit = bounded_integer(max_messages_per_wake, 4, 1, 32)
 		local bound, bind_error = mailbox:BindWakeups(accelerator)
 		if not bound then return false, bind_error end
-		return accelerator:Register(owner_text, function(reason)
+
+		local scheduler_installed = false
+		if type(mailbox.SetLeaseRenewalScheduler) == "function" then
+			local configured, configure_error = mailbox:SetLeaseRenewalScheduler(function(
+				message_id, due_in_ms, lease_remaining_ms, callback, on_complete
+			)
+				if not valid_text(message_id, 128) or not finite(due_in_ms) or not finite(lease_remaining_ms)
+					or due_in_ms < 0 or lease_remaining_ms < 0 or type(callback) ~= "function"
+					or type(on_complete) ~= "function"
+				then
+					return { code = "invalid", message = "lease renewal scheduling arguments are invalid" }
+				end
+				local schedule_now = current_schedule_time_ms()
+				local expires_at_ms = schedule_now + lease_remaining_ms
+				local safety_margin_ms = math.min(5000, math.floor(lease_remaining_ms / 4))
+				local deadline_ms = expires_at_ms - safety_margin_ms
+				return enqueue_scheduled_callback(
+					owner,
+					"lease_renewal",
+					"mailbox_lease_renewal:" .. message_id,
+					callback,
+					schedule_now + due_in_ms,
+					{
+						lane = "lease_renewal",
+						work_class = "lease_renewal",
+						operation_class = "lease_renewal",
+						service_class = "critical",
+						deadline_ms = deadline_ms,
+						expires_at_ms = expires_at_ms,
+						handler_slots = 1,
+					},
+					on_complete
+				)
+			end)
+			if not configured then return false, configure_error or "failed to install lease renewal scheduler" end
+			scheduler_installed = true
+		end
+
+		local registered, register_error = accelerator:Register(owner_text, function(reason)
 			dispatch_sequence += 1
 			local job_id = "rv2w:" .. tostring(dispatch_sequence)
-			local due_now = if options.runtime ~= nil and type(options.runtime.now_ms) == "function"
-				then options.runtime.now_ms() else os.clock() * 1000
+			local due_now = current_schedule_time_ms()
 			local accepted = runtime_governor:Enqueue({
 				id = job_id,
 				owner_id = owner_digest,
 				lane = "normal",
+				work_class = "mailbox_wakeup",
+				operation_class = "mailbox_claim",
+				cost = 4,
 				due_at_ms = due_now,
 				wake_reason = if valid_text(reason, 32) then reason else "unknown",
 			})
@@ -4222,6 +4262,8 @@ function V2.new(record_store, mailbox_module, options)
 			dispatch_metrics.accepted += 1
 			kick_dispatcher()
 		end)
+		if not registered and scheduler_installed then mailbox:SetLeaseRenewalScheduler(nil) end
+		return registered, register_error
 	end
 	activation_block = function(operation)
 		if allow_unattested_activation then return nil end
