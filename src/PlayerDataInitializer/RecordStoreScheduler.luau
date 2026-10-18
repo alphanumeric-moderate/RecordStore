@@ -395,6 +395,7 @@ local function new_governor(options)
 	end
 	local function choose_index(self, algorithm, renewal_mode)
 		local now, eligible = now_ms(), {}
+		local urgent_fallback = self.urgent_streak >= self.policy.urgent_deadline_burst
 		for index, item in ipairs(self.queue) do
 			local ready = (item.due_at_ms or 0) <= now
 				and (item.available_at_ms == nil or item.available_at_ms <= now)
@@ -412,7 +413,7 @@ local function new_governor(options)
 				end
 			end
 		end
-		if #eligible == 0 then return nil end
+		if #eligible == 0 then return nil, false end
 		if self.high_streak >= self.policy.high_burst then
 			local has_non_high = false
 			for _, row in ipairs(eligible) do
@@ -429,7 +430,7 @@ local function new_governor(options)
 			for _, row in ipairs(eligible) do
 				if best == nil or row.item.enqueued_at_ms < best.item.enqueued_at_ms then best = row end
 			end
-			return best and best.index or nil
+			return best and best.index or nil, urgent_fallback
 		elseif algorithm == "weighted" or algorithm == "deadline" then
 			local best, best_score
 			for _, row in ipairs(eligible) do
@@ -447,7 +448,7 @@ local function new_governor(options)
 					else -lane_weight * 1000 - service_rank * 500 - age * 0.25 + urgency_score * 0.01
 				if best_score == nil or score < best_score then best, best_score = row, score end
 			end
-			return best and best.index or nil
+			return best and best.index or nil, urgent_fallback
 		end
 		local lane_rows, lane_keys = {}, {}
 		for _, row in ipairs(eligible) do
@@ -495,11 +496,11 @@ local function new_governor(options)
 				if cost <= self.drr_deficit[key] then
 					self.drr_deficit[key] -= cost
 					self.drr_cursor_key = key
-					return best.index
+					return best.index, urgent_fallback
 				end
 			end
 		end
-		return nil
+		return nil, false
 	end
 	function governor:Enqueue(item)
 		if type(item) ~= "table" or not valid_text(item.id, 128) or not valid_text(item.owner_id, 512) then return { code = "invalid" } end
@@ -617,7 +618,7 @@ local function new_governor(options)
 				return item, "expired"
 			end
 		end
-		local index = choose_index(self, self.policy.algorithm or "drr", renewal_mode)
+		local index, urgent_fallback = choose_index(self, self.policy.algorithm or "drr", renewal_mode)
 		if not index then return nil, "empty" end
 		if self.policy.shadow_enabled and self.policy.shadow_sample_rate > 0 then
 			local interval = math.max(1, math.floor(1 / self.policy.shadow_sample_rate))
@@ -638,7 +639,15 @@ local function new_governor(options)
 		if item.overdue then self.stats.scheduled_overdue += 1 end
 		local effective_lane = scheduled_lane(item, now)
 		if effective_lane == "high" then self.high_streak += 1 else self.high_streak = 0 end
-		if finite(item.deadline_ms) and item.deadline_ms - now <= 5000 then self.urgent_streak += 1 else self.urgent_streak = 0 end
+		if urgent_fallback then
+			-- A fairness yield consumes the urgent burst; deadline preference may
+			-- resume after this older eligible item receives service.
+			self.urgent_streak = 0
+		elseif finite(item.deadline_ms) and item.deadline_ms - now <= 5000 then
+			self.urgent_streak += 1
+		else
+			self.urgent_streak = 0
+		end
 		self.active_owner[item.owner_id] = (self.active_owner[item.owner_id] or 0) + 1
 		if item.lane == "lease_renewal" then self.active_renewals_by_owner[item.owner_id] = (self.active_renewals_by_owner[item.owner_id] or 0) + 1 end
 		item.selected_at_ms = now
