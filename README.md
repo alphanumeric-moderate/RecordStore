@@ -225,8 +225,6 @@ local job = RecordStore.schedule_work(
         lane = "background",
         work_class = "maintenance",
         operation_class = "maintenance",
-        -- Set false only when this callback is guaranteed not to mutate persisted state.
-        mutating = false,
     }
 )
 assert(job.code == "accepted", job.message)
