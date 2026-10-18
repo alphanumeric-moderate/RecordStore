@@ -948,7 +948,8 @@ local function new_dispatcher(governor, options)
 			local jitter = if jitter_span > 0 then (math.random() * 2 - 1) * jitter_span else 0
 			delay_ms = math.max(10, math.floor(exponential + jitter))
 		else
-			delay_ms = math.max(10, finite(wait_ms) and wait_ms or entry.retry_delay_ms)
+			-- A depleted token bucket defers retry traffic; it must not spin a tight timer.
+			delay_ms = if finite(wait_ms) then math.clamp(math.floor(wait_ms), 10, 60000) else 60000
 		end
 		local due_at_ms = now + delay_ms
 		local queued, message = governor:Reschedule(item.id, due_at_ms)
@@ -1023,7 +1024,8 @@ local function new_dispatcher(governor, options)
 		if type(entry) == "table" and entry.retry_waiting_for_token == true then
 			local token, wait_ms = governor:AcquireRetryToken(entry.work_class)
 			if not token then
-				local retry_due_at = now_ms() + math.max(10, finite(wait_ms) and wait_ms or entry.retry_delay_ms)
+				local token_wait_ms = if finite(wait_ms) then math.clamp(math.floor(wait_ms), 10, 60000) else 60000
+				local retry_due_at = now_ms() + token_wait_ms
 				local requeued, retry_error = governor:Reschedule(item.id, retry_due_at)
 				if requeued then
 					schedule_wake_at(retry_due_at)
@@ -1061,9 +1063,6 @@ local function new_dispatcher(governor, options)
 				local item, status = governor:TakeNext(true)
 				if item == nil and dispatcher.in_flight < normal_limit then
 					item, status = governor:TakeNext(false)
-				elseif item == nil and dispatcher.in_flight < maximum then
-					local counts = governor:Stats().lanes
-					if (counts.lease_renewal or 0) == 0 then item, status = governor:TakeNext(false) end
 				end
 				if item == nil then break end
 				dispatch_one(item, status)
