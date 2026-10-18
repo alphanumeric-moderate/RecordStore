@@ -1045,12 +1045,30 @@ local function new_dispatcher(governor, options)
 		dispatcher.in_flight += 1
 		dispatcher.metrics.max_in_flight = math.max(dispatcher.metrics.max_in_flight, dispatcher.in_flight)
 		spawn_scheduled(function()
+			-- A queued item can become expired after selection but before its
+			-- coroutine actually starts. Check the no-new-start boundary again here.
+			if finite(item.expires_at_ms) and item.expires_at_ms <= now_ms() then
+				finish_scheduled_item(item, "expired", entry, true, nil, true)
+				return
+			end
+			local started_at_ms = now_ms()
 			local callback_ok, callback_result
 			if type(entry) == "table" and type(entry.callback) == "function" then
 				callback_ok, callback_result = pcall(entry.callback)
 			else
 				callback_ok, callback_result = false, "scheduled callback is missing"
 			end
+			local elapsed_ms = math.max(0, now_ms() - started_at_ms)
+			local result_code = if type(callback_result) == "table" then callback_result.code
+				elseif callback_ok and (callback_result == true or callback_result == nil) then "success"
+				elseif not callback_ok then "unknown" else tostring(callback_result)
+			local operation_kind = if type(entry) == "table" then entry.operation_class or entry.work_class else "scheduled_callback"
+			local failed = not callback_ok or result_code == "unknown" or result_code == "budget"
+				or result_code == "retryable" or result_code == "retry_rejected" or result_code == "retry_exhausted"
+			governor:Observe(operation_kind, not failed, elapsed_ms, if failed then tostring(result_code or "unknown") else nil)
+			local prior_service_latency = governor.latency_ewma.service
+			governor.latency_ewma.service = if finite(prior_service_latency)
+				then prior_service_latency * 0.8 + elapsed_ms * 0.2 else elapsed_ms
 			finish_scheduled_item(item, "success", entry, callback_ok, callback_result, true)
 		end)
 	end
@@ -1160,8 +1178,10 @@ local function new_dispatcher(governor, options)
 		end
 		self.callbacks[id] = {
 			callback = callback, on_complete = schedule_options.on_complete,
-			work_id = work_id, work_class = work_class, retry_attempt = 0,
-			max_retries = retry_limit, retry_delay_ms = retry_delay_ms, retry_jitter_percent = jitter,
+			work_id = work_id, work_class = work_class,
+			operation_class = schedule_options.operation_class or work_class,
+			retry_attempt = 0, max_retries = retry_limit,
+			retry_delay_ms = retry_delay_ms, retry_jitter_percent = jitter,
 		}
 		self.metrics.accepted += 1
 		kick_dispatcher()
