@@ -169,6 +169,33 @@ local erased_event = erased_projections:ApplyAsync("subject_projection_v1", {
 	subject_user_ids = { 987654321 },
 })
 assert(erased_event.code == "erased", "projection recreated data for a durably erased subject")
+local subject_read_store = new_store()
+local live_subject_projection = V2.Projections.new(subject_read_store, {
+	is_erased = function(_user_id) return false end,
+})
+assert(live_subject_projection:Register("subject_read_v1", 1, function(current, event)
+	local changed = table.clone(current)
+	changed.subject = event.subject_user_ids[1]
+	return changed
+end))
+local subject_row = live_subject_projection:ApplyAsync("subject_read_v1", {
+	event_id = "subject-read-seed",
+	entity_id = "subject-entity",
+	source_revision = 1,
+	subject_user_ids = { 987654321 },
+})
+assert(subject_row.code == "committed", "could not seed subject-bound projection row")
+local erased_subject_projection = V2.Projections.new(subject_read_store, {
+	is_erased = function(_user_id) return true end,
+})
+assert(erased_subject_projection:Register("subject_read_v1", 1, function(current, event)
+	local changed = table.clone(current)
+	changed.subject = event.subject_user_ids[1]
+	return changed
+end))
+local erased_read = erased_subject_projection:GetAsync("subject_read_v1", "subject-entity")
+assert(erased_read.code == "erased", "projection read returned data for a subject marked erased")
+
 local mutable_subjects = { 987654321 }
 local snapshot_store = new_store()
 local snapshot_reservations = V2.Projections.new(snapshot_store, {
