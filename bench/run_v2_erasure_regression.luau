@@ -464,6 +464,25 @@ assert(tampered_result.code == "corrupt",
 assert(delete_calls == deletes_before_tamper,
 	"erasure performed a destructive action using a tampered manifest entry")
 
+local tampered_generation_store = new_store()
+local tampered_generation = V2.Erasure.new(tampered_generation_store, { family(true) }, {
+	verify_templates = function(_user_id, rendered) return type(rendered) == "table" and #rendered == 1 end,
+})
+local generation_plan = tampered_generation:PlanAsync(129, "erasure-tampered-generation")
+assert(generation_plan.code == "success" and generation_plan.rtbf_coverage_verified == true,
+	"tampered-generation fixture did not create a verified plan")
+tampered_generation_store:UpdateAsync("rv2erase-u129", function(old)
+	local changed = clone(old)
+	changed.entries[1].item.generation = 2
+	return changed
+end)
+local deletes_before_generation_tamper = delete_calls
+local generation_tamper_result = tampered_generation:ExecuteAsync(129, "erasure-tampered-generation", 1)
+assert(generation_tamper_result.code == "corrupt",
+	"erasure accepted a generation changed after the immutable plan was recorded")
+assert(delete_calls == deletes_before_generation_tamper,
+	"erasure performed a destructive action using a tampered generation")
+
 local mutating_adapter_family = family(true)
 local mutating_adapter_calls = 0
 mutating_adapter_family.redact_or_delete_if_generation = function(item, _user_id, _erasure_id)
