@@ -558,6 +558,81 @@ assert(admission_governor:Stats().in_flight == 0,
 	"request admission leaked its in-flight reservation")
 admission_dispatcher:Close()
 
+-- The scheduler's degraded modes must apply to real callbacks, not only direct governor calls.
+local read_only_governor = new_scheduler()
+local read_only_policy = read_only_governor:Stats().policy
+assert(read_only_governor:SetPolicy({
+	revision = read_only_policy.revision + 1,
+	mode = "read_only",
+}), "read-only policy was rejected")
+local read_only_dispatcher = Scheduler.new_dispatcher(read_only_governor, {
+	now_ms = function() return now_ms end,
+})
+local mutating_callback_ran, mutating_completion = false, nil
+local read_only_mutation = read_only_dispatcher:Schedule(
+	"read-only-owner", "blocked-mutation", function()
+		mutating_callback_ran = true
+		return { code = "committed" }
+	end,
+	{
+		operation_class = "tracing",
+		work_class = "maintenance",
+		on_complete = function(result) mutating_completion = result end,
+	}
+)
+assert(read_only_mutation.code == "accepted", "read-only mutation fixture was not queued")
+for _ = 1, 100 do
+	if mutating_completion ~= nil then break end
+	task.wait(0.001)
+end
+assert(type(mutating_completion) == "table" and mutating_completion.code == "read_only",
+	"read-only policy did not return its typed terminal result")
+assert(not mutating_callback_ran, "mutating work ran under read-only policy")
+local read_only_read_ran = false
+local read_only_read = read_only_dispatcher:Schedule(
+	"read-only-owner", "allowed-read", function()
+		read_only_read_ran = true
+		return { code = "committed" }
+	end,
+	{ operation_class = "tracing", work_class = "maintenance", mutating = false }
+)
+assert(read_only_read.code == "accepted", "read-only work fixture was not queued")
+for _ = 1, 100 do
+	if read_only_read_ran then break end
+	task.wait(0.001)
+end
+assert(read_only_read_ran, "explicitly non-mutating work was blocked in read-only mode")
+assert(read_only_governor:Stats().stats.rejected >= 1, "read-only rejection was not measured")
+read_only_dispatcher:Close()
+
+-- Budget backpressure retains work and resumes after a fresh budget observation.
+local budget_governor = new_scheduler()
+budget_governor:Observe("tracing", true, 1, nil, 0)
+local budget_dispatcher = Scheduler.new_dispatcher(budget_governor, {
+	now_ms = function() return now_ms end,
+})
+local budget_callback_ran = false
+local budget_job = budget_dispatcher:Schedule(
+	"budget-owner", "budget-delayed-work", function()
+		budget_callback_ran = true
+		return { code = "committed" }
+	end,
+	{ operation_class = "tracing", work_class = "maintenance", mutating = false }
+)
+assert(budget_job.code == "accepted", "budget-delayed work was rejected before queueing")
+assert(not budget_callback_ran, "work executed below the configured request-budget minimum")
+assert(budget_governor:Stats().queue_items == 1, "budget-backpressured work was removed from the queue")
+budget_governor:Observe("tracing", true, 1, nil, 3)
+now_ms += 251
+budget_dispatcher:Kick()
+for _ = 1, 100 do
+	if budget_callback_ran then break end
+	task.wait(0.001)
+end
+assert(budget_callback_ran, "work did not resume after budget recovery")
+assert(budget_governor:Stats().stats.throttled >= 1, "budget backpressure was not measured")
+budget_dispatcher:Close()
+
 -- The main RecordStore module resolves the same scheduler through its
 -- ModuleScript parent. Runtime scheduling remains opt-in.
 local RecordStore = Shim.load()
