@@ -2025,7 +2025,8 @@ local function new_erasure(store, families, options)
 	end
 	function coordinator:ExecuteAsync(user_id, erasure_id, max_items)
 		if not finite(user_id) or user_id < 1 or math.floor(user_id) ~= user_id or not valid_text(erasure_id, 96) then return { code = "invalid" } end
-		max_items = math.clamp(math.floor(max_items or 16), 1, 64)
+		local requested_max_items = if finite(max_items) then math.floor(max_items) else 16
+		max_items = math.clamp(requested_max_items, 1, 64)
 		local key = manifest_key(user_id)
 		local manifest, message = adapter_call(store, "GetAsync", key)
 		if message then return { code = "unknown", message = message } end
@@ -2037,8 +2038,29 @@ local function new_erasure(store, families, options)
 		if manifest.status == "completed" then return { code = "committed", completed_count = manifest.completed_count or 0, rtbf_coverage_verified = true } end
 		if type(manifest.entries) ~= "table" or not finite(manifest.cursor) or math.floor(manifest.cursor) ~= manifest.cursor
 			or manifest.cursor < 0 or manifest.cursor > #manifest.entries
+			or not finite(manifest.completed_count) or math.floor(manifest.completed_count) ~= manifest.completed_count
+			or manifest.completed_count < 0 or manifest.completed_count > #manifest.entries
 		then
-			return { code = "corrupt", message = "erasure manifest has an invalid bounded cursor or entries list" }
+			return { code = "corrupt", message = "erasure manifest has an invalid bounded cursor, completed count or entries list" }
+		end
+		local entry_count = #manifest.entries
+		if entry_count < 1 or entry_count > MAX_ERASURE_ITEMS then
+			return { code = "corrupt", message = "erasure manifest entry count is outside the supported bounds" }
+		end
+		for index in pairs(manifest.entries) do
+			if type(index) ~= "number" or not finite(index) or math.floor(index) ~= index
+				or index < 1 or index > entry_count
+			then
+				return { code = "corrupt", message = "erasure manifest entries must be a dense bounded array" }
+			end
+		end
+		for index = 1, entry_count do
+			local entry = manifest.entries[index]
+			if type(entry) ~= "table" or not valid_text(entry.family, 48) or type(entry.item) ~= "table"
+				or by_name[entry.family] == nil
+			then
+				return { code = "corrupt", message = "erasure manifest contains a malformed or unknown entry" }
+			end
 		end
 		for _, family in ipairs(self.families) do
 			if type(family.fence_user) ~= "function" or type(family.dependencies_clear) ~= "function"
