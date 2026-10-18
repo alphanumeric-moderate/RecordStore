@@ -901,6 +901,7 @@ local function new_dispatcher(governor, options)
 		callbacks = {},
 		sequence = 0,
 		in_flight = 0,
+		normal_in_flight = 0,
 		running = false,
 		closed = false,
 		wake_generation = 0,
@@ -1005,7 +1006,12 @@ local function new_dispatcher(governor, options)
 		then
 			callback_result = { code = "retry_exhausted", message = "configured retry cap reached", last_result = copy(callback_result) }
 		end
-		if counted_in_flight then dispatcher.in_flight = math.max(0, dispatcher.in_flight - 1) end
+		if counted_in_flight then
+			dispatcher.in_flight = math.max(0, dispatcher.in_flight - 1)
+			if item.lane ~= "lease_renewal" then
+				dispatcher.normal_in_flight = math.max(0, dispatcher.normal_in_flight - 1)
+			end
+		end
 		if not retry_scheduled then
 			if status == "success" and callback_ok then dispatcher.metrics.completed += 1 end
 			dispatcher.callbacks[item.id] = nil
@@ -1047,6 +1053,7 @@ local function new_dispatcher(governor, options)
 			dispatcher.metrics.retries += 1
 		end
 		dispatcher.in_flight += 1
+		if item.lane ~= "lease_renewal" then dispatcher.normal_in_flight += 1 end
 		dispatcher.metrics.max_in_flight = math.max(dispatcher.metrics.max_in_flight, dispatcher.in_flight)
 		spawn_scheduled(function()
 			-- A queued item can become expired after selection but before its
@@ -1085,7 +1092,7 @@ local function new_dispatcher(governor, options)
 			local normal_limit = math.max(0, maximum - policy.scheduler_critical_reserve)
 			while dispatcher.in_flight < maximum do
 				local item, status = governor:TakeNext(true)
-				if item == nil and dispatcher.in_flight < normal_limit then
+				if item == nil and dispatcher.normal_in_flight < normal_limit then
 					item, status = governor:TakeNext(false)
 				end
 				if item == nil then break end
@@ -1203,6 +1210,7 @@ local function new_dispatcher(governor, options)
 	function dispatcher:Stats()
 		local snapshot = copy(self.metrics)
 		snapshot.in_flight = self.in_flight
+		snapshot.normal_in_flight = self.normal_in_flight
 		snapshot.next_wake_due_ms = self.wake_due_ms
 		snapshot.closed = self.closed
 		snapshot.governor = governor:Stats()
