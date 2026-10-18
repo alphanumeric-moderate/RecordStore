@@ -107,6 +107,8 @@ assert(blocked_transaction.code == "disabled" and gate_record.transaction_calls 
 	"V2 transaction entrypoint bypassed the prepared rollout gate")
 local blocked_inbox = guarded_v2.Inbox.ApplyAsync(nil, "pre-activation-message", { kind = "coins" }, function(current) return current end)
 assert(blocked_inbox.code == "disabled", "V2 inbox entrypoint bypassed the prepared rollout gate")
+local blocked_prune = guarded_v2.Inbox.PruneReceipts(nil, 0, 1, "pre-activation-prune")
+assert(blocked_prune.code == "disabled", "V2 inbox receipt pruning bypassed the prepared rollout gate")
 local blocked_maintenance = guarded_v2.ScheduleMaintenance("maintenance-owner", "pre-activation", function()
 	return { code = "committed" }
 end)
