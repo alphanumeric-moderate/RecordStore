@@ -2757,6 +2757,16 @@ local function new_projections(store, options)
 			if not cursor_ok then return { code = "invalid", processed = processed, cursor = nil, message = "rebuild cursor must be an acyclic value" } end
 			local items, next_cursor, complete = io_call(fetch_page, cursor_snapshot, 64)
 			if type(items) ~= "table" then return { code = "unknown", processed = processed, cursor = cursor } end
+			local item_count = key_count(items)
+			if item_count > 64 then return { code = "capacity", processed = processed, cursor = cursor, message = "rebuild page exceeds 64 items" } end
+			for index in pairs(items) do
+				if type(index) ~= "number" or not finite(index) or math.floor(index) ~= index or index < 1 or index > item_count then
+					return { code = "invalid", processed = processed, cursor = cursor, message = "rebuild page must be a dense array" }
+				end
+			end
+			for index = 1, item_count do
+				if items[index] == nil then return { code = "invalid", processed = processed, cursor = cursor, message = "rebuild page contains a hole" } end
+			end
 			local next_cursor_ok, next_cursor_snapshot = pcall(copy, next_cursor)
 			if not next_cursor_ok then return { code = "invalid", processed = processed, cursor = cursor, message = "fetch_page returned a cyclic cursor" } end
 			for _, event in ipairs(items) do
