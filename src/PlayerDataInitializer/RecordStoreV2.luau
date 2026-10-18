@@ -2618,8 +2618,18 @@ local function new_projections(store, options)
 	end
 	function service:Register(name, version, projector, definition)
 		if not valid_text(name, 40) or not finite(version) or version < 1 or math.floor(version) ~= version or type(projector) ~= "function" then return false, "projection requires name, positive version, and pure projector" end
-		if self.projections[name] and self.projections[name].version ~= version then return false, "use a versioned projection name and explicit cutover" end
-		self.projections[name] = { name = name, version = version, projector = projector, definition = copy(definition or {}) }
+		local normalized_definition = copy(definition or {})
+		local prior = self.projections[name]
+		if prior ~= nil then
+			if prior.version ~= version then return false, "use a versioned projection name and explicit cutover" end
+			local prior_ok, prior_material = pcall(canonical, prior.definition)
+			local next_ok, next_material = pcall(canonical, normalized_definition)
+			if prior.projector ~= projector or not prior_ok or not next_ok or prior_material ~= next_material then
+				return false, "projection name/version is immutable; use a new versioned name for changed logic or definition"
+			end
+			return true, "duplicate"
+		end
+		self.projections[name] = { name = name, version = version, projector = projector, definition = normalized_definition }
 		return true
 	end
 	function service:ApplyAsync(name, event)
