@@ -159,6 +159,21 @@ assert(snapshot_reservation.code == "committed", "subject-bound reservation fail
 assert(snapshot_reservation.reservation.subject_user_ids[1] == 987654321,
 	"subject list changed between erasure verification and reservation persistence")
 
+local rebuild_store = new_store()
+local rebuild_projection = V2.Projections.new(rebuild_store)
+assert(rebuild_projection:Register("rebuild_projection_v1", 1, function(current) return current end))
+local caller_cursor = { page = 1 }
+local empty_rebuild = rebuild_projection:RebuildAsync("rebuild_projection_v1", function(received_cursor)
+	received_cursor.page = 99
+	return {}, nil, true
+end, caller_cursor, 1)
+assert(empty_rebuild.code == "committed" and caller_cursor.page == 1,
+	"projection rebuild exposed its caller-owned cursor to fetch_page")
+local sparse_rebuild = rebuild_projection:RebuildAsync("rebuild_projection_v1", function()
+	return { [1] = { event_id = "rebuild-1", entity_id = "entity-1", source_revision = 1 }, [3] = {} }, nil, true
+end, nil, 1)
+assert(sparse_rebuild.code == "invalid", "projection rebuild accepted a sparse page and could skip events")
+
 local corrupt_store = new_store()
 local corrupt_projection = V2.Projections.new(corrupt_store)
 assert(corrupt_projection:Register("player_balance_v1", 1, function(current) return current end))
