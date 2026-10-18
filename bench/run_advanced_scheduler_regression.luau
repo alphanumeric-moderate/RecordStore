@@ -832,7 +832,7 @@ budget_dispatcher:Close()
 
 -- The live governor consumes a fresh StandardRead/StandardWrite budget snapshot,
 -- and critical persistence may use its explicit reserve while background reads defer.
-local live_request_budget = 0
+local live_request_budget = 1
 local live_budget_governor = Scheduler.new({
 	now_ms = function() return now_ms end,
 	get_request_budgets = function()
@@ -857,7 +857,7 @@ local live_deferred_read = live_budget_dispatcher:Schedule(
 )
 assert(live_deferred_read.code == "accepted", "budget-constrained read was rejected at enqueue")
 assert(not deferred_read_ran, "noncritical read executed below the live StandardRead threshold")
-assert(live_budget_governor:Stats().request_budgets.read == 0,
+assert(live_budget_governor:Stats().request_budgets.read == 1,
 	"dispatcher did not publish the fresh StandardRead budget snapshot")
 local live_critical_renewal = live_budget_dispatcher:Schedule(
 	"live-budget-owner", "critical-lease-renewal", function()
