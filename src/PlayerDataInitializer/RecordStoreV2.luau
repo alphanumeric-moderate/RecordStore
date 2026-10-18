@@ -975,6 +975,20 @@ local function new_migrations()
 		for _, step in ipairs(steps) do
 			local next_data, err = pure(step.migrate, copy(proposed), { store_name = store_name, from_version = step.from_version, to_version = step.to_version, migration_id = step.id, revision = step.revision, dry_run = true })
 			if type(next_data) ~= "table" then return { code = "invalid", message = err or "migration must return table" } end
+			for key, before_value in pairs(proposed) do
+				if type(key) == "string" and string.sub(key, 1, #RESERVED) == RESERVED
+					and key ~= field and not reserved_equal(before_value, next_data[key])
+				then
+					return { code = "invalid", message = "migration preview attempted to modify reserved sidecar: " .. key }
+				end
+			end
+			for key in pairs(next_data) do
+				if type(key) == "string" and string.sub(key, 1, #RESERVED) == RESERVED
+					and key ~= field and proposed[key] == nil
+				then
+					return { code = "invalid", message = "migration preview attempted to create reserved sidecar: " .. key }
+				end
+			end
 			if step.validate then local valid, validation_error = pure(step.validate, next_data); if valid ~= true then return { code = "validation", message = validation_error or "migration validator rejected data" } end end
 			next_data[field] = step.to_version
 			proposed = next_data
