@@ -2613,7 +2613,9 @@ local function new_projections(store, options)
 			for index = 1, subject_count do
 				local erased, error_value = io_call(options.is_erased, subject_user_ids[index])
 				if erased == true then return false, { code = "erased" } end
-				if erased == nil then return false, { code = "unknown", message = error_value or "erasure state unresolved" } end
+				if erased ~= false then
+					return false, { code = "unknown", message = error_value or "erasure verifier must return exactly true or false" }
+				end
 			end
 		end
 		return true, nil
