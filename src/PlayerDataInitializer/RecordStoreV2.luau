@@ -2158,8 +2158,10 @@ local function new_erasure(store, families, options)
 			or manifest.cursor < 0 or manifest.cursor > #manifest.entries
 			or not finite(manifest.completed_count) or math.floor(manifest.completed_count) ~= manifest.completed_count
 			or manifest.completed_count < 0 or manifest.completed_count > #manifest.entries
+			or manifest.completed_count ~= manifest.cursor
+			or (manifest.status == "planned" and manifest.cursor ~= 0)
 		then
-			return { code = "corrupt", message = "erasure manifest has an invalid bounded cursor, completed count or entries list" }
+			return { code = "corrupt", message = "erasure manifest has inconsistent bounded cursor, completed count or entries list" }
 		end
 		local entry_count = #manifest.entries
 		if entry_count < 1 or entry_count > MAX_ERASURE_ITEMS then
