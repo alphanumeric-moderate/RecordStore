@@ -15,6 +15,7 @@ for _, path in {
 	"bench/run_v2_runtime_governor_regression.luau",
 	"bench/run_v2_read_coalescer_regression.luau",
 	"bench/run_v2_maintenance_regression.luau",
+	"bench/run_v2_projection_regression.luau",
 	"bench/run_v2_production_mailbox_failure_matrix.luau",
 	"bench/run_v2_transaction_inbox_outbox_failure_matrix.luau",
 	"bench/run_v2_erasure_regression.luau",
