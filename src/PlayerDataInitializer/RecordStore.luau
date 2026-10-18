@@ -6685,6 +6685,9 @@ local function enqueue_state_work(
 		scheduler_owner_id(state),
 		kind .. ":" .. tostring(state.generation),
 		function()
+			if not scheduler_enabled then
+				return { code = "cancelled", message = "advanced scheduler was disabled before work started" }
+			end
 			if closing or state.retired or state.state ~= "active" then
 				return { code = "cancelled", message = "record is no longer active" }
 			end
@@ -6711,7 +6714,9 @@ end
 function RecordStore.set_scheduler_enabled(enabled: boolean): (boolean, string?)
 	if type(enabled) ~= "boolean" then return false, "enabled must be a boolean" end
 	scheduler_enabled = enabled
-	if enabled then scheduler_dispatcher:Kick() end
+	-- Drain due but not-yet-started core jobs through the cancellation guard when
+	-- disabling so the legacy path can immediately resume their responsibility.
+	scheduler_dispatcher:Kick()
 	return true, nil
 end
 
@@ -6740,7 +6745,21 @@ function RecordStore.compare_scheduler_shadow(): any
 end
 
 function RecordStore.replay_scheduler_trace(trace: { any }): { any }
-	return scheduler_governor:Replay(trace)
+	if type(trace) ~= "table" then return { code = "invalid", message = "scheduler trace must be an array" } end
+	-- Replay runs against an isolated governor and virtual clock. It must never
+	-- enqueue, dequeue or complete work in the live server scheduler.
+	local replay_now_ms = now_local() * 1000
+	local replay = RecordStoreScheduler.new({
+		now_ms = function() return replay_now_ms end,
+		advance_ms = function(milliseconds) replay_now_ms += milliseconds end,
+	})
+	local current_policy = scheduler_governor:Stats().policy
+	local replay_policy = replay:Stats().policy
+	local policy_patch = table.clone(current_policy)
+	policy_patch.revision = replay_policy.revision + 1
+	local policy_ok, policy_message = replay:SetPolicy(policy_patch)
+	if not policy_ok then return { code = "invalid", message = policy_message } end
+	return replay:Replay(trace)
 end
 
 local function run_scheduled_record_work(record: Record, state: InternalState, now: number)
