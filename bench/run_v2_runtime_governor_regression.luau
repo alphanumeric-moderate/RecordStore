@@ -240,6 +240,31 @@ assert(type(scheduled_maintenance_result) == "table"
 	and scheduled_maintenance_result.code == "committed"
 	and scheduled_maintenance_result.cursor == 1,
 	"bounded maintenance chunk did not complete through the shared selector")
+
+local future_result = nil
+local future_due_ms = now_ms + 30
+local future_job = V2.ScheduleMaintenance(
+	"maintenance-owner",
+	"future-due-chunk",
+	function(maintenance_id)
+		return { code = "committed", maintenance_id = maintenance_id, ran_at_ms = now_ms }
+	end,
+	{
+		due_at_ms = future_due_ms,
+		on_complete = function(result) future_result = result end,
+	}
+)
+assert(future_job.code == "accepted", "future-due maintenance was not accepted")
+task.wait(0.01)
+assert(future_result == nil, "future-due work ran before its due time")
+for _ = 1, 100 do
+	now_ms += 10
+	if future_result ~= nil then break end
+	task.wait(0.01)
+end
+assert(type(future_result) == "table" and future_result.code == "committed"
+	and future_result.ran_at_ms >= future_due_ms,
+	"future-due work was not awakened and dispatched at or after its due time")
 local retry_calls = 0
 local retry_result = nil
 local retry_job = V2.ScheduleMaintenance(
@@ -317,10 +342,41 @@ assert(thrown_calls == 1, "scheduler retried a thrown callback with potentially 
 assert(type(thrown_result) == "table" and thrown_result.code == "unknown",
 	"thrown callback did not surface an unknown outcome")
 
+local exhausted_calls = 0
+local exhausted_result = nil
+local exhausted_job = V2.ScheduleMaintenance(
+	"maintenance-owner",
+	"retry-cap-exhaustion",
+	function()
+		exhausted_calls += 1
+		return { code = "retryable", message = "known pre-commit failure" }
+	end,
+	{
+		max_retries = 1,
+		retry_delay_ms = 10,
+		on_complete = function(result) exhausted_result = result end,
+	}
+)
+assert(exhausted_job.code == "accepted", "retry exhaustion fixture was not accepted")
+for _ = 1, 100 do
+	now_ms += 10
+	if exhausted_result ~= nil then break end
+	task.wait(0.01)
+end
+assert(exhausted_calls == 2, "scheduler did not stop at the configured retry cap")
+assert(type(exhausted_result) == "table" and exhausted_result.code == "retry_exhausted",
+	"retry cap did not return a typed retry_exhausted result")
+
+local invalid_retry_cap = V2.ScheduleMaintenance(
+	"maintenance-owner", "invalid-retry-cap", function() return { code = "committed" } end,
+	{ max_retries = 9 }
+)
+assert(invalid_retry_cap.code == "invalid", "scheduler accepted max_retries above the documented bound")
+
 local dispatch_stats = V2.GetSchedulerDispatchStats()
-assert(dispatch_stats.accepted >= 5 and dispatch_stats.dispatched >= 4,
-	"shared scheduler did not account for outbox, maintenance and retried work")
-assert(dispatch_stats.retries == 2, "scheduler retry metric did not count explicit retries")
+assert(dispatch_stats.accepted >= 7 and dispatch_stats.dispatched >= 6,
+	"shared scheduler did not account for outbox, maintenance, delayed and retried work")
+assert(dispatch_stats.retries == 3, "scheduler retry metric did not count explicit retries")
 
 print("[PASS] RecordStoreV2 runtime policy and advanced adapter admission hooks.")
 Shim.close()
