@@ -464,6 +464,27 @@ assert(tampered_result.code == "corrupt",
 assert(delete_calls == deletes_before_tamper,
 	"erasure performed a destructive action using a tampered manifest entry")
 
+local tampered_progress_store = new_store()
+local tampered_progress = V2.Erasure.new(tampered_progress_store, { family(true) }, {
+	verify_templates = function(_user_id, rendered) return type(rendered) == "table" and #rendered == 1 end,
+})
+local progress_plan = tampered_progress:PlanAsync(130, "erasure-tampered-progress")
+assert(progress_plan.code == "success" and progress_plan.rtbf_coverage_verified == true,
+	"tampered-progress fixture did not create a verified plan")
+tampered_progress_store:UpdateAsync("rv2erase-u130", function(old)
+	local changed = clone(old)
+	changed.status = "in_progress"
+	changed.cursor = 1
+	changed.completed_count = 1
+	return changed
+end)
+local deletes_before_progress_tamper = delete_calls
+local progress_tamper_result = tampered_progress:ExecuteAsync(130, "erasure-tampered-progress", 1)
+assert(progress_tamper_result.code == "corrupt",
+	"erasure accepted progress counters changed outside a durable checkpoint")
+assert(delete_calls == deletes_before_progress_tamper,
+	"erasure skipped an unprocessed entry after progress tampering")
+
 local tampered_generation_store = new_store()
 local tampered_generation = V2.Erasure.new(tampered_generation_store, { family(true) }, {
 	verify_templates = function(_user_id, rendered) return type(rendered) == "table" and #rendered == 1 end,
