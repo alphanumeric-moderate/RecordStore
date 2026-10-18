@@ -1108,10 +1108,11 @@ local function new_dispatcher(governor, options)
 		return result
 	end
 	local function finish_scheduled_item(item, status, entry, callback_ok, callback_result, counted_in_flight)
-		if type(entry) == "table" and entry.admission_ticket ~= nil then
-			governor:Release(entry.admission_ticket)
-			entry.admission_ticket = nil
-		end
+		local admission_ticket = if type(entry) == "table" and entry.admission_ticket ~= nil
+			then entry.admission_ticket else item.admission_ticket
+		if admission_ticket ~= nil then governor:Release(admission_ticket) end
+		if type(entry) == "table" then entry.admission_ticket = nil end
+		item.admission_ticket = nil
 		local retry_scheduled = false
 		if status ~= "success" then
 			callback_ok = true
@@ -1234,6 +1235,7 @@ local function new_dispatcher(governor, options)
 			end
 			return
 		end
+		item.admission_ticket = admission
 		if type(entry) == "table" then entry.admission_ticket = admission end
 		dispatcher.in_flight += 1
 		if item.lane ~= "lease_renewal" then dispatcher.normal_in_flight += 1 end
@@ -1260,9 +1262,10 @@ local function new_dispatcher(governor, options)
 			local result_code = if type(callback_result) == "table" then callback_result.code
 				elseif callback_ok and (callback_result == true or callback_result == nil) then "success"
 				elseif not callback_ok then "unknown" else tostring(callback_result)
-			-- Keep observations keyed exactly like admission. Missing operation_class
-			-- uses the same "default" request-kind key as the governor.
-			local operation_kind = if type(entry) == "table" then entry.operation_class or "default" else "scheduled_callback"
+			-- Schedule normalizes operation_class to work_class when omitted;
+			-- keep observations keyed exactly like the admission reservation.
+			local operation_kind = if type(entry) == "table"
+				then entry.operation_class or entry.work_class or "default" else "scheduled_callback"
 			local failed = not callback_ok or result_code == "unknown" or result_code == "budget"
 				or result_code == "retryable" or result_code == "retry_rejected" or result_code == "retry_exhausted"
 			local observed_budget = if type(callback_result) == "table" and finite(callback_result.budget)
