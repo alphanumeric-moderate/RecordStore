@@ -558,6 +558,75 @@ assert(admission_governor:Stats().in_flight == 0,
 	"request admission leaked its in-flight reservation")
 admission_dispatcher:Close()
 
+-- StandardRead and StandardWrite reservations are independent because UpdateAsync
+-- consumes both request budgets while a read-only operation consumes only StandardRead.
+local dimensions_governor = new_scheduler()
+local dimensions_policy = dimensions_governor:Stats().policy
+assert(dimensions_governor:SetPolicy({
+	revision = dimensions_policy.revision + 1,
+	max_in_flight = 16,
+	critical_reserve = 0,
+	max_read_units_in_flight = 2,
+	max_write_units_in_flight = 1,
+	read_critical_reserve = 0,
+	write_critical_reserve = 0,
+	max_estimated_bytes_in_flight = 65536,
+	max_handler_slots_in_flight = 3,
+	max_scheduled_in_flight = 3,
+	scheduler_critical_reserve = 0,
+	max_per_owner_in_flight = 3,
+}), "multi-dimensional admission policy was rejected")
+local dimensions_dispatcher = Scheduler.new_dispatcher(dimensions_governor, {
+	now_ms = function() return now_ms end,
+})
+local first_update_started, first_update_finished = false, false
+local queued_update_started, read_only_started = false, false
+local second_write_overlapped = false
+local first_update = dimensions_dispatcher:Schedule(
+	"dimension-owner", "slow-update-async", function()
+		first_update_started = true
+		task.wait(0.06)
+		first_update_finished = true
+		return { code = "committed" }
+	end,
+	{ operation_class = "update_async", read_units = 1, write_units = 1, estimated_bytes = 8, handler_slots = 1 }
+)
+assert(first_update.code == "accepted", "dimension-limited UpdateAsync was rejected")
+for _ = 1, 100 do if first_update_started then break end; task.wait(0.001) end
+assert(first_update_started, "first UpdateAsync did not start")
+local second_update = dimensions_dispatcher:Schedule(
+	"dimension-owner", "queued-update-async", function()
+		queued_update_started = true
+		second_write_overlapped = not first_update_finished
+		return { code = "committed" }
+	end,
+	{ operation_class = "update_async", read_units = 1, write_units = 1, estimated_bytes = 8, handler_slots = 1 }
+)
+local parallel_read = dimensions_dispatcher:Schedule(
+	"dimension-owner", "read-during-update", function()
+		read_only_started = true
+		return { code = "committed" }
+	end,
+	{ operation_class = "read", read_units = 1, write_units = 0, estimated_bytes = 8, handler_slots = 1, mutating = false }
+)
+assert(second_update.code == "accepted" and parallel_read.code == "accepted",
+	"dimension-limited jobs were rejected at enqueue")
+for _ = 1, 100 do if read_only_started then break end; task.wait(0.001) end
+assert(read_only_started, "StandardWrite saturation incorrectly blocked an independently admitted read")
+assert(not queued_update_started, "two UpdateAsync operations shared one StandardWrite reservation")
+for _ = 1, 150 do
+	if queued_update_started and first_update_finished then break end
+	task.wait(0.002)
+end
+assert(queued_update_started and first_update_finished and not second_write_overlapped,
+	"deferred UpdateAsync did not start after the write reservation was released")
+local dimension_snapshot = dimensions_governor:Stats()
+assert(dimension_snapshot.read_units_in_flight == 0 and dimension_snapshot.write_units_in_flight == 0,
+	"read/write request reservations leaked after callbacks completed")
+assert(dimension_snapshot.estimated_bytes_in_flight == 0 and dimension_snapshot.handler_slots_in_flight == 0,
+	"byte/handler reservations leaked after callbacks completed")
+dimensions_dispatcher:Close()
+
 -- The scheduler's degraded modes must apply to real callbacks, not only direct governor calls.
 local read_only_governor = new_scheduler()
 local read_only_policy = read_only_governor:Stats().policy
