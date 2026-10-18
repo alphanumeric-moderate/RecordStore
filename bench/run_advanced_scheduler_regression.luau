@@ -2,6 +2,7 @@
 -- PR #33 advanced-scheduler public behavior regression suite.
 local Scheduler = require("../src/PlayerDataInitializer/RecordStoreScheduler")
 local task = require("@lune/task")
+local Shim = require("./RobloxShim")
 
 local now_ms = 1_800_000_000_000
 local function new_scheduler(options)
