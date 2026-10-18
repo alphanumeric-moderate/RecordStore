@@ -453,6 +453,11 @@ local function new_governor(options)
 		local read_limit = self.policy.max_read_units_in_flight - self.read_units_in_flight
 		local write_limit = self.policy.max_write_units_in_flight - self.write_units_in_flight
 		local byte_limit = self.policy.max_estimated_bytes_in_flight - self.estimated_bytes_in_flight
+		local unit_cost = math.max(1, unit.read_units + unit.write_units, math.ceil(unit.estimated_bytes / 16384),
+			unit.handler_slots * 4, if finite(item.requested_cost) then item.requested_cost else 0)
+		local global_cost_room = self.policy.max_in_flight - self.in_flight
+		local class_limit = math.min(limits[item.work_class] or limits.interactive, self.policy.max_in_flight)
+		local class_cost_room = class_limit - (self.by_class[item.work_class] or 0)
 		if not critical then
 			read_limit -= self.policy.read_critical_reserve
 			write_limit -= self.policy.write_critical_reserve
@@ -460,6 +465,9 @@ local function new_governor(options)
 		if unit.read_units > 0 then count = math.min(count, math.max(1, math.floor(math.max(0, read_limit) / unit.read_units))) end
 		if unit.write_units > 0 then count = math.min(count, math.max(1, math.floor(math.max(0, write_limit) / unit.write_units))) end
 		if unit.estimated_bytes > 0 then count = math.min(count, math.max(1, math.floor(math.max(0, byte_limit) / unit.estimated_bytes))) end
+		if not critical then global_cost_room -= self.policy.critical_reserve end
+		count = math.min(count, math.max(1, math.floor(math.max(0, global_cost_room) / unit_cost)))
+		count = math.min(count, math.max(1, math.floor(math.max(0, class_cost_room) / unit_cost)))
 		if budget_fresh and not critical then
 			if unit.read_units > 0 and finite(budgets.read) then
 				count = math.min(count, math.max(1, math.floor(math.max(0, budgets.read) / unit.read_units)))
@@ -588,16 +596,17 @@ local function new_governor(options)
 		if left_slack ~= right_slack then return left_slack < right_slack end
 		return (left.enqueued_at_ms or 0) < (right.enqueued_at_ms or 0)
 	end
-	local function effective_cost(item)
-		local dimensions = estimate_dimensions(item, if item.batchable == true
-			then math.min(item.batch_size or 1, item.batch_backlog or item.batch_size or 1) else nil)
+	local function effective_cost(item, batch_count)
+		local default_batch_count = if item.batchable == true
+			then math.min(item.batch_size or 1, item.batch_backlog or item.batch_size or 1) else nil
+		local dimensions = estimate_dimensions(item, if batch_count ~= nil then batch_count else default_batch_count)
 		local estimated = math.max(
 			1,
 			dimensions.read_units + dimensions.write_units,
 			math.ceil(dimensions.estimated_bytes / 16384),
 			dimensions.handler_slots * 4
 		)
-		if finite(item.cost) then estimated = math.max(estimated, math.floor(item.cost)) end
+		if finite(item.requested_cost) then estimated = math.max(estimated, math.floor(item.requested_cost)) end
 		return math.clamp(math.ceil(estimated), 1, 256)
 	end
 	local function lane_key(item, now)
@@ -634,7 +643,7 @@ local function new_governor(options)
 				if owner_can_renew and (effective_lane == "lease_renewal" or owner_active < self.policy.max_per_owner_in_flight) then
 					local batch_count = selected_batch_size(self, item)
 					local admission = admission_decision(self,
-						item.work_class, item.operation_class, effective_cost(item), item.mutating ~= false,
+						item.work_class, item.operation_class, effective_cost(item, batch_count), item.mutating ~= false,
 						item.service_class == "critical" or item.lane == "lease_renewal", estimate_dimensions(item, batch_count)
 					)
 					if admission.code == "admitted" then
@@ -791,6 +800,7 @@ local function new_governor(options)
 			value.due_at_ms = value.expires_at_ms
 		end
 		value.dependencies = dependencies
+		value.requested_cost = if finite(value.cost) then value.cost else nil
 		value.cost = effective_cost(value)
 		if value.cost > self.policy.max_item_cost then return { code = "invalid", message = "estimated scheduler cost exceeds max_item_cost" } end
 		value.queued = true
@@ -856,7 +866,7 @@ local function new_governor(options)
 			else
 				local batch_count = selected_batch_size(self, item)
 				local admission = admission_decision(self,
-					item.work_class, item.operation_class, effective_cost(item), item.mutating ~= false,
+					item.work_class, item.operation_class, effective_cost(item, batch_count), item.mutating ~= false,
 					item.service_class == "critical" or item.lane == "lease_renewal", estimate_dimensions(item, batch_count)
 				)
 				if admission.terminal then
@@ -879,6 +889,7 @@ local function new_governor(options)
 		local selected_count = selected_batch_size(self, selected_item)
 		local item = table.remove(self.queue, index)
 		item.admission_batch_size = selected_count
+		item.admission_cost = effective_cost(item, selected_count)
 		item.queued = false
 		local age = math.max(0, now - (item.enqueued_at_ms or now))
 		self.scheduler_metrics.wait_ms[#self.scheduler_metrics.wait_ms + 1] = age
@@ -1407,7 +1418,7 @@ local function new_dispatcher(governor, options)
 			dispatcher.metrics.retries += 1
 		end
 		local admission = governor:Admit(
-			item.work_class, item.operation_class, item.cost or 1, item.mutating ~= false,
+			item.work_class, item.operation_class, item.admission_cost or item.cost or 1, item.mutating ~= false,
 			item.service_class == "critical" or item.lane == "lease_renewal",
 			estimate_dimensions(item, item.admission_batch_size)
 		)
