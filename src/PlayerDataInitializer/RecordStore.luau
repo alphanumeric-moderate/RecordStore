@@ -6395,25 +6395,30 @@ close_internal = function(state: InternalState, shutdown: boolean): (ResultCode,
 	return "closed", nil
 end
 
+local function complete_deferred_takeover_work(state: InternalState): { [string]: any }
+	if not state.takeover_requested or state.busy or state.state ~= "active" or state.retired then
+		return { code = "cancelled", message = "takeover is no longer eligible" }
+	end
+	local request_id = state.takeover_request_id
+	local requester_job_id = state.takeover_requester_job_id
+	local result, message = close_internal(state, false)
+	if request_id ~= nil and requester_job_id ~= nil then
+		local status: HandoffStatus = if result == "closed" then "released" else "failed"
+		cache_takeover_status(state, request_id, status)
+		publish_handoff_ack(state, request_id, requester_job_id, state.generation, state.token or "", status)
+	end
+	state.takeover_request_id = nil
+	state.takeover_requester_job_id = nil
+	state.takeover_requested = false
+	return { code = if result == "closed" then "success" else result, message = message }
+end
+
 complete_deferred_takeover = function(state: InternalState)
 	if not state.takeover_requested or state.busy or state.state ~= "active" then
 		return
 	end
 	task.spawn(function()
-		if state.retired then
-			return
-		end
-		local request_id = state.takeover_request_id
-		local requester_job_id = state.takeover_requester_job_id
-		local result = close_internal(state, false)
-		if request_id ~= nil and requester_job_id ~= nil then
-			local status: HandoffStatus = if result == "closed" then "released" else "failed"
-			cache_takeover_status(state, request_id, status)
-			publish_handoff_ack(state, request_id, requester_job_id, state.generation, state.token or "", status)
-		end
-		state.takeover_request_id = nil
-		state.takeover_requester_job_id = nil
-		state.takeover_requested = false
+		complete_deferred_takeover_work(state)
 	end)
 end
 
@@ -6745,9 +6750,9 @@ local function run_scheduled_record_work(record: Record, state: InternalState, n
 			enqueue_state_work(record, state, "takeover", "high", "session_takeover", "profile_release", function()
 				if not state.takeover_requested then return { code = "cancelled" } end
 				if state.busy or state.queue_busy then return { code = "retryable", message = "record is still busy before takeover start" } end
-				complete_deferred_takeover(state)
+				local result = complete_deferred_takeover_work(state)
 				sync_public(record)
-				return { code = "success" }
+				return result
 			end, { service_class = "critical", read_units = 1, write_units = 1, max_retries = 4, retry_delay_ms = 25 })
 		end
 		return
