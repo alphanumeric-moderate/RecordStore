@@ -3,6 +3,7 @@
 local DataStoreService = game:GetService("DataStoreService")
 local HttpService = game:GetService("HttpService")
 local MessagingService = game:GetService("MessagingService")
+local RecordStoreScheduler: any = require(script.Parent.RecordStoreScheduler)
 
 local RecordStore = {}
 
@@ -6614,63 +6615,280 @@ local function make_record(name: string, scope: string, key: string, options: Op
 	return record
 end
 
-local function start_scheduler()
-	if scheduler_started then
+local scheduler_governor = RecordStoreScheduler.new({
+	now_ms = function() return now_local() * 1000 end,
+	now_unix = now_unix,
+	get_record_stats = function(record)
+		if type(record) ~= "table" or type(record.Stats) ~= "function" then return {} end
+		local ok, value = pcall(function() return record:Stats() end)
+		return if ok and type(value) == "table" then value else {}
+	end,
+})
+local scheduler_dispatcher: any = RecordStoreScheduler.new_dispatcher(scheduler_governor, {
+	now_ms = function() return now_local() * 1000 end,
+})
+local scheduler_enabled = false
+local scheduler_state: { [InternalState]: any } = setmetatable({}, { __mode = "k" })
+
+local function scheduler_owner_id(state: InternalState): string
+	local function component(value: string): string
+		return tostring(#value) .. ":" .. value
+	end
+	return component(state.name) .. component(state.scope) .. component(state.key)
+end
+
+local function scheduled_state_slot(state: InternalState): any
+	local slot = scheduler_state[state]
+	if slot == nil then
+		slot = { pending = {}, jobs = {}, last_result = {} }
+		scheduler_state[state] = slot
+	end
+	return slot
+end
+
+local function enqueue_state_work(
+	record: Record,
+	state: InternalState,
+	kind: string,
+	lane: string,
+	work_class: string,
+	operation_class: string,
+	callback: () -> any,
+	schedule_options: any?
+): any
+	local slot = scheduled_state_slot(state)
+	if slot.pending[kind] == true then return { code = "already_pending" } end
+	local options = if schedule_options == nil then {} else table.clone(schedule_options)
+	options.lane = lane
+	options.work_class = work_class
+	options.operation_class = operation_class
+	options.on_complete = function(result)
+		slot.pending[kind] = nil
+		slot.jobs[kind] = nil
+		slot.last_result[kind] = if type(result) == "table" then tostring(result.code or "unknown") else "unknown"
+		if kind == "lease_renewal" and result.code == "retry_exhausted" and state.state == "active" then
+			state.next_renewal = math.min(state.next_renewal, now_local())
+		elseif kind == "autosave" and result.code == "retry_exhausted" and state.state == "active" then
+			state.next_autosave = math.min(state.next_autosave, now_local())
+		elseif kind == "queue_poll" and result.code == "retry_exhausted" and state.state == "active" then
+			state.next_queue_poll = math.min(state.next_queue_poll, now_local())
+		end
+	end
+	-- Set pending before enqueue: the dispatcher is allowed to start synchronously.
+	slot.pending[kind] = true
+	local result = scheduler_dispatcher:Schedule(
+		scheduler_owner_id(state),
+		kind .. ":" .. tostring(state.generation),
+		function()
+			if closing or state.retired or state.state ~= "active" then
+				return { code = "cancelled", message = "record is no longer active" }
+			end
+			return callback()
+		end,
+		options
+	)
+	if type(result) ~= "table" or result.code ~= "accepted" then
+		slot.pending[kind] = nil
+		slot.last_result[kind] = if type(result) == "table" then tostring(result.code) else "unknown"
+		return if type(result) == "table" then result else { code = "unknown", message = "scheduler admission returned no result" }
+	end
+	slot.jobs[kind] = result.id
+	return result
+end
+
+-- Scheduling never replaces the durable request gate or session fencing.
+-- It is disabled until the caller explicitly enables the new selector.
+function RecordStore.configure_scheduler_policy(policy: { [string]: unknown }): (string, string?)
+	if type(policy) ~= "table" then return "invalid", "scheduler policy must be a table" end
+	return scheduler_dispatcher:SetPolicy(policy)
+end
+
+function RecordStore.set_scheduler_enabled(enabled: boolean): (boolean, string?)
+	if type(enabled) ~= "boolean" then return false, "enabled must be a boolean" end
+	scheduler_enabled = enabled
+	if enabled then scheduler_dispatcher:Kick() end
+	return true, nil
+end
+
+function RecordStore.schedule_work(
+	owner_id: string,
+	work_id: string,
+	callback: () -> any,
+	schedule_options: { [string]: unknown }?
+): { [string]: any }
+	if closing then return { code = "closed", message = "RecordStore is shutting down" } end
+	return scheduler_dispatcher:Schedule(owner_id, work_id, callback, schedule_options)
+end
+
+function RecordStore.get_scheduler_snapshot(): { [string]: any }
+	local governor = scheduler_governor:Stats()
+	return {
+		enabled = scheduler_enabled,
+		policy = governor.policy,
+		governor = governor,
+		dispatcher = scheduler_dispatcher:Stats(),
+	}
+end
+
+function RecordStore.compare_scheduler_shadow(): any
+	return scheduler_governor:ShadowDecision()
+end
+
+function RecordStore.replay_scheduler_trace(trace: { any }): { any }
+	return scheduler_governor:Replay(trace)
+end
+
+local function run_scheduled_record_work(record: Record, state: InternalState, now: number)
+	local slot = scheduled_state_slot(state)
+	if state.takeover_requested then
+		if not state.busy and not state.queue_busy and slot.pending.takeover ~= true then
+			enqueue_state_work(record, state, "takeover", "high", "session_takeover", "profile_release", function()
+				if not state.takeover_requested then return { code = "cancelled" } end
+				if state.busy or state.queue_busy then return { code = "retryable", message = "record is still busy before takeover start" } end
+				complete_deferred_takeover(state)
+				sync_public(record)
+				return { code = "success" }
+			end, { service_class = "critical", read_units = 1, write_units = 1, max_retries = 4, retry_delay_ms = 25 })
+		end
 		return
 	end
+
+	if not state.busy and not state.queue_busy and now >= state.next_renewal
+		and slot.pending.lease_renewal ~= true
+	then
+		local remaining_ms = if state.durable_lease_until > 0
+			then math.max(0, (state.durable_lease_until - now_unix()) * 1000) else nil
+		local renewal_options: any = {
+			service_class = "critical",
+			read_units = 1,
+			write_units = 1,
+			handler_slots = 1,
+			max_retries = 8,
+			retry_delay_ms = 25,
+			retry_jitter_percent = 10,
+		}
+		if remaining_ms ~= nil then renewal_options.deadline_ms = now_local() * 1000 + remaining_ms * 0.5 end
+		local result = enqueue_state_work(record, state, "lease_renewal", "lease_renewal",
+			"profile_lease_renewal", "lease_renewal", function()
+				if state.busy or state.queue_busy then
+					return { code = "retryable", message = "record became busy before renewal started" }
+				end
+				local code, message = renew_internal(state)
+				sync_public(record)
+				-- Do not retry a result returned by the persistence operation. In particular,
+				-- an unknown outcome may already have committed.
+				return { code = code, message = message }
+			end, renewal_options)
+		if type(result) == "table" and result.code == "accepted" then
+			state.next_renewal = now + (state.options.lease_renewal or DEFAULT_LEASE_RENEWAL)
+		end
+	elseif not state.busy and not state.queue_busy and now >= state.next_autosave
+		and slot.pending.autosave ~= true
+	then
+		local next_autosave = now + (state.options.autosave_interval or DEFAULT_AUTOSAVE_INTERVAL) * (0.9 + math.random() * 0.2)
+		local result = enqueue_state_work(record, state, "autosave", "normal", "profile_autosave", "update_async", function()
+			if state.busy or state.queue_busy then
+				return { code = "retryable", message = "record became busy before autosave started" }
+			end
+			local code, message = save_internal(state, "autosave", nil, nil)
+			sync_public(record)
+			return { code = code, message = message }
+		end, { service_class = "critical", read_units = 1, write_units = 1, handler_slots = 1,
+			max_retries = 6, retry_delay_ms = 50, retry_jitter_percent = 10 })
+		if type(result) == "table" and result.code == "accepted" then state.next_autosave = next_autosave end
+	end
+
+	if state.state == "active"
+		and state.options.on_message ~= nil
+		and messaging_enabled(state)
+		and state.message_subscription == nil
+		and now >= state.next_message_subscribe
+	then
+		subscribe_record(state)
+	end
+
+	if state.state == "active"
+		and state.options.durable_queue_enabled ~= false
+		and state.options.on_queue_message ~= nil
+		and slot.pending.queue_poll ~= true
+		and (state.queue_hint or now >= state.next_queue_poll)
+	then
+		local result = enqueue_state_work(record, state, "queue_poll", "background", "mailbox_poll", "read",
+			function()
+				if state.queue_busy then
+					return { code = "retryable", message = "queue poll became busy before processing started" }
+				end
+				state.queue_hint = false
+				local code, message = process_queue_internal(state, 4)
+				sync_public(record)
+				return { code = code, message = message }
+			end,
+			{ service_class = "normal", read_units = 1, write_units = 1, handler_slots = 1,
+				max_retries = 4, retry_delay_ms = 50, retry_jitter_percent = 10 })
+		if type(result) == "table" and result.code == "accepted" then
+			state.next_queue_poll = now + (state.options.queue_poll_interval or DEFAULT_QUEUE_POLL_INTERVAL)
+		end
+	end
+end
+
+local function start_scheduler()
+	if scheduler_started then return end
 	scheduler_started = true
 	task.spawn(function()
 		while not closing do
 			for record in active_records do
 				local state = private[record]
 				if state ~= nil and state.state == "active" then
-					local handled_takeover = false
-					if state.takeover_requested and not state.busy and not state.queue_busy then
-						complete_deferred_takeover(state)
-						sync_public(record)
-						handled_takeover = true
-					end
 					local now = now_local()
-					if not handled_takeover and state.state == "active"
-						and not state.busy and not state.queue_busy and now >= state.next_renewal
-					then
-						state.next_renewal = now + (state.options.lease_renewal or DEFAULT_LEASE_RENEWAL)
-						task.spawn(function()
-							renew_internal(state)
+					if scheduler_enabled then
+						run_scheduled_record_work(record, state, now)
+					else
+						local handled_takeover = false
+						if state.takeover_requested and not state.busy and not state.queue_busy then
+							complete_deferred_takeover(state)
 							sync_public(record)
-						end)
-					elseif not handled_takeover and state.state == "active"
-						and not state.busy and not state.queue_busy and now >= state.next_autosave
-					then
-						state.next_autosave = now + (state.options.autosave_interval or DEFAULT_AUTOSAVE_INTERVAL) * (0.9 + math.random() * 0.2)
-						task.spawn(function()
-							save_internal(state, "autosave", nil, nil)
-							sync_public(record)
-						end)
-					end
-					if state.state == "active"
-						and state.options.on_message ~= nil
-						and messaging_enabled(state)
-						and state.message_subscription == nil
-						and now >= state.next_message_subscribe
-					then
-						subscribe_record(state)
-					end
-					if state.state == "active"
-						and state.options.durable_queue_enabled ~= false
-						and state.options.on_queue_message ~= nil
-						and not state.queue_busy
-						and (state.queue_hint or now >= state.next_queue_poll)
-					then
-						state.queue_hint = false
-						state.next_queue_poll = now + (state.options.queue_poll_interval or DEFAULT_QUEUE_POLL_INTERVAL)
-						task.spawn(function()
-							process_queue_internal(state, 4)
-							sync_public(record)
-						end)
+							handled_takeover = true
+						end
+						if not handled_takeover and state.state == "active"
+							and not state.busy and not state.queue_busy and now >= state.next_renewal
+						then
+							state.next_renewal = now + (state.options.lease_renewal or DEFAULT_LEASE_RENEWAL)
+							task.spawn(function()
+								renew_internal(state)
+								sync_public(record)
+							end)
+						elseif not handled_takeover and state.state == "active"
+							and not state.busy and not state.queue_busy and now >= state.next_autosave
+						then
+							state.next_autosave = now + (state.options.autosave_interval or DEFAULT_AUTOSAVE_INTERVAL) * (0.9 + math.random() * 0.2)
+							task.spawn(function()
+								save_internal(state, "autosave", nil, nil)
+								sync_public(record)
+							end)
+						end
+						if state.state == "active"
+							and state.options.on_message ~= nil
+							and messaging_enabled(state)
+							and state.message_subscription == nil
+							and now >= state.next_message_subscribe
+						then subscribe_record(state) end
+						if state.state == "active"
+							and state.options.durable_queue_enabled ~= false
+							and state.options.on_queue_message ~= nil
+							and not state.queue_busy
+							and (state.queue_hint or now >= state.next_queue_poll)
+						then
+							state.queue_hint = false
+							state.next_queue_poll = now + (state.options.queue_poll_interval or DEFAULT_QUEUE_POLL_INTERVAL)
+							task.spawn(function()
+								process_queue_internal(state, 4)
+								sync_public(record)
+							end)
+						end
 					end
 				end
 			end
+			if scheduler_enabled then scheduler_dispatcher:Kick() end
 			task.wait(SCHEDULER_STEP)
 		end
 	end)
