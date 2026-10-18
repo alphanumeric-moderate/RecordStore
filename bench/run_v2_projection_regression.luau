@@ -115,6 +115,14 @@ local duplicate_reservation = reservations:ReserveUnique("username", "Barcode", 
 assert(duplicate_reservation.code == "duplicate", "same entity did not receive duplicate reservation outcome")
 local conflict_reservation = reservations:ReserveUnique("username", "Barcode", "player-2", "reserve-op-3")
 assert(conflict_reservation.code == "conflict", "unique reservation allowed a second entity to claim the same value")
+local subject_bound_reservations = V2.Projections.new(reservation_store, {
+	is_erased = function(_user_id) return false end,
+})
+local changed_subject_reservation = subject_bound_reservations:ReserveUnique(
+	"username", "Barcode", "player-1", "reserve-op-4", { 987654321 }
+)
+assert(changed_subject_reservation.code == "conflict",
+	"unique reservation allowed its subject association to change after creation")
 
 local protected_store = new_store()
 local protected_projections = V2.Projections.new(protected_store)
