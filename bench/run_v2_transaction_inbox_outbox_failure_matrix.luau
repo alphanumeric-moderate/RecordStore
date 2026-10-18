@@ -284,6 +284,96 @@ group("08 outbox helper inputs fail closed", function()
 		"transaction receipt retention helper did not reject malformed inputs")
 end)
 
+group("09 inbox/outbox stats are exact for one durable envelope", function()
+	local key = "sidecar-stats"
+	local record = open_record(key)
+	local inbox_code, inbox_message = record:ApplyInboxAsync(
+		"stats-inbox-receipt", "stats-inbox:v1", increment("coins", 2), "stats-inbox:canonical"
+	)
+	assert(inbox_code == "success", tostring(inbox_message))
+
+	local events = {
+		{
+			EventId = "stats-outbox-event-1",
+			DestinationStoreName = "RecordStoreDestination",
+			DestinationScope = SCOPE,
+			DestinationProfileKey = "stats-recipient-1",
+			MessageType = "reward",
+			Data = { coins = 1 },
+		},
+		{
+			EventId = "stats-outbox-event-2",
+			DestinationStoreName = "RecordStoreDestination",
+			DestinationScope = SCOPE,
+			DestinationProfileKey = "stats-recipient-2",
+			MessageType = "reward",
+			Data = { coins = 2 },
+		},
+	}
+	local commit_code, commit_message = record:CommitWithOutboxAsync(
+		"stats-outbox-commit", "stats-outbox:v1", increment("coins", 3), events, "stats-outbox:request"
+	)
+	assert(commit_code == "success", tostring(commit_message))
+
+	local inbox_stats, inbox_code = record:GetInboxStatsAsync()
+	assert(inbox_code == "success", tostring(inbox_code))
+	assert(inbox_stats.consistency == "single_envelope_read"
+		and inbox_stats.completeness == "complete_for_observed_envelope"
+		and inbox_stats.exactness == "exact_for_observed_envelope"
+		and type(inbox_stats.observed_at) == "number",
+		"inbox stats omitted snapshot scope or observation metadata")
+	assert(inbox_stats.receipt_count >= 1 and type(inbox_stats.oldest_receipt_age_seconds) == "number",
+		"inbox stats omitted durable receipt count or age")
+
+	local pending_stats, outbox_code = record:GetOutboxStatsAsync()
+	assert(outbox_code == "success", tostring(outbox_code))
+	assert(pending_stats.pending_count == 2 and pending_stats.dispatched_count == 0
+		and pending_stats.total_count == 2,
+		"outbox stats returned wrong pending/dispatched counts")
+	assert(type(pending_stats.oldest_pending_created_at) == "number"
+		and type(pending_stats.oldest_pending_age_seconds) == "number",
+		"outbox stats omitted oldest pending event age")
+
+	local dispatched, dispatch_code, dispatch_message = record:DispatchOutboxAsync(function()
+		return true, "stats-destination-receipt"
+	end, 1)
+	assert(dispatch_code == "success" and dispatched == 1, tostring(dispatch_message))
+	local mixed_stats, mixed_code = RecordStore.get_outbox_stats_async(STORE, SCOPE, key)
+	assert(mixed_code == "success", tostring(mixed_code))
+	assert(mixed_stats.pending_count == 1 and mixed_stats.dispatched_count == 1
+		and mixed_stats.total_count == 2,
+		"module-level outbox stats did not report the mixed terminal states")
+	assert(mixed_stats.max_dispatch_attempts >= 1 and type(mixed_stats.revision) == "number",
+		"outbox stats omitted attempts or envelope revision")
+
+	local module_inbox, module_inbox_code = RecordStore.get_inbox_stats_async(STORE, SCOPE, key)
+	assert(module_inbox_code == "success" and module_inbox.receipt_count == inbox_stats.receipt_count,
+		"module-level inbox stats differed from the active Record view")
+	local invalid_stats, invalid_code = RecordStore.get_outbox_stats_async("", SCOPE, key)
+	assert(invalid_code == "invalid" and next(invalid_stats) == nil,
+		"module-level stats accepted an invalid store identity")
+
+	local before_updates = Fake:Stats().calls.update
+	local before_reads = Fake:Stats().calls.get
+	local no_side_effect_stats, no_side_effect_code = record:GetOutboxStatsAsync()
+	assert(no_side_effect_code == "success" and type(no_side_effect_stats.observed_at) == "number",
+		"read-only outbox stats failed")
+	local after_stats = Fake:Stats()
+	assert(after_stats.calls.update == before_updates and after_stats.calls.get == before_reads + 1,
+		"outbox stats mutated storage or performed more than one profile-key read")
+
+	Fake:ScheduleFault("get", STORE, SCOPE, key, "before")
+	local failed_record_stats, failed_record_code = record:GetInboxStatsAsync()
+	assert(failed_record_code == "unknown" and next(failed_record_stats) == nil,
+		"active Record inbox stats hid an unknown read outcome")
+	Fake:ScheduleFault("get", STORE, SCOPE, key, "before")
+	local failed_module_stats, failed_module_code = RecordStore.get_outbox_stats_async(STORE, SCOPE, key)
+	assert(failed_module_code == "unknown" and next(failed_module_stats) == nil,
+		"module-level outbox stats hid an unknown read outcome")
+
+	record:Close()
+end)
+
 group("07 consumer reducers cannot modify RecordStore reserved sidecars", function()
 	Fake:Reset()
 	local record = open_record("reserved-sidecar-guard")
