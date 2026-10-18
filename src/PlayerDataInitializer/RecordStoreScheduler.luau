@@ -157,42 +157,77 @@ local function new_governor(options)
 		end
 		return true
 	end
-	function governor:Admit(work_class, request_kind, cost, mutating)
+	local function admission_decision(self, work_class, request_kind, cost, mutating, critical_override)
 		work_class, request_kind, cost = work_class or "interactive", request_kind or "default", cost or 1
-		if not finite(cost) or math.floor(cost) ~= cost or cost < 1 then return { code = "invalid" } end
-		local critical = work_class == "critical" or work_class == "profile_save" or work_class == "profile_release"
-		if self.policy.mode == "read_only" and mutating and not critical then self.stats.rejected += 1; return { code = "read_only" } end
-		if self.policy.mode == "reject_noncritical" and not critical then self.stats.rejected += 1; return { code = "backpressure" } end
+		if not finite(cost) or math.floor(cost) ~= cost or cost < 1 then
+			return { code = "invalid", terminal = true }, false, false
+		end
+		local critical = critical_override == true or work_class == "critical"
+			or work_class == "profile_save" or work_class == "profile_release"
+		if self.policy.mode == "read_only" and mutating and not critical then
+			return { code = "read_only", terminal = true, message = "mutating noncritical work is disabled" }, false, true
+		end
+		if self.policy.mode == "reject_noncritical" and not critical then
+			return { code = "backpressure", terminal = true, message = "scheduler policy rejects noncritical work" }, false, true
+		end
 		local circuit = self.circuits[request_kind]
 		local probe_needed = false
 		if circuit and circuit.state == "open" then
-			if now_ms() < circuit.until_ms then return { code = "circuit_open", retry_after_ms = circuit.until_ms - now_ms(), reason = circuit.reason } end
+			local wait_ms = circuit.until_ms - now_ms()
+			if wait_ms > 0 then
+				return { code = "circuit_open", transient = true, retry_after_ms = wait_ms, reason = circuit.reason }, false, false
+			end
 			probe_needed = true
 		elseif circuit and circuit.state == "half_open" then
-			if circuit.probe then return { code = "circuit_open", reason = "half-open probe already reserved" } end
+			if circuit.probe then
+				return { code = "circuit_open", transient = true, retry_after_ms = 100, reason = "half-open probe already reserved" }, false, false
+			end
 			probe_needed = true
 		end
 		local observed_budget = self.last_budget_by_kind[request_kind]
 		if finite(observed_budget) and observed_budget < self.policy.minimum_budget and not critical then
-			self.stats.rejected += 1
-			return { code = "backpressure", message = "request budget is below configured minimum" }
+			return { code = "backpressure", transient = true, retry_after_ms = 250,
+				message = "request budget is below configured minimum" }, false, true
 		end
-		if self.in_flight + cost > self.policy.max_in_flight then self.stats.rejected += 1; return { code = "capacity" } end
-		if not critical and self.in_flight + cost > self.policy.max_in_flight - self.policy.critical_reserve then self.stats.rejected += 1; return { code = "backpressure", message = "critical save/release reserve protected" } end
-		if (self.by_class[work_class] or 0) + cost > math.min(limits[work_class] or limits.interactive, self.policy.max_in_flight) then self.stats.rejected += 1; return { code = "capacity", message = "work-class cap reached" } end
+		if self.in_flight + cost > self.policy.max_in_flight then
+			return { code = "capacity", transient = true, message = "global in-flight request budget reached" }, false, true
+		end
+		if not critical and self.in_flight + cost > self.policy.max_in_flight - self.policy.critical_reserve then
+			return { code = "backpressure", transient = true, message = "critical save/release reserve protected" }, false, true
+		end
+		if (self.by_class[work_class] or 0) + cost > math.min(limits[work_class] or limits.interactive, self.policy.max_in_flight) then
+			return { code = "capacity", transient = true, message = "work-class cap reached" }, false, true
+		end
+		return {
+			code = "admitted", work_class = work_class, request_kind = request_kind,
+			cost = cost, critical = critical,
+		}, probe_needed, false
+	end
+	function governor:CanAdmit(work_class, request_kind, cost, mutating, critical_override)
+		local decision = admission_decision(self, work_class, request_kind, cost, mutating, critical_override)
+		return decision
+	end
+	function governor:Admit(work_class, request_kind, cost, mutating, critical_override)
+		local decision, probe_needed, counted_rejection =
+			admission_decision(self, work_class, request_kind, cost, mutating, critical_override)
+		if decision.code ~= "admitted" then
+			if counted_rejection then self.stats.rejected += 1 end
+			return decision
+		end
+		local circuit = self.circuits[decision.request_kind]
 		if probe_needed and circuit ~= nil then
 			circuit.state = "half_open"
 			circuit.probe = true
 		end
-		self.in_flight += cost
-		self.by_class[work_class] = (self.by_class[work_class] or 0) + cost
+		self.in_flight += decision.cost
+		self.by_class[decision.work_class] = (self.by_class[decision.work_class] or 0) + decision.cost
 		self.stats.admitted += 1
 		return {
 			code = "admitted",
 			ticket = tostring(self.policy.revision) .. ":" .. tostring(self.stats.admitted),
-			cost = cost,
-			work_class = work_class,
-			request_kind = request_kind,
+			cost = decision.cost,
+			work_class = decision.work_class,
+			request_kind = decision.request_kind,
 			probe = probe_needed,
 		}
 	end
@@ -400,6 +435,10 @@ local function new_governor(options)
 			local ready = (item.due_at_ms or 0) <= now
 				and (item.available_at_ms == nil or item.available_at_ms <= now)
 				and dependencies_ready(self, item)
+			if item.admission_blocked_until_ms ~= nil then
+				if item.admission_blocked_until_ms > now then ready = false
+				else item.admission_blocked_until_ms = nil end
+			end
 			if renewal_mode == true and item.lane ~= "lease_renewal" then ready = false end
 			if renewal_mode == false and item.lane == "lease_renewal" then ready = false end
 			if ready and (not item.expires_at_ms or item.expires_at_ms > now) then
@@ -409,7 +448,15 @@ local function new_governor(options)
 				-- At most one renewal may be active for a single claim/owner at a time.
 				local owner_can_renew = effective_lane ~= "lease_renewal" or renewal_count < 1
 				if owner_can_renew and (effective_lane == "lease_renewal" or owner_active < self.policy.max_per_owner_in_flight) then
-					eligible[#eligible + 1] = { index = index, item = item, effective_lane = effective_lane }
+					local admission = self:CanAdmit(
+						item.work_class, item.operation_class, effective_cost(item), item.mutating ~= false,
+						item.service_class == "critical" or item.lane == "lease_renewal"
+					)
+					if admission.code == "admitted" then
+						eligible[#eligible + 1] = { index = index, item = item, effective_lane = effective_lane }
+					elseif finite(admission.retry_after_ms) then
+						item.admission_blocked_until_ms = now + math.max(1, admission.retry_after_ms)
+					end
 				end
 			end
 		end
@@ -517,6 +564,7 @@ local function new_governor(options)
 		if value.expires_at_ms ~= nil and not finite(value.expires_at_ms) then return { code = "invalid", message = "expires_at_ms must be finite" } end
 		local valid_service_classes = { critical = true, interactive = true, normal = true, bulk = true, best_effort = true }
 		if value.service_class ~= nil and not valid_service_classes[value.service_class] then return { code = "invalid", message = "unsupported service_class" } end
+		if value.mutating ~= nil and type(value.mutating) ~= "boolean" then return { code = "invalid", message = "mutating must be boolean" } end
 		local dependencies = value.dependencies or {}
 		if type(dependencies) ~= "table" or #dependencies > 32 then return { code = "invalid", message = "dependencies must be an array of at most 32 IDs" } end
 		local dependency_count, seen_dependencies = 0, {}
@@ -616,6 +664,18 @@ local function new_governor(options)
 				item.terminal_result = { code = "expired", message = "scheduled work expired before it could start" }
 				remember_terminal(self, item.id, "expired")
 				return item, "expired"
+			else
+				local admission = self:CanAdmit(
+					item.work_class, item.operation_class, effective_cost(item), item.mutating ~= false,
+					item.service_class == "critical" or item.lane == "lease_renewal"
+				)
+				if admission.terminal then
+					table.remove(self.queue, index)
+					item.queued = false
+					item.terminal_result = admission
+					self.known[item.id] = item
+					return item, "admission_rejected"
+				end
 			end
 		end
 		local index, urgent_fallback = choose_index(self, self.policy.algorithm or "drr", renewal_mode)
@@ -670,7 +730,10 @@ local function new_governor(options)
 				(self.active_renewals_by_owner[item.owner_id] or 0) < self.policy.max_per_owner_in_flight
 			if dependencies_ready(self, item) and (renewal_can_run or not owner_at_cap) then
 				local candidate
-				if (item.due_at_ms or 0) > now then candidate = item.due_at_ms end
+				if item.admission_blocked_until_ms ~= nil and item.admission_blocked_until_ms > now then
+					candidate = item.admission_blocked_until_ms
+				end
+				if (item.due_at_ms or 0) > now and (candidate == nil or item.due_at_ms < candidate) then candidate = item.due_at_ms end
 				-- Expiry must wake the dispatcher even when it precedes available_at.
 				if item.expires_at_ms ~= nil and item.expires_at_ms > now
 					and (candidate == nil or item.expires_at_ms < candidate)
@@ -1038,6 +1101,10 @@ local function new_dispatcher(governor, options)
 		return result
 	end
 	local function finish_scheduled_item(item, status, entry, callback_ok, callback_result, counted_in_flight)
+		if type(entry) == "table" and entry.admission_ticket ~= nil then
+			governor:Release(entry.admission_ticket)
+			entry.admission_ticket = nil
+		end
 		local retry_scheduled = false
 		if status ~= "success" then
 			callback_ok = true
@@ -1134,6 +1201,33 @@ local function new_dispatcher(governor, options)
 			entry.retry_attempt += 1
 			dispatcher.metrics.retries += 1
 		end
+		local admission = governor:Admit(
+			item.work_class, item.operation_class, effective_cost(item), item.mutating ~= false,
+			item.service_class == "critical" or item.lane == "lease_renewal"
+		)
+		if admission.code ~= "admitted" then
+			-- Admission is checked during selection and cannot race in this
+			-- non-yielding section, but defer safely if a future caller changes that.
+			if admission.terminal then
+				item.terminal_result = admission
+				finish_scheduled_item(item, "admission_rejected", entry, true, admission, false)
+			else
+				local delay_ms = if finite(admission.retry_after_ms)
+					then math.clamp(math.floor(admission.retry_after_ms), 10, 60000) else 25
+				local requeued, retry_error, retry_due_at = governor:Reschedule(
+					item.id, math.max(now_ms() + delay_ms, item.available_at_ms or -math.huge)
+				)
+				if requeued then
+					item.is_retry = false
+					schedule_wake_at(retry_due_at)
+				else
+					item.terminal_result = { code = "backpressure", message = tostring(retry_error or "request admission deferred") }
+					finish_scheduled_item(item, "admission_rejected", entry, true, item.terminal_result, false)
+				end
+			end
+			return
+		end
+		if type(entry) == "table" then entry.admission_ticket = admission end
 		dispatcher.in_flight += 1
 		if item.lane ~= "lease_renewal" then dispatcher.normal_in_flight += 1 end
 		dispatcher.metrics.max_in_flight = math.max(dispatcher.metrics.max_in_flight, dispatcher.in_flight)
@@ -1158,7 +1252,9 @@ local function new_dispatcher(governor, options)
 			local operation_kind = if type(entry) == "table" then entry.operation_class or entry.work_class else "scheduled_callback"
 			local failed = not callback_ok or result_code == "unknown" or result_code == "budget"
 				or result_code == "retryable" or result_code == "retry_rejected" or result_code == "retry_exhausted"
-			governor:Observe(operation_kind, not failed, elapsed_ms, if failed then tostring(result_code or "unknown") else nil)
+			local observed_budget = if type(callback_result) == "table" and finite(callback_result.budget)
+				then callback_result.budget else nil
+			governor:Observe(operation_kind, not failed, elapsed_ms, if failed then tostring(result_code or "unknown") else nil, observed_budget)
 			local prior_service_latency = governor.latency_ewma.service
 			governor.latency_ewma.service = if finite(prior_service_latency)
 				then prior_service_latency * 0.8 + elapsed_ms * 0.2 else elapsed_ms
@@ -1189,7 +1285,7 @@ local function new_dispatcher(governor, options)
 		service_class = true, work_class = true, operation_class = true, dependencies = true,
 		read_units = true, write_units = true, estimated_bytes = true, handler_slots = true, cost = true,
 		max_retries = true, retry_delay_ms = true, retry_jitter_percent = true, batch_window_ms = true,
-		batchable = true, on_complete = true,
+		batchable = true, on_complete = true, mutating = true,
 	}
 	function dispatcher:Schedule(owner_id, work_id, callback, schedule_options)
 		if self.closed then return { code = "closed", message = "scheduler dispatcher is closed" } end
@@ -1223,6 +1319,9 @@ local function new_dispatcher(governor, options)
 		end
 		if schedule_options.on_complete ~= nil and type(schedule_options.on_complete) ~= "function" then
 			return { code = "invalid", message = "on_complete must be a function" }
+		end
+		if schedule_options.mutating ~= nil and type(schedule_options.mutating) ~= "boolean" then
+			return { code = "invalid", message = "mutating must be a boolean" }
 		end
 		for _, field in ipairs({ "due_at_ms", "available_at_ms", "deadline_ms", "expires_at_ms" }) do
 			if schedule_options[field] ~= nil and not finite(schedule_options[field]) then
@@ -1263,6 +1362,7 @@ local function new_dispatcher(governor, options)
 			dependencies = schedule_options.dependencies, read_units = schedule_options.read_units,
 			write_units = schedule_options.write_units, estimated_bytes = schedule_options.estimated_bytes,
 			handler_slots = schedule_options.handler_slots, cost = schedule_options.cost,
+			mutating = schedule_options.mutating,
 		}
 		local accepted = governor:Enqueue(item)
 		if type(accepted) ~= "table" or accepted.code ~= "accepted" then
@@ -1288,6 +1388,7 @@ local function new_dispatcher(governor, options)
 	end
 	function dispatcher:SetPolicy(policy)
 		local ok, message = governor:SetPolicy(policy)
+		if ok then self:Kick() end
 		return if ok then "success" else "invalid", message
 	end
 	function dispatcher:Stats()
