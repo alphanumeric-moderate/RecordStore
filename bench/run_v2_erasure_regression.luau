@@ -442,5 +442,23 @@ assert(old_generation_delete.code == "deleted",
 assert(stale_record:Stats().generation == before_erase.generation + 1,
 	"repeated erasure changed the tombstone generation")
 
+local corrupt_completed_store = new_store()
+local corrupt_completed = V2.Erasure.new(corrupt_completed_store, { family(true) }, {
+	verify_templates = function(_user_id, rendered) return type(rendered) == "table" and #rendered == 1 end,
+})
+local corrupt_plan = corrupt_completed:PlanAsync(125, "erasure-corrupt-completed")
+assert(corrupt_plan.code == "success" and corrupt_plan.rtbf_coverage_verified == true,
+	"corrupt-completed fixture did not create a verified plan")
+corrupt_completed_store:UpdateAsync("rv2erase-u125", function(old)
+	local changed = clone(old)
+	changed.status = "completed"
+	changed.cursor = 0
+	changed.completed_count = 0
+	return changed
+end)
+local corrupt_completed_result = corrupt_completed:ExecuteAsync(125, "erasure-corrupt-completed", 1)
+assert(corrupt_completed_result.code == "corrupt",
+	"erasure reported success for a completed manifest with incomplete durable checkpoints")
+
 print("[PASS] Erasure coverage gating, bounded inventory, immutable checkpoints, writer fencing and generation-aware deletion.")
 Shim.close()
