@@ -301,6 +301,43 @@ assert(retry_job.code == "accepted", "retry callback was not accepted")
 for _ = 1, 200 do if retry_done then break end; task.wait(0.002) end
 assert(retry_done and callback_attempts == 2, "explicit retryable result did not retry exactly once")
 
+-- Retry-token exhaustion must defer without executing or busy-spinning a retry.
+local token_governor = new_scheduler()
+local token_policy = token_governor:Stats().policy
+assert(token_governor:SetPolicy({
+	revision = token_policy.revision + 1,
+	retry_token_capacity = 1,
+	retry_tokens_per_second = 0,
+}), "retry-token exhaustion policy was rejected")
+local consumed_token = token_governor:AcquireRetryToken("maintenance")
+assert(consumed_token, "retry-token fixture could not consume its only token")
+local token_dispatcher = Scheduler.new_dispatcher(token_governor, { now_ms = function() return now_ms end })
+local gated_attempts, gated_done = 0, false
+local gated_job = token_dispatcher:Schedule("retry-gate-owner", "retry-token-gate", function()
+	gated_attempts += 1
+	return if gated_attempts == 1 then { code = "retryable" } else { code = "committed" }
+end, {
+	lane = "normal", work_class = "maintenance", max_retries = 2,
+	retry_delay_ms = 10, retry_jitter_percent = 0,
+	on_complete = function(result) gated_done = result.code == "committed" end,
+})
+assert(gated_job.code == "accepted", "retry-token test work was not accepted")
+for _ = 1, 100 do if gated_attempts >= 1 then break end; task.wait(0.001) end
+assert(gated_attempts == 1, "initial callback did not execute exactly once")
+task.wait(0.03)
+assert(gated_attempts == 1, "retry executed without a retry token")
+assert(token_governor:Stats().queue_items == 1, "token-deferred retry was removed from the queue")
+local depleted_policy = token_governor:Stats().policy
+assert(token_governor:SetPolicy({
+	revision = depleted_policy.revision + 1,
+	retry_tokens_per_second = 128,
+}), "retry-token refill policy was rejected")
+now_ms += 60001
+token_dispatcher:Kick()
+for _ = 1, 100 do if gated_done then break end; task.wait(0.002) end
+assert(gated_done and gated_attempts == 2, "deferred retry did not run after token admission")
+token_dispatcher:Close()
+
 local thrown_attempts = 0
 local thrown_done = false
 local thrown_job = dispatcher:Schedule("error-owner", "unknown-callback", function()
