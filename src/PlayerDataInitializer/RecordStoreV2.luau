@@ -2669,6 +2669,7 @@ local function new_projections(store, options)
 			if type(old) == "table" and (old.entity_id ~= event.entity_id or old.projection_name ~= name) then return old end
 			if type(old) == "table" and old.version ~= def.version then return old end
 			if type(old) == "table" and (type(old.value) ~= "table" or not finite(old.source_revision)
+				or math.floor(old.source_revision) ~= old.source_revision or old.source_revision < -1
 				or not valid_recent_events(old.recent_events)
 			) then return old end
 			local current = if type(old) == "table" then old else {
@@ -2709,7 +2710,9 @@ local function new_projections(store, options)
 			if observed.version ~= def.version then
 				return { code = "unsupported_schema", message = "projection schema revision changed" }
 			end
-			if type(observed.value) ~= "table" or not finite(observed.source_revision) or not valid_recent_events(observed.recent_events) then
+			if type(observed.value) ~= "table" or not finite(observed.source_revision)
+				or math.floor(observed.source_revision) ~= observed.source_revision or observed.source_revision < -1
+				or not valid_recent_events(observed.recent_events) then
 				return { code = "corrupt", message = "projection row has malformed value, revision or event ledger" }
 			end
 			for _, event_id in ipairs(observed.recent_events) do
