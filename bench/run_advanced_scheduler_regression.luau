@@ -733,7 +733,9 @@ assert(adaptive_batch_dispatcher:Stats().batch_calls == 1,
 	"adaptive batch invocation was not measured")
 assert(adaptive_batch_dispatcher:Stats().max_batch_size == 1,
 	"adaptive batch metrics did not record the bounded selected size")
-adaptive_batch_governor:Observe("outbox_dispatch", true, 1)
+-- The service-latency EWMA needs repeated healthy observations before a
+-- previously slow lane should permit larger batches again.
+for _ = 1, 8 do adaptive_batch_governor:Observe("outbox_dispatch", true, 1) end
 local backlog_limited_size = nil
 local backlog_limited_job = adaptive_batch_dispatcher:Schedule(
 	"adaptive-batch-owner", "backlog-limited-batch", function(batch_size)
