@@ -209,11 +209,12 @@ The v2 feature layer is opt-in and lives at
 first Record; adaptive mode remains disabled unless explicitly enabled.
 
 This integration example assumes a deployment bootstrap has already moved
-`player-records-v2` to the durable `active` rollout phase using real verifier callbacks. The
-runtime guard below checks that durable state; it does not create attestations or prove that old
-writers have stopped. Configure the rollout separately, and keep V2 disabled until the
-compatibility, writer-drain, activation-freeze, rollback-rehearsal, and profile-key-fencing
-verifiers return durable evidence.
+`player-records-v2` to the durable `active` rollout phase using real verifier callbacks and
+the same compatibility digest shown below. The runtime guard checks both the durable rollout phase
+and this binary's expected digest; it does not create attestations or prove that old writers have
+stopped. Configure the rollout separately, and keep V2 disabled until the compatibility,
+writer-drain, activation-freeze, rollback-rehearsal, and profile-key-fencing verifiers return durable
+evidence.
 
 ```lua
 local DataStoreService = game:GetService("DataStoreService")
@@ -255,7 +256,11 @@ assert(open_code == "created" or open_code == "loaded", open_error)
 -- using real compatibility, old-writer-drain, freeze, rollback and fencing evidence.
 -- Do not replace this durable guard with a constant "true" callback.
 local rollout_store = DataStoreAdapter.new(RecordStore, "RecordStoreV2Rollout", "global")
-local rollout = RecordStoreV2.Rollout.new(rollout_store)
+-- Use exactly the same immutable digest supplied to PrepareAsync by deployment tooling.
+local rollout_matrix_digest = "matrix-digest-v2"
+local rollout = RecordStoreV2.Rollout.new(rollout_store, {
+    expected_matrix_digest = rollout_matrix_digest,
+})
 local rollout_id = "player-records-v2"
 local function activation_guard(operation)
     return rollout:ActivationGuard(rollout_id, operation)
