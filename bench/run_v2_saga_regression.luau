@@ -83,7 +83,7 @@ end
 
 local function durable_late_credit(base, id, amount, recipient_id)
 	local request = credit_request(id, amount, recipient_id)
-	local material = V2.canonical(request)
+	local material = V2.Canonicalize(request)
 	return base:TransactAsync(transfer_operation(id, "credit"), digest(material), function(current)
 		assert(type(current) == "table", "late credit received a non-table profile")
 		local changed = table.clone(current)
