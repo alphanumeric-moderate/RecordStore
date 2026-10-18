@@ -225,6 +225,8 @@ local job = RecordStore.schedule_work(
         lane = "background",
         work_class = "maintenance",
         operation_class = "maintenance",
+        -- Set false only when this callback is guaranteed not to mutate persisted state.
+        mutating = false,
     }
 )
 assert(job.code == "accepted", job.message)
@@ -235,11 +237,21 @@ local current = RecordStore.get_scheduler_snapshot()
 The API supports revisioned policy updates, cost-aware DRR, bounded owner/work-class
 fairness, deadline and age-aware selection, a strictly reserved lease-renewal
 concurrency slot, delayed-work heaps, expiry/dependency outcomes, retry tokens with
-backoff/jitter, bounded callback concurrency, opt-in batch windows for callbacks that
-already represent an application-defined batch, shadow comparisons, deterministic trace
-replay, and queue/latency metrics. It never combines separate callbacks into a new
-business transaction. Owner IDs are bounded to 512 bytes, work IDs to 96 bytes, and
-work classes to 64 bytes.
+backoff/jitter, bounded callback concurrency, cost-weighted governor admission,
+per-work-class caps, circuit cooldowns, optional request-budget observations, opt-in
+batch windows for callbacks that already represent an application-defined batch, shadow
+comparisons, deterministic trace replay, and queue/latency metrics. Governor reservations
+are released on completion and before a retry is queued. It never combines separate
+callbacks into a new business transaction. Owner IDs are bounded to 512 bytes, work IDs
+to 96 bytes, and work classes to 64 bytes.
+
+Admission uses operation_class as the request-kind key and estimated work cost from the
+scheduler options. Generic callbacks can return a numeric budget field with their
+result to publish a request-budget observation. Work remains queued during temporary
+capacity, circuit, or budget backpressure. Under read_only, mutations are terminally
+rejected unless they are classified as critical; mutating = false opts a callback into
+read-only execution only when it truly performs no persistence mutation. The
+reject_noncritical mode gives queued noncritical work a typed backpressure completion.
 
 `available_at`, an advisory scheduling deadline, `expires_at`, and the durable
 session/claim lease are distinct concepts. A deadline is not a completion guarantee.
