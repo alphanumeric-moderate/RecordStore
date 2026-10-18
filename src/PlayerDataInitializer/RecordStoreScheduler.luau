@@ -286,14 +286,18 @@ local function new_governor(options)
 		end
 		local budgets = self.request_budgets
 		local budget_fresh = finite(budgets.sampled_at_ms) and now_ms() - budgets.sampled_at_ms <= 1000
-		if budget_fresh and not critical then
-			if read_units > 0 and finite(budgets.read) and budgets.read < math.max(self.policy.minimum_budget, read_units) then
+		if budget_fresh then
+			-- Critical work can use reserved local scheduler capacity below the normal
+			-- headroom target, but cannot bypass an exhausted Roblox request budget.
+			local read_threshold = if critical then read_units else math.max(self.policy.minimum_budget, read_units)
+			local write_threshold = if critical then write_units else math.max(self.policy.minimum_budget, write_units)
+			if read_units > 0 and finite(budgets.read) and budgets.read < read_threshold then
 				return { code = "backpressure", transient = true, budget_limited = true, retry_after_ms = 250,
-					message = "StandardRead budget is below the configured admission threshold" }, false, true
+					message = "StandardRead budget is below the operation admission threshold" }, false, true
 			end
-			if write_units > 0 and finite(budgets.write) and budgets.write < math.max(self.policy.minimum_budget, write_units) then
+			if write_units > 0 and finite(budgets.write) and budgets.write < write_threshold then
 				return { code = "backpressure", transient = true, budget_limited = true, retry_after_ms = 250,
-					message = "StandardWrite budget is below the configured admission threshold" }, false, true
+					message = "StandardWrite budget is below the operation admission threshold" }, false, true
 			end
 		end
 		if self.in_flight + cost > self.policy.max_in_flight then
