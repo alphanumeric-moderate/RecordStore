@@ -2639,7 +2639,13 @@ local function new_projections(store, options)
 	function service:ApplyAsync(name, event)
 		local def = self.projections[name]
 		if not def then return { code = "not_found" } end
-		if type(event) ~= "table" or not valid_text(event.event_id, 128) or not valid_text(event.entity_id, 128)
+		if type(event) ~= "table" then return { code = "invalid" } end
+		local event_ok, event_snapshot = pcall(copy, event)
+		if not event_ok or type(event_snapshot) ~= "table" then
+			return { code = "invalid", message = "projection event must be a bounded acyclic table" }
+		end
+		event = event_snapshot
+		if not valid_text(event.event_id, 128) or not valid_text(event.entity_id, 128)
 			or not finite(event.source_revision) or event.source_revision < 0 or math.floor(event.source_revision) ~= event.source_revision then return { code = "invalid" } end
 		local subjects_ok, subject_error = verify_subjects(event.subject_user_ids)
 		if not subjects_ok then return subject_error end
@@ -2759,9 +2765,11 @@ local function new_projections(store, options)
 	end
 	function service:ReserveUnique(namespace, unique_value, entity_id, operation_id, subject_user_ids)
 		if not valid_text(namespace, 32) or not valid_text(unique_value, 128) or not valid_text(entity_id, 128) or not valid_text(operation_id, 128) then return { code = "invalid" } end
-		local subjects_ok, subject_error = verify_subjects(subject_user_ids)
+		local subjects_copy_ok, subject_snapshot = pcall(copy, subject_user_ids)
+		if not subjects_copy_ok then return { code = "invalid", message = "subject_user_ids must be a bounded acyclic table" } end
+		local subjects_ok, subject_error = verify_subjects(subject_snapshot)
 		if not subjects_ok then return subject_error end
-		local normalized_subjects = copy(subject_user_ids or {})
+		local normalized_subjects = if subject_snapshot == nil then {} else subject_snapshot
 		local key = "rv2u-" .. digest(namespace .. ":" .. unique_value)
 		local attempt_id = digest(operation_id .. ":" .. tostring(os.clock()) .. ":" .. tostring(math.random()))
 		local created_at = os.time()
