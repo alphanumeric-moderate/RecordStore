@@ -6628,6 +6628,18 @@ local scheduler_governor = RecordStoreScheduler.new({
 		local ok, value = pcall(function() return record:Stats() end)
 		return if ok and type(value) == "table" then value else {}
 	end,
+	get_request_budgets = function()
+		local read_ok, read_budget = pcall(function()
+			return DataStoreService:GetRequestBudgetForRequestType(Enum.DataStoreRequestType.StandardRead)
+		end)
+		local write_ok, write_budget = pcall(function()
+			return DataStoreService:GetRequestBudgetForRequestType(Enum.DataStoreRequestType.StandardWrite)
+		end)
+		if not read_ok or not write_ok or type(read_budget) ~= "number" or type(write_budget) ~= "number" then
+			return nil
+		end
+		return { read = read_budget, write = write_budget }
+	end,
 })
 local scheduler_dispatcher: any = RecordStoreScheduler.new_dispatcher(scheduler_governor, {
 	now_ms = function() return now_local() * 1000 end,
