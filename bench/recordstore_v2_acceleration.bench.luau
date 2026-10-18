@@ -7,7 +7,7 @@ local Shim = require("./RobloxShim")
 Shim.load()
 local Acceleration = luau.load(
 	fs.readFile("src/PlayerDataInitializer/RecordStoreV2Acceleration.luau"),
-	{ debugName = "RecordStoreV2Acceleration" }
+	{ debugName = "RecordStoreV2Acceleration", environment = Shim.environment }
 )()
 
 local messages = {}
