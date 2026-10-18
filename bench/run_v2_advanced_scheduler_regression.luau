@@ -124,9 +124,14 @@ enqueue(per_owner, { id = "owner-one-a", owner_id = "one", lane = "normal" })
 enqueue(per_owner, { id = "owner-one-b", owner_id = "one", lane = "normal" })
 enqueue(per_owner, { id = "owner-two", owner_id = "two", lane = "normal" })
 local first = per_owner:TakeNext()
-assert(first ~= nil and first.owner_id == "one", "unexpected first owner in bounded concurrency fixture")
+assert(first ~= nil, "bounded concurrency fixture had no first item")
 local second = per_owner:TakeNext()
-assert(second ~= nil and second.owner_id == "two", "owner cap did not preserve another owner's opportunity")
+assert(second ~= nil, "another owner did not retain a selectable item")
+local owner_one_first = if first.owner_id == "one" then first else second
+local owner_two_first = if first.owner_id == "two" then first else second
+assert(owner_one_first.owner_id == "one" and owner_two_first.owner_id == "two",
+	"the scheduler failed to expose both owners before a second item from one owner")
+assert(per_owner:TakeNext() == nil, "the configured per-owner in-flight cap was exceeded")
 per_owner:MarkCompleted(first.id, "committed")
 per_owner:MarkCompleted(second.id, "committed")
 take(per_owner, "owner-one-b")
