@@ -639,6 +639,7 @@ local closing_dispatcher = Scheduler.new_dispatcher(closing_governor, {
 	now_ms = function() return now_ms end,
 })
 local closing_callback_ran, closing_completion = false, nil
+local schedule_during_close = nil
 local closing_job = closing_dispatcher:Schedule(
 	"closing-owner", "future-callback", function()
 		closing_callback_ran = true
@@ -647,7 +648,14 @@ local closing_job = closing_dispatcher:Schedule(
 	{
 		lane = "background",
 		due_at_ms = now_ms + 60000,
-		on_complete = function(result) closing_completion = result end,
+		on_complete = function(result)
+			closing_completion = result
+			schedule_during_close = closing_dispatcher:Schedule(
+				"closing-owner", "work-created-by-close-callback", function()
+					error("work was admitted while the dispatcher was closing")
+				end
+			)
+		end,
 	}
 )
 assert(closing_job.code == "accepted", "future close fixture was rejected")
@@ -655,6 +663,8 @@ closing_dispatcher:Close()
 assert(not closing_callback_ran, "closing dispatcher executed a future callback")
 assert(type(closing_completion) == "table" and closing_completion.code == "cancelled",
 	"closing dispatcher did not provide the cancellation result")
+assert(type(schedule_during_close) == "table" and schedule_during_close.code == "closed",
+	"completion callback was able to add work during dispatcher close")
 assert(closing_governor:Stats().queue_items == 0, "closing dispatcher retained queued work")
 assert(closing_dispatcher:Stats().closed, "dispatcher close state was not published")
 
