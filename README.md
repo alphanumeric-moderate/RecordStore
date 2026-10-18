@@ -185,6 +185,79 @@ rojo build tests.project.json -o RecordStore-CompatibilityTests.rbxlx
 
 Open the test place in Roblox Studio and run a server playtest. Regression scripts use `RecordStore.Mock`; they do not read or write live DataStore records.
 
+## Advanced server-local scheduler
+
+RecordStore includes an advanced **opt-in** server-local scheduler. It is disabled by
+default so an existing experience can explicitly review policy and enable the new
+selection path. When enabled, background session renewal, autosave and legacy queue
+polling enter the same bounded selector. Durable record writes still use RecordStore's
+existing session-token/generation fencing and DataStore request-budget checks.
+
+The scheduler exposes policy, metrics and a generic work entry point:
+
+```lua
+local RecordStore = require(
+    game:GetService("ServerScriptService")
+        .PlayerDataInitializer
+        .RecordStore
+)
+
+local snapshot = RecordStore.get_scheduler_snapshot()
+local configured, message = RecordStore.configure_scheduler_policy({
+    revision = snapshot.policy.revision + 1,
+    shadow_enabled = true,
+    shadow_sample_rate = 1,
+})
+assert(configured == "success", message)
+
+-- Enabling the selector is an explicit rollout decision and can be reversed.
+assert(RecordStore.set_scheduler_enabled(true))
+
+local job = RecordStore.schedule_work(
+    "maintenance:daily-rebuild",
+    "rebuild-page-1",
+    function()
+        -- Return a typed result. Use "retryable" only when the callback
+        -- can prove that no side effect committed.
+        return { code = "success" }
+    end,
+    {
+        lane = "background",
+        work_class = "maintenance",
+        operation_class = "maintenance",
+    }
+)
+assert(job.code == "accepted", job.message)
+
+local current = RecordStore.get_scheduler_snapshot()
+```
+
+The API supports revisioned policy updates, cost-aware DRR, bounded owner/work-class
+fairness, deadline and age-aware selection, a strictly reserved lease-renewal
+concurrency slot, delayed-work heaps, expiry/dependency outcomes, retry tokens with
+backoff/jitter, bounded callback concurrency, opt-in batch-formation windows,
+shadow comparisons, deterministic trace replay, and queue/latency metrics.
+
+`available_at`, an advisory scheduling deadline, `expires_at`, and the durable
+session/claim lease are distinct concepts. A deadline is not a completion guarantee.
+An expired item is returned with a typed terminal outcome rather than silently dropped.
+The dispatcher retries only an explicit `{ code = "retryable" }` result and only
+within configured limits and retry-token admission. A thrown callback is converted to
+`unknown` and is not automatically replayed because its side effect may have committed.
+Applications must reconcile ambiguous effects using stable business operation IDs.
+
+The scheduler and its due-time heap are **server-local and non-durable**. A process
+restart discards queued callbacks. Do not use generic scheduled callbacks as the durable
+mailbox or as an exactly-once transaction mechanism. Scheduled entry points may coexist
+with existing direct APIs; callers must deliberately route work through the selector when
+they require scheduler ordering. Strict `ordering_key` semantics and global/server-instance
+priority are not provided.
+
+The focused scheduler regression suite runs under Lune and the CodSpeed configuration
+includes a fixed synthetic owner/work-class selection workload. These establish local
+algorithm behavior and cost only; they do not prove Roblox DataStore latency, quota,
+cross-server behavior or production rollout safety.
+
 ## Benchmarks
 
 Performance is tracked with [CodSpeed](https://codspeed.io). The benchmarks run `RecordStore.Mock` scenarios outside Roblox with [Lune](https://github.com/lune-org/lune), a standalone Luau runtime. `bench/RobloxShim.luau` provides the small set of Roblox APIs the mock backend needs (`HttpService`, `DateTime`, `Enum`, `task`, ...).
