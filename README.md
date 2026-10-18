@@ -235,17 +235,27 @@ local current = RecordStore.get_scheduler_snapshot()
 The API supports revisioned policy updates, cost-aware DRR, bounded owner/work-class
 fairness, deadline and age-aware selection, a strictly reserved lease-renewal
 concurrency slot, delayed-work heaps, expiry/dependency outcomes, retry tokens with
-backoff/jitter, bounded callback concurrency, cost-weighted governor admission,
-per-work-class caps, circuit cooldowns, optional request-budget observations, opt-in
-batch windows for callbacks that already represent an application-defined batch, shadow
-comparisons, deterministic trace replay, and queue/latency metrics. Governor reservations
-are released on completion and before a retry is queued. It never combines separate
-callbacks into a new business transaction. Owner IDs are bounded to 512 bytes, work IDs
-to 96 bytes, and work classes to 64 bytes.
+backoff/jitter, bounded callback concurrency, cost-weighted governor admission with
+separate StandardRead and StandardWrite estimates, per-work-class caps, estimated-byte
+and handler-slot limits, critical read/write reserves, circuit cooldowns, live request
+budget observations, opt-in batch windows for callbacks that already represent an
+application-defined batch, shadow comparisons, deterministic trace replay, and
+queue/latency metrics. Governor reservations are released on completion and before a
+retry is queued. It never combines separate callbacks into a new business transaction.
+Owner IDs are bounded to 512 bytes, work IDs to 96 bytes, and work classes to 64 bytes.
 
-Admission uses operation_class as the request-kind key and estimated work cost from the
-scheduler options. Generic callbacks can return a numeric budget field with their
-result to publish a request-budget observation. Work remains queued during temporary
+Admission uses operation_class as the request-kind key and a conservative estimate for
+each operation class. Explicit read_units, write_units, estimated_bytes and handler_slots
+can raise the estimate; they cannot lower the class's configured minimum. An UpdateAsync
+defaults to consuming both read and write admission dimensions. RecordStore refreshes
+the server's StandardRead and StandardWrite budgets at each scheduler dispatch pump using
+GetRequestBudgetForRequestType. Fresh low-budget observations defer noncritical work;
+critical admission reserves remain local controls, not guarantees against other scripts,
+servers or Open Cloud traffic. See the [official DataStore request budget and limits
+documentation](https://create.roblox.com/docs/cloud-services/data-stores/error-codes-and-limits).
+
+Generic callbacks can return a numeric budget field to publish an additional
+operation-class-specific budget observation. Work remains queued during temporary
 capacity, circuit, or budget backpressure. Under read_only, mutations are terminally
 rejected unless they are classified as critical; mutating = false opts a callback into
 read-only execution only when it truly performs no persistence mutation. The
