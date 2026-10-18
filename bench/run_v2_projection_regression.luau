@@ -169,6 +169,18 @@ local erased_event = erased_projections:ApplyAsync("subject_projection_v1", {
 	subject_user_ids = { 987654321 },
 })
 assert(erased_event.code == "erased", "projection recreated data for a durably erased subject")
+local unresolved_projections = V2.Projections.new(protected_store, {
+	is_erased = function(_user_id) return "unknown" end,
+})
+assert(unresolved_projections:Register("subject_projection_v1", 1, function(current) return current end))
+local unresolved_event = unresolved_projections:ApplyAsync("subject_projection_v1", {
+	event_id = "projection-unresolved-erasure",
+	entity_id = "player-unresolved",
+	source_revision = 1,
+	subject_user_ids = { 987654321 },
+})
+assert(unresolved_event.code == "unknown",
+	"projection accepted a non-boolean erasure verifier result")
 local subject_read_store = new_store()
 local live_subject_projection = V2.Projections.new(subject_read_store, {
 	is_erased = function(_user_id) return false end,
@@ -195,6 +207,17 @@ assert(erased_subject_projection:Register("subject_read_v1", 1, function(current
 end))
 local erased_read = erased_subject_projection:GetAsync("subject_read_v1", "subject-entity")
 assert(erased_read.code == "erased", "projection read returned data for a subject marked erased")
+local unresolved_read_projection = V2.Projections.new(subject_read_store, {
+	is_erased = function(_user_id) return "unknown" end,
+})
+assert(unresolved_read_projection:Register("subject_read_v1", 1, function(current, event)
+	local changed = table.clone(current)
+	changed.subject = event.subject_user_ids[1]
+	return changed
+end))
+local unresolved_read = unresolved_read_projection:GetAsync("subject_read_v1", "subject-entity")
+assert(unresolved_read.code == "unknown",
+	"projection read returned data after a non-boolean erasure verifier result")
 
 local mutable_subjects = { 987654321 }
 local snapshot_store = new_store()
