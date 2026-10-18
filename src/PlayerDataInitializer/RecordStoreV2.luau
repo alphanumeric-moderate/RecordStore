@@ -2144,9 +2144,9 @@ local function new_erasure(store, families, options)
 		for index = cursor + 1, math.min(#manifest.entries, cursor + max_items) do
 			local entry, family = manifest.entries[index], by_name[manifest.entries[index].family]
 			if not family then return { code = "corrupt", message = "unknown family in erasure plan" } end
-			local clear, dependency_error = io_call(family.dependencies_clear, entry.item, user_id)
+			local clear, dependency_error = io_call(family.dependencies_clear, copy(entry.item), user_id)
 			if clear ~= true then return { code = "blocked", cursor = index - 1, message = dependency_error or "live dependency blocks deletion" }
-			local status, action_error = io_call(family.redact_or_delete_if_generation, entry.item, user_id, erasure_id)
+			local status, action_error = io_call(family.redact_or_delete_if_generation, copy(entry.item), user_id, erasure_id)
 			if status ~= "deleted" and status ~= "redacted" then
 				local observed, state_error = adapter_call(store, "UpdateAsync", key, function(old)
 					if type(old) ~= "table" or old.erasure_id ~= erasure_id then return old end
@@ -2171,7 +2171,7 @@ local function new_erasure(store, families, options)
 			-- Current-key deletion is not complete RTBF while historical versions or
 			-- backups can still restore the prior payload. The callback must clear
 			-- history for this exact generation while retaining its current tombstone.
-			local history_cleared, history_error = io_call(family.clear_history_if_generation, entry.item, user_id, erasure_id)
+			local history_cleared, history_error = io_call(family.clear_history_if_generation, copy(entry.item), user_id, erasure_id)
 			if history_cleared ~= true then
 				local observed, state_error = adapter_call(store, "UpdateAsync", key, function(old)
 					if type(old) ~= "table" or old.erasure_id ~= erasure_id then return old end
