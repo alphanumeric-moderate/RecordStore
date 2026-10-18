@@ -372,6 +372,14 @@ local invalid_retry_cap = V2.ScheduleMaintenance(
 	{ max_retries = 9 }
 )
 assert(invalid_retry_cap.code == "invalid", "scheduler accepted max_retries above the documented bound")
+local invalid_maintenance_options = V2.ScheduleMaintenance(
+	"maintenance-owner", "invalid-options", function() return { code = "committed" } end, true
+)
+assert(invalid_maintenance_options.code == "invalid", "maintenance scheduler crashed on non-table options")
+local invalid_outbox_options = V2.ScheduleOutboxDispatch(
+	"outbox-owner", record, function() return true end, 1, 1, nil, true
+)
+assert(invalid_outbox_options.code == "invalid", "outbox scheduler crashed on non-table options")
 
 local dispatch_stats = V2.GetSchedulerDispatchStats()
 assert(dispatch_stats.accepted >= 7 and dispatch_stats.dispatched >= 6,
