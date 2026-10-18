@@ -1033,13 +1033,12 @@ local function new_governor(options)
 				return item, "expired"
 			end
 		end
-		if self.policy.shadow_enabled and self.policy.shadow_sample_rate > 0 then
-			local interval = math.max(1, math.floor(1 / self.policy.shadow_sample_rate))
-			local decision_count = self.stats.scheduled_selected + self.stats.shadow_samples + 1
-			if decision_count % interval == 0 then self:ShadowDecision(renewal_mode) end
-		end
 		local index = choose_index(self, self.policy.algorithm or "drr", renewal_mode)
 		if not index then return nil, "empty" end
+		if self.policy.shadow_enabled and self.policy.shadow_sample_rate > 0 then
+			local interval = math.max(1, math.floor(1 / self.policy.shadow_sample_rate))
+			if (self.stats.scheduled_selected + 1) % interval == 0 then self:ShadowDecision(renewal_mode) end
+		end
 		local item = table.remove(self.queue, index)
 		item.queued = false
 		local age = math.max(0, now - (item.enqueued_at_ms or now))
