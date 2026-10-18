@@ -514,7 +514,8 @@ local function new_governor(options)
 		in_flight = 0, by_class = {}, queue = {}, due = {}, due_heap = {}, queued_due_heap = {},
 		completed = {}, completed_order = {}, known = {}, active_owner = {}, active_renewals_by_owner = {},
 		drr_deficit = {}, drr_cursor_key = nil, high_streak = 0, urgent_streak = 0,
-		failed = {}, failed_order = {}, due_sequence = 0,
+		failed = {}, failed_order = {}, retry_cooldown_until = {}, retry_tokens_by_class = {},
+		last_token_time_by_class = {}, due_sequence = 0,
 		retry_tokens = 32, last_token_time = now_ms(),
 		last_budget = nil, last_budget_by_kind = {}, latency_ewma = {}, consecutive_errors = {}, circuits = {},
 		stats = { admitted = 0, rejected = 0, completed = 0, throttled = 0, errors = 0,
@@ -664,14 +665,29 @@ local function new_governor(options)
 		self.stats.completed += 1
 		return true
 	end
-	function governor:AcquireRetryToken()
+	function governor:AcquireRetryToken(work_class)
 		local now = now_ms()
 		self.retry_tokens = math.min(self.policy.retry_token_capacity, self.retry_tokens + math.max(0, now - self.last_token_time) / 1000 * self.policy.retry_tokens_per_second)
 		self.last_token_time = now
 		if self.retry_tokens < 1 then
 			return false, if self.policy.retry_tokens_per_second > 0 then math.ceil((1 - self.retry_tokens) / self.policy.retry_tokens_per_second * 1000) else math.huge
 		end
+		local class = if valid_text(work_class, 64) then work_class else "default"
+		local bucket = self.retry_tokens_by_class[class]
+		if bucket == nil then
+			bucket = { tokens = math.max(1, math.floor(self.policy.retry_token_capacity / 4)), at_ms = now }
+			self.retry_tokens_by_class[class] = bucket
+		end
+		local capacity = math.max(1, math.floor(self.policy.retry_token_capacity / 4))
+		local refill = self.policy.retry_tokens_per_second / 4
+		bucket.tokens = math.min(capacity, bucket.tokens + math.max(0, now - bucket.at_ms) / 1000 * refill)
+		bucket.at_ms = now
+		if bucket.tokens < 1 then
+			local wait_ms = if refill > 0 then math.ceil((1 - bucket.tokens) / refill * 1000) else math.huge
+			return false, wait_ms
+		end
 		self.retry_tokens -= 1
+		bucket.tokens -= 1
 		return true, 0
 	end
 	function governor:ChooseBatchSize(requested, latency_ms)
@@ -985,6 +1001,59 @@ local function new_governor(options)
 			if entry.item.queued ~= true or self.known[entry.id] ~= entry.item then heap_pop(self.queued_due_heap)
 			else return entry.due_at_ms end
 		end
+	end
+	function governor:NextWakeAt()
+		local now, next_wake = now_ms(), nil
+		for _, item in ipairs(self.queue) do
+			local owner_at_cap = (self.active_owner[item.owner_id] or 0) >= self.policy.max_per_owner_in_flight
+			local renewal_can_run = item.lane == "lease_renewal" and
+				(self.active_renewals_by_owner[item.owner_id] or 0) < 1
+			if dependencies_ready(self, item) and (renewal_can_run or not owner_at_cap) then
+				local candidate
+				if (item.due_at_ms or 0) > now then candidate = item.due_at_ms
+				elseif item.expires_at_ms ~= nil and item.expires_at_ms > now then candidate = item.expires_at_ms end
+				if candidate ~= nil and (next_wake == nil or candidate < next_wake) then next_wake = candidate end
+			elseif item.expires_at_ms ~= nil and item.expires_at_ms > now
+				and (next_wake == nil or item.expires_at_ms < next_wake)
+			then
+				-- Even an owner-saturated item must eventually report expiry. Its
+				-- callback still cannot start until a dispatch slot is available.
+				next_wake = item.expires_at_ms
+			end
+		end
+		return next_wake
+	end
+	function governor:Reschedule(id, due_at_ms)
+		if not valid_text(id, 128) or not finite(due_at_ms) then return false, "invalid retry schedule" end
+		local item = self.known[id]
+		if item == nil or item.dispatch_state ~= "in_flight" then return false, "scheduled item is not in flight" end
+		if #self.queue >= self.policy.queue_capacity then return false, "local queue full; retry was not accepted" end
+		local now = now_ms()
+		local cooldown_until = self.retry_cooldown_until[item.owner_id] or 0
+		local next_due = math.max(due_at_ms, cooldown_until, now)
+		item.due_at_ms = next_due
+		item.is_retry = true
+		item.queued = true
+		item.dispatch_state = nil
+		item.selected_at_ms = nil
+		self.active_owner[item.owner_id] = math.max(0, (self.active_owner[item.owner_id] or 1) - 1)
+		if item.lane == "lease_renewal" then
+			self.active_renewals_by_owner[item.owner_id] = math.max(0, (self.active_renewals_by_owner[item.owner_id] or 1) - 1)
+		end
+		table.insert(self.queue, item)
+		heap_push(self.queued_due_heap, { id = item.id, due_at_ms = item.due_at_ms, item = item })
+		if #self.queued_due_heap > self.policy.queue_capacity * 2 then
+			local rebuilt = {}
+			for _, queued in ipairs(self.queue) do heap_push(rebuilt, { id = queued.id, due_at_ms = queued.due_at_ms, item = queued }) end
+			self.queued_due_heap = rebuilt
+		end
+		self.retry_cooldown_until[item.owner_id] = next_due
+		return true, nil, next_due
+	end
+	local function rebuild_queued_due_heap(self)
+		local rebuilt = {}
+		for _, item in ipairs(self.queue) do heap_push(rebuilt, { id = item.id, due_at_ms = item.due_at_ms, item = item }) end
+		self.queued_due_heap = rebuilt
 	end
 	remember_terminal = function(self, id, code)
 		self.failed[id] = code
@@ -3724,10 +3793,16 @@ function V2.new(record_store, mailbox_module, options)
 	api.RenderErasureTemplate = render_template
 	api.Acceleration = options.acceleration_module
 	local activation_block
-	local dispatch_metrics = { accepted = 0, rejected = 0, dispatched = 0, retries = 0, callback_errors = 0, last_error = nil }
+	local dispatch_metrics = {
+		accepted = 0, rejected = 0, dispatched = 0, retries = 0, callback_errors = 0,
+		expired = 0, dependency_failed = 0, last_error = nil, max_in_flight = 0,
+	}
 	local dispatch_callbacks = {}
 	local dispatch_sequence = 0
 	local dispatcher_running = false
+	local dispatcher_in_flight = 0
+	local scheduled_wake_due_ms = nil
+	local scheduled_wake_generation = 0
 	local kick_dispatcher
 
 	local function current_schedule_time_ms()
@@ -3740,165 +3815,270 @@ function V2.new(record_store, mailbox_module, options)
 		return scheduler ~= nil and type(scheduler.delay) == "function"
 	end
 
-	local function wake_dispatcher_after(delay_ms)
-		if not has_delay_scheduler() then return false end
-		local target_due_ms = current_schedule_time_ms() + math.max(0, delay_ms)
+	local function schedule_wake_at(target_due_ms)
+		if not finite(target_due_ms) or not has_delay_scheduler() then return false end
+		if scheduled_wake_due_ms ~= nil and scheduled_wake_due_ms <= target_due_ms then
+			return true
+		end
+		scheduled_wake_generation += 1
+		local generation = scheduled_wake_generation
+		scheduled_wake_due_ms = target_due_ms
 		local function wake()
-			-- Roblox timers and injected test clocks need not advance in lockstep.
-			-- Re-arm until the scheduler's clock reaches the durable job's due time.
+			if generation ~= scheduled_wake_generation or scheduled_wake_due_ms ~= target_due_ms then return end
 			local remaining_ms = target_due_ms - current_schedule_time_ms()
 			if remaining_ms > 0 then
-				if not delay_scheduled(math.max(0.001, remaining_ms / 1000), wake) then return end
-			elseif dispatcher_running then
-				if not delay_scheduled(0.01, wake) then return end
-			else
-				kick_dispatcher()
+				if not delay_scheduled(math.max(0.001, remaining_ms / 1000), wake) then
+					if scheduled_wake_generation == generation then scheduled_wake_due_ms = nil end
+				end
+				return
 			end
+			scheduled_wake_due_ms = nil
+			kick_dispatcher()
 		end
-		return delay_scheduled(math.max(0, delay_ms) / 1000, wake)
+		local wait_ms = math.max(0, target_due_ms - current_schedule_time_ms())
+		if not delay_scheduled(wait_ms / 1000, wake) then
+			scheduled_wake_due_ms = nil
+			return false
+		end
+		return true
 	end
 
-	local function enqueue_scheduled_retry(entry, prior_result)
+	local function schedule_next_wake()
+		local next_wake = runtime_governor:NextWakeAt()
+		if next_wake ~= nil then schedule_wake_at(next_wake) end
+	end
+
+	local function retry_jitter_ms(entry, attempt, base_delay_ms)
+		local jitter_percent = entry.retry_jitter_percent or runtime_governor.policy.retry_jitter_percent
+		local spread = math.floor(base_delay_ms * jitter_percent / 100)
+		if spread <= 0 then return base_delay_ms end
+		local seed = entry.job_id .. ":" .. tostring(attempt) .. ":" .. tostring(entry.owner_id)
+		local hash = 0
+		for index = 1, #seed do hash = (hash * 33 + string.byte(seed, index)) % 2147483647 end
+		local signed = (hash % (spread * 2 + 1)) - spread
+		return math.clamp(base_delay_ms + signed, 10, 60000)
+	end
+
+	local function enqueue_scheduled_retry(item, entry, prior_result)
 		if not has_delay_scheduler() then
 			return false, { code = "retry_exhausted", message = "task.delay is unavailable; retry remains caller-controlled" }
 		end
-		local token_ok, retry_after_ms = runtime_governor:AcquireRetryToken()
+		local token_ok, retry_after_ms = runtime_governor:AcquireRetryToken(entry.work_class)
 		if not token_ok then
 			return false, {
-				code = "retry_exhausted",
-				message = "scheduler retry-token budget is exhausted",
-				retry_after_ms = retry_after_ms,
+				code = "retry_exhausted", message = "scheduler retry-token budget for this work class is exhausted",
+				retry_after_ms = retry_after_ms, work_class = entry.work_class,
 			}
 		end
-
-		local delay_ms = math.min(60000, entry.retry_delay_ms * (2 ^ entry.retry_attempt))
+		local base_delay_ms = math.min(60000, entry.retry_delay_ms * (2 ^ entry.retry_attempt))
+		local delay_ms = retry_jitter_ms(entry, entry.retry_attempt, base_delay_ms)
 		if type(prior_result) == "table" and finite(prior_result.retry_after_ms) then
-			delay_ms = math.max(delay_ms, math.min(60000, math.max(0, prior_result.retry_after_ms)))
+			delay_ms = math.max(delay_ms, math.clamp(prior_result.retry_after_ms, 0, 60000))
 		end
-
-		dispatch_sequence += 1
-		local retry_id = "rv2job:" .. tostring(dispatch_sequence)
-		local accepted = runtime_governor:Enqueue({
-			id = retry_id,
-			owner_id = entry.owner_id,
-			lane = entry.lane,
-			due_at_ms = current_schedule_time_ms() + delay_ms,
-			wake_reason = entry.reason,
-		})
-		if type(accepted) ~= "table" or accepted.code ~= "accepted" then
+		delay_ms = math.clamp(math.floor(delay_ms), 10, 60000)
+		local due_at_ms = current_schedule_time_ms() + delay_ms
+		local queued, reschedule_error, actual_due = runtime_governor:Reschedule(item.id, due_at_ms)
+		if not queued then
 			return false, {
-				code = "retry_exhausted",
-				message = "scheduler could not queue the retry",
-				reason = if type(accepted) == "table" then accepted.code else "unknown",
+				code = "retry_exhausted", message = "scheduler could not requeue the retry",
+				reason = reschedule_error or "unknown",
 			}
 		end
-
 		entry.retry_attempt += 1
-		dispatch_callbacks[retry_id] = entry
 		dispatch_metrics.retries += 1
-		wake_dispatcher_after(delay_ms)
+		schedule_wake_at(actual_due or due_at_ms)
 		return true, nil
+	end
+
+	local function invoke_completion(entry, result)
+		if type(entry) ~= "table" or type(entry.on_complete) ~= "function" then return end
+		local completed, completion_error = pcall(entry.on_complete, copy(result))
+		if not completed then
+			dispatch_metrics.callback_errors += 1
+			dispatch_metrics.last_error = text_error(completion_error, 200)
+		end
+	end
+
+	local function finish_scheduled_item(item, status, callback_entry, callback_ok, callback_result)
+		local retry_scheduled = false
+		if status ~= "success" then
+			callback_ok = true
+			callback_result = item.terminal_result or { code = status, message = "scheduled item reached a terminal scheduler state" }
+			if status == "expired" then dispatch_metrics.expired += 1 end
+			if status == "dependency_failed" then dispatch_metrics.dependency_failed += 1 end
+		elseif not callback_ok then
+			dispatch_metrics.callback_errors += 1
+			dispatch_metrics.last_error = text_error(callback_result, 200)
+			-- A raised callback may have performed a side effect before failing.
+			callback_result = {
+				code = "unknown",
+				message = "scheduled callback raised; side effects may have committed",
+			}
+		elseif type(callback_entry) == "table" and type(callback_result) == "table"
+			and callback_result.code == "retryable"
+		then
+			if callback_entry.retry_attempt < callback_entry.max_retries then
+				local queued, retry_error = enqueue_scheduled_retry(item, callback_entry, callback_result)
+				if queued then
+					retry_scheduled = true
+				else
+					callback_result = retry_error
+				end
+			else
+				callback_result = {
+					code = "retry_exhausted", message = "configured retry cap reached",
+					last_result = copy(callback_result),
+				}
+			end
+		end
+		if not retry_scheduled then
+			if status == "success" and callback_ok then dispatch_metrics.dispatched += 1 end
+			dispatch_callbacks[item.id] = nil
+			invoke_completion(callback_entry, callback_result)
+			local outcome = if type(callback_result) == "table" then callback_result.code
+				elseif callback_ok and (callback_result == true or callback_result == nil) then "success"
+				elseif not callback_ok then "unknown" else tostring(callback_result)
+			runtime_governor:MarkCompleted(item.id, outcome)
+		end
+	end
+
+	local function dispatch_one(item, status)
+		local callback_entry = dispatch_callbacks[item.id]
+		if status ~= "success" then
+			finish_scheduled_item(item, status, callback_entry, true, nil)
+			return
+		end
+		dispatcher_in_flight += 1
+		dispatch_metrics.max_in_flight = math.max(dispatch_metrics.max_in_flight, dispatcher_in_flight)
+		spawn_scheduled(function()
+			local callback = if type(callback_entry) == "table" then callback_entry.callback else callback_entry
+			local callback_ok, callback_result = true, nil
+			if type(callback) == "function" then
+				local results = table.pack(pcall(callback))
+				callback_ok = results[1]
+				callback_result = results[2]
+			else
+				callback_ok = false
+				callback_result = "scheduled job lost its callback"
+			end
+			finish_scheduled_item(item, "success", callback_entry, callback_ok, callback_result)
+			dispatcher_in_flight = math.max(0, dispatcher_in_flight - 1)
+			kick_dispatcher()
+		end)
 	end
 
 	kick_dispatcher = function()
 		if dispatcher_running then return end
 		dispatcher_running = true
 		spawn_scheduled(function()
-			while true do
-				local item = runtime_governor:TakeNext()
+			local policy = runtime_governor.policy
+			local max_in_flight = policy.max_scheduled_in_flight
+			local normal_limit = math.max(0, max_in_flight - policy.scheduler_critical_reserve)
+			while dispatcher_in_flight < max_in_flight do
+				local item, status
+				-- Always check renewals first. They use a real reserved dispatch lane.
+				item, status = runtime_governor:TakeNext(true)
+				if item == nil and dispatcher_in_flight < normal_limit then
+					item, status = runtime_governor:TakeNext(false)
+				elseif item == nil and dispatcher_in_flight < max_in_flight then
+					local counts = runtime_governor:Stats().lanes
+					if (counts.lease_renewal or 0) == 0 then
+						item, status = runtime_governor:TakeNext(false)
+					end
+				end
 				if item == nil then break end
-
-				local callback_entry = dispatch_callbacks[item.id]
-				dispatch_callbacks[item.id] = nil
-				local callback = if type(callback_entry) == "table" then callback_entry.callback else callback_entry
-				local callback_ok, callback_result = true, nil
-				if callback ~= nil then
-					local results = table.pack(pcall(callback))
-					callback_ok = results[1]
-					callback_result = results[2]
-				end
-
-				local retry_scheduled = false
-				if not callback_ok then
-					dispatch_metrics.callback_errors += 1
-					dispatch_metrics.last_error = text_error(callback_result, 200)
-					-- A raised callback may have performed a side effect before failing.
-					-- Keep it unknown and never replay it automatically.
-					callback_result = {
-						code = "unknown",
-						message = "scheduled callback raised; side effects may have committed",
-					}
-				elseif type(callback_entry) == "table" and type(callback_result) == "table"
-					and callback_result.code == "retryable"
-				then
-					if callback_entry.retry_attempt < callback_entry.max_retries then
-						local queued, retry_error = enqueue_scheduled_retry(callback_entry, callback_result)
-						if queued then
-							retry_scheduled = true
-						else
-							callback_result = retry_error
-						end
-					else
-						callback_result = {
-							code = "retry_exhausted",
-							message = "configured retry cap reached",
-							last_result = copy(callback_result),
-						}
-					end
-				end
-
-				if not retry_scheduled then
-					if callback_ok then dispatch_metrics.dispatched += 1 end
-					if type(callback_entry) == "table" and type(callback_entry.on_complete) == "function" then
-						local completed, completion_error = pcall(callback_entry.on_complete, copy(callback_result))
-						if not completed then
-							dispatch_metrics.callback_errors += 1
-							dispatch_metrics.last_error = text_error(completion_error, 200)
-						end
-					end
-				end
-				runtime_governor:MarkCompleted(item.id)
+				dispatch_one(item, status)
 			end
 			dispatcher_running = false
-			-- Do not spin when the queue contains future-due work. Enqueue and retry
-			-- arrange timer wakes; the durable sources and pollers remain authoritative.
+			-- Completion re-enters the pump; future eligibility uses one coalesced
+			-- timer based on the earliest disposable local queue deadline.
+			if dispatcher_in_flight < max_in_flight then schedule_next_wake() end
 		end)
 	end
 
-	api.GetSchedulerDispatchStats = function() return copy(dispatch_metrics) end
+	api.GetSchedulerDispatchStats = function()
+		local snapshot = copy(dispatch_metrics)
+		snapshot.in_flight = dispatcher_in_flight
+		snapshot.next_wake_due_ms = scheduled_wake_due_ms
+		return snapshot
+	end
+
 	local function enqueue_scheduled_callback(owner, lane, reason, callback, due_at_ms, schedule_options, on_complete)
 		if type(callback) ~= "function" then return { code = "invalid", message = "scheduled callback is required" } end
-		schedule_options = schedule_options or {}
+		if schedule_options == nil then schedule_options = {} end
+		if type(schedule_options) ~= "table" then return { code = "invalid", message = "schedule_options must be a table" } end
+		local allowed = {
+			lane = true, due_at_ms = true, available_at_ms = true, deadline_ms = true, expires_at_ms = true,
+			service_class = true, work_class = true, operation_class = true, dependencies = true,
+			read_units = true, write_units = true, estimated_bytes = true, handler_slots = true, cost = true,
+			max_retries = true, retry_delay_ms = true, retry_jitter_percent = true, batch_window_ms = true,
+			on_complete = true,
+		}
+		for key in pairs(schedule_options) do
+			if not allowed[key] then return { code = "invalid", message = "unsupported scheduled-work option: " .. tostring(key) } end
+		end
 		local max_retries = if schedule_options.max_retries == nil then 0 else schedule_options.max_retries
 		local retry_delay_ms = if schedule_options.retry_delay_ms == nil then 100 else schedule_options.retry_delay_ms
+		local retry_jitter_percent = if schedule_options.retry_jitter_percent == nil
+			then runtime_governor.policy.retry_jitter_percent else schedule_options.retry_jitter_percent
 		if not finite(max_retries) or math.floor(max_retries) ~= max_retries or max_retries < 0 or max_retries > 8 then
 			return { code = "invalid", message = "max_retries must be an integer in 0..8" }
 		end
 		if not finite(retry_delay_ms) or math.floor(retry_delay_ms) ~= retry_delay_ms or retry_delay_ms < 10 or retry_delay_ms > 60000 then
 			return { code = "invalid", message = "retry_delay_ms must be an integer in 10..60000" }
 		end
+		if not finite(retry_jitter_percent) or retry_jitter_percent < 0 or retry_jitter_percent > 50 then
+			return { code = "invalid", message = "retry_jitter_percent must be finite and in 0..50" }
+		end
 		if on_complete ~= nil and type(on_complete) ~= "function" then
 			return { code = "invalid", message = "on_complete must be a function" }
 		end
+		if schedule_options.on_complete ~= nil and type(schedule_options.on_complete) ~= "function" then
+			return { code = "invalid", message = "schedule_options.on_complete must be a function" }
+		end
+		local completion = on_complete or schedule_options.on_complete
 		local owner_material, owner_error = request_material(owner)
 		if owner_material == nil then return { code = "invalid", message = owner_error or "owner identity is invalid" } end
-
 		local owner_id = digest(owner_material)
-		local due_now = if finite(due_at_ms) then due_at_ms else current_schedule_time_ms()
-		local delay_ms = math.max(0, due_now - current_schedule_time_ms())
+		local now = current_schedule_time_ms()
+		local due_now = if finite(due_at_ms) then due_at_ms
+			elseif finite(schedule_options.due_at_ms) then schedule_options.due_at_ms
+			elseif finite(schedule_options.available_at_ms) then schedule_options.available_at_ms
+			else now
+		local batch_window_ms = 0
+		if reason == "outbox_dispatch" then
+			batch_window_ms = if finite(schedule_options.batch_window_ms)
+				then math.clamp(schedule_options.batch_window_ms, 0, runtime_governor.policy.batch_window_ms)
+				else runtime_governor.policy.batch_window_ms
+			local observed = runtime_governor.latency_ewma.outbox_dispatch or 0
+			if observed >= runtime_governor.policy.batch_latency_ceiling_ms then batch_window_ms = 0
+			elseif observed >= runtime_governor.policy.batch_latency_ceiling_ms * 0.75 then batch_window_ms = math.floor(batch_window_ms / 2) end
+			if #runtime_governor.queue >= runtime_governor.policy.max_batch then batch_window_ms = 0 end
+		end
+		due_now = math.max(due_now, now + batch_window_ms)
+		if finite(schedule_options.deadline_ms) and due_now > schedule_options.deadline_ms then due_now = now end
+		if finite(schedule_options.expires_at_ms) and due_now >= schedule_options.expires_at_ms then
+			due_now = schedule_options.expires_at_ms
+		end
+		local delay_ms = math.max(0, due_now - now)
 		if delay_ms > 0 and not has_delay_scheduler() then
 			return { code = "unsupported", message = "task.delay is required for future-due scheduled work" }
 		end
-
 		dispatch_sequence += 1
 		local job_id = "rv2job:" .. tostring(dispatch_sequence)
-		local accepted = runtime_governor:Enqueue({
-			id = job_id,
-			owner_id = owner_id,
-			lane = lane or "normal",
-			due_at_ms = due_now,
-			wake_reason = reason,
-		})
+		local work_class = schedule_options.work_class or schedule_options.operation_class
+			or (if reason == "outbox_dispatch" then "outbox_dispatch" else "maintenance")
+		local item = {
+			id = job_id, owner_id = owner_id, lane = lane or "normal", due_at_ms = due_now,
+			deadline_ms = schedule_options.deadline_ms, expires_at_ms = schedule_options.expires_at_ms,
+			service_class = schedule_options.service_class, work_class = work_class,
+			operation_class = schedule_options.operation_class or work_class,
+			dependencies = schedule_options.dependencies,
+			read_units = schedule_options.read_units, write_units = schedule_options.write_units,
+			estimated_bytes = schedule_options.estimated_bytes, handler_slots = schedule_options.handler_slots,
+			cost = schedule_options.cost, wake_reason = reason,
+		}
+		local accepted = runtime_governor:Enqueue(item)
 		if type(accepted) ~= "table" or accepted.code ~= "accepted" then
 			dispatch_metrics.rejected += 1
 			return {
@@ -3906,48 +4086,37 @@ function V2.new(record_store, mailbox_module, options)
 				message = if type(accepted) == "table" then accepted.message else "scheduler rejected work",
 			}
 		end
-
 		dispatch_callbacks[job_id] = {
-			callback = callback,
-			owner_id = owner_id,
-			lane = lane or "normal",
-			reason = reason,
-			retry_attempt = 0,
-			max_retries = max_retries,
-			retry_delay_ms = retry_delay_ms,
-			on_complete = on_complete,
+			job_id = job_id, callback = callback, owner_id = owner_id, lane = lane or "normal",
+			reason = reason, work_class = work_class, retry_attempt = 0, max_retries = max_retries,
+			retry_delay_ms = retry_delay_ms, retry_jitter_percent = retry_jitter_percent,
+			on_complete = completion,
 		}
 		dispatch_metrics.accepted += 1
 		kick_dispatcher()
-		if delay_ms > 0 then wake_dispatcher_after(delay_ms) end
+		if delay_ms > 0 then schedule_wake_at(due_now) end
 		return { code = "accepted", job_id = job_id }
 	end
-	-- Outbox dispatch is a durable side-effect runner. The selector is advisory
-	-- and server-local; source outbox rows remain the authority and must be
-	-- polled again after overload, restart, or a rejected wake-up.
+
+	-- Outbox dispatch keeps each event's durable identity and uses the configured
+	-- batch window only to let persisted events accumulate before a bounded batch.
 	api.ScheduleOutboxDispatch = function(owner, record, dispatcher, batch_size, max_batches, on_complete, schedule_options)
 		schedule_options = schedule_options or {}
-		if type(schedule_options) ~= "table" then
-			return { code = "invalid", message = "schedule_options must be a table" }
-		end
+		if type(schedule_options) ~= "table" then return { code = "invalid", message = "schedule_options must be a table" } end
 		if type(record) ~= "table" or (type(record.DispatchOutboxBatchAsync) ~= "function"
 			and type(record.DispatchOutboxAsync) ~= "function")
-		then
-			return { code = "invalid", message = "a Record with outbox dispatch APIs is required" }
-		end
+		then return { code = "invalid", message = "a Record with outbox dispatch APIs is required" } end
 		if type(dispatcher) ~= "function" then return { code = "invalid", message = "outbox dispatcher is required" } end
 		if on_complete ~= nil and type(on_complete) ~= "function" then return { code = "invalid", message = "on_complete must be a function" } end
 		return enqueue_scheduled_callback(owner, schedule_options.lane or "background", "outbox_dispatch", function()
 			return api.Outbox.DispatchBatches(record, dispatcher, batch_size, max_batches)
 		end, schedule_options.due_at_ms, schedule_options, on_complete)
 	end
-	-- Maintenance uses this same work selector but stays bounded and resumable:
-	-- callback code must process one bounded chunk and persist its own cursor.
+
+	-- Maintenance is one bounded chunk; a caller persists and resumes its cursor.
 	api.ScheduleMaintenance = function(owner, maintenance_id, callback, schedule_options)
 		schedule_options = schedule_options or {}
-		if type(schedule_options) ~= "table" then
-			return { code = "invalid", message = "schedule_options must be a table" }
-		end
+		if type(schedule_options) ~= "table" then return { code = "invalid", message = "schedule_options must be a table" } end
 		if not valid_text(maintenance_id, 96) then return { code = "invalid", message = "maintenance_id must be 1..96 bytes" } end
 		if type(callback) ~= "function" then return { code = "invalid", message = "maintenance callback is required" } end
 		local lane = schedule_options.lane or "background"
