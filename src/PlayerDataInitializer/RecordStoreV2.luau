@@ -2667,7 +2667,7 @@ local function new_projections(store, options)
 					if observed.last_attempt_id == attempt_id and observed.last_event_id == event.event_id
 						and observed.last_event_revision == event.source_revision
 					then
-						return { code = if ambiguous then "committed" else "committed", row = observed, reconciled = ambiguous or nil, consistency = "eventual" }
+						return { code = "committed", row = observed, reconciled = ambiguous or nil, consistency = "eventual" }
 					end
 					return { code = "duplicate", row = observed, consistency = "eventual" }
 				end
