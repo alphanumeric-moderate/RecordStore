@@ -208,6 +208,13 @@ The v2 feature layer is opt-in and lives at
 `RecordStore` and `RecordStoreMailboxV2`. Runtime policy must be configured before creating the
 first Record; adaptive mode remains disabled unless explicitly enabled.
 
+This integration example assumes a deployment bootstrap has already moved
+`player-records-v2` to the durable `active` rollout phase using real verifier callbacks. The
+runtime guard below checks that durable state; it does not create attestations or prove that old
+writers have stopped. Configure the rollout separately, and keep V2 disabled until the
+compatibility, writer-drain, activation-freeze, rollback-rehearsal, and profile-key-fencing
+verifiers return durable evidence.
+
 ```lua
 local DataStoreService = game:GetService("DataStoreService")
 local MemoryStoreService = game:GetService("MemoryStoreService")
@@ -244,8 +251,22 @@ local record = RecordStore.new(owner.store_name, owner.scope, owner.profile_key,
 local open_code, open_error = record:Open({ coins = 0 })
 assert(open_code == "created" or open_code == "loaded", open_error)
 
+-- The deployment bootstrap must prepare, attest and activate this rollout ID
+-- using real compatibility, old-writer-drain, freeze, rollback and fencing evidence.
+-- Do not replace this durable guard with a constant "true" callback.
+local rollout_store = DataStoreAdapter.new(RecordStore, "RecordStoreV2Rollout", "global")
+local rollout = RecordStoreV2.Rollout.new(rollout_store)
+local rollout_id = "player-records-v2"
+local function activation_guard(operation)
+    return rollout:ActivationGuard(rollout_id, operation)
+end
+
+local V2 = RecordStoreV2.new(RecordStore, MailboxV2, {
+    acceleration_module = Acceleration,
+    activation_guard = activation_guard,
+})
 local store = DataStoreAdapter.new(RecordStore, "RecordStoreMailboxV2", "global")
-local mailbox = MailboxV2.new(store, owner, {
+local mailbox = V2.Mailbox.new(store, owner, {
     active_record = record,
     encode = function(value)
         return HttpService:JSONEncode(value)
@@ -255,9 +276,6 @@ local mailbox = MailboxV2.new(store, owner, {
 local bind_code, bind_error = record:BindMailboxV2Async(mailbox)
 assert(bind_code == "success", bind_error)
 
-local V2 = RecordStoreV2.new(RecordStore, MailboxV2, {
-    acceleration_module = Acceleration,
-})
 local wakeups = Acceleration.new({
     request_runner = RecordStore,
     operation_deadline_seconds = 5,
@@ -272,7 +290,7 @@ local function handle_message(payload, message)
     end
     local command = {
         message_id = message.Id,
-        message_type = message Type field,
+        message_type = message.Type,
         payload = payload,
     }
     local material = V2.Canonicalize(command)
