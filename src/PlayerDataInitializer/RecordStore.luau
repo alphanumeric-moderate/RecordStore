@@ -38,6 +38,8 @@ export type ResultCode =
 | "deleted"
 | "enqueued"
 | "processed"
+| "duplicate"
+| "capacity"
 | "empty"
 | "locked"
 | "already_open"
@@ -97,6 +99,76 @@ export type ChangeObserver = (event: ChangeEvent) -> ()
 
 export type ChangeSubscription = {
 	Disconnect: (self: ChangeSubscription) -> (),
+}
+
+export type DurabilityRiskEvent = {
+	Transition: "entered" | "changed" | "recovered" | "resolved",
+	Reason: "dirty_age_exceeded" | "write_outcome_uncertain" | "recovered" | "record_deleted",
+	State: SessionState,
+	Dirty: boolean,
+	DirtyGeneration: number,
+	DurableGeneration: number,
+	KnownRevision: number,
+	LastConfirmedDurableRevision: number,
+	DirtyAgeSeconds: number?,
+	MaxDirtyAgeSeconds: number,
+	LastConfirmedSaveUnix: number,
+	WriteOutcomeUncertain: boolean,
+	ObservedAtUnix: number,
+}
+
+export type DurabilityRiskObserver = (event: DurabilityRiskEvent) -> ()
+
+export type DurabilityStatus = {
+	state: SessionState,
+	dirty: boolean,
+	dirty_generation: number,
+	durable_generation: number,
+	known_revision: number,
+	last_confirmed_durable_revision: number,
+	dirty_age_seconds: number?,
+	dirty_age_available: boolean,
+	dirty_age_exceeded: boolean?,
+	age_basis: "clean" | "tracked_dirty_generation" | "unavailable",
+	max_dirty_age_seconds: number,
+	last_confirmed_save_unix: number,
+	write_outcome_uncertain: boolean,
+	retry_category: string?,
+	in_flight_operations: number,
+	durability_risk_active: boolean,
+	durability_risk_reason: string?,
+	observed_at_unix: number,
+}
+
+export type SessionWaitOutcome =
+	"no_known_competing_session"
+	| "competing_session_observed"
+	| "wait_retry_scheduled"
+	| "cancellation_requested"
+	| "ownership_acquired"
+	| "ownership_fenced_or_lost"
+	| "session_status_unavailable"
+
+export type SessionWaitResult = {
+	Outcome: SessionWaitOutcome,
+	Attempt: number,
+	ObservedAtUnix: number,
+	SessionJobId: string?,
+	LeaseUntilUnix: number?,
+	RetryAfterSeconds: number?,
+	RetryScheduled: boolean,
+	ReadResult: ResultCode?,
+	Message: string?,
+}
+
+export type SessionWaitOptions = {
+	max_wait_seconds: number?,
+	max_attempts: number?,
+	retry_interval_seconds: number?,
+	max_retry_interval_seconds: number?,
+	recreate: boolean?,
+	cancelled: (() -> boolean)?,
+	on_status: ((SessionWaitResult) -> ())?,
 }
 
 export type HandoffStatus =
@@ -184,6 +256,22 @@ export type Snapshot = {
 	BackendUpdatedAt: number?,
 }
 
+type ReadFlightWaiter = {
+	event: any,
+	active: boolean,
+	timed_out: boolean,
+}
+type ReadFlight = {
+	waiters: { ReadFlightWaiter },
+	done: boolean,
+	snapshot: Snapshot?,
+	code: ResultCode,
+	message: string?,
+}
+local in_flight_reads: { [string]: ReadFlight } = {}
+local MAX_IN_FLIGHT_READ_KEYS = 256
+local MAX_IN_FLIGHT_READ_WAITERS = 64
+
 export type HistoryEntry = {
 	Version: string,
 	CreatedTime: number,
@@ -263,6 +351,57 @@ export type Options = {
 }
 
 
+export type RuntimeGovernorHooks = {
+	admit: (work_class: string, request_kind: string, mutating: boolean) -> { [string]: unknown },
+	release: (ticket: unknown) -> (),
+	observe: (request_kind: string, success: boolean, duration_ms: number, error_message: string?) -> (),
+}
+
+export type RuntimeOptions = {
+	revision: number?,
+	runtime_profile: string?,
+	max_dirty_age_seconds: number?,
+	server_role: string?,
+	degraded_mode: string?,
+	circuit_threshold: number?,
+	circuit_cooldown_seconds: number?,
+	adaptive_runtime_enabled: boolean?,
+	adaptive_sample_interval: number?,
+	adaptive_min_queue_poll_interval: number?,
+	adaptive_max_queue_poll_interval: number?,
+	adaptive_min_concurrent_requests: number?,
+	adaptive_max_concurrent_requests: number?,
+	adaptive_read_budget_floor: number?,
+	adaptive_write_budget_floor: number?,
+	adaptive_queue_budget_share: number?,
+	adaptive_hysteresis_seconds: number?,
+	runtime_policy_refresh_interval: number?,
+	critical_request_reserve: number?,
+	runtime_policy_provider: (() -> { [string]: unknown })?,
+}
+
+type RuntimePolicy = {
+	revision: number,
+	runtime_profile: string,
+	max_dirty_age_seconds: number,
+	server_role: string,
+	degraded_mode: string,
+	circuit_threshold: number,
+	circuit_cooldown_seconds: number,
+	adaptive_runtime_enabled: boolean,
+	adaptive_sample_interval: number,
+	adaptive_min_queue_poll_interval: number,
+	adaptive_max_queue_poll_interval: number,
+	adaptive_min_concurrent_requests: number,
+	adaptive_max_concurrent_requests: number,
+	adaptive_read_budget_floor: number,
+	adaptive_write_budget_floor: number,
+	adaptive_queue_budget_share: number,
+	adaptive_hysteresis_seconds: number,
+	runtime_policy_refresh_interval: number,
+	critical_request_reserve: number,
+}
+
 type Tombstone = {
 	deleted_at: number,
 	generation: number,
@@ -277,6 +416,50 @@ type SessionEnvelope = {
 	lease_until: number,
 }
 
+export type TransactionTransform = (value: JsonValue?) -> JsonValue
+export type OutboxEventInput = {
+	EventId: string,
+	DestinationStoreName: string,
+	DestinationScope: string,
+	DestinationProfileKey: string,
+	MessageType: string,
+	Data: JsonValue?,
+}
+export type OutboxEvent = OutboxEventInput & {
+	OperationId: string,
+	State: "pending" | "dispatched",
+	CreatedAt: number,
+	DispatchedAt: number?,
+	Attempts: number,
+	LastError: string?,
+	DestinationReceiptId: string?,
+}
+export type OutboxDispatcher = (event: OutboxEvent) -> (boolean, string?)
+
+type InboxReceiptRecord = {
+	operation_id: string,
+	request_fingerprint: string,
+	request_material: string?,
+	write_id: string,
+	revision: number,
+	committed_at: number,
+}
+type OutboxEntryRecord = {
+	event_id: string,
+	operation_id: string,
+	destination_store_name: string,
+	destination_scope: string,
+	destination_profile_key: string,
+	message_type: string,
+	payload: JsonValue?,
+	state: "pending" | "dispatched",
+	created_at: number,
+	dispatched_at: number?,
+	attempts: number,
+	last_error: string?,
+	destination_receipt_id: string?,
+}
+
 type Envelope = {
 	implementation_version: number,
 	schema_version: number,
@@ -288,6 +471,8 @@ type Envelope = {
 	user_ids: { number }?,
 	tombstone: Tombstone?,
 	session: SessionEnvelope?,
+	inbox_receipts: { [string]: InboxReceiptRecord }?,
+	outbox: { [string]: OutboxEntryRecord }?,
 	write_id: string,
 }
 
@@ -386,6 +571,11 @@ type InternalState = {
 	change_dispatch_tail: number,
 	change_dispatch_running: boolean,
 	change_events_dropped: number,
+	durability_risk_observers: { [number]: DurabilityRiskObserver },
+	durability_risk_observer_next_id: number,
+	durability_risk_observer_errors: number,
+	durability_risk_active: boolean,
+	durability_risk_reason: string?,
 	takeover_seen: { [string]: HandoffStatus },
 	takeover_seen_order: { string },
 	takeover_request_id: string?,
@@ -429,11 +619,13 @@ type InternalState = {
 	next_queue_poll: number,
 	busy: boolean,
 	queue_busy: boolean,
+	mailbox_v2_binding: boolean,
 	save_requested: boolean,
 	shutdown: boolean,
 	retired: boolean,
 	takeover_requested: boolean,
 	queue_hint: boolean,
+	record_impl: any?,
 	message_topic: string,
 	message_subscription: RBXScriptConnection?,
 	last_error: string?,
@@ -444,7 +636,25 @@ type InternalState = {
 	last_saved: DurableSnapshot?,
 	change_sequence: number,
 	saved_change_sequence: number,
+	dirty_since_unix: number,
 	durable_lease_until: number,
+}
+
+export type RecordIdentity = {
+	store_name: string,
+	scope: string,
+	profile_key: string,
+	user_ids: { number },
+}
+
+export type EraseOptions = {
+	store_name: string,
+	scope: string,
+	profile_key: string,
+	expected_generation: number,
+	expected_revision: number?,
+	user_id: number,
+	erasure_id: string,
 }
 
 export type Record = {
@@ -460,6 +670,7 @@ export type Record = {
 	Open: (self: Record, default_data: JsonValue?, recreate: boolean?) -> (ResultCode, string?),
 	Get: (self: Record) -> JsonValue?,
 	GetKey: (self: Record) -> string,
+	GetIdentity: (self: Record) -> RecordIdentity,
 	GetState: (self: Record) -> SessionState,
 	GetRevision: (self: Record) -> number,
 	GetGeneration: (self: Record) -> number,
@@ -470,6 +681,9 @@ export type Record = {
 	GetLastError: (self: Record) -> RecordError?,
 	GetHandoff: (self: Record) -> HandoffResult?,
 	SubscribeChanges: (self: Record, observer: ChangeObserver) -> (ChangeSubscription?, ResultCode, string?),
+	GetDurabilityStatus: (self: Record) -> (DurabilityStatus?, ResultCode, string?),
+	SubscribeDurabilityRisk: (self: Record, observer: DurabilityRiskObserver) -> (ChangeSubscription?, ResultCode, string?),
+	WaitForSessionAsync: (self: Record, default_data: JsonValue?, wait_options: SessionWaitOptions?) -> (SessionWaitResult, ResultCode, string?),
 	GetUserIds: (self: Record) -> { number },
 	SetUserIds: (self: Record, user_ids: { number }) -> (ResultCode, string?),
 	AddUserId: (self: Record, user_id: number) -> (ResultCode, string?),
@@ -481,8 +695,19 @@ export type Record = {
 	Update: (self: Record, callback: (JsonValue?) -> JsonValue?) -> (ResultCode, string?),
 	Reconcile: (self: Record, template: JsonValue) -> (ResultCode, string?),
 	Save: (self: Record, reason: string?) -> (ResultCode, string?),
+	TransactAsync: (self: Record, operation_id: string, request_fingerprint: string, transform: TransactionTransform, request_material: string?) -> (ResultCode, string?),
+	ApplyInboxAsync: (self: Record, operation_id: string, request_fingerprint: string, transform: TransactionTransform, request_material: string?) -> (ResultCode, string?),
+	CommitWithOutboxAsync: (self: Record, operation_id: string, request_fingerprint: string, transform: TransactionTransform, events: { OutboxEventInput }, request_material: string?) -> (ResultCode, string?),
+	GetOutboxAsync: (self: Record, max_items: number?) -> ({ OutboxEvent }, ResultCode, string?),
+	DispatchOutboxAsync: (self: Record, dispatcher: OutboxDispatcher, max_items: number?) -> (number, ResultCode, string?),
+	DispatchOutboxBatchAsync: (self: Record, dispatcher: OutboxDispatcher, max_items: number?) -> (number, ResultCode, string?),
+	PruneTransactionReceiptsAsync: (self: Record, committed_before_ms: number, max_items: number?) -> (number, ResultCode, string?),
+	PruneOutboxAsync: (self: Record, dispatched_before_ms: number, max_items: number?) -> (number, ResultCode, string?),
+	GetInboxStatsAsync: (self: Record) -> ({ [string]: unknown }, ResultCode, string?),
+	GetOutboxStatsAsync: (self: Record) -> ({ [string]: unknown }, ResultCode, string?),
 	MessageAsync: (self: Record, message_type: string, data: JsonValue?) -> (ResultCode, string?),
-	EnqueueAsync: (self: Record, message_type: string, data: JsonValue?) -> (ResultCode, string?),
+	BindMailboxV2Async: (self: Record, mailbox: unknown) -> (ResultCode, string?),
+	EnqueueAsync: (self: Record, message_type: string, data: JsonValue?, enqueue_options: { [string]: unknown }?) -> (ResultCode, string?),
 	ProcessQueueAsync: (self: Record, max_messages: number?) -> (ResultCode, string?),
 	GetQueueAsync: (self: Record) -> ({ QueueMessage }, ResultCode, string?),
 	GetDeadLettersAsync: (self: Record) -> ({ DeadLetterMessage }, ResultCode, string?),
@@ -491,6 +716,7 @@ export type Record = {
 	DiscardDeadLetterAsync: (self: Record, message_id: string, lock_token: string) -> (ResultCode, string?),
 	Close: (self: Record) -> (ResultCode, string?),
 	Delete: (self: Record) -> (ResultCode, string?),
+	EraseAsync: (self: Record, options: EraseOptions) -> (ResultCode, string?),
 	Stats: (self: Record) -> { [string]: number | string? },
 }
 
@@ -501,6 +727,10 @@ local DEFAULT_LEASE_DURATION = 180
 local DEFAULT_LEASE_RENEWAL = 60
 local DEFAULT_RETRY_ATTEMPTS = 5
 local MAX_RETRY_ATTEMPTS = 12
+local MAX_INBOX_RECEIPTS = 128
+local MAX_REQUEST_MATERIAL_BYTES = 16_384
+local MAX_OUTBOX_EVENTS = 32
+local MAX_OUTBOX_EVENTS_PER_COMMIT = 8
 local DEFAULT_OPERATION_DEADLINE = 20
 local DEFAULT_SHUTDOWN_DEADLINE = 25
 local DEFAULT_SHUTDOWN_ATTEMPTS = 2
@@ -522,6 +752,8 @@ local MAX_QUEUE_ERROR_LENGTH = 256
 local MAX_MESSAGE_BYTES = 900
 local CHANGE_OBSERVER_CAPACITY = 1024
 local CHANGE_DISPATCH_QUEUE_CAPACITY = 4096
+local DURABILITY_RISK_OBSERVER_CAPACITY = 32
+local DEFAULT_MAX_DIRTY_AGE_SECONDS = 300
 local TAKEOVER_SEEN_CAPACITY = 64
 local HANDOFF_PUBLISH_COOLDOWN = 0.5
 local INTERNAL_METADATA_WRITE_ID = "__rs:w"
@@ -557,6 +789,65 @@ local mock_update_replay_advance_seconds = 0
 local mock_update_failure_count = 0
 local mock_update_failure_code: ResultCode = "budget"
 local mock_update_failure_message: string? = nil
+local mock_update_response_lost_count = 0
+local mock_update_response_lost_message: string? = nil
+
+local runtime_options: RuntimePolicy = {
+	revision = 1,
+	runtime_profile = "balanced",
+	max_dirty_age_seconds = DEFAULT_MAX_DIRTY_AGE_SECONDS,
+	server_role = "standard",
+	degraded_mode = "normal",
+	circuit_threshold = 5,
+	circuit_cooldown_seconds = 15,
+	adaptive_runtime_enabled = false,
+	adaptive_sample_interval = 5,
+	adaptive_min_queue_poll_interval = 3,
+	adaptive_max_queue_poll_interval = 30,
+	adaptive_min_concurrent_requests = 1,
+	adaptive_max_concurrent_requests = DEFAULT_MAX_CONCURRENT_REQUESTS,
+	adaptive_read_budget_floor = 1,
+	adaptive_write_budget_floor = 1,
+	adaptive_queue_budget_share = 0.2,
+	adaptive_hysteresis_seconds = 15,
+	runtime_policy_refresh_interval = 30,
+	critical_request_reserve = 1,
+}
+local runtime_policy_provider: (() -> { [string]: unknown })? = nil
+local runtime_effective_concurrent_requests = DEFAULT_MAX_CONCURRENT_REQUESTS
+local runtime_next_policy_refresh = 0
+local runtime_next_budget_sample = 0
+local runtime_refresh_in_flight = false
+local runtime_budget_read: number? = nil
+local runtime_budget_write: number? = nil
+local runtime_next_growth_at = 0
+local runtime_queue_tokens = DEFAULT_MAX_CONCURRENT_REQUESTS * 0.2
+local runtime_queue_tokens_updated = 0
+local runtime_external_in_flight: { [string]: number } = {
+	interactive = 0, messaging = 0, migration = 0, maintenance = 0, tracing = 0,
+}
+local runtime_external_governor_hooks: RuntimeGovernorHooks? = nil
+local runtime_breakers: { [string]: { failures: number, open_until: number, probe_in_flight: boolean } } = {
+	read = { failures = 0, open_until = 0, probe_in_flight = false },
+	write = { failures = 0, open_until = 0, probe_in_flight = false },
+	service = { failures = 0, open_until = 0, probe_in_flight = false },
+}
+local runtime_metrics = {
+	reads = 0,
+	writes = 0,
+	service_calls = 0,
+	failures = 0,
+	throttles = 0,
+	budget_rejections = 0,
+	queue_admitted = 0,
+	queue_rejected = 0,
+	no_op_saves = 0,
+	read_latency_ewma_ms = 0,
+	write_latency_ewma_ms = 0,
+	service_latency_ewma_ms = 0,
+	last_error = "",
+	last_policy_error = "",
+}
 
 local close_internal: (state: InternalState, shutdown: boolean) -> (ResultCode, string?)
 local complete_deferred_takeover: (state: InternalState) -> ()
@@ -586,6 +877,332 @@ end
 local function now_local(): number
 	return os.clock()
 end
+
+
+local function mark_dirty(state: InternalState)
+	if state.change_sequence == state.saved_change_sequence then
+		state.dirty_since_unix = session_now_unix(state.backend.mock)
+	end
+	state.change_sequence += 1
+end
+
+local function mark_saved(state: InternalState, sequence: number)
+	state.saved_change_sequence = sequence
+	if state.change_sequence == sequence then
+		state.dirty_since_unix = 0
+	end
+end
+
+local function valid_runtime_policy(candidate: RuntimePolicy): (boolean, string?)
+	if candidate.runtime_profile ~= "balanced" and candidate.runtime_profile ~= "latency"
+		and candidate.runtime_profile ~= "throughput" and candidate.runtime_profile ~= "conservative"
+	then
+		return false, "runtime_profile must be balanced, latency, throughput or conservative"
+	end
+	if type(candidate.server_role) ~= "string" or candidate.server_role == "" or #candidate.server_role > 64 then
+		return false, "server_role must be 1 to 64 characters"
+	end
+	if type(candidate.adaptive_runtime_enabled) ~= "boolean" then return false, "adaptive_runtime_enabled must be boolean" end
+	if candidate.degraded_mode ~= "normal" and candidate.degraded_mode ~= "reject_noncritical" and candidate.degraded_mode ~= "read_only" then
+		return false, "degraded_mode must be normal, reject_noncritical or read_only"
+	end
+	if type(candidate.circuit_threshold) ~= "number" or not math.isfinite(candidate.circuit_threshold)
+		or candidate.circuit_threshold < 1 or candidate.circuit_threshold > 100
+		or math.floor(candidate.circuit_threshold) ~= candidate.circuit_threshold
+	then return false, "circuit_threshold must be an integer from 1 to 100" end
+	if type(candidate.circuit_cooldown_seconds) ~= "number" or not math.isfinite(candidate.circuit_cooldown_seconds)
+		or candidate.circuit_cooldown_seconds < 1 or candidate.circuit_cooldown_seconds > 300
+	then return false, "circuit_cooldown_seconds must be between 1 and 300" end
+	local numeric_values = {
+		candidate.revision, candidate.max_dirty_age_seconds, candidate.adaptive_sample_interval,
+		candidate.adaptive_min_queue_poll_interval, candidate.adaptive_max_queue_poll_interval,
+		candidate.adaptive_min_concurrent_requests, candidate.adaptive_max_concurrent_requests,
+		candidate.adaptive_read_budget_floor, candidate.adaptive_write_budget_floor,
+		candidate.adaptive_queue_budget_share, candidate.adaptive_hysteresis_seconds,
+		candidate.runtime_policy_refresh_interval, candidate.critical_request_reserve,
+	}
+	for _, value in ipairs(numeric_values) do
+		if type(value) ~= "number" or not math.isfinite(value) then return false, "runtime numeric fields must be finite" end
+	end
+	if candidate.revision < 1 or math.floor(candidate.revision) ~= candidate.revision then return false, "revision must be a positive integer" end
+	if candidate.max_dirty_age_seconds < 1 or candidate.max_dirty_age_seconds > 86400 then
+		return false, "max_dirty_age_seconds must be between 1 and 86400 seconds"
+	end
+	if candidate.adaptive_sample_interval < 1 or candidate.adaptive_sample_interval > 60 then return false, "adaptive_sample_interval must be 1 to 60 seconds" end
+	if candidate.adaptive_min_queue_poll_interval < 0.25 or candidate.adaptive_max_queue_poll_interval > 300
+		or candidate.adaptive_min_queue_poll_interval > candidate.adaptive_max_queue_poll_interval
+	then
+		return false, "queue poll interval bounds must be ordered and between 0.25 and 300 seconds"
+	end
+	if candidate.adaptive_min_concurrent_requests < 1 or candidate.adaptive_max_concurrent_requests > 64
+		or math.floor(candidate.adaptive_min_concurrent_requests) ~= candidate.adaptive_min_concurrent_requests
+		or math.floor(candidate.adaptive_max_concurrent_requests) ~= candidate.adaptive_max_concurrent_requests
+		or candidate.adaptive_min_concurrent_requests > candidate.adaptive_max_concurrent_requests
+	then
+		return false, "concurrency limits must be ordered integers between 1 and 64"
+	end
+	if candidate.critical_request_reserve < 0 or math.floor(candidate.critical_request_reserve) ~= candidate.critical_request_reserve
+		or candidate.adaptive_min_concurrent_requests + candidate.critical_request_reserve > candidate.adaptive_max_concurrent_requests
+	then
+		return false, "critical_request_reserve must be a non-negative integer that fits below maximum concurrency"
+	end
+	if candidate.adaptive_read_budget_floor < 0 or candidate.adaptive_write_budget_floor < 0
+		or math.floor(candidate.adaptive_read_budget_floor) ~= candidate.adaptive_read_budget_floor
+		or math.floor(candidate.adaptive_write_budget_floor) ~= candidate.adaptive_write_budget_floor
+	then
+		return false, "read/write budget floors must be non-negative integers"
+	end
+	if candidate.adaptive_queue_budget_share < 0 or candidate.adaptive_queue_budget_share > 1 then return false, "adaptive_queue_budget_share must be between 0 and 1" end
+	if candidate.adaptive_hysteresis_seconds < 1 or candidate.adaptive_hysteresis_seconds > 300 then return false, "adaptive_hysteresis_seconds must be 1 to 300 seconds" end
+	if candidate.runtime_policy_refresh_interval < 5 or candidate.runtime_policy_refresh_interval > 3600 then return false, "runtime_policy_refresh_interval must be 5 to 3600 seconds" end
+	return true, nil
+end
+
+local RUNTIME_POLICY_FIELDS: { [string]: boolean } = {
+	revision = true, runtime_profile = true, max_dirty_age_seconds = true, server_role = true, degraded_mode = true,
+	circuit_threshold = true, circuit_cooldown_seconds = true, adaptive_runtime_enabled = true,
+	adaptive_sample_interval = true, adaptive_min_queue_poll_interval = true,
+	adaptive_max_queue_poll_interval = true, adaptive_min_concurrent_requests = true,
+	adaptive_max_concurrent_requests = true, adaptive_read_budget_floor = true,
+	adaptive_write_budget_floor = true, adaptive_queue_budget_share = true,
+	adaptive_hysteresis_seconds = true, runtime_policy_refresh_interval = true,
+	critical_request_reserve = true,
+}
+
+local RUNTIME_PROFILE_DEFAULTS: { [string]: { [string]: unknown } } = {
+	balanced = {
+		adaptive_sample_interval = 5, adaptive_min_queue_poll_interval = 3,
+		adaptive_max_queue_poll_interval = 30, adaptive_min_concurrent_requests = 1,
+		adaptive_max_concurrent_requests = DEFAULT_MAX_CONCURRENT_REQUESTS,
+		adaptive_read_budget_floor = 1, adaptive_write_budget_floor = 1,
+		adaptive_queue_budget_share = 0.2, adaptive_hysteresis_seconds = 15,
+		critical_request_reserve = 1,
+	},
+	latency = {
+		adaptive_sample_interval = 2, adaptive_min_queue_poll_interval = 0.5,
+		adaptive_max_queue_poll_interval = 15, adaptive_min_concurrent_requests = 2,
+		adaptive_max_concurrent_requests = 12, adaptive_read_budget_floor = 1,
+		adaptive_write_budget_floor = 1, adaptive_queue_budget_share = 0.3,
+		adaptive_hysteresis_seconds = 5, critical_request_reserve = 2,
+	},
+	throughput = {
+		adaptive_sample_interval = 10, adaptive_min_queue_poll_interval = 5,
+		adaptive_max_queue_poll_interval = 45, adaptive_min_concurrent_requests = 4,
+		adaptive_max_concurrent_requests = 48, adaptive_read_budget_floor = 2,
+		adaptive_write_budget_floor = 2, adaptive_queue_budget_share = 0.25,
+		adaptive_hysteresis_seconds = 30, critical_request_reserve = 2,
+	},
+	conservative = {
+		adaptive_sample_interval = 5, adaptive_min_queue_poll_interval = 5,
+		adaptive_max_queue_poll_interval = 60, adaptive_min_concurrent_requests = 1,
+		adaptive_max_concurrent_requests = 16, adaptive_read_budget_floor = 3,
+		adaptive_write_budget_floor = 3, adaptive_queue_budget_share = 0.1,
+		adaptive_hysteresis_seconds = 30, critical_request_reserve = 2,
+	},
+}
+
+local function merge_runtime_policy(patch: { [string]: unknown }, base: RuntimePolicy, from_provider: boolean): (RuntimePolicy?, string?)
+	local candidate = table.clone(base)
+	for key, value in pairs(patch) do
+		if key == "runtime_policy_provider" then
+			if from_provider then return nil, "runtime provider may not replace itself" end
+			continue
+		end
+		if not RUNTIME_POLICY_FIELDS[key] then return nil, "unsupported runtime policy field: " .. tostring(key) end
+		if key == "revision" then
+			if type(value) ~= "number" then return nil, "revision must be numeric" end
+			candidate.revision = value
+		elseif key == "runtime_profile" then
+			if type(value) ~= "string" then return nil, "runtime_profile must be a string" end
+			candidate.runtime_profile = value
+		elseif key == "max_dirty_age_seconds" then
+			if type(value) ~= "number" then return nil, key .. " must be numeric" end
+			candidate.max_dirty_age_seconds = value
+		elseif key == "server_role" then
+			if type(value) ~= "string" then return nil, "server_role must be a string" end
+			candidate.server_role = value
+		elseif key == "degraded_mode" then
+			if type(value) ~= "string" then return nil, "degraded_mode must be a string" end
+			candidate.degraded_mode = value
+		elseif key == "circuit_threshold" then
+			if type(value) ~= "number" then return nil, "circuit_threshold must be numeric" end
+			candidate.circuit_threshold = value
+		elseif key == "circuit_cooldown_seconds" then
+			if type(value) ~= "number" then return nil, "circuit_cooldown_seconds must be numeric" end
+			candidate.circuit_cooldown_seconds = value
+		elseif key == "adaptive_runtime_enabled" then
+			if type(value) ~= "boolean" then return nil, "adaptive_runtime_enabled must be boolean" end
+			candidate.adaptive_runtime_enabled = value
+		elseif key == "adaptive_sample_interval" then
+			if type(value) ~= "number" then return nil, key .. " must be numeric" end
+			candidate.adaptive_sample_interval = value
+		elseif key == "adaptive_min_queue_poll_interval" then
+			if type(value) ~= "number" then return nil, key .. " must be numeric" end
+			candidate.adaptive_min_queue_poll_interval = value
+		elseif key == "adaptive_max_queue_poll_interval" then
+			if type(value) ~= "number" then return nil, key .. " must be numeric" end
+			candidate.adaptive_max_queue_poll_interval = value
+		elseif key == "adaptive_min_concurrent_requests" then
+			if type(value) ~= "number" then return nil, key .. " must be numeric" end
+			candidate.adaptive_min_concurrent_requests = value
+		elseif key == "adaptive_max_concurrent_requests" then
+			if type(value) ~= "number" then return nil, key .. " must be numeric" end
+			candidate.adaptive_max_concurrent_requests = value
+		elseif key == "adaptive_read_budget_floor" then
+			if type(value) ~= "number" then return nil, key .. " must be numeric" end
+			candidate.adaptive_read_budget_floor = value
+		elseif key == "adaptive_write_budget_floor" then
+			if type(value) ~= "number" then return nil, key .. " must be numeric" end
+			candidate.adaptive_write_budget_floor = value
+		elseif key == "adaptive_queue_budget_share" then
+			if type(value) ~= "number" then return nil, key .. " must be numeric" end
+			candidate.adaptive_queue_budget_share = value
+		elseif key == "adaptive_hysteresis_seconds" then
+			if type(value) ~= "number" then return nil, key .. " must be numeric" end
+			candidate.adaptive_hysteresis_seconds = value
+		elseif key == "runtime_policy_refresh_interval" then
+			if type(value) ~= "number" then return nil, key .. " must be numeric" end
+			candidate.runtime_policy_refresh_interval = value
+		elseif key == "critical_request_reserve" then
+			if type(value) ~= "number" then return nil, key .. " must be numeric" end
+			candidate.critical_request_reserve = value
+		end
+	end
+	if candidate.runtime_profile ~= base.runtime_profile then
+		local profile_defaults = RUNTIME_PROFILE_DEFAULTS[candidate.runtime_profile]
+		if profile_defaults == nil then return nil, "unsupported runtime_profile" end
+		for field, value in pairs(profile_defaults) do
+			if patch[field] == nil then (candidate :: any)[field] = value end
+		end
+	end
+	if from_provider and candidate.revision <= base.revision then return nil, "runtime policy revision must increase" end
+	local valid, message = valid_runtime_policy(candidate)
+	if not valid then return nil, message end
+	return candidate, nil
+end
+
+local function apply_runtime_policy(patch: { [string]: unknown }, from_provider: boolean): (boolean, string?)
+	local candidate, message = merge_runtime_policy(patch, runtime_options, from_provider)
+	if candidate == nil then
+		runtime_metrics.last_policy_error = tostring(message)
+		return false, message
+	end
+	runtime_options = candidate
+	runtime_effective_concurrent_requests = math.clamp(
+		runtime_effective_concurrent_requests,
+		runtime_options.adaptive_min_concurrent_requests + runtime_options.critical_request_reserve,
+		runtime_options.adaptive_max_concurrent_requests
+	)
+	runtime_queue_tokens = math.max(1, runtime_options.adaptive_max_concurrent_requests * runtime_options.adaptive_queue_budget_share * 16)
+	runtime_metrics.last_policy_error = ""
+	return true, nil
+end
+
+local function request_is_critical(state: InternalState?): boolean
+	return state ~= nil and (state.state == "saving" or state.state == "releasing" or state.shutdown)
+end
+
+local function request_budget(request_type: Enum.DataStoreRequestType): number?
+	local ok, budget = pcall(function()
+		return DataStoreService:GetRequestBudgetForRequestType(request_type)
+	end)
+	if not ok or type(budget) ~= "number" or not math.isfinite(budget) then return nil end
+	if request_type == Enum.DataStoreRequestType.StandardRead then
+		runtime_budget_read = budget
+	elseif request_type == Enum.DataStoreRequestType.StandardWrite then
+		runtime_budget_write = budget
+	end
+	return budget
+end
+
+local function consume_runtime_queue_token(): boolean
+	local now = now_local()
+	local elapsed = math.max(0, now - runtime_queue_tokens_updated)
+	local rate = runtime_options.adaptive_max_concurrent_requests * runtime_options.adaptive_queue_budget_share * 8
+	local capacity = math.max(1, rate * 2)
+	runtime_queue_tokens = math.min(capacity, runtime_queue_tokens + elapsed * rate)
+	runtime_queue_tokens_updated = now
+	if runtime_options.adaptive_queue_budget_share == 0 or runtime_queue_tokens < 1 then
+		runtime_metrics.queue_rejected += 1
+		return false
+	end
+	runtime_queue_tokens -= 1
+	runtime_metrics.queue_admitted += 1
+	return true
+end
+
+local runtime_breaker_complete: (kind: string, success: boolean) -> ()
+
+local function observe_runtime_request(kind: string, success: boolean, message: string?, duration_ms: number)
+	if kind == "read" then
+		runtime_metrics.reads += 1
+		runtime_metrics.read_latency_ewma_ms = if runtime_metrics.read_latency_ewma_ms == 0 then duration_ms else runtime_metrics.read_latency_ewma_ms * 0.8 + duration_ms * 0.2
+	elseif kind == "service" then
+		runtime_metrics.service_calls += 1
+		runtime_metrics.service_latency_ewma_ms = if runtime_metrics.service_latency_ewma_ms == 0 then duration_ms else runtime_metrics.service_latency_ewma_ms * 0.8 + duration_ms * 0.2
+	else
+		runtime_metrics.writes += 1
+		runtime_metrics.write_latency_ewma_ms = if runtime_metrics.write_latency_ewma_ms == 0 then duration_ms else runtime_metrics.write_latency_ewma_ms * 0.8 + duration_ms * 0.2
+	end
+	runtime_breaker_complete(kind, success)
+	if success then
+		if runtime_options.adaptive_runtime_enabled and now_local() >= runtime_next_growth_at
+			and runtime_effective_concurrent_requests < runtime_options.adaptive_max_concurrent_requests
+		then
+			runtime_effective_concurrent_requests += 1
+			runtime_next_growth_at = now_local() + runtime_options.adaptive_hysteresis_seconds
+		end
+		return
+	end
+	runtime_metrics.failures += 1
+	runtime_metrics.last_error = string.sub(string.gsub(tostring(message or "unknown request error"), "%c", " "), 1, 200)
+	local normalized = string.lower(tostring(message or ""))
+	local throttled = string.find(normalized, "thrott", 1, true) ~= nil
+		or string.find(normalized, "request limit", 1, true) ~= nil
+		or string.find(normalized, "rate limit", 1, true) ~= nil
+		or string.find(normalized, "429", 1, true) ~= nil
+	if throttled then
+		runtime_metrics.throttles += 1
+		if runtime_options.adaptive_runtime_enabled then
+			runtime_effective_concurrent_requests = math.max(
+				runtime_options.adaptive_min_concurrent_requests + runtime_options.critical_request_reserve,
+				runtime_effective_concurrent_requests - 1
+			)
+			runtime_next_growth_at = now_local() + runtime_options.adaptive_hysteresis_seconds
+		end
+	end
+end
+
+local function refresh_runtime_policy(now: number)
+	if runtime_policy_provider == nil or runtime_refresh_in_flight or now < runtime_next_policy_refresh then return end
+	runtime_next_policy_refresh = now + runtime_options.runtime_policy_refresh_interval
+	runtime_refresh_in_flight = true
+	local provider = runtime_policy_provider
+	task.spawn(function()
+		local ok, result = pcall(provider)
+		if ok and type(result) == "table" then
+			apply_runtime_policy(result, true)
+		else
+			runtime_metrics.last_policy_error = string.sub(string.gsub(tostring(result or "runtime policy provider failed"), "%c", " "), 1, 200)
+		end
+		runtime_refresh_in_flight = false
+	end)
+end
+
+local function effective_queue_poll_interval(requested: number): number
+	if not runtime_options.adaptive_runtime_enabled then return requested end
+	local interval = math.clamp(requested, runtime_options.adaptive_min_queue_poll_interval, runtime_options.adaptive_max_queue_poll_interval)
+	if (runtime_budget_read ~= nil and runtime_budget_read < runtime_options.adaptive_read_budget_floor)
+		or (runtime_budget_write ~= nil and runtime_budget_write < runtime_options.adaptive_write_budget_floor)
+	then
+		return runtime_options.adaptive_max_queue_poll_interval
+	end
+	if runtime_effective_concurrent_requests < runtime_options.adaptive_max_concurrent_requests then
+		return math.min(runtime_options.adaptive_max_queue_poll_interval, interval * 1.5)
+	end
+	return interval
+end
+
 
 local function resolve_operation_deadline(operation_deadline: number?): (number?, string?)
 	local duration = operation_deadline
@@ -1262,6 +1879,12 @@ local function encode_envelope_for_storage(envelope: Envelope): JsonValue
 	if envelope.session ~= nil then
 		stored.session = copy_value(envelope.session) :: JsonValue
 	end
+	if envelope.inbox_receipts ~= nil then
+		stored.inbox_receipts = copy_value(envelope.inbox_receipts :: JsonValue) :: JsonValue
+	end
+	if envelope.outbox ~= nil then
+		stored.outbox = copy_value(envelope.outbox :: JsonValue) :: JsonValue
+	end
 	return stored
 end
 
@@ -1631,23 +2254,69 @@ local function enqueue_change_observation(state: InternalState, old_value: unkno
 	end)
 end
 
-local function budget_available(request_type: Enum.DataStoreRequestType): boolean?
-	local ok, budget = pcall(function()
-		return DataStoreService:GetRequestBudgetForRequestType(request_type)
-	end)
-	if not ok or type(budget) ~= "number" then
-		return nil
+
+local function runtime_breaker_admit(kind: string): (boolean, string?)
+	local breaker = runtime_breakers[kind]
+	if breaker == nil then return true, nil end
+	local now = now_local()
+	if breaker.open_until > now then
+		return false, ("shared %s circuit is open for %.2f more seconds"):format(kind, breaker.open_until - now)
 	end
-	return budget >= 1
+	if breaker.failures >= runtime_options.circuit_threshold then
+		if breaker.probe_in_flight then
+			return false, ("shared %s circuit is waiting for its half-open probe"):format(kind)
+		end
+		breaker.probe_in_flight = true
+	end
+	return true, nil
 end
 
-local function acquire_slot(deadline: number): boolean
-	while active_requests >= DEFAULT_MAX_CONCURRENT_REQUESTS and now_local() < deadline do
+local function runtime_breaker_cancel_probe(kind: string)
+	local breaker = runtime_breakers[kind]
+	if breaker ~= nil and breaker.failures >= runtime_options.circuit_threshold then
+		breaker.probe_in_flight = false
+	end
+end
+
+runtime_breaker_complete = function(kind: string, success: boolean)
+	local breaker = runtime_breakers[kind]
+	if breaker == nil then return end
+	if success then
+		breaker.failures = 0
+		breaker.open_until = 0
+		breaker.probe_in_flight = false
+		return
+	end
+	breaker.failures += 1
+	breaker.probe_in_flight = false
+	if breaker.failures >= runtime_options.circuit_threshold then
+		breaker.open_until = now_local() + runtime_options.circuit_cooldown_seconds
+	end
+end
+
+local function runtime_degraded_reject(state: InternalState?, update: boolean): boolean
+	local mode = runtime_options.degraded_mode
+	if mode == "normal" then return false end
+	local critical = request_is_critical(state)
+	if mode == "reject_noncritical" then return not critical end
+	if mode == "read_only" then return update and not critical end
+	return false
+end
+
+local function budget_available(request_type: Enum.DataStoreRequestType): boolean?
+	local budget = request_budget(request_type)
+	return if budget == nil then nil else budget >= 1
+end
+
+local function acquire_slot(deadline: number, critical: boolean): boolean
+	local limit = runtime_effective_concurrent_requests
+	if not critical then limit = math.max(1, limit - runtime_options.critical_request_reserve) end
+	while active_requests >= limit and now_local() < deadline do
 		task.wait(0.05)
+		limit = runtime_effective_concurrent_requests
+		if not critical then limit = math.max(1, limit - runtime_options.critical_request_reserve) end
 	end
-	if active_requests >= DEFAULT_MAX_CONCURRENT_REQUESTS then
-		return false
-	end
+	if active_requests >= limit then return false end
 	active_requests += 1
 	return true
 end
@@ -1657,7 +2326,32 @@ local function release_slot()
 end
 
 local function acquire_request(state: InternalState?, deadline: number, update: boolean, request_type: Enum.DataStoreRequestType?): boolean
-	if not acquire_slot(deadline) then
+	local critical = request_is_critical(state)
+	if runtime_degraded_reject(state, update) then
+		runtime_metrics.budget_rejections += 1
+		return false
+	end
+	local circuit_kind = if update then "write" else "read"
+	local circuit_ok = runtime_breaker_admit(circuit_kind)
+	if not circuit_ok then
+		runtime_metrics.budget_rejections += 1
+		return false
+	end
+	if runtime_options.adaptive_runtime_enabled then
+		local read_budget = if request_type == nil or request_type == Enum.DataStoreRequestType.StandardRead
+			then request_budget(Enum.DataStoreRequestType.StandardRead) else nil
+		local write_budget = if update and (request_type == nil or request_type == Enum.DataStoreRequestType.StandardWrite)
+			then request_budget(Enum.DataStoreRequestType.StandardWrite) else nil
+		if not critical and ((read_budget ~= nil and read_budget < runtime_options.adaptive_read_budget_floor)
+			or (write_budget ~= nil and write_budget < runtime_options.adaptive_write_budget_floor))
+		then
+			runtime_metrics.budget_rejections += 1
+			return false
+		end
+		if state ~= nil and state.queue_busy and not consume_runtime_queue_token() then return false end
+	end
+	if not acquire_slot(deadline, critical) then
+		runtime_breaker_cancel_probe(circuit_kind)
 		return false
 	end
 	local wait_seconds = if state ~= nil then state.options.budget_wait or DEFAULT_BUDGET_WAIT else DEFAULT_BUDGET_WAIT
@@ -1665,15 +2359,11 @@ local function acquire_request(state: InternalState?, deadline: number, update: 
 	while now_local() < wait_deadline do
 		if request_type ~= nil then
 			local available = budget_available(request_type)
-			if available ~= false then
-				return true
-			end
+			if available ~= false then return true end
 		else
 			local read_available = budget_available(Enum.DataStoreRequestType.StandardRead)
 			local write_available = if update then budget_available(Enum.DataStoreRequestType.StandardWrite) else true
-			if read_available ~= false and write_available ~= false then
-				return true
-			end
+			if read_available ~= false and write_available ~= false then return true end
 		end
 		task.wait(0.05)
 	end
@@ -1683,6 +2373,7 @@ local function acquire_request(state: InternalState?, deadline: number, update: 
 		and (not update or budget_available(Enum.DataStoreRequestType.StandardWrite) ~= false)
 	if available == false then
 		release_slot()
+		runtime_breaker_cancel_probe(circuit_kind)
 		return false
 	end
 	return true
@@ -1768,10 +2459,12 @@ local function backend_get(backend: Backend, use_cache: boolean, deadline: numbe
 	if not acquire_request(request_state, deadline, false, Enum.DataStoreRequestType.StandardRead) then
 		return nil, nil, "budget", "read request deadline exceeded"
 	end
+	local started_at = now_local()
 	local ok, raw, key_info = pcall(function()
 		return store:GetAsync(backend.key, options)
 	end)
 	release_slot()
+	observe_runtime_request("read", ok, if ok then nil else tostring(raw), (now_local() - started_at) * 1000)
 	if not ok then
 		return nil, nil, "unknown", tostring(raw)
 	end
@@ -1878,6 +2571,10 @@ local function backend_update(backend: Backend, transform: UpdateTransform, dead
 		end
 		local next_entry = mock_write_version(entry, value, ids, normalized_metadata, false)
 		store[backend.key] = next_entry
+		if mock_update_response_lost_count > 0 then
+			mock_update_response_lost_count -= 1
+			return nil, nil, "unknown", mock_update_response_lost_message or "injected response loss after UpdateAsync committed"
+		end
 		return copy_value(next_entry.Value), {
 			Version = next_entry.Version,
 			CreatedTime = next_entry.CreatedTime,
@@ -1894,6 +2591,7 @@ local function backend_update(backend: Backend, transform: UpdateTransform, dead
 	if not acquire_request(request_state, deadline, true, nil) then
 		return nil, nil, "budget", "update request deadline exceeded"
 	end
+	local started_at = now_local()
 	local ok, result, key_info = pcall(function()
 		return store:UpdateAsync(backend.key, function(raw, key_info)
 			local info = backend_info_from_key_info(key_info)
@@ -1902,6 +2600,7 @@ local function backend_update(backend: Backend, transform: UpdateTransform, dead
 		end)
 	end)
 	release_slot()
+	observe_runtime_request("write", ok, if ok then nil else tostring(result), (now_local() - started_at) * 1000)
 	if not ok then
 		return nil, nil, "unknown", tostring(result)
 	end
@@ -2029,6 +2728,8 @@ local function parse_envelope(raw: unknown): (Envelope?, string?, boolean)
 	local raw_user_ids = get_string_field(raw, "user_ids")
 	local raw_tombstone = get_string_field(raw, "tombstone")
 	local raw_session = get_string_field(raw, "session")
+	local raw_inbox_receipts = get_string_field(raw, "inbox_receipts")
+	local raw_outbox = get_string_field(raw, "outbox")
 	if implementation_version == nil then
 		local legacy_marker = get_string_field(raw, "__recordStore")
 		if legacy_marker == "RecordStore" then
@@ -2241,6 +2942,114 @@ local function parse_envelope(raw: unknown): (Envelope?, string?, boolean)
 	if session ~= nil and session.generation ~= fencing_generation then
 		return nil, "session generation does not match fencing generation", false
 	end
+	local inbox_receipts: { [string]: InboxReceiptRecord } = {}
+	if raw_inbox_receipts ~= nil then
+		if type(raw_inbox_receipts) ~= "table" then
+			return nil, "invalid inbox_receipts sidecar", false
+		end
+		local receipt_count = 0
+		for operation_id, raw_receipt in raw_inbox_receipts :: { [string]: unknown } do
+			receipt_count += 1
+			if receipt_count > MAX_INBOX_RECEIPTS or type(operation_id) ~= "string" or operation_id == "" or #operation_id > 128 then
+				return nil, "inbox receipt count or operation_id exceeds its bound", false
+			end
+			if type(raw_receipt) ~= "table" then
+				return nil, "invalid inbox receipt entry", false
+			end
+			local raw_operation = get_string_field(raw_receipt, "operation_id")
+			local fingerprint = get_string_field(raw_receipt, "request_fingerprint")
+			local receipt_material = (raw_receipt :: { [string]: unknown }).request_material
+			if receipt_material ~= nil and (type(receipt_material) ~= "string" or #receipt_material > MAX_REQUEST_MATERIAL_BYTES) then
+				return nil, "invalid inbox receipt request_material", false
+			end
+			local receipt_write_id = get_string_field(raw_receipt, "write_id")
+			local receipt_revision = get_string_field(raw_receipt, "revision")
+			local committed_at = get_string_field(raw_receipt, "committed_at")
+			if raw_operation ~= operation_id
+				or type(fingerprint) ~= "string" or fingerprint == "" or #fingerprint > 256
+				or type(receipt_write_id) ~= "string" or receipt_write_id == "" or #receipt_write_id > 128
+				or type(receipt_revision) ~= "number" or not math.isfinite(receipt_revision) or math.floor(receipt_revision) ~= receipt_revision or receipt_revision < 1
+				or type(committed_at) ~= "number" or not math.isfinite(committed_at)
+			then
+				return nil, "invalid inbox receipt fields", false
+			end
+			inbox_receipts[operation_id] = {
+				operation_id = operation_id,
+				request_fingerprint = fingerprint,
+				request_material = receipt_material :: string?,
+				write_id = receipt_write_id,
+				revision = receipt_revision,
+				committed_at = committed_at,
+			}
+		end
+	end
+	local outbox: { [string]: OutboxEntryRecord } = {}
+	if raw_outbox ~= nil then
+		if type(raw_outbox) ~= "table" then
+			return nil, "invalid outbox sidecar", false
+		end
+		local outbox_count = 0
+		for event_id, raw_event in raw_outbox :: { [string]: unknown } do
+			outbox_count += 1
+			if outbox_count > MAX_OUTBOX_EVENTS or type(event_id) ~= "string" or event_id == "" or #event_id > 128 then
+				return nil, "outbox count or event_id exceeds its bound", false
+			end
+			if type(raw_event) ~= "table" then
+				return nil, "invalid outbox entry", false
+			end
+			local stored_event_id = get_string_field(raw_event, "event_id")
+			local operation_id = get_string_field(raw_event, "operation_id")
+			local destination_store = get_string_field(raw_event, "destination_store_name")
+			local destination_scope = get_string_field(raw_event, "destination_scope")
+			local destination_key = get_string_field(raw_event, "destination_profile_key")
+			local message_type = get_string_field(raw_event, "message_type")
+			local raw_payload = get_string_field(raw_event, "payload")
+			local status = get_string_field(raw_event, "state")
+			local created_at = get_string_field(raw_event, "created_at")
+			local dispatched_at = get_string_field(raw_event, "dispatched_at")
+			local attempts = get_string_field(raw_event, "attempts")
+			local last_error = get_string_field(raw_event, "last_error")
+			local receipt_id = get_string_field(raw_event, "destination_receipt_id")
+			if stored_event_id ~= event_id
+				or type(operation_id) ~= "string" or operation_id == "" or #operation_id > 128
+				or type(destination_store) ~= "string" or destination_store == "" or #destination_store > 50
+				or type(destination_scope) ~= "string" or destination_scope == "" or #destination_scope > 50
+				or type(destination_key) ~= "string" or destination_key == "" or #destination_key > 50
+				or type(message_type) ~= "string" or message_type == "" or #message_type > MAX_MESSAGE_TYPE_LENGTH
+				or (status ~= "pending" and status ~= "dispatched")
+				or type(created_at) ~= "number" or not math.isfinite(created_at)
+				or (dispatched_at ~= nil and (type(dispatched_at) ~= "number" or not math.isfinite(dispatched_at)))
+				or type(attempts) ~= "number" or not math.isfinite(attempts) or math.floor(attempts) ~= attempts or attempts < 0
+				or (last_error ~= nil and (type(last_error) ~= "string" or #last_error > MAX_QUEUE_ERROR_LENGTH))
+				or (receipt_id ~= nil and (type(receipt_id) ~= "string" or #receipt_id > 256))
+			then
+				return nil, "invalid outbox entry fields", false
+			end
+			local payload: JsonValue? = nil
+			if raw_payload ~= nil then
+				local copied_payload = copy_value(raw_payload :: JsonValue)
+				if copied_payload == nil then
+					return nil, "invalid outbox payload", false
+				end
+				payload = copied_payload
+			end
+			outbox[event_id] = {
+				event_id = event_id,
+				operation_id = operation_id,
+				destination_store_name = destination_store,
+				destination_scope = destination_scope,
+				destination_profile_key = destination_key,
+				message_type = message_type,
+				payload = payload,
+				state = status :: "pending" | "dispatched",
+				created_at = created_at,
+				dispatched_at = dispatched_at :: number?,
+				attempts = attempts,
+				last_error = last_error :: string?,
+				destination_receipt_id = receipt_id :: string?,
+			}
+		end
+	end
 	local restored_data = data
 	if raw_non_finite_numbers ~= nil then
 		if data == nil then
@@ -2267,6 +3076,8 @@ local function parse_envelope(raw: unknown): (Envelope?, string?, boolean)
 		user_ids = ids,
 		tombstone = tombstone,
 		session = session,
+		inbox_receipts = inbox_receipts,
+		outbox = outbox,
 		write_id = write_id,
 	}, nil, true
 end
@@ -3651,6 +4462,13 @@ local function save_internal(state: InternalState, reason: string?, operation_de
 		state.save_requested = true
 		return "busy", (if state.queue_busy then "durable queue is being processed" else "record already has a durable operation in flight")
 	end
+	if reason == "autosave" and state.change_sequence == state.saved_change_sequence
+		and not state.save_requested and state.last_saved ~= nil
+	then
+		state.next_autosave = now_local() + (state.options.autosave_interval or DEFAULT_AUTOSAVE_INTERVAL)
+		runtime_metrics.no_op_saves += 1
+		return "saved", nil
+	end
 	local token = state.token
 	if token == nil then
 		return "fenced", "session token is missing"
@@ -3679,6 +4497,8 @@ local function save_internal(state: InternalState, reason: string?, operation_de
 	state.busy = true
 	state.state = "saving"
 	local last_error: string? = nil
+	local last_result: ResultCode? = nil
+	local write_may_have_committed = false
 	local confirmed: Envelope? = nil
 	local confirmed_info: BackendInfo? = nil
 	for attempt = 1, attempts do
@@ -3756,6 +4576,8 @@ local function save_internal(state: InternalState, reason: string?, operation_de
 					acquired_at = session.acquired_at,
 					lease_until = transform_time + (state.options.lease_duration or DEFAULT_LEASE_DURATION),
 				},
+				inbox_receipts = envelope.inbox_receipts or {},
+				outbox = envelope.outbox or {},
 				write_id = write_id,
 			}
 			local envelope_valid, envelope_error = validate_envelope(next_envelope)
@@ -3770,10 +4592,24 @@ local function save_internal(state: InternalState, reason: string?, operation_de
 		if result_code ~= nil then
 			decision = result_code
 			decision_message = result_message
+			last_result = result_code
+			last_error = result_message
 		end
 		if state.retired or state.state ~= "saving" then
 			state.busy = false
 			return "closing", "save was invalidated before its result could be applied"
+		end
+		if result_code == "budget" and result == nil then
+			-- The shared gate refused admission before DataStore UpdateAsync started.
+			-- There is no ambiguous write to reconcile, so keep the local dirty state retryable.
+			if attempt < attempts and now_local() < deadline then
+				task.wait(math.min(retry_delay(attempt), math.max(0, deadline - now_local())))
+				continue
+			end
+			break
+		end
+		if result_code == nil or result_code == "unknown" then
+			write_may_have_committed = true
 		end
 		if result ~= nil then
 			local returned = parse_envelope(result)
@@ -3812,6 +4648,13 @@ local function save_internal(state: InternalState, reason: string?, operation_de
 	end
 	if confirmed == nil then
 		state.busy = false
+		if not write_may_have_committed then
+			state.state = "active"
+			local result_code = last_result or "budget"
+			local result_message = last_error or "save deadline expired before a write request was admitted"
+			observe(state, "save", result_code, result_message)
+			return result_code, result_message
+		end
 		state.state = "unknown"
 		observe(state, "save", "unknown", last_error or "save outcome is unresolved")
 		return "unknown", last_error or "save outcome is unresolved"
@@ -3828,7 +4671,7 @@ local function save_internal(state: InternalState, reason: string?, operation_de
 	state.last_observed = now_unix()
 	if not local_changed_during_save then
 		update_local_from_envelope(state, confirmed, confirmed_info)
-		state.saved_change_sequence = captured_change_sequence
+		mark_saved(state, captured_change_sequence)
 	else
 		state.save_requested = true
 		state.next_autosave = now_local()
@@ -3846,7 +4689,7 @@ local function save_internal(state: InternalState, reason: string?, operation_de
 	return "saved", nil
 end
 
-function RecordStore.read_async(name: string, scope: string, key: string, operation_deadline: number?, legacy_decoder: LegacyDecoder?): (Snapshot?, ResultCode, string?)
+local function read_async_uncached(name: string, scope: string, key: string, operation_deadline: number?, legacy_decoder: LegacyDecoder?): (Snapshot?, ResultCode, string?)
 	local valid_identity, identity_message = validate_store_identity(name, scope, key)
 	if not valid_identity then
 		return nil, "invalid", identity_message
@@ -3881,6 +4724,91 @@ function RecordStore.read_async(name: string, scope: string, key: string, operat
 		return nil, "corrupt", "durable envelope is missing"
 	end
 	return snapshot_from_envelope(key, envelope, info), "success", nil
+end
+
+local function clone_read_snapshot(snapshot: Snapshot?): Snapshot?
+	if snapshot == nil then return nil end
+	local result = table.clone(snapshot)
+	result.Data = copy_value(snapshot.Data)
+	result.UserIds = clone_user_ids(snapshot.UserIds)
+	result.Metadata = clone_metadata(snapshot.Metadata)
+	return result
+end
+
+function RecordStore.read_async(name: string, scope: string, key: string, operation_deadline: number?, legacy_decoder: LegacyDecoder?): (Snapshot?, ResultCode, string?)
+	-- Legacy decoders are application callbacks; do not coalesce across different callback identities.
+	if legacy_decoder ~= nil then
+		return read_async_uncached(name, scope, key, operation_deadline, legacy_decoder)
+	end
+	local valid_identity = validate_store_identity(name, scope, key)
+	if not valid_identity then
+		return read_async_uncached(name, scope, key, operation_deadline, nil)
+	end
+	local deadline, deadline_error = resolve_operation_deadline(operation_deadline)
+	if deadline == nil then return nil, "invalid", deadline_error end
+	local identity = tostring(#name) .. ":" .. name .. tostring(#scope) .. ":" .. scope .. tostring(#key) .. ":" .. key
+	local current = in_flight_reads[identity]
+	if current ~= nil and not current.done then
+		if #current.waiters >= MAX_IN_FLIGHT_READ_WAITERS then
+			return read_async_uncached(name, scope, key, operation_deadline, nil)
+		end
+		local event_ok, event = pcall(function() return Instance.new("BindableEvent") end)
+		if not event_ok or event == nil then
+			-- Coalescing is an optimization only. If waiter signaling is unavailable, perform a normal read.
+			return read_async_uncached(name, scope, key, operation_deadline, nil)
+		end
+		local waiter: ReadFlightWaiter = { event = event, active = true, timed_out = false }
+		table.insert(current.waiters, waiter)
+		local remaining = math.max(0, (deadline :: number) - now_local())
+		task.delay(remaining, function()
+			if waiter.active then
+				waiter.active = false
+				waiter.timed_out = true
+				pcall(function() event:Fire() end)
+			end
+		end)
+		event.Event:Wait()
+		if waiter.timed_out then
+			pcall(function() event:Destroy() end)
+			return nil, "budget", "coalesced read waiter exceeded its local operation deadline"
+		end
+		pcall(function() event:Destroy() end)
+		return clone_read_snapshot(current.snapshot), current.code, current.message
+	end
+
+	local flight_count = 0
+	for _ in pairs(in_flight_reads) do flight_count += 1 end
+	if flight_count >= MAX_IN_FLIGHT_READ_KEYS then
+		return read_async_uncached(name, scope, key, operation_deadline, nil)
+	end
+	local flight: ReadFlight = { waiters = {}, done = false, snapshot = nil, code = "unknown", message = "read did not produce a result" }
+	in_flight_reads[identity] = flight
+	local call_ok, snapshot_or_error, code_or_nil, message_or_nil = pcall(function()
+		return read_async_uncached(name, scope, key, operation_deadline, nil)
+	end)
+	local snapshot: Snapshot? = nil
+	local code: ResultCode = "unknown"
+	local message: string? = nil
+	if call_ok then
+		snapshot = snapshot_or_error :: Snapshot?
+		code = code_or_nil :: ResultCode
+		message = message_or_nil :: string?
+	else
+		message = tostring(snapshot_or_error)
+	end
+	flight.snapshot = clone_read_snapshot(snapshot)
+	flight.code = code
+	flight.message = message
+	flight.done = true
+	if in_flight_reads[identity] == flight then in_flight_reads[identity] = nil end
+	for _, waiter in ipairs(flight.waiters) do
+		if waiter.active then
+			waiter.active = false
+			pcall(function() waiter.event:Fire() end)
+		end
+	end
+	table.clear(flight.waiters)
+	return snapshot, code, message
 end
 
 local function list_versions_internal(name: string, scope: string, key: string, sort_direction: Enum.SortDirection?, min_date_ms: number?, max_date_ms: number?, max_versions: number?, operation_deadline: number?, mock: boolean): ({ HistoryEntry }?, ResultCode, string?)
@@ -4267,7 +5195,7 @@ track_external_data_mutation = function(state: InternalState)
 	if public_record_table ~= nil then
 		public_record_table.Data = state.data
 	end
-	state.change_sequence += 1
+	mark_dirty(state)
 	local operation_id = HttpService:GenerateGUID(false)
 	state.current_operation_id = operation_id
 	enqueue_change_observation(state, old_data, current_data, operation_id, "direct_data_mutation")
@@ -4367,6 +5295,19 @@ end
 local function get_key(self: Record): string
 	local state = private[self]
 	return if state ~= nil then state.key else self.Key
+end
+
+local function get_identity(self: Record): RecordIdentity
+	local state = private[self]
+	if state == nil then
+		return { store_name = "", scope = "", profile_key = self.Key, user_ids = {} }
+	end
+	return {
+		store_name = state.name,
+		scope = state.scope,
+		profile_key = state.key,
+		user_ids = clone_user_ids(state.user_ids),
+	}
 end
 
 local function get_state(self: Record): SessionState
@@ -4470,7 +5411,7 @@ local function set_user_ids(self: Record, user_ids: { number }): (ResultCode, st
 	end
 	local old_user_ids = state.user_ids
 	state.user_ids = normalized
-	state.change_sequence += 1
+	mark_dirty(state)
 	local operation_id = HttpService:GenerateGUID(false)
 	state.current_operation_id = operation_id
 	enqueue_change_observation(state, old_user_ids, normalized, operation_id, "user_ids")
@@ -4543,7 +5484,7 @@ local function set_metadata(self: Record, metadata: Metadata): (ResultCode, stri
 	end
 	local old_metadata = state.metadata
 	state.metadata = copied
-	state.change_sequence += 1
+	mark_dirty(state)
 	local operation_id = HttpService:GenerateGUID(false)
 	state.current_operation_id = operation_id
 	enqueue_change_observation(state, old_metadata, copied, operation_id, "metadata")
@@ -4600,7 +5541,7 @@ local function update_metadata(self: Record, callback: (Metadata) -> Metadata): 
 	end
 	local old_metadata = state.metadata
 	state.metadata = copied
-	state.change_sequence += 1
+	mark_dirty(state)
 	local operation_id = HttpService:GenerateGUID(false)
 	state.current_operation_id = operation_id
 	enqueue_change_observation(state, old_metadata, copied, operation_id, "metadata")
@@ -4689,7 +5630,7 @@ local function update(self: Record, callback: (JsonValue?) -> JsonValue?): (Resu
 	state.data = copied
 	state.public_data_source = copy_value(state.data)
 	self.Data = state.data
-	state.change_sequence += 1
+	mark_dirty(state)
 	local operation_id = HttpService:GenerateGUID(false)
 	state.current_operation_id = operation_id
 	enqueue_change_observation(state, old_data, copied, operation_id, "update")
@@ -4800,7 +5741,7 @@ local function reconcile(self: Record, template: JsonValue): (ResultCode, string
 	state.public_data_source = copy_value(state.data)
 	self.Data = state.data
 	if changed == true then
-		state.change_sequence += 1
+		mark_dirty(state)
 		local operation_id = HttpService:GenerateGUID(false)
 		state.current_operation_id = operation_id
 		enqueue_change_observation(state, old_data, next_value, operation_id, "reconcile")
@@ -4810,6 +5751,774 @@ local function reconcile(self: Record, template: JsonValue): (ResultCode, string
 	observe(state, "reconcile", "success", nil)
 	sync_public(self, skip_sync_external_mutation_check)
 	return "success", nil
+end
+
+local function clone_inbox_receipts(source: { [string]: InboxReceiptRecord }?): { [string]: InboxReceiptRecord }
+	local result: { [string]: InboxReceiptRecord } = {}
+	for operation_id, receipt in source or {} do
+		result[operation_id] = {
+			operation_id = receipt.operation_id,
+			request_fingerprint = receipt.request_fingerprint,
+			request_material = receipt.request_material,
+			write_id = receipt.write_id,
+			revision = receipt.revision,
+			committed_at = receipt.committed_at,
+		}
+	end
+	return result
+end
+
+local function clone_outbox_entries(source: { [string]: OutboxEntryRecord }?): { [string]: OutboxEntryRecord }
+	local result: { [string]: OutboxEntryRecord } = {}
+	for event_id, event in source or {} do
+		result[event_id] = {
+			event_id = event.event_id,
+			operation_id = event.operation_id,
+			destination_store_name = event.destination_store_name,
+			destination_scope = event.destination_scope,
+			destination_profile_key = event.destination_profile_key,
+			message_type = event.message_type,
+			payload = if event.payload ~= nil then copy_value(event.payload) else nil,
+			state = event.state,
+			created_at = event.created_at,
+			dispatched_at = event.dispatched_at,
+			attempts = event.attempts,
+			last_error = event.last_error,
+			destination_receipt_id = event.destination_receipt_id,
+		}
+	end
+	return result
+end
+
+local function outbox_to_public(event: OutboxEntryRecord): OutboxEvent
+	return {
+		EventId = event.event_id,
+		OperationId = event.operation_id,
+		DestinationStoreName = event.destination_store_name,
+		DestinationScope = event.destination_scope,
+		DestinationProfileKey = event.destination_profile_key,
+		MessageType = event.message_type,
+		Data = if event.payload ~= nil then copy_value(event.payload) else nil,
+		State = event.state,
+		CreatedAt = event.created_at,
+		DispatchedAt = event.dispatched_at,
+		Attempts = event.attempts,
+		LastError = event.last_error,
+		DestinationReceiptId = event.destination_receipt_id,
+	}
+end
+
+local function validate_operation_identity(operation_id: string, request_fingerprint: string, request_material: string?): string?
+	if type(operation_id) ~= "string" or operation_id == "" or #operation_id > 128 then
+		return "operation_id must be 1 to 128 bytes"
+	end
+	if type(request_fingerprint) ~= "string" or request_fingerprint == "" or #request_fingerprint > 256 then
+		return "request_fingerprint must be 1 to 256 bytes"
+	end
+	if request_material ~= nil and (type(request_material) ~= "string" or #request_material > MAX_REQUEST_MATERIAL_BYTES) then
+		return "request_material exceeds its 16384-byte bound"
+	end
+	return nil
+end
+
+local function prepare_outbox_inputs(
+	operation_id: string,
+	events: { OutboxEventInput },
+	created_at: number
+): ({ OutboxEntryRecord }?, string?)
+	if type(events) ~= "table" or #events > MAX_OUTBOX_EVENTS_PER_COMMIT then
+		return nil, "one transaction may contain at most " .. tostring(MAX_OUTBOX_EVENTS_PER_COMMIT) .. " outbox events"
+	end
+	local prepared: { OutboxEntryRecord } = {}
+	local seen: { [string]: boolean } = {}
+	for index, event in events do
+		if type(index) ~= "number" or not math.isfinite(index) or math.floor(index) ~= index or index < 1 or index > #events then
+			return nil, "outbox events must be a dense array"
+		end
+		if type(event) ~= "table"
+			or type(event.EventId) ~= "string" or event.EventId == "" or #event.EventId > 128
+			or seen[event.EventId] == true
+			or type(event.DestinationStoreName) ~= "string" or event.DestinationStoreName == "" or #event.DestinationStoreName > 50
+			or type(event.DestinationScope) ~= "string" or event.DestinationScope == "" or #event.DestinationScope > 50
+			or type(event.DestinationProfileKey) ~= "string" or event.DestinationProfileKey == "" or #event.DestinationProfileKey > 50
+			or type(event.MessageType) ~= "string" or event.MessageType == "" or #event.MessageType > MAX_MESSAGE_TYPE_LENGTH
+		then
+			return nil, "invalid or duplicate outbox event input at index " .. tostring(index)
+		end
+		seen[event.EventId] = true
+		local payload: JsonValue? = nil
+		if event.Data ~= nil then
+			local copied_ok, copied = pcall(function()
+				return copy_value(event.Data :: JsonValue)
+			end)
+			if not copied_ok or copied == nil then
+				return nil, "outbox payload is not a valid JSON value"
+			end
+			payload = copied
+		end
+		table.insert(prepared, {
+			event_id = event.EventId,
+			operation_id = operation_id,
+			destination_store_name = event.DestinationStoreName,
+			destination_scope = event.DestinationScope,
+			destination_profile_key = event.DestinationProfileKey,
+			message_type = event.MessageType,
+			payload = payload,
+			state = "pending",
+			created_at = created_at,
+			dispatched_at = nil,
+			attempts = 0,
+			last_error = nil,
+			destination_receipt_id = nil,
+		})
+	end
+	return prepared, nil
+end
+
+local function validate_envelope_for_transaction(envelope: Envelope): (boolean, string?)
+	local encoded_ok, stored_or_error = pcall(function()
+		return encode_envelope_for_storage(envelope)
+	end)
+	if not encoded_ok then
+		return false, tostring(stored_or_error)
+	end
+	return validate_serialized_size(stored_or_error :: JsonValue)
+end
+
+local function transaction_internal(
+	state: InternalState,
+	operation_id: string,
+	request_fingerprint: string,
+	transform: TransactionTransform,
+	outbox_inputs: { OutboxEventInput }?,
+	request_material: string?
+): (ResultCode, string?)
+	local identity_error = validate_operation_identity(operation_id, request_fingerprint, request_material)
+	if identity_error ~= nil then
+		return "invalid", identity_error
+	end
+	if type(transform) ~= "function" then
+		return "invalid", "transaction transform must be a function"
+	end
+	track_external_data_mutation(state)
+	if state.retired then
+		return "invalid", "record has been retired"
+	end
+	if closing then
+		return "closing", "server is shutting down"
+	end
+	if state.state ~= "active" then
+		return if state.state == "tombstoned" then "tombstoned" else "fenced", "record is not actively owned"
+	end
+	if state.takeover_requested then
+		return "closing", "session takeover has been requested"
+	end
+	if state.busy or state.queue_busy then
+		return "busy", "record has another durable operation in flight"
+	end
+	if state.change_sequence ~= state.saved_change_sequence then
+		return "busy", "save local profile changes before starting an atomic transaction"
+	end
+	local session_token = state.token
+	if session_token == nil then
+		return "fenced", "session token is missing"
+	end
+	if state.data == nil then
+		return "invalid", "record has no active profile data"
+	end
+	local base_data = copy_value(state.data)
+	if base_data == nil then
+		return "validation", "profile data could not be copied"
+	end
+	local callback_ok, transformed_value = pcall(transform, copy_value(base_data))
+	if not callback_ok then
+		return "validation", "transaction transform failed: " .. string.sub(tostring(transformed_value), 1, MAX_QUEUE_ERROR_LENGTH)
+	end
+	if transformed_value == nil then
+		return "validation", "transaction transform must return a non-nil JSON value"
+	end
+	local data_ok, next_data = pcall(function()
+		return copy_value(transformed_value)
+	end)
+	if not data_ok or next_data == nil then
+		return "validation", "transaction transform returned an invalid JSON value"
+	end
+	local valid_data, data_error = validate_value(next_data, state.options.validator)
+	if not valid_data then
+		return "validation", data_error
+	end
+
+	local generation = state.generation
+	local expected_revision = state.revision
+	local write_id = HttpService:GenerateGUID(false)
+	local operation_time = now_unix()
+	local deadline, deadline_error = resolve_operation_deadline(state.options.operation_deadline)
+	if deadline == nil then
+		return "invalid", deadline_error
+	end
+	local prepared_events, events_error = prepare_outbox_inputs(operation_id, outbox_inputs or {}, operation_time)
+	if prepared_events == nil then
+		return "validation", events_error
+	end
+	state.current_operation_id = write_id
+	state.busy = true
+	state.state = "saving"
+	local attempts = state.options.retry_attempts or DEFAULT_RETRY_ATTEMPTS
+	local last_error: string? = nil
+	for attempt = 1, attempts do
+		if state.retired or state.state ~= "saving" then
+			state.busy = false
+			return "closing", "transaction was invalidated before completion"
+		end
+		local decision: ResultCode? = nil
+		local decision_message: string? = nil
+		local transaction_time = session_now_unix(state.backend.mock)
+		local result, info, result_code, result_message = backend_update(state.backend, function(raw, info)
+			decision = nil
+			decision_message = nil
+			local envelope, parse_error, current_format = parse_envelope(raw)
+			if not current_format or envelope == nil then
+				decision = if parse_error == "future implementation version" then "future_schema" else "corrupt"
+				decision_message = parse_error or "durable envelope is invalid"
+				return nil, nil, nil
+			end
+			if not matches_session(envelope, session_token :: string, generation)
+				or envelope.session == nil or envelope.session.lease_until <= transaction_time
+			then
+				decision = "fenced"
+				decision_message = "durable profile session fence is no longer valid"
+				return nil, nil, nil
+			end
+			if envelope.schema_version > state.options.schema_version then
+				decision = "future_schema"
+				decision_message = "durable schema is newer than this server supports"
+				return nil, nil, nil
+			end
+			local receipts = envelope.inbox_receipts or {}
+			local existing_receipt = receipts[operation_id]
+			if existing_receipt ~= nil then
+				if existing_receipt.request_fingerprint ~= request_fingerprint then
+					decision = "conflict"
+					decision_message = "operation_id is already bound to a different request_fingerprint"
+					return nil, nil, nil
+				end
+				if request_material ~= nil and existing_receipt.request_material ~= nil
+					and existing_receipt.request_material ~= request_material
+				then
+					decision = "conflict"
+					decision_message = "operation_id fingerprint matched but exact request material differed"
+					return nil, nil, nil
+				end
+				if existing_receipt.write_id == write_id then
+					decision = "success"
+					return envelope, (info ~= nil and info.UserIds or envelope.user_ids or state.user_ids),
+						make_backend_metadata(if info ~= nil then info.RawMetadata else state.metadata, envelope)
+				end
+				decision = "duplicate"
+				decision_message = "operation was already committed"
+				return nil, nil, nil
+			end
+			if envelope.revision ~= expected_revision then
+				decision = "conflict"
+				decision_message = "durable revision changed before transaction commit"
+				return nil, nil, nil
+			end
+			local receipts_copy = clone_inbox_receipts(envelope.inbox_receipts)
+			if (function()
+				local count = 0
+				for _ in receipts_copy do count += 1 end
+				return count
+			end)() >= MAX_INBOX_RECEIPTS then
+				decision = "capacity"
+				decision_message = "inbox receipt capacity reached; prune only after the caller's deduplication window"
+				return nil, nil, nil
+			end
+			local outbox_copy = clone_outbox_entries(envelope.outbox)
+			local outbox_count = 0
+			for _ in outbox_copy do outbox_count += 1 end
+			if outbox_count + #prepared_events > MAX_OUTBOX_EVENTS then
+				decision = "capacity"
+				decision_message = "outbox capacity reached; dispatch and prune verified terminal events before retry"
+				return nil, nil, nil
+			end
+			for _, event in prepared_events do
+				if outbox_copy[event.event_id] ~= nil then
+					decision = "conflict"
+					decision_message = "outbox event_id is already present: " .. event.event_id
+					return nil, nil, nil
+				end
+				outbox_copy[event.event_id] = event
+			end
+			local durable_ids = if info ~= nil then clone_user_ids(info.UserIds) elseif envelope.user_ids ~= nil then clone_user_ids(envelope.user_ids) else clone_user_ids(state.user_ids)
+			local durable_metadata = if info ~= nil then clone_metadata(info.RawMetadata) else clone_metadata(state.metadata)
+			local next_envelope: Envelope = {
+				implementation_version = IMPLEMENTATION_VERSION,
+				schema_version = state.options.schema_version,
+				revision = envelope.revision + 1,
+				fencing_generation = generation,
+				created_at = envelope.created_at,
+				updated_at = transaction_time,
+				data = next_data :: JsonValue,
+				user_ids = durable_ids,
+				tombstone = nil,
+				session = {
+					token = session_token :: string,
+					generation = generation,
+					job_id = server_id,
+					place_id = game.PlaceId,
+					acquired_at = envelope.session.acquired_at,
+					lease_until = transaction_time + (state.options.lease_duration or DEFAULT_LEASE_DURATION),
+				},
+				inbox_receipts = receipts_copy,
+				outbox = outbox_copy,
+				write_id = write_id,
+			}
+			local envelope_valid, envelope_error = validate_envelope_for_transaction(next_envelope)
+			if not envelope_valid then
+				decision = "validation"
+				decision_message = envelope_error or "transaction envelope failed validation"
+				return nil, nil, nil
+			end
+			receipts_copy[operation_id] = {
+				operation_id = operation_id,
+				request_fingerprint = request_fingerprint,
+				request_material = request_material,
+				write_id = write_id,
+				revision = next_envelope.revision,
+				committed_at = operation_time,
+			}
+			-- Refresh the encoded size after the receipt is part of the same atomic write.
+			local final_valid, final_error = validate_envelope_for_transaction(next_envelope)
+			if not final_valid then
+				decision = "validation"
+				decision_message = final_error or "transaction receipt envelope failed validation"
+				return nil, nil, nil
+			end
+			decision = "success"
+			return next_envelope, durable_ids, make_backend_metadata(durable_metadata, next_envelope)
+		end, deadline, state)
+		if result_code ~= nil then
+			decision = result_code
+			decision_message = result_message
+		end
+		if decision == "duplicate" or decision == "conflict" or decision == "capacity" or decision == "validation"
+			or decision == "fenced" or decision == "future_schema" or decision == "corrupt"
+		then
+			state.busy = false
+			state.state = if decision == "fenced" then "fenced" elseif decision == "future_schema" then "future" elseif decision == "corrupt" then "corrupt" else "active"
+			observe(state, "transaction", decision, decision_message)
+			return decision, decision_message
+		end
+		if result ~= nil then
+			local returned = parse_envelope(result)
+			local receipt = if returned ~= nil and returned.inbox_receipts ~= nil then returned.inbox_receipts[operation_id] else nil
+			if returned ~= nil and receipt ~= nil
+				and returned.write_id == write_id
+				and receipt.write_id == write_id
+				and receipt.request_fingerprint == request_fingerprint
+				and returned.revision == receipt.revision
+				and matches_session(returned, session_token :: string, generation)
+				and backend_metadata_matches(info, returned)
+			then
+				update_local_from_envelope(state, returned, info)
+				mark_saved(state, state.change_sequence)
+				state.last_saved = make_durable_snapshot(returned, info, "transaction")
+				state.last_observed = now_unix()
+				state.busy = false
+				state.state = "active"
+				observe(state, "transaction", "success", operation_id)
+				sync_public(state.public_record)
+				return "success", nil
+			end
+		end
+		last_error = result_message or decision_message
+		if attempt < attempts then
+			task.wait(math.min(retry_delay(attempt), math.max(0, deadline - now_local())))
+		end
+	end
+	state.busy = false
+	state.state = "unknown"
+	observe(state, "transaction", "unknown", last_error or "transaction commit outcome is unresolved")
+	return "unknown", last_error or "transaction commit outcome is unresolved"
+end
+
+local function update_profile_sidecars(
+	state: InternalState,
+	reason: string,
+	mutate: (
+		{ [string]: InboxReceiptRecord },
+		{ [string]: OutboxEntryRecord },
+		number
+	) -> ({ [string]: InboxReceiptRecord }?, { [string]: OutboxEntryRecord }?, ResultCode?, string?, number?)
+): (number, ResultCode, string?)
+	track_external_data_mutation(state)
+	if state.retired then return 0, "invalid", "record has been retired" end
+	if closing then return 0, "closing", "server is shutting down" end
+	if state.state ~= "active" then return 0, if state.state == "tombstoned" then "tombstoned" else "fenced", "record is not actively owned" end
+	if state.takeover_requested then return 0, "closing", "session takeover has been requested" end
+	if state.busy or state.queue_busy then return 0, "busy", "record has another durable operation in flight" end
+	local session_token = state.token
+	if session_token == nil then return 0, "fenced", "session token is missing" end
+	local generation = state.generation
+	local expected_revision = state.revision
+	local write_id = HttpService:GenerateGUID(false)
+	local deadline, deadline_error = resolve_operation_deadline(state.options.operation_deadline)
+	if deadline == nil then return 0, "invalid", deadline_error end
+	local max_attempts = state.options.retry_attempts or DEFAULT_RETRY_ATTEMPTS
+	state.current_operation_id = write_id
+	state.busy = true
+	state.state = "saving"
+	local affected_count = 0
+	local last_error: string? = nil
+	for attempt = 1, max_attempts do
+		if state.retired or state.state ~= "saving" then
+			state.busy = false
+			return affected_count, "closing", "sidecar update was invalidated"
+		end
+		local decision: ResultCode? = nil
+		local decision_message: string? = nil
+		local transaction_time = session_now_unix(state.backend.mock)
+		local result, info, result_code, result_message = backend_update(state.backend, function(raw, info)
+			decision = nil
+			decision_message = nil
+			local envelope, parse_error, current_format = parse_envelope(raw)
+			if not current_format or envelope == nil then
+				decision = if parse_error == "future implementation version" then "future_schema" else "corrupt"
+				decision_message = parse_error or "durable envelope is invalid"
+				return nil, nil, nil
+			end
+			if envelope.write_id == write_id and matches_session(envelope, session_token :: string, generation) then
+				decision = "success"
+				return envelope, (info ~= nil and info.UserIds or envelope.user_ids or state.user_ids),
+					make_backend_metadata(if info ~= nil then info.RawMetadata else state.metadata, envelope)
+			end
+			if not matches_session(envelope, session_token :: string, generation)
+				or envelope.session == nil or envelope.session.lease_until <= transaction_time
+			then
+				decision = "fenced"
+				decision_message = "durable profile session fence is no longer valid"
+				return nil, nil, nil
+			end
+			if envelope.schema_version > state.options.schema_version then
+				decision = "future_schema"
+				decision_message = "durable schema is newer than this server supports"
+				return nil, nil, nil
+			end
+			if envelope.revision ~= expected_revision then
+				decision = "conflict"
+				decision_message = "durable revision changed before sidecar update"
+				return nil, nil, nil
+			end
+			local next_receipts, next_outbox, mutate_code, mutate_message, count = mutate(
+				clone_inbox_receipts(envelope.inbox_receipts),
+				clone_outbox_entries(envelope.outbox),
+				transaction_time
+			)
+			if mutate_code ~= nil then
+				decision = mutate_code
+				decision_message = mutate_message
+				affected_count = count or affected_count
+				return nil, nil, nil
+			end
+			if next_receipts == nil or next_outbox == nil then
+				decision = "validation"
+				decision_message = "sidecar mutator returned incomplete maps"
+				return nil, nil, nil
+			end
+			affected_count = count or affected_count
+			local durable_ids = if info ~= nil then clone_user_ids(info.UserIds) elseif envelope.user_ids ~= nil then clone_user_ids(envelope.user_ids) else clone_user_ids(state.user_ids)
+			local durable_metadata = if info ~= nil then clone_metadata(info.RawMetadata) else clone_metadata(state.metadata)
+			local next_envelope: Envelope = {
+				implementation_version = IMPLEMENTATION_VERSION,
+				schema_version = envelope.schema_version,
+				revision = envelope.revision + 1,
+				fencing_generation = generation,
+				created_at = envelope.created_at,
+				updated_at = transaction_time,
+				data = envelope.data,
+				user_ids = durable_ids,
+				tombstone = nil,
+				session = {
+					token = session_token :: string,
+					generation = generation,
+					job_id = server_id,
+					place_id = game.PlaceId,
+					acquired_at = envelope.session.acquired_at,
+					lease_until = transaction_time + (state.options.lease_duration or DEFAULT_LEASE_DURATION),
+				},
+				inbox_receipts = next_receipts,
+				outbox = next_outbox,
+				write_id = write_id,
+			}
+			local valid_envelope, envelope_error = validate_envelope_for_transaction(next_envelope)
+			if not valid_envelope then
+				decision = "validation"
+				decision_message = envelope_error or "sidecar envelope failed validation"
+				return nil, nil, nil
+			end
+			decision = "success"
+			return next_envelope, durable_ids, make_backend_metadata(durable_metadata, next_envelope)
+		end, deadline, state)
+		if result_code ~= nil then
+			decision = result_code
+			decision_message = result_message
+		end
+		if decision == "duplicate" or decision == "not_found" or decision == "capacity"
+			or decision == "validation" or decision == "conflict" or decision == "fenced"
+			or decision == "future_schema" or decision == "corrupt"
+		then
+			state.busy = false
+			state.state = if decision == "fenced" then "fenced" elseif decision == "future_schema" then "future" elseif decision == "corrupt" then "corrupt" else "active"
+			return affected_count, decision, decision_message
+		end
+		if result ~= nil then
+			local returned = parse_envelope(result)
+			if returned ~= nil and returned.write_id == write_id
+				and returned.revision == expected_revision + 1
+				and matches_session(returned, session_token :: string, generation)
+				and backend_metadata_matches(info, returned)
+			then
+				state.revision = returned.revision
+				state.updated_at = returned.updated_at
+				state.durable_lease_until = if returned.session ~= nil then returned.session.lease_until else 0
+				update_state_metadata_from_info(state, info)
+				state.last_saved = make_durable_snapshot(returned, info, reason)
+				state.last_observed = now_unix()
+				if state.change_sequence ~= state.saved_change_sequence then
+					state.save_requested = true
+					state.next_autosave = now_local()
+				end
+				state.busy = false
+				state.state = "active"
+				sync_public(state.public_record)
+				return affected_count, "success", nil
+			end
+		end
+		last_error = result_message or decision_message
+		if attempt < max_attempts then
+			task.wait(math.min(retry_delay(attempt), math.max(0, deadline - now_local())))
+		end
+	end
+	state.busy = false
+	state.state = "unknown"
+	observe(state, reason, "unknown", last_error or "sidecar update outcome is unresolved")
+	return affected_count, "unknown", last_error or "sidecar update outcome is unresolved"
+end
+
+local function transaction(self: Record, operation_id: string, request_fingerprint: string, transform: TransactionTransform, request_material: string?): (ResultCode, string?)
+	local state = private[self]
+	if state == nil then return "invalid", "record does not exist" end
+	return transaction_internal(state, operation_id, request_fingerprint, transform, nil, request_material)
+end
+
+local function apply_inbox(self: Record, operation_id: string, request_fingerprint: string, transform: TransactionTransform, request_material: string?): (ResultCode, string?)
+	local state = private[self]
+	if state == nil then return "invalid", "record does not exist" end
+	return transaction_internal(state, operation_id, request_fingerprint, transform, nil, request_material)
+end
+
+local function commit_with_outbox(self: Record, operation_id: string, request_fingerprint: string, transform: TransactionTransform, events: { OutboxEventInput }, request_material: string?): (ResultCode, string?)
+	local state = private[self]
+	if state == nil then return "invalid", "record does not exist" end
+	return transaction_internal(state, operation_id, request_fingerprint, transform, events, request_material)
+end
+
+local function get_outbox(self: Record, max_items: number?): ({ OutboxEvent }, ResultCode, string?)
+	local state = private[self]
+	if state == nil then return {}, "invalid", "record does not exist" end
+	if state.state ~= "active" or state.token == nil then return {}, "fenced", "record is not actively owned" end
+	local limit = max_items or MAX_OUTBOX_EVENTS
+	if not math.isfinite(limit) or math.floor(limit) ~= limit or limit < 1 or limit > MAX_OUTBOX_EVENTS then
+		return {}, "invalid", "max_items must be an integer from 1 to " .. tostring(MAX_OUTBOX_EVENTS)
+	end
+	local deadline, deadline_error = resolve_operation_deadline(state.options.operation_deadline)
+	if deadline == nil then return {}, "invalid", deadline_error end
+	local raw, info, read_code, read_message = backend_get(state.backend, false, deadline, state)
+	if read_code ~= nil then return {}, read_code, read_message end
+	local envelope, parse_error, current_format = parse_envelope(raw)
+	if not current_format or envelope == nil then return {}, "corrupt", parse_error or "durable envelope is invalid" end
+	if not matches_session(envelope, state.token, state.generation)
+		or envelope.session == nil or envelope.session.lease_until <= session_now_unix(state.backend.mock)
+	then
+		return {}, "fenced", "durable profile session fence is no longer valid"
+	end
+	local result: { OutboxEvent } = {}
+	for _, event in envelope.outbox or {} do
+		if event.state == "pending" then
+			table.insert(result, outbox_to_public(event))
+		end
+	end
+	table.sort(result, function(left, right)
+		if left.CreatedAt ~= right.CreatedAt then return left.CreatedAt < right.CreatedAt end
+		return left.EventId < right.EventId
+	end)
+	while #result > limit do table.remove(result) end
+	return result, "success", nil
+end
+
+local function set_outbox_result(
+	state: InternalState,
+	event_id: string,
+	accepted: boolean,
+	destination_receipt_id: string?,
+	reason: string?
+): (ResultCode, string?)
+	if type(event_id) ~= "string" or event_id == "" or #event_id > 128 then return "invalid", "invalid event_id" end
+	if destination_receipt_id ~= nil and (type(destination_receipt_id) ~= "string" or #destination_receipt_id > 256) then
+		return "invalid", "destination receipt ID exceeds 256 bytes"
+	end
+	local _, code, message = update_profile_sidecars(state, "outbox_dispatch", function(receipts, outbox, transaction_time)
+		local event = outbox[event_id]
+		if event == nil then return nil, nil, "not_found", "outbox event does not exist", 0 end
+		if event.state == "dispatched" then return nil, nil, "duplicate", "outbox event was already dispatched", 0 end
+		local updated = clone_outbox_entries(outbox)
+		local current = updated[event_id]
+		current.attempts += 1
+		if accepted then
+			current.state = "dispatched"
+			current.dispatched_at = transaction_time
+			current.last_error = nil
+			current.destination_receipt_id = destination_receipt_id
+		else
+			current.state = "pending"
+			current.dispatched_at = nil
+			current.last_error = string.sub(string.gsub(reason or "destination did not confirm acceptance", "[^ -~]", "?"), 1, MAX_QUEUE_ERROR_LENGTH)
+		end
+		return receipts, updated, nil, nil, 1
+	end)
+	return code, message
+end
+
+local function dispatch_outbox(self: Record, dispatcher: OutboxDispatcher, max_items: number?): (number, ResultCode, string?)
+	if type(dispatcher) ~= "function" then return 0, "invalid", "dispatcher must be a function" end
+	local state = private[self]
+	if state == nil then return 0, "invalid", "record does not exist" end
+	local events, read_code, read_message = get_outbox(self, max_items)
+	if read_code ~= "success" then return 0, read_code, read_message end
+	local dispatched = 0
+	local first_error: string? = nil
+	for _, event in events do
+		-- The destination must deduplicate by EventId. Source cleanup can fail after delivery,
+		-- so dispatch is at-least-once and an unknown source result causes the same EventId to retry.
+		local call_ok, accepted, receipt_id = pcall(dispatcher, event)
+		local confirmed = call_ok and accepted == true
+		local reason = if not call_ok then tostring(accepted) elseif accepted ~= true then tostring(receipt_id or "destination did not confirm acceptance") else nil
+		local code, message = set_outbox_result(private[self], event.EventId, confirmed, if type(receipt_id) == "string" then receipt_id else nil, reason)
+		if code == "success" or (confirmed and code == "duplicate") then
+			if confirmed then dispatched += 1 else first_error = first_error or reason end
+		else
+			first_error = first_error or message or "outbox status could not be updated"
+			if code == "fenced" or code == "unknown" or code == "conflict" or code == "corrupt" then
+				return dispatched, code, first_error
+			end
+		end
+	end
+	return dispatched, "success", first_error
+end
+
+
+local function dispatch_outbox_batch(self: Record, dispatcher: OutboxDispatcher, max_items: number?): (number, ResultCode, string?)
+	if type(dispatcher) ~= "function" then return 0, "invalid", "dispatcher must be a function" end
+	local state = private[self]
+	if state == nil then return 0, "invalid", "record does not exist" end
+	local events, read_code, read_message = get_outbox(self, max_items)
+	if read_code ~= "success" then return 0, read_code, read_message end
+	if #events == 0 then return 0, "success", nil end
+
+	local outcomes: { [string]: { accepted: boolean, receipt_id: string?, reason: string? } } = {}
+	local first_error: string? = nil
+	for _, event in events do
+		-- Destination IDs are stable. If the source commit below is ambiguous, the same IDs are retried.
+		local call_ok, accepted, receipt_id = pcall(dispatcher, event)
+		local confirmed = call_ok and accepted == true
+		local reason = if not call_ok then tostring(accepted)
+			elseif accepted ~= true then tostring(receipt_id or "destination did not confirm acceptance")
+			else nil
+		outcomes[event.EventId] = {
+			accepted = confirmed,
+			receipt_id = if type(receipt_id) == "string" then receipt_id else nil,
+			reason = reason,
+		}
+		if not confirmed then first_error = first_error or reason end
+	end
+
+	local count, code, message = update_profile_sidecars(state, "outbox_dispatch_batch", function(receipts, outbox, transaction_time)
+		local updated = clone_outbox_entries(outbox)
+		local changed = 0
+		local newly_dispatched = 0
+		for _, event in events do
+			local current = updated[event.EventId]
+			local outcome = outcomes[event.EventId]
+			if current == nil then
+				return nil, nil, "not_found", "outbox event disappeared before batch result commit", 0
+			end
+			if current.state == "dispatched" then
+				continue
+			end
+			current.attempts += 1
+			changed += 1
+			if outcome.accepted then
+				current.state = "dispatched"
+				current.dispatched_at = transaction_time
+				current.last_error = nil
+				current.destination_receipt_id = outcome.receipt_id
+				newly_dispatched += 1
+			else
+				current.state = "pending"
+				current.dispatched_at = nil
+				current.last_error = string.sub(string.gsub(outcome.reason or "destination acceptance remains unconfirmed", "[^ -~]", "?"), 1, MAX_QUEUE_ERROR_LENGTH)
+			end
+		end
+		if changed == 0 then return nil, nil, "duplicate", "all selected outbox entries were already dispatched", 0 end
+		return receipts, updated, nil, nil, newly_dispatched
+	end)
+	if code == "success" then return count, code, first_error end
+	return 0, code, message or first_error
+end
+
+local function prune_transaction_receipts(self: Record, committed_before_ms: number, max_items: number?): (number, ResultCode, string?)
+	local state = private[self]
+	if state == nil then return 0, "invalid", "record does not exist" end
+	if not math.isfinite(committed_before_ms) then return 0, "invalid", "committed_before_ms must be finite" end
+	local cutoff_unix = committed_before_ms / 1000
+	local limit = max_items or 16
+	if not math.isfinite(limit) or math.floor(limit) ~= limit or limit < 1 or limit > 32 then
+		return 0, "invalid", "max_items must be an integer from 1 to 32"
+	end
+	return update_profile_sidecars(state, "receipt_prune", function(receipts, outbox, _now)
+		local keys: { string } = {}
+		for operation_id, receipt in receipts do
+			if receipt.committed_at < cutoff_unix then table.insert(keys, operation_id) end
+		end
+		table.sort(keys)
+		local remove_count = math.min(limit, #keys)
+		for index = 1, remove_count do receipts[keys[index]] = nil end
+		if remove_count == 0 then return nil, nil, "duplicate", "no receipts are eligible for the requested retention cutoff", 0 end
+		return receipts, outbox, nil, nil, remove_count
+	end)
+end
+
+local function prune_outbox(self: Record, dispatched_before_ms: number, max_items: number?): (number, ResultCode, string?)
+	local state = private[self]
+	if state == nil then return 0, "invalid", "record does not exist" end
+	if not math.isfinite(dispatched_before_ms) then return 0, "invalid", "dispatched_before_ms must be finite" end
+	local cutoff_unix = dispatched_before_ms / 1000
+	local limit = max_items or 16
+	if not math.isfinite(limit) or math.floor(limit) ~= limit or limit < 1 or limit > 32 then
+		return 0, "invalid", "max_items must be an integer from 1 to 32"
+	end
+	return update_profile_sidecars(state, "outbox_prune", function(receipts, outbox, _now)
+		local keys: { string } = {}
+		for event_id, event in outbox do
+			-- Do not delete legacy dispatched rows that lack a verifiable dispatch time.
+			if event.state == "dispatched" and event.dispatched_at ~= nil and event.dispatched_at < cutoff_unix then table.insert(keys, event_id) end
+		end
+		table.sort(keys)
+		local remove_count = math.min(limit, #keys)
+		for index = 1, remove_count do outbox[keys[index]] = nil end
+		if remove_count == 0 then return nil, nil, "duplicate", "no dispatched outbox events are eligible for the requested retention cutoff", 0 end
+		return receipts, outbox, nil, nil, remove_count
+	end)
 end
 
 local function message(self: Record, message_type: string, data: JsonValue?): (ResultCode, string?)
@@ -4844,27 +6553,428 @@ local function message(self: Record, message_type: string, data: JsonValue?): (R
 	return "success", nil
 end
 
-local function enqueue(self: Record, message_type: string, data: JsonValue?): (ResultCode, string?)
+
+local record_impl = {}
+
+function record_impl.get_envelope_sidecar_stats(
+	backend: Backend,
+	operation_deadline: number?,
+	kind: "inbox" | "outbox",
+	state: InternalState?
+): ({ [string]: unknown }, ResultCode, string?)
+	local valid_identity, identity_message = validate_store_identity(backend.name, backend.scope, backend.key)
+	if not valid_identity then return {}, "invalid", identity_message end
+	local deadline, deadline_error = resolve_operation_deadline(operation_deadline)
+	if deadline == nil then return {}, "invalid", deadline_error end
+	local raw, _info, read_code, read_message = backend_get(backend, false, deadline, state)
+	if read_code ~= nil then return {}, read_code, read_message end
+	if raw == nil then return {}, "not_found", "record does not exist" end
+	local envelope, parse_error, current_format = parse_envelope(raw)
+	if not current_format then
+		local code = if parse_error == "legacy payload" then "legacy"
+			elseif parse_error == "future implementation version" then "future_schema" else "corrupt"
+		return {}, code, parse_error or "durable envelope is invalid"
+	end
+	if envelope == nil then return {}, "corrupt", parse_error or "durable envelope is missing" end
+	if state ~= nil then
+		if state.state ~= "active" or state.token == nil then
+			return {}, "fenced", "record is not actively owned"
+		end
+		if not matches_session(envelope, state.token, state.generation)
+			or envelope.session == nil
+			or envelope.session.lease_until <= session_now_unix(state.backend.mock)
+		then
+			return {}, "fenced", "durable profile session fence is no longer valid"
+		end
+	end
+	local observed_at = session_now_unix(backend.mock)
+	local stats: { [string]: unknown } = {
+		observed_at = observed_at,
+		consistency = "single_envelope_read",
+		completeness = "complete_for_observed_envelope",
+		exactness = "exact_for_observed_envelope",
+		revision = envelope.revision,
+		generation = envelope.fencing_generation,
+	}
+	if kind == "inbox" then
+		local receipts = envelope.inbox_receipts or {}
+		if type(receipts) ~= "table" then return {}, "corrupt", "inbox receipt sidecar is malformed" end
+		local count = 0
+		local oldest_committed_at: number? = nil
+		local newest_committed_at: number? = nil
+		for operation_id, receipt in receipts do
+			if type(operation_id) ~= "string" or type(receipt) ~= "table" or not math.isfinite(receipt.committed_at) then
+				return {}, "corrupt", "inbox receipt sidecar contains a malformed row"
+			end
+			count += 1
+			oldest_committed_at = if oldest_committed_at == nil
+				then receipt.committed_at else math.min(oldest_committed_at, receipt.committed_at)
+			newest_committed_at = if newest_committed_at == nil
+				then receipt.committed_at else math.max(newest_committed_at, receipt.committed_at)
+		end
+		stats.receipt_count = count
+		stats.oldest_receipt_committed_at = oldest_committed_at
+		stats.newest_receipt_committed_at = newest_committed_at
+		stats.oldest_receipt_age_seconds = if oldest_committed_at == nil
+			then 0 else math.max(0, observed_at - oldest_committed_at)
+		return stats, "success", nil
+	end
+	local outbox = envelope.outbox or {}
+	if type(outbox) ~= "table" then return {}, "corrupt", "outbox sidecar is malformed" end
+	local pending, dispatched = 0, 0
+	local oldest_pending_created_at: number? = nil
+	local total_attempts, maximum_attempts = 0, 0
+	for event_id, event in outbox do
+		if type(event_id) ~= "string" or type(event) ~= "table"
+			or not math.isfinite(event.created_at) or not math.isfinite(event.attempts)
+		then
+			return {}, "corrupt", "outbox sidecar contains a malformed row"
+		end
+		if event.state == "pending" then
+			pending += 1
+			oldest_pending_created_at = if oldest_pending_created_at == nil
+				then event.created_at else math.min(oldest_pending_created_at, event.created_at)
+		elseif event.state == "dispatched" then
+			dispatched += 1
+		else
+			return {}, "corrupt", "outbox sidecar contains an unsupported state"
+		end
+		total_attempts += event.attempts
+		maximum_attempts = math.max(maximum_attempts, event.attempts)
+	end
+	stats.pending_count = pending
+	stats.dispatched_count = dispatched
+	stats.total_count = pending + dispatched
+	stats.oldest_pending_created_at = oldest_pending_created_at
+	stats.oldest_pending_age_seconds = if oldest_pending_created_at == nil
+		then 0 else math.max(0, observed_at - oldest_pending_created_at)
+	stats.total_dispatch_attempts = total_attempts
+	stats.max_dispatch_attempts = maximum_attempts
+	return stats, "success", nil
+end
+
+function record_impl.get_inbox_stats(self: Record): ({ [string]: unknown }, ResultCode, string?)
 	local state = private[self]
-	if state == nil then
-		return "invalid", "record does not exist"
+	if state == nil then return {}, "invalid", "record does not exist" end
+	return record_impl.get_envelope_sidecar_stats(state.backend, state.options.operation_deadline, "inbox", state)
+end
+
+function record_impl.get_outbox_stats(self: Record): ({ [string]: unknown }, ResultCode, string?)
+	local state = private[self]
+	if state == nil then return {}, "invalid", "record does not exist" end
+	return record_impl.get_envelope_sidecar_stats(state.backend, state.options.operation_deadline, "outbox", state)
+end
+
+function RecordStore.get_inbox_stats_async(name: string, scope: string, key: string, operation_deadline: number?): ({ [string]: unknown }, ResultCode, string?)
+	local valid_identity, identity_message = validate_store_identity(name, scope, key)
+	if not valid_identity then return {}, "invalid", identity_message end
+	return record_impl.get_envelope_sidecar_stats(make_backend(name, scope, key, false), operation_deadline, "inbox", nil)
+end
+
+function RecordStore.get_outbox_stats_async(name: string, scope: string, key: string, operation_deadline: number?): ({ [string]: unknown }, ResultCode, string?)
+	local valid_identity, identity_message = validate_store_identity(name, scope, key)
+	if not valid_identity then return {}, "invalid", identity_message end
+	return record_impl.get_envelope_sidecar_stats(make_backend(name, scope, key, false), operation_deadline, "outbox", nil)
+end
+
+
+function record_impl.bound_mailbox_for_state(state: InternalState): (any?, ResultCode?, string?)
+	local mailbox = state.mailbox_v2
+	if mailbox == nil then return nil, nil, nil end
+	if type(mailbox) ~= "table"
+		or type((mailbox :: any).GetOwner) ~= "function"
+		or type((mailbox :: any).EnqueueAsync) ~= "function"
+	then
+		return nil, "fenced", "bound V2 mailbox no longer exposes its required API"
+	end
+	local owner_ok, owner = pcall(function() return (mailbox :: any):GetOwner() end)
+	if not owner_ok or type(owner) ~= "table" then
+		return nil, "fenced", "bound V2 mailbox owner could not be verified"
+	end
+	local owner_fields = owner :: { [string]: unknown }
+	if owner_fields.store_name ~= state.name or owner_fields.scope ~= state.scope or owner_fields.profile_key ~= state.key then
+		return nil, "fenced", "bound V2 mailbox identity changed after binding"
+	end
+	if #state.user_ids > 0 and owner_fields.user_id == nil then
+		return nil, "fenced", "bound mailbox lost the UserId required for this Record"
+	end
+	if owner_fields.user_id ~= nil then
+		if type(owner_fields.user_id) ~= "number" or not math.isfinite(owner_fields.user_id)
+			or math.floor(owner_fields.user_id) ~= owner_fields.user_id
+		then
+			return nil, "fenced", "bound V2 mailbox UserId is not a finite integer"
+		end
+		local found = false
+		for _, user_id in ipairs(state.user_ids) do
+			if user_id == owner_fields.user_id then found = true; break end
+		end
+		if not found then return nil, "fenced", "bound V2 mailbox UserId no longer matches persisted Record UserIds" end
+	end
+	if type((mailbox :: any).GetActiveRecord) == "function" then
+		local active_ok, active_record = pcall(function() return (mailbox :: any):GetActiveRecord() end)
+		if not active_ok then return nil, "fenced", "bound mailbox active Record could not be verified" end
+		if active_record ~= nil and active_record ~= state.public_record then
+			return nil, "conflict", "bound V2 mailbox is attached to a different Record instance"
+		end
+	end
+	return mailbox, nil, nil
+end
+
+function record_impl.map_v2_result_code(code: unknown): ResultCode
+	if code == "success" then return "success" end
+	if code == "accepted" then return "enqueued" end
+	if code == "processed" or code == "dead_lettered" then return "processed" end
+	if code == "duplicate" then return "duplicate" end
+	if code == "capacity" then return "capacity" end
+	if code == "empty" then return "empty" end
+	if code == "busy" or code == "preparing" then return "busy" end
+	if code == "closing" then return "closing" end
+	if code == "fenced" then return "fenced" end
+	if code == "conflict" then return "conflict" end
+	if code == "corrupt" then return "corrupt" end
+	if code == "invalid" then return "invalid" end
+	if code == "not_found" then return "not_found" end
+	if code == "retryable" then return "budget" end
+	if code == "discarded" then return "success" end
+	return "unknown"
+end
+
+function record_impl.v2_result_message(result: any, fallback: string): string
+	if type(result) == "table" and type(result.error) == "string" and result.error ~= "" then
+		return result.error
+	end
+	if type(result) == "table" and type(result.message) == "table" and type(result.message.LastError) == "string" then
+		return result.message.LastError
+	end
+	return fallback
+end
+
+function record_impl.bind_mailbox_v2(self: Record, mailbox: unknown): (ResultCode, string?)
+	local state = private[self]
+	if state == nil then return "invalid", "record does not exist" end
+	if state.state ~= "active" then return "fenced", "V2 mailbox binding requires an active Record" end
+	if state.takeover_requested then return "closing", "session takeover has been requested" end
+	if state.mailbox_v2 ~= nil and state.mailbox_v2 ~= mailbox then
+		return "conflict", "this Record is already bound to a different V2 mailbox"
+	end
+	if type(mailbox) ~= "table" or type((mailbox :: any).GetOwner) ~= "function"
+		or type((mailbox :: any).EnqueueAsync) ~= "function"
+	then
+		return "invalid", "mailbox must expose GetOwner and EnqueueAsync"
+	end
+	local ok, owner = pcall(function() return (mailbox :: any):GetOwner() end)
+	if not ok or type(owner) ~= "table" then return "invalid", "mailbox owner identity could not be read" end
+	if type((mailbox :: any).GetActiveRecord) ~= "function" then
+		return "invalid", "V2 mailbox must expose GetActiveRecord and bind processing to this Record"
+	end
+	local active_ok, active_record = pcall(function() return (mailbox :: any):GetActiveRecord() end)
+	if not active_ok then return "invalid", "mailbox active Record binding could not be inspected" end
+	if active_record ~= self then
+		return "conflict", "V2 mailbox must be bound to this exact active Record instance"
+	end
+	local owner_fields = owner :: { [string]: unknown }
+	if owner_fields.store_name ~= state.name or owner_fields.scope ~= state.scope or owner_fields.profile_key ~= state.key then
+		return "conflict", "mailbox owner does not match this Record identity"
+	end
+	if #state.user_ids > 0 and owner_fields.user_id == nil then
+		return "invalid", "mailbox owner must include a UserId for a UserId-associated Record"
+	end
+	if owner_fields.user_id ~= nil then
+		if type(owner_fields.user_id) ~= "number" or not math.isfinite(owner_fields.user_id)
+			or math.floor(owner_fields.user_id) ~= owner_fields.user_id
+		then
+			return "invalid", "mailbox owner UserId must be a finite integer"
+		end
+		local found = false
+		for _, user_id in ipairs(state.user_ids) do if user_id == owner_fields.user_id then found = true; break end end
+		if not found then return "fenced", "mailbox UserId does not match the Record's persisted UserIds" end
+	end
+	state.mailbox_v2 = mailbox
+	return "success", nil
+end
+
+function record_impl.enqueue(self: Record, message_type: string, data: JsonValue?, enqueue_options: { [string]: unknown }?): (ResultCode, string?)
+	local state = private[self]
+	if state == nil then return "invalid", "record does not exist" end
+	if state.mailbox_v2_binding then return "busy", "V2 mailbox binding is checking the legacy queue" end
+	if state.state ~= "active" then return "fenced", "record is not actively owned" end
+	if state.takeover_requested then return "closing", "session takeover has been requested" end
+	if state.mailbox_v2 ~= nil then
+		local mailbox, bound_code, bound_message = record_impl.bound_mailbox_for_state(state)
+		if mailbox == nil then return bound_code or "fenced", bound_message end
+		local call_ok, result = pcall(function()
+			return mailbox:EnqueueAsync(message_type, data, enqueue_options)
+		end)
+		if not call_ok then
+			local error_message = tostring(result)
+			observe(state, "v2_enqueue", "unknown", error_message)
+			return "unknown", error_message
+		end
+		if type(result) ~= "table" then return "unknown", "V2 mailbox returned no structured result" end
+		if result.code == "accepted" then observe(state, "v2_enqueue", "success", message_type); return "enqueued", nil end
+		if result.code == "duplicate" then observe(state, "v2_enqueue", "duplicate", message_type); return "duplicate", nil end
+		if result.code == "capacity" then return "capacity", record_impl.v2_result_message(result, "V2 mailbox capacity was reached") end
+		if result.code == "conflict" then return "conflict", record_impl.v2_result_message(result, "V2 idempotency conflict") end
+		if result.code == "invalid" then return "invalid", record_impl.v2_result_message(result, "V2 enqueue options are invalid") end
+		if result.code == "corrupt" then return "corrupt", record_impl.v2_result_message(result, "V2 mailbox record is corrupt") end
+		if result.code == "not_found" then return "not_found", record_impl.v2_result_message(result, "V2 message was not found") end
+		if result.code == "fenced" then return "fenced", record_impl.v2_result_message(result, "V2 operation was fenced") end
+		if result.code == "busy" or result.code == "preparing" or result.code == "retry_scheduled" then
+			return "busy", record_impl.v2_result_message(result, "V2 mailbox operation is still in progress")
+		end
+		if result.code == "retryable" then return "budget", record_impl.v2_result_message(result, "V2 mailbox request was throttled") end
+		if result.code == "unknown" then return "unknown", record_impl.v2_result_message(result, "V2 mailbox outcome is unknown") end
+		return "unknown", "unmapped V2 mailbox result: " .. tostring(result.code)
+	end
+	if enqueue_options ~= nil then
+		return "invalid", "enqueue_options require an explicitly bound V2 mailbox"
 	end
 	return enqueue_internal(state, message_type, data)
 end
 
-local function process_queue(self: Record, max_messages: number?): (ResultCode, string?)
+function record_impl.process_queue(self: Record, max_messages: number?): (ResultCode, string?)
 	local state = private[self]
-	if state == nil then
-		return "invalid", "record does not exist"
+	if state == nil then return "invalid", "record does not exist" end
+	if state.mailbox_v2_binding then return "busy", "V2 mailbox binding is checking the legacy queue" end
+	if state.mailbox_v2 == nil then return process_queue_internal(state, max_messages or 1) end
+	local mailbox, bound_code, bound_message = record_impl.bound_mailbox_for_state(state)
+	if mailbox == nil then return bound_code or "fenced", bound_message end
+	if state.state ~= "active" then return "fenced", "record is not actively owned" end
+	if state.takeover_requested then return "closing", "session takeover has been requested" end
+	if state.queue_busy or state.busy then return "busy", "record already has a durable operation in flight" end
+	local handler = state.options.on_queue_message
+	if handler == nil then return "invalid", "on_queue_message is not configured" end
+	local limit = max_messages or 1
+	if type(limit) ~= "number" or not math.isfinite(limit) or limit < 1 or math.floor(limit) ~= limit then
+		return "invalid", "max_messages must be a positive integer"
 	end
-	return process_queue_internal(state, max_messages or 1)
+	limit = math.min(limit, state.options.queue_max_messages or DEFAULT_QUEUE_MAX_MESSAGES)
+	state.queue_busy = true
+	local call_ok, result_code, result_message = pcall(function()
+		local processed = 0
+		for _ = 1, limit do
+			local handler_failure_code: ResultCode? = nil
+			local handler_failure_message: string? = nil
+			local function dispatch_v2(payload: unknown, message_value: unknown): (boolean, string?)
+				if type(message_value) ~= "table" then
+					handler_failure_code = "corrupt"
+					handler_failure_message = "V2 mailbox returned a malformed message snapshot"
+					return false, handler_failure_message
+				end
+				local message = message_value :: { [string]: unknown }
+				if type(message.Type) ~= "string" or type(message.Id) ~= "string"
+					or type(message.Attempts) ~= "number" or type(message.CreatedAt) ~= "number"
+				then
+					handler_failure_code = "corrupt"
+					handler_failure_message = "V2 mailbox message omitted required handler fields"
+					return false, handler_failure_message
+				end
+				local handler_completed = false
+				local handler_handled = false
+				local callback_error: string? = nil
+				local callback_message: string? = nil
+				local handler_thread = coroutine.create(function()
+					local callback_ok, callback_result, callback_result_message = pcall(
+						handler,
+						message.Type :: string,
+						copy_value(payload :: JsonValue?),
+						message.Attempts :: number,
+						message.Id :: string,
+						(if type(message.SenderJobId) == "string" then message.SenderJobId else ""),
+						message.CreatedAt :: number
+					)
+					if not callback_ok then
+						callback_error = tostring(callback_result)
+						return
+					end
+					handler_completed = true
+					handler_handled = callback_result == true
+					if type(callback_result_message) == "string" then callback_message = callback_result_message end
+				end)
+				local resumed, resume_error = coroutine.resume(handler_thread)
+				if coroutine.status(handler_thread) ~= "dead" then
+					coroutine.close(handler_thread)
+					handler_failure_code = "invalid"
+					handler_failure_message = "queue handler must not yield"
+					return false, handler_failure_message
+				end
+				if not resumed or callback_error ~= nil then
+					handler_failure_code = "invalid"
+					handler_failure_message = "queue handler threw: " .. (callback_error or tostring(resume_error or "execution failed"))
+					return false, handler_failure_message
+				end
+				if not handler_completed or not handler_handled then
+					handler_failure_code = "unknown"
+					handler_failure_message = callback_message or "queue handler rejected the message"
+					return false, handler_failure_message
+				end
+				return true, nil
+			end
+			local mailbox_call_ok, result = pcall(function()
+				return mailbox:ProcessNextAsync(dispatch_v2)
+			end)
+			if not mailbox_call_ok then return "unknown" :: ResultCode, tostring(result) end
+			if type(result) ~= "table" or type(result.code) ~= "string" then
+				return "unknown" :: ResultCode, "V2 mailbox returned no structured processing result"
+			end
+			if result.code == "empty" then break end
+			if result.code == "processed" or result.code == "duplicate" or result.code == "dead_lettered" then
+				processed += 1
+				continue
+			end
+			if result.code == "retry_scheduled" then
+				return handler_failure_code or "unknown", handler_failure_message or record_impl.v2_result_message(result, "V2 queue handler failed and the message was rescheduled")
+			end
+			return record_impl.map_v2_result_code(result.code), record_impl.v2_result_message(result, "V2 queue processing returned " .. result.code)
+		end
+		if processed == 0 then return "empty" :: ResultCode, nil end
+		return "processed" :: ResultCode, tostring(processed)
+	end)
+	state.queue_busy = false
+	if not call_ok then return "unknown", tostring(result_code) end
+	return result_code :: ResultCode, result_message
 end
 
-local function get_queue(self: Record): ({ QueueMessage }, ResultCode, string?)
+function record_impl.get_queue(self: Record): ({ QueueMessage }, ResultCode, string?)
 	local state = private[self]
 	if state == nil then
 		return {}, "invalid", "record does not exist"
 	end
+	if state.mailbox_v2 ~= nil then
+		local mailbox, bound_code, bound_message = record_impl.bound_mailbox_for_state(state)
+		if mailbox == nil then return {}, bound_code or "fenced", bound_message end
+		local call_ok, rows, result = pcall(function()
+			return mailbox:GetQueueAsync()
+		end)
+		if not call_ok then return {}, "unknown", tostring(rows) end
+		if type(rows) ~= "table" or type(result) ~= "table" or type(result.code) ~= "string" then
+			return {}, "unknown", "V2 mailbox returned no structured queue result"
+		end
+		if result.code ~= "success" then
+			return {}, record_impl.map_v2_result_code(result.code), record_impl.v2_result_message(result, "V2 queue read failed")
+		end
+		local projected: { QueueMessage } = {}
+		for _, row_value in ipairs(rows) do
+			if type(row_value) ~= "table" or type(row_value.Id) ~= "string" or type(row_value.Type) ~= "string"
+				or type(row_value.Attempts) ~= "number" or type(row_value.TotalAttempts) ~= "number"
+				or type(row_value.ReplayCount) ~= "number" or type(row_value.CreatedAt) ~= "number"
+			then
+				return {}, "corrupt", "V2 queue contained a malformed public message snapshot"
+			end
+			projected[#projected + 1] = {
+				Id = row_value.Id,
+				Type = row_value.Type,
+				Data = copy_value(row_value.Data :: JsonValue?),
+				Attempts = row_value.Attempts,
+				TotalAttempts = row_value.TotalAttempts,
+				ReplayCount = row_value.ReplayCount,
+				SenderJobId = if type(row_value.SenderJobId) == "string" then row_value.SenderJobId else "",
+				CreatedAt = row_value.CreatedAt,
+			}
+		end
+		return projected, "success", nil
+	end
+
 	if state.options.durable_queue_enabled == false then
 		return {}, "success", nil
 	end
@@ -4904,11 +7014,101 @@ local function get_queue(self: Record): ({ QueueMessage }, ResultCode, string?)
 	return result, "success", nil
 end
 
-local function get_dead_letters(self: Record): ({ DeadLetterMessage }, ResultCode, string?)
+
+function record_impl.bind_mailbox_v2_async(self: Record, mailbox: unknown): (ResultCode, string?)
+	local state = private[self]
+	if state == nil then return "invalid", "record does not exist" end
+	if state.state ~= "active" then return "fenced", "V2 mailbox binding requires an active Record" end
+	if state.takeover_requested then return "closing", "session takeover has been requested" end
+	if state.mailbox_v2 ~= nil then return record_impl.bind_mailbox_v2(self, mailbox) end
+	if type(mailbox) ~= "table"
+		or type((mailbox :: any).GetOwner) ~= "function"
+		or type((mailbox :: any).GetActiveRecord) ~= "function"
+		or type((mailbox :: any).EnqueueAsync) ~= "function"
+	then
+		return "invalid", "mailbox must expose GetOwner, GetActiveRecord and EnqueueAsync"
+	end
+	local active_ok, active_record = pcall(function() return (mailbox :: any):GetActiveRecord() end)
+	if not active_ok then return "invalid", "mailbox active Record binding could not be inspected" end
+	if active_record ~= self then
+		return "conflict", "V2 mailbox must be bound to this exact active Record instance"
+	end
+	if state.mailbox_v2_binding or state.queue_busy or state.busy then
+		return "busy", "Record has another operation in flight; V2 mailbox binding was not attempted"
+	end
+	if state.options.durable_queue_enabled == false then
+		return "invalid", "safe V2 binding requires the legacy queue to be enabled so pending messages can be checked"
+	end
+	state.mailbox_v2_binding = true
+	state.queue_busy = true
+	local call_ok, legacy_queue, queue_code, queue_message = pcall(function()
+		return record_impl.get_queue(self)
+	end)
+	state.queue_busy = false
+	state.mailbox_v2_binding = false
+	if not call_ok then return "unknown", "could not inspect the legacy queue before V2 binding: " .. tostring(legacy_queue) end
+	if queue_code ~= "success" then
+		return queue_code or "unknown", queue_message or "could not verify the legacy queue before V2 binding"
+	end
+	if #legacy_queue > 0 then
+		return "busy", "legacy queue contains pending messages; drain it before binding the V2 mailbox"
+	end
+	return record_impl.bind_mailbox_v2(self, mailbox)
+end
+
+function record_impl.get_dead_letters(self: Record): ({ DeadLetterMessage }, ResultCode, string?)
 	local state = private[self]
 	if state == nil then
 		return {}, "invalid", "record does not exist"
 	end
+	if state.mailbox_v2_binding then return {}, "busy", "V2 mailbox binding is checking the legacy queue" end
+	if state.mailbox_v2 ~= nil then
+		local mailbox, bound_code, bound_message = record_impl.bound_mailbox_for_state(state)
+		if mailbox == nil then return {}, bound_code or "fenced", bound_message end
+		local result_rows: { DeadLetterMessage } = {}
+		local cursor: string? = nil
+		local page_count = 0
+		while page_count < 10 do
+			local call_ok, page, next_cursor, result = pcall(function()
+				return mailbox:GetDeadLettersAsync(cursor, 100)
+			end)
+			if not call_ok then return {}, "unknown", tostring(page) end
+			if type(page) ~= "table" or type(result) ~= "table" or type(result.code) ~= "string" then
+				return {}, "unknown", "V2 mailbox returned no structured dead-letter result"
+			end
+			if result.code ~= "success" then
+				return {}, record_impl.map_v2_result_code(result.code), record_impl.v2_result_message(result, "V2 dead-letter read failed")
+			end
+			for _, row_value in ipairs(page) do
+				if type(row_value) ~= "table" or type(row_value.Id) ~= "string" or type(row_value.Type) ~= "string"
+					or type(row_value.Attempts) ~= "number" or type(row_value.TotalAttempts) ~= "number"
+					or type(row_value.ReplayCount) ~= "number" or type(row_value.CreatedAt) ~= "number"
+				then
+					return {}, "corrupt", "V2 dead-letter list contained a malformed public message snapshot"
+				end
+				result_rows[#result_rows + 1] = {
+					Id = row_value.Id,
+					Type = row_value.Type,
+					Data = copy_value(row_value.Data :: JsonValue?),
+					Attempts = row_value.Attempts,
+					TotalAttempts = row_value.TotalAttempts,
+					ReplayCount = row_value.ReplayCount,
+					SenderJobId = if type(row_value.SenderJobId) == "string" then row_value.SenderJobId else "",
+					CreatedAt = row_value.CreatedAt,
+					DeadLetteredAt = if type(row_value.DeadLetteredAt) == "number" then row_value.DeadLetteredAt else row_value.CreatedAt,
+					LastError = if type(row_value.LastError) == "string" then row_value.LastError else "",
+					LockToken = nil,
+					LockedUntil = nil,
+				}
+			end
+			page_count += 1
+			if next_cursor == nil then return result_rows, "success", nil end
+			if type(next_cursor) ~= "string" then return {}, "corrupt", "V2 dead-letter cursor was malformed" end
+			cursor = next_cursor
+		end
+		return {}, "capacity", "V2 dead-letter projection exceeded 1000 entries; use the V2 cursor API for bounded pagination"
+	end
+
 	if state.options.durable_queue_enabled == false then
 		return {}, "success", nil
 	end
@@ -4948,10 +7148,16 @@ local function get_dead_letters(self: Record): ({ DeadLetterMessage }, ResultCod
 	return result, "success", nil
 end
 
-local function claim_dead_letter(self: Record, message_id: string): (DeadLetterMessage?, ResultCode, string?)
+function record_impl.claim_dead_letter(self: Record, message_id: string): (DeadLetterMessage?, ResultCode, string?)
 	local state = private[self]
 	if state == nil then
 		return nil, "invalid", "record does not exist"
+	end
+	if state.mailbox_v2_binding then return nil, "busy", "V2 mailbox binding is checking the legacy queue" end
+	if state.mailbox_v2 ~= nil then
+		local mailbox, bound_code, bound_message = record_impl.bound_mailbox_for_state(state)
+		if mailbox == nil then return nil, bound_code or "fenced", bound_message end
+		return nil, "invalid", "V2 dead-letter claims use generation-aware V2 APIs; use MailboxV2 directly"
 	end
 	if type(message_id) ~= "string" or message_id == "" or #message_id > 100 then
 		return nil, "invalid", "message_id must be a non-empty string of at most 100 characters"
@@ -5052,10 +7258,16 @@ local function claim_dead_letter(self: Record, message_id: string): (DeadLetterM
 	return nil, "conflict", "dead-letter claim expired or could not be verified"
 end
 
-local function replay_dead_letter(self: Record, message_id: string, lock_token: string): (ResultCode, string?)
+function record_impl.replay_dead_letter(self: Record, message_id: string, lock_token: string): (ResultCode, string?)
 	local state = private[self]
 	if state == nil then
 		return "invalid", "record does not exist"
+	end
+	if state.mailbox_v2_binding then return "busy", "V2 mailbox binding is checking the legacy queue" end
+	if state.mailbox_v2 ~= nil then
+		local mailbox, bound_code, bound_message = record_impl.bound_mailbox_for_state(state)
+		if mailbox == nil then return bound_code or "fenced", bound_message end
+		return "invalid", "V2 replay requires a stable operation_id; use MailboxV2.ReplayDeadLetterAsync"
 	end
 	if type(message_id) ~= "string" or message_id == "" or #message_id > 100 or type(lock_token) ~= "string" or lock_token == "" then
 		return "invalid", "message_id and lock_token must be non-empty strings"
@@ -5156,10 +7368,16 @@ local function replay_dead_letter(self: Record, message_id: string, lock_token: 
 	return "conflict", "dead-letter replay could not be verified"
 end
 
-local function discard_dead_letter(self: Record, message_id: string, lock_token: string): (ResultCode, string?)
+function record_impl.discard_dead_letter(self: Record, message_id: string, lock_token: string): (ResultCode, string?)
 	local state = private[self]
 	if state == nil then
 		return "invalid", "record does not exist"
+	end
+	if state.mailbox_v2_binding then return "busy", "V2 mailbox binding is checking the legacy queue" end
+	if state.mailbox_v2 ~= nil then
+		local mailbox, bound_code, bound_message = record_impl.bound_mailbox_for_state(state)
+		if mailbox == nil then return bound_code or "fenced", bound_message end
+		return "invalid", "V2 discard requires expected_replay_count; use MailboxV2.DiscardDeadLetterAsync"
 	end
 	if type(message_id) ~= "string" or message_id == "" or #message_id > 100 or type(lock_token) ~= "string" or lock_token == "" then
 		return "invalid", "message_id and lock_token must be non-empty strings"
@@ -5234,20 +7452,48 @@ local function discard_dead_letter(self: Record, message_id: string, lock_token:
 	return "success", nil
 end
 
-local function close_record(self: Record): (ResultCode, string?)
+function record_impl.close_record(self: Record): (ResultCode, string?)
 	local state = private[self]
 	if state == nil then
 		return "invalid", "record does not exist"
 	end
 	local result, message = close_internal(state, false)
+	record_impl.evaluate_durability_risk(self, state)
 	sync_public(self)
 	return result, message
 end
 
-local function delete_record(self: Record): (ResultCode, string?)
+function record_impl.delete_record(self: Record, erase_options: EraseOptions?): (ResultCode, string?)
 	local state = private[self]
 	if state == nil then
 		return "invalid", "record does not exist"
+	end
+	if erase_options ~= nil then
+		if not math.isfinite(erase_options.expected_generation) or math.floor(erase_options.expected_generation) ~= erase_options.expected_generation
+			or not math.isfinite(erase_options.user_id) or erase_options.user_id < 1 or math.floor(erase_options.user_id) ~= erase_options.user_id
+			or type(erase_options.erasure_id) ~= "string" or erase_options.erasure_id == "" or #erase_options.erasure_id > 96
+			or type(erase_options.store_name) ~= "string" or erase_options.store_name == "" or #erase_options.store_name > 50
+			or type(erase_options.scope) ~= "string" or #erase_options.scope > 50
+			or type(erase_options.profile_key) ~= "string" or erase_options.profile_key == "" or #erase_options.profile_key > 50
+			or (erase_options.expected_revision ~= nil and (not math.isfinite(erase_options.expected_revision)
+				or math.floor(erase_options.expected_revision) ~= erase_options.expected_revision or erase_options.expected_revision < 0))
+		then
+			return "invalid", "erasure needs bounded target identity, stable erasure ID, UserId and observed generation"
+		end
+		if state.name ~= erase_options.store_name or state.scope ~= erase_options.scope or state.key ~= erase_options.profile_key then
+			return "conflict", "erasure target does not match the open Record's exact DataStore identity"
+		end
+		if state.generation ~= erase_options.expected_generation
+			or (erase_options.expected_revision ~= nil and state.revision ~= erase_options.expected_revision)
+		then
+			return "conflict", "Record generation or expected revision changed after the erasure inventory snapshot"
+		end
+		if #state.user_ids > 1 then
+			return "conflict", "shared/multi-user Records require an application-specific per-user redaction callback"
+		end
+		if #state.user_ids == 1 and state.user_ids[1] ~= erase_options.user_id then
+			return "conflict", "Record UserIds do not match the erasure subject"
+		end
 	end
 	if state.retired then
 		return "invalid", "record has been retired"
@@ -5275,6 +7521,8 @@ local function delete_record(self: Record): (ResultCode, string?)
 	local generation = state.generation
 	local next_generation = generation + 1
 	local target_revision = state.revision + 1
+	local target_user_ids = if erase_options ~= nil then {} else clone_user_ids(state.user_ids)
+	local target_metadata = if erase_options ~= nil then {} else clone_metadata(state.metadata)
 	local write_id = HttpService:GenerateGUID(false)
 	state.current_operation_id = write_id
 	local deadline = now_local() + (state.options.operation_deadline or DEFAULT_OPERATION_DEADLINE)
@@ -5310,7 +7558,15 @@ local function delete_record(self: Record): (ResultCode, string?)
 				and envelope.revision == target_revision
 			then
 				decision = "success"
-				return envelope, envelope.user_ids, (if info ~= nil then info.RawMetadata else make_backend_metadata(state.metadata, envelope))
+				return envelope, target_user_ids, make_backend_metadata(target_metadata, envelope)
+			end
+			if erase_options ~= nil and (
+				envelope.fencing_generation ~= erase_options.expected_generation
+				or (erase_options.expected_revision ~= nil and envelope.revision ~= erase_options.expected_revision)
+			) then
+				decision = "conflict"
+				decision_message = "durable profile generation/revision changed after the erasure inventory snapshot"
+				return nil, nil, nil
 			end
 			if envelope.schema_version > state.options.schema_version then
 				decision = "future_schema"
@@ -5327,6 +7583,13 @@ local function delete_record(self: Record): (ResultCode, string?)
 				decision_message = "durable session lease has expired"
 				return nil, nil, nil
 			end
+			for _, event in envelope.outbox or {} do
+				if event.state == "pending" then
+					decision = "conflict"
+					decision_message = "record cannot be deleted while a durable outbox event is pending"
+					return nil, nil, nil
+				end
+			end
 			if envelope.revision ~= state.revision then
 				decision = "conflict"
 				decision_message = "durable revision changed unexpectedly"
@@ -5340,12 +7603,14 @@ local function delete_record(self: Record): (ResultCode, string?)
 				created_at = envelope.created_at,
 				updated_at = transform_time,
 				data = nil,
-				user_ids = clone_user_ids(state.user_ids),
+				user_ids = clone_user_ids(target_user_ids),
 				tombstone = {
 					deleted_at = transform_time,
 					generation = next_generation,
 				},
 				session = nil,
+				inbox_receipts = if erase_options ~= nil then {} else (envelope.inbox_receipts or {}),
+				outbox = if erase_options ~= nil then {} else (envelope.outbox or {}),
 				write_id = write_id,
 			}
 			local valid_envelope, envelope_error = validate_envelope(next_envelope)
@@ -5354,7 +7619,7 @@ local function delete_record(self: Record): (ResultCode, string?)
 				decision_message = envelope_error
 				return nil, nil, nil
 			end
-			return next_envelope, state.user_ids, make_backend_metadata(state.metadata, next_envelope)
+			return next_envelope, target_user_ids, make_backend_metadata(target_metadata, next_envelope)
 		end, deadline, state)
 		if result_code ~= nil then
 			decision = result_code
@@ -5401,7 +7666,7 @@ local function delete_record(self: Record): (ResultCode, string?)
 		return "unknown", last_error or "delete outcome is unresolved"
 	end
 	state.last_saved = make_durable_snapshot(confirmed, confirmed_info, "delete")
-	state.saved_change_sequence = state.change_sequence
+	mark_saved(state, state.change_sequence)
 	state.data = nil
 	state.public_data_source = nil
 	state.token = nil
@@ -5420,8 +7685,47 @@ local function delete_record(self: Record): (ResultCode, string?)
 	state.queue_hint = false
 	disconnect_message_subscription(state)
 	observe(state, "delete", "deleted", nil)
+	if state.durability_risk_active then
+		state.durability_risk_active = false
+		state.durability_risk_reason = nil
+		record_impl.dispatch_durability_risk(state, "resolved", "record_deleted")
+	end
 	sync_public(self)
 	return "deleted", nil
+end
+
+function record_impl.erase_record(self: Record, options: EraseOptions): (ResultCode, string?)
+	local state = private[self]
+	if state == nil then return "invalid", "record does not exist" end
+	if type(options) ~= "table"
+		or not math.isfinite(options.expected_generation)
+		or math.floor(options.expected_generation) ~= options.expected_generation
+		or not math.isfinite(options.user_id)
+		or options.user_id < 1 or math.floor(options.user_id) ~= options.user_id
+		or type(options.erasure_id) ~= "string" or options.erasure_id == "" or #options.erasure_id > 96
+	then
+		return "invalid", "EraseAsync requires a stable erasure ID, UserId and observed generation"
+	end
+	if state.name ~= options.store_name or state.scope ~= options.scope or state.key ~= options.profile_key then
+		return "conflict", "erasure target does not match the Record's exact DataStore identity"
+	end
+	if state.state == "tombstoned" and state.generation == options.expected_generation + 1 then
+		-- Idempotent reconciliation when the tombstone committed but the caller lost the response.
+		return "deleted", nil
+	end
+	if state.generation ~= options.expected_generation then
+		return "conflict", "Record generation changed after the erasure inventory snapshot"
+	end
+	local code, message = record_impl.delete_record(self, options)
+	if code == "deleted" and state.state == "tombstoned"
+		and state.generation == options.expected_generation + 1
+	then
+		return "deleted", nil
+	end
+	if state.state == "tombstoned" and state.generation == options.expected_generation + 1 then
+		return "deleted", nil
+	end
+	return code, message
 end
 
 verify_snapshot_write = function(state: InternalState, write_id: string, token: string, generation: number, revision: number, operation_deadline: number): (boolean, Envelope?, BackendInfo?)
@@ -5459,7 +7763,7 @@ verify_release_write = function(state: InternalState, write_id: string, generati
 	return true, envelope, info
 end
 
-local function verify_open_write(state: InternalState, write_id: string, token: string, operation_deadline: number): (boolean, Envelope?, BackendInfo?)
+function record_impl.verify_open_write(state: InternalState, write_id: string, token: string, operation_deadline: number): (boolean, Envelope?, BackendInfo?)
 	local deadline = math.min(operation_deadline, now_local() + 5)
 	local raw, info, result_code = backend_get(state.backend, false, deadline, state)
 	if result_code ~= nil then
@@ -5472,8 +7776,8 @@ local function verify_open_write(state: InternalState, write_id: string, token: 
 	return true, envelope, info
 end
 
-local function open_internal(state: InternalState, default_data: JsonValue?, recreate: boolean?): (ResultCode, string?)
-	local function recover_corrupt_history(
+function record_impl.open_internal(state: InternalState, default_data: JsonValue?, recreate: boolean?): (ResultCode, string?)
+	function record_impl.recover_corrupt_history(
 		state: InternalState,
 		observed_version: string,
 		corrupt_reason: string,
@@ -5578,6 +7882,8 @@ local function open_internal(state: InternalState, default_data: JsonValue?, rec
 				user_ids = clone_user_ids(snapshot.UserIds),
 				tombstone = nil,
 				session = nil,
+				inbox_receipts = {},
+				outbox = {},
 				write_id = "history-recovery-" .. HttpService:GenerateGUID(false),
 			}
 			local envelope_valid, envelope_error = validate_envelope(recovered_envelope)
@@ -5706,6 +8012,11 @@ local function open_internal(state: InternalState, default_data: JsonValue?, rec
 					write_id = write_id,
 				}
 			elseif not current_format then
+				if type(raw) == "table" and (get_string_field(raw, "inbox_receipts") ~= nil or get_string_field(raw, "outbox") ~= nil) then
+					decision = "corrupt"
+					decision_message = "automatic recovery is blocked because the current envelope contains transaction sidecars that could not be validated"
+					return nil, nil, nil
+				end
 				if parse_error == "future implementation version" then
 					decision = "future_schema"
 					decision_message = parse_error
@@ -5825,6 +8136,8 @@ local function open_internal(state: InternalState, default_data: JsonValue?, rec
 				data = migrated,
 				user_ids = initial_ids,
 				tombstone = nil,
+				inbox_receipts = if envelope ~= nil then envelope.inbox_receipts or {} else {},
+				outbox = if envelope ~= nil then envelope.outbox or {} else {},
 				session = {
 					token = token,
 					generation = next_generation,
@@ -5913,7 +8226,7 @@ local function open_internal(state: InternalState, default_data: JsonValue?, rec
 				final_decision_message = (observed_parse_error or "durable envelope is invalid") .. "; current version metadata is unavailable, so history recovery was refused"
 				break
 			end
-			local candidate, recovery_result, recovery_message = recover_corrupt_history(
+			local candidate, recovery_result, recovery_message = record_impl.recover_corrupt_history(
 				state,
 				observed_info.Version,
 				observed_parse_error or "durable envelope is invalid",
@@ -5983,7 +8296,7 @@ local function open_internal(state: InternalState, default_data: JsonValue?, rec
 			last_result = result_code
 			last_error = result_message
 		end
-		local verified, envelope, info_after = verify_open_write(state, write_id, token, deadline)
+		local verified, envelope, info_after = record_impl.verify_open_write(state, write_id, token, deadline)
 		if verified then
 			confirmed = envelope
 			confirmed_info = info_after
@@ -6015,6 +8328,7 @@ local function open_internal(state: InternalState, default_data: JsonValue?, rec
 		state.last_saved = make_durable_snapshot(confirmed, confirmed_info, "open")
 		state.change_sequence = 0
 		state.saved_change_sequence = 0
+		state.dirty_since_unix = 0
 		state.busy = false
 		state.state = "active"
 		state.next_autosave = now_local() + (state.options.autosave_interval or DEFAULT_AUTOSAVE_INTERVAL) * (0.9 + math.random() * 0.2)
@@ -6041,7 +8355,7 @@ local function open_internal(state: InternalState, default_data: JsonValue?, rec
 	return unresolved_result, last_error or "session acquisition was not confirmed"
 end
 
-local function renew_internal(state: InternalState): (ResultCode, string?)
+function record_impl.renew_internal(state: InternalState): (ResultCode, string?)
 	if state.retired then
 		return "invalid", "record has been retired"
 	end
@@ -6138,6 +8452,8 @@ local function renew_internal(state: InternalState): (ResultCode, string?)
 					acquired_at = envelope.session.acquired_at,
 					lease_until = transform_time + (state.options.lease_duration or DEFAULT_LEASE_DURATION),
 				},
+				inbox_receipts = envelope.inbox_receipts or {},
+				outbox = envelope.outbox or {},
 				write_id = write_id,
 			}
 			local valid_envelope, envelope_error = validate_envelope(next_envelope)
@@ -6328,6 +8644,8 @@ close_internal = function(state: InternalState, shutdown: boolean): (ResultCode,
 				user_ids = clone_user_ids(state.user_ids),
 				tombstone = nil,
 				session = nil,
+				inbox_receipts = envelope.inbox_receipts or {},
+				outbox = envelope.outbox or {},
 				write_id = write_id,
 			}
 			local valid_envelope, envelope_error = validate_envelope(next_envelope)
@@ -6380,7 +8698,7 @@ close_internal = function(state: InternalState, shutdown: boolean): (ResultCode,
 	end
 	update_local_from_envelope(state, confirmed, confirmed_info)
 	state.last_saved = make_durable_snapshot(confirmed, confirmed_info, "close")
-	state.saved_change_sequence = state.change_sequence
+	mark_saved(state, state.change_sequence)
 	state.busy = false
 	state.state = "closed"
 	state.durable_lease_until = 0
@@ -6416,17 +8734,18 @@ complete_deferred_takeover = function(state: InternalState)
 	end)
 end
 
-local function save(self: Record, reason: string?): (ResultCode, string?)
+function record_impl.save(self: Record, reason: string?): (ResultCode, string?)
 	local state = private[self]
 	if state == nil then
 		return "invalid", "record does not exist"
 	end
 	local result, message = save_internal(state, reason or "manual", nil, nil)
+	record_impl.evaluate_durability_risk(self, state)
 	sync_public(self)
 	return result, message
 end
 
-local function stats(self: Record): { [string]: number | string? }
+function record_impl.stats(self: Record): { [string]: number | string? }
 	local state = private[self]
 	if state == nil then
 		return {}
@@ -6456,21 +8775,397 @@ local function stats(self: Record): { [string]: number | string? }
 		handoff_published = if state.handoff_published then 1 else 0,
 		change_sequence = state.change_sequence,
 		saved_change_sequence = state.saved_change_sequence,
+		dirty_since_unix = state.dirty_since_unix,
+		dirty_age_seconds = if state.change_sequence ~= state.saved_change_sequence and state.dirty_since_unix > 0 then math.max(0, session_now_unix(state.backend.mock) - state.dirty_since_unix) else 0,
 		dirty = if state.change_sequence ~= state.saved_change_sequence then 1 else 0,
+		durability_risk_active = if state.durability_risk_active then 1 else 0,
+		durability_risk_reason = state.durability_risk_reason,
+		durability_risk_observer_errors = state.durability_risk_observer_errors,
 	}
 end
 
-local function open(self: Record, default_data: JsonValue?, recreate: boolean?): (ResultCode, string?)
+
+function record_impl.durability_status_for_state(state: InternalState): DurabilityStatus
+	local observed_at = session_now_unix(state.backend.mock)
+	local dirty = state.change_sequence ~= state.saved_change_sequence
+	local dirty_since = state.dirty_since_unix
+	local age_available = not dirty or (type(dirty_since) == "number" and dirty_since > 0)
+	local dirty_age = if not dirty then 0 else if age_available then math.max(0, observed_at - dirty_since) else nil
+	local dirty_age_exceeded = if not dirty then false else if dirty_age ~= nil then dirty_age > runtime_options.max_dirty_age_seconds else nil
+	local last_error = state.last_error_info
+	local uncertain = state.state == "unknown"
+		or (last_error ~= nil and last_error.DurableOutcome == "unknown" and state.last_result == "unknown")
+	return {
+		state = state.state,
+		dirty = dirty,
+		dirty_generation = state.change_sequence,
+		durable_generation = state.saved_change_sequence,
+		known_revision = state.revision,
+		last_confirmed_durable_revision = if state.last_saved ~= nil then state.last_saved.Revision else 0,
+		dirty_age_seconds = dirty_age,
+		dirty_age_available = age_available,
+		dirty_age_exceeded = dirty_age_exceeded,
+		age_basis = if not dirty then "clean" else if age_available then "tracked_dirty_generation" else "unavailable",
+		max_dirty_age_seconds = runtime_options.max_dirty_age_seconds,
+		last_confirmed_save_unix = if state.last_saved ~= nil then state.last_saved.ConfirmedAt else 0,
+		write_outcome_uncertain = uncertain,
+		retry_category = if last_error ~= nil then last_error.Code else state.last_result,
+		in_flight_operations = (if state.busy then 1 else 0) + (if state.queue_busy then 1 else 0),
+		durability_risk_active = state.durability_risk_active,
+		durability_risk_reason = state.durability_risk_reason,
+		observed_at_unix = observed_at,
+	}
+end
+
+function record_impl.dispatch_durability_risk(state: InternalState, transition: "entered" | "changed" | "recovered" | "resolved", reason: "dirty_age_exceeded" | "write_outcome_uncertain" | "recovered" | "record_deleted")
+	if next(state.durability_risk_observers) == nil then return end
+	local status = record_impl.durability_status_for_state(state)
+	local event: DurabilityRiskEvent = {
+		Transition = transition,
+		Reason = reason,
+		State = state.state,
+		Dirty = status.dirty,
+		DirtyGeneration = state.change_sequence,
+		DurableGeneration = state.saved_change_sequence,
+		KnownRevision = state.revision,
+		LastConfirmedDurableRevision = status.last_confirmed_durable_revision,
+		DirtyAgeSeconds = status.dirty_age_seconds,
+		MaxDirtyAgeSeconds = status.max_dirty_age_seconds,
+		LastConfirmedSaveUnix = status.last_confirmed_save_unix,
+		WriteOutcomeUncertain = status.write_outcome_uncertain,
+		ObservedAtUnix = status.observed_at_unix,
+	}
+	local observers: { DurabilityRiskObserver } = {}
+	for _, observer in pairs(state.durability_risk_observers) do table.insert(observers, observer) end
+	task.spawn(function()
+		for _, observer in ipairs(observers) do
+			local ok = pcall(observer, event)
+			if not ok then state.durability_risk_observer_errors += 1 end
+		end
+	end)
+end
+
+function record_impl.evaluate_durability_risk(_record: Record, state: InternalState)
+	local status = record_impl.durability_status_for_state(state)
+	local next_reason: ("dirty_age_exceeded" | "write_outcome_uncertain")? = nil
+	if status.write_outcome_uncertain then
+		next_reason = "write_outcome_uncertain"
+	elseif status.dirty_age_exceeded == true then
+		next_reason = "dirty_age_exceeded"
+	end
+	if next_reason == nil then
+		if state.durability_risk_active then
+			state.durability_risk_active = false
+			state.durability_risk_reason = nil
+			record_impl.dispatch_durability_risk(state, "recovered", "recovered")
+		end
+		return
+	end
+	if not state.durability_risk_active then
+		state.durability_risk_active = true
+		state.durability_risk_reason = next_reason
+		record_impl.dispatch_durability_risk(state, "entered", next_reason)
+	elseif state.durability_risk_reason ~= next_reason then
+		state.durability_risk_reason = next_reason
+		record_impl.dispatch_durability_risk(state, "changed", next_reason)
+	end
+end
+
+function record_impl.get_durability_status(self: Record): (DurabilityStatus?, ResultCode, string?)
+	local state = private[self]
+	if state == nil then return nil, "invalid", "record does not exist" end
+	track_external_data_mutation(state)
+	record_impl.evaluate_durability_risk(self, state)
+	return record_impl.durability_status_for_state(state), "success", nil
+end
+
+function record_impl.subscribe_durability_risk(self: Record, observer: DurabilityRiskObserver): (ChangeSubscription?, ResultCode, string?)
+	local state = private[self]
+	if state == nil then return nil, "invalid", "record does not exist" end
+	if type(observer) ~= "function" then return nil, "invalid", "durability-risk observer must be a function" end
+	local count = 0
+	for _ in pairs(state.durability_risk_observers) do count += 1 end
+	if count >= DURABILITY_RISK_OBSERVER_CAPACITY then
+		return nil, "capacity", "durability-risk observer capacity reached"
+	end
+	local id = state.durability_risk_observer_next_id
+	state.durability_risk_observer_next_id += 1
+	state.durability_risk_observers[id] = observer
+	local connected = true
+	local subscription: ChangeSubscription = {
+		Disconnect = function(_: ChangeSubscription)
+			if not connected then return end
+			connected = false
+			state.durability_risk_observers[id] = nil
+		end,
+	}
+	record_impl.evaluate_durability_risk(self, state)
+	return subscription, "success", nil
+end
+
+function record_impl.open(self: Record, default_data: JsonValue?, recreate: boolean?): (ResultCode, string?)
 	local state = private[self]
 	if state == nil then
 		return "invalid", "record does not exist"
 	end
-	local result, message = open_internal(state, default_data, recreate)
+	local result, message = record_impl.open_internal(state, default_data, recreate)
 	sync_public(self)
 	return result, message
 end
 
-local function make_record(name: string, scope: string, key: string, options: Options, mock: boolean): Record
+
+function record_impl.wait_for_session_async(self: Record, default_data: JsonValue?, wait_options: SessionWaitOptions?): (SessionWaitResult, ResultCode, string?)
+	local state = private[self]
+	if state == nil then
+		return {
+			Outcome = "session_status_unavailable", Attempt = 0, ObservedAtUnix = now_unix(),
+			SessionJobId = nil, LeaseUntilUnix = nil, RetryAfterSeconds = nil, RetryScheduled = false,
+			ReadResult = "invalid", Message = "record does not exist",
+		}, "invalid", "record does not exist"
+	end
+	if wait_options ~= nil and type(wait_options) ~= "table" then
+		return {
+			Outcome = "session_status_unavailable", Attempt = 0, ObservedAtUnix = now_unix(),
+			SessionJobId = nil, LeaseUntilUnix = nil, RetryAfterSeconds = nil, RetryScheduled = false,
+			ReadResult = "invalid", Message = "wait_options must be a table",
+		}, "invalid", "wait_options must be a table"
+	end
+	local options = wait_options or {}
+	local max_wait = if options.max_wait_seconds == nil then DEFAULT_OPERATION_DEADLINE else options.max_wait_seconds
+	local max_attempts = if options.max_attempts == nil then 8 else options.max_attempts
+	local retry_interval = if options.retry_interval_seconds == nil then MIN_RETRY_DELAY else options.retry_interval_seconds
+	local max_retry_interval = if options.max_retry_interval_seconds == nil then MAX_RETRY_DELAY else options.max_retry_interval_seconds
+	if type(max_wait) ~= "number" or not math.isfinite(max_wait) or max_wait <= 0 or max_wait > 1200 then
+		return {
+			Outcome = "session_status_unavailable", Attempt = 0, ObservedAtUnix = now_unix(),
+			SessionJobId = nil, LeaseUntilUnix = nil, RetryAfterSeconds = nil, RetryScheduled = false,
+			ReadResult = "invalid", Message = "max_wait_seconds must be between 0 and 1200",
+		}, "invalid", "max_wait_seconds must be between 0 and 1200"
+	end
+	if type(max_attempts) ~= "number" or not math.isfinite(max_attempts) or math.floor(max_attempts) ~= max_attempts or max_attempts < 1 or max_attempts > 32 then
+		return {
+			Outcome = "session_status_unavailable", Attempt = 0, ObservedAtUnix = now_unix(),
+			SessionJobId = nil, LeaseUntilUnix = nil, RetryAfterSeconds = nil, RetryScheduled = false,
+			ReadResult = "invalid", Message = "max_attempts must be an integer from 1 to 32",
+		}, "invalid", "max_attempts must be an integer from 1 to 32"
+	end
+	if type(retry_interval) ~= "number" or not math.isfinite(retry_interval) or retry_interval <= 0 or retry_interval > 30
+		or type(max_retry_interval) ~= "number" or not math.isfinite(max_retry_interval) or max_retry_interval < retry_interval or max_retry_interval > 30
+	then
+		return {
+			Outcome = "session_status_unavailable", Attempt = 0, ObservedAtUnix = now_unix(),
+			SessionJobId = nil, LeaseUntilUnix = nil, RetryAfterSeconds = nil, RetryScheduled = false,
+			ReadResult = "invalid", Message = "retry intervals must be positive, ordered and at most 30 seconds",
+		}, "invalid", "retry intervals must be positive, ordered and at most 30 seconds"
+	end
+	if options.cancelled ~= nil and type(options.cancelled) ~= "function" then
+		return {
+			Outcome = "session_status_unavailable", Attempt = 0, ObservedAtUnix = now_unix(),
+			SessionJobId = nil, LeaseUntilUnix = nil, RetryAfterSeconds = nil, RetryScheduled = false,
+			ReadResult = "invalid", Message = "cancelled must be a function",
+		}, "invalid", "cancelled must be a function"
+	end
+	if options.on_status ~= nil and type(options.on_status) ~= "function" then
+		return {
+			Outcome = "session_status_unavailable", Attempt = 0, ObservedAtUnix = now_unix(),
+			SessionJobId = nil, LeaseUntilUnix = nil, RetryAfterSeconds = nil, RetryScheduled = false,
+			ReadResult = "invalid", Message = "on_status must be a function",
+		}, "invalid", "on_status must be a function"
+	end
+
+	local deadline = now_local() + max_wait
+	local last_outcome: SessionWaitOutcome = "no_known_competing_session"
+	local last_job_id: string? = nil
+	local last_lease_until: number? = nil
+	local last_code: ResultCode? = nil
+	local last_message: string? = nil
+
+	function record_impl.make_result(
+		outcome: SessionWaitOutcome,
+		attempt: number,
+		job_id: string?,
+		lease_until: number?,
+		retry_after: number?,
+		retry_scheduled: boolean,
+		read_result: ResultCode?,
+		message: string?
+	): SessionWaitResult
+		return {
+			Outcome = outcome,
+			Attempt = attempt,
+			ObservedAtUnix = session_now_unix(state.backend.mock),
+			SessionJobId = job_id,
+			LeaseUntilUnix = lease_until,
+			RetryAfterSeconds = retry_after,
+			RetryScheduled = retry_scheduled,
+			ReadResult = read_result,
+			Message = message,
+		}
+	end
+
+	function record_impl.report(
+		outcome: SessionWaitOutcome,
+		attempt: number,
+		job_id: string?,
+		lease_until: number?,
+		retry_after: number?,
+		retry_scheduled: boolean,
+		read_result: ResultCode?,
+		message: string?
+	): SessionWaitResult
+		local result = record_impl.make_result(outcome, attempt, job_id, lease_until, retry_after, retry_scheduled, read_result, message)
+		if options.on_status ~= nil then pcall(options.on_status, result) end
+		return result
+	end
+
+	function record_impl.cancellation_requested(): (boolean, string?)
+		if state.takeover_requested then return true, nil end
+		if options.cancelled == nil then return false, nil end
+		local ok, value = pcall(options.cancelled)
+		if not ok then return false, "cancellation callback failed: " .. tostring(value) end
+		return value == true, nil
+	end
+
+	function record_impl.observe_competitor(attempt: number): (SessionWaitOutcome, string?, number?, ResultCode?, string?)
+		local raw, _, read_code, read_message = backend_get(state.backend, false, deadline, state)
+		if read_code ~= nil then
+			return "session_status_unavailable", nil, nil, read_code, read_message
+		end
+		if raw == nil then
+			return "no_known_competing_session", nil, nil, nil, nil
+		end
+		local envelope, parse_error, current_format = parse_envelope(raw)
+		if not current_format then
+			local code: ResultCode = if parse_error == "future implementation version" then "future_schema" elseif parse_error == "legacy payload" then "legacy" else "corrupt"
+			return "session_status_unavailable", nil, nil, code, parse_error or "stored record envelope is invalid"
+		end
+		if envelope == nil then
+			return "session_status_unavailable", nil, nil, "corrupt", parse_error or "stored record envelope is missing"
+		end
+		if envelope.tombstone ~= nil then
+			return "ownership_fenced_or_lost", nil, nil, "tombstoned", "record is tombstoned"
+		end
+		local session = envelope.session
+		if session == nil or session.lease_until <= session_now_unix(state.backend.mock) then
+			return "no_known_competing_session", nil, nil, nil, nil
+		end
+		if state.state == "active" and state.token == session.token
+			and state.generation == session.generation and session.job_id == server_id
+		then
+			return "ownership_acquired", session.job_id, session.lease_until, nil, nil
+		end
+		return "competing_session_observed", session.job_id, session.lease_until, "locked", "a live session lease was observed; this read does not authorize ownership"
+	end
+
+	for attempt = 1, max_attempts do
+		if now_local() >= deadline then break end
+		if state.takeover_requested then
+			local result = record_impl.report("cancellation_requested", attempt, last_job_id, last_lease_until, nil, false, "closing", "session takeover has been requested")
+			return result, "closing", result.Message
+		end
+		if state.state == "active" and state.token ~= nil then
+			if state.durable_lease_until > session_now_unix(state.backend.mock) then
+				local result = record_impl.report("ownership_acquired", attempt, server_id, state.durable_lease_until, nil, false, "success", nil)
+				return result, "success", nil
+			end
+			if not state.busy then
+				local result = record_impl.report("ownership_fenced_or_lost", attempt, server_id, state.durable_lease_until, nil, false, "fenced", "the last confirmed local lease has expired")
+				return result, "fenced", result.Message
+			end
+		end
+		local cancelled, cancellation_error = record_impl.cancellation_requested()
+		if cancellation_error ~= nil then
+			local result = record_impl.report("session_status_unavailable", attempt, last_job_id, last_lease_until, nil, false, "invalid", cancellation_error)
+			return result, "invalid", cancellation_error
+		end
+		if cancelled then
+			local result = record_impl.report("cancellation_requested", attempt, last_job_id, last_lease_until, nil, false, "closing", "session wait was cancelled")
+			return result, "closing", result.Message
+		end
+		if state.state == "fenced" or state.state == "tombstoned" then
+			local code: ResultCode = if state.state == "tombstoned" then "tombstoned" else "fenced"
+			local result = record_impl.report("ownership_fenced_or_lost", attempt, nil, nil, nil, false, code, "local Record is not eligible to acquire ownership")
+			return result, code, result.Message
+		end
+		if state.state == "unknown" then
+			local result = record_impl.report("session_status_unavailable", attempt, nil, nil, nil, false, "unknown", "prior open/save outcome is unresolved; do not blindly retry acquisition")
+			return result, "unknown", result.Message
+		end
+
+		local open_code: ResultCode
+		local open_message: string?
+		if state.busy or state.queue_busy then
+			open_code, open_message = "busy", "another Record operation is in flight"
+		else
+			open_code, open_message = record_impl.open(self, default_data, options.recreate)
+		end
+		last_code, last_message = open_code, open_message
+		if open_code == "created" or open_code == "loaded" or open_code == "already_open" then
+			if state.state == "active" and state.token ~= nil and state.durable_lease_until > session_now_unix(state.backend.mock) then
+				local result = record_impl.report("ownership_acquired", attempt, server_id, state.durable_lease_until, nil, false, "success", nil)
+				return result, "success", nil
+			end
+			local result = record_impl.report("session_status_unavailable", attempt, nil, nil, nil, false, "unknown", "Open reported success without a confirmed live local lease")
+			return result, "unknown", result.Message
+		end
+		if open_code == "fenced" or open_code == "tombstoned" then
+			local outcome: SessionWaitOutcome = "ownership_fenced_or_lost"
+			local result = record_impl.report(outcome, attempt, nil, nil, nil, false, open_code, open_message)
+			return result, open_code, open_message
+		end
+		if open_code == "unknown" or open_code == "retry_exhausted" then
+			local result = record_impl.report("session_status_unavailable", attempt, nil, nil, nil, false, open_code, open_message)
+			return result, open_code, open_message
+		end
+
+		local can_retry = open_code == "locked" or open_code == "busy" or open_code == "budget" or is_retryable_result(open_code, "open")
+		if not can_retry then
+			local result = record_impl.report("session_status_unavailable", attempt, nil, nil, nil, false, open_code, open_message)
+			return result, open_code, open_message
+		end
+		local observed_outcome: SessionWaitOutcome
+		local observed_job_id: string? = nil
+		local observed_lease_until: number? = nil
+		local observed_code: ResultCode? = nil
+		local observed_message: string? = nil
+		observed_outcome, observed_job_id, observed_lease_until, observed_code, observed_message = record_impl.observe_competitor(attempt)
+		if observed_outcome == "ownership_acquired" then
+			local result = record_impl.report("ownership_acquired", attempt, observed_job_id, observed_lease_until, nil, false, "success", nil)
+			return result, "success", nil
+		end
+		if observed_outcome == "ownership_fenced_or_lost" then
+			local result = record_impl.report(observed_outcome, attempt, nil, nil, nil, false, observed_code, observed_message)
+			return result, observed_code or "tombstoned", observed_message
+		end
+		if observed_outcome == "session_status_unavailable" then
+			local result = record_impl.report(observed_outcome, attempt, nil, nil, nil, false, observed_code, observed_message)
+			return result, observed_code or "unknown", observed_message
+		end
+		last_outcome, last_job_id, last_lease_until = observed_outcome, observed_job_id, observed_lease_until
+		last_code = if observed_outcome == "competing_session_observed" then "locked" else "retry_exhausted"
+		last_message = if observed_outcome == "competing_session_observed" then observed_message else "no competing live session was observed; acquisition will be retried"
+		if observed_outcome == "competing_session_observed" then
+			record_impl.report(observed_outcome, attempt, observed_job_id, observed_lease_until, nil, false, "locked", observed_message)
+		end
+		local remaining = math.max(0, deadline - now_local())
+		if attempt >= max_attempts or remaining <= 0 then break end
+		local backoff = math.min(max_retry_interval, retry_interval * (2 ^ math.min(attempt - 1, 8)))
+		if observed_lease_until ~= nil then
+			local lease_remaining = math.max(0, observed_lease_until - session_now_unix(state.backend.mock))
+			if lease_remaining > 0 then backoff = math.min(backoff, math.max(retry_interval, lease_remaining)) end
+		end
+		local delay = math.min(backoff, remaining)
+		record_impl.report("wait_retry_scheduled", attempt, observed_job_id, observed_lease_until, delay, true, observed_code, observed_message)
+		task.wait(delay)
+	end
+	local timed_out_code: ResultCode = if now_local() >= deadline then "budget" else (last_code or "retry_exhausted")
+	local timed_out_message = if now_local() >= deadline then "session wait deadline expired" else (last_message or "session wait attempt limit reached")
+	local final_outcome: SessionWaitOutcome = if last_outcome == "competing_session_observed" then "competing_session_observed" else "no_known_competing_session"
+	local result = record_impl.report(final_outcome, max_attempts, last_job_id, last_lease_until, nil, false, timed_out_code, timed_out_message)
+	return result, timed_out_code, timed_out_message
+end
+
+function record_impl.make_record(name: string, scope: string, key: string, options: Options, mock: boolean): Record
 	local mode = if mock then "mock" else "live"
 	local id = HttpService:JSONEncode({ mode, name, scope, key })
 	local existing = records[id]
@@ -6503,6 +9198,11 @@ local function make_record(name: string, scope: string, key: string, options: Op
 		options = options,
 		change_observers = {},
 		change_observer_next_id = 1,
+		durability_risk_observers = {},
+		durability_risk_observer_next_id = 1,
+		durability_risk_observer_errors = 0,
+		durability_risk_active = false,
+		durability_risk_reason = nil,
 		change_dispatch_queue = {},
 		change_dispatch_head = 1,
 		change_dispatch_tail = 0,
@@ -6545,11 +9245,13 @@ local function make_record(name: string, scope: string, key: string, options: Op
 		next_queue_poll = math.huge,
 		busy = false,
 		queue_busy = false,
+		mailbox_v2_binding = false,
 		save_requested = false,
 		shutdown = false,
 		retired = false,
 		takeover_requested = false,
 		queue_hint = false,
+		mailbox_v2 = nil,
 		message_topic = make_message_topic(options.message_topic_prefix or DEFAULT_MESSAGE_TOPIC_PREFIX, name, scope, key),
 		message_subscription = nil,
 		last_error = nil,
@@ -6559,6 +9261,7 @@ local function make_record(name: string, scope: string, key: string, options: Op
 		last_saved = nil,
 		change_sequence = 0,
 		saved_change_sequence = 0,
+		dirty_since_unix = 0,
 		durable_lease_until = 0,
 	}
 	local record: Record = {
@@ -6571,9 +9274,10 @@ local function make_record(name: string, scope: string, key: string, options: Op
 		UpdatedAt = 0,
 		Tombstoned = false,
 		LastError = nil,
-		Open = open,
+		Open = record_impl.open,
 		Get = get_data,
 		GetKey = get_key,
+		GetIdentity = get_identity,
 		GetState = get_state,
 		GetRevision = get_revision,
 		GetGeneration = get_generation,
@@ -6584,6 +9288,9 @@ local function make_record(name: string, scope: string, key: string, options: Op
 		GetLastError = get_last_error_info,
 		GetHandoff = get_handoff,
 		SubscribeChanges = subscribe_changes,
+		GetDurabilityStatus = record_impl.get_durability_status,
+		SubscribeDurabilityRisk = record_impl.subscribe_durability_risk,
+		WaitForSessionAsync = record_impl.wait_for_session_async,
 		GetUserIds = get_user_ids,
 		SetUserIds = set_user_ids,
 		AddUserId = add_user_id,
@@ -6594,18 +9301,30 @@ local function make_record(name: string, scope: string, key: string, options: Op
 		Touch = touch,
 		Update = update,
 		Reconcile = reconcile,
-		Save = save,
+		Save = record_impl.save,
+		TransactAsync = transaction,
+		ApplyInboxAsync = apply_inbox,
+		CommitWithOutboxAsync = commit_with_outbox,
+		GetOutboxAsync = get_outbox,
+		DispatchOutboxAsync = dispatch_outbox,
+		DispatchOutboxBatchAsync = dispatch_outbox_batch,
+		PruneTransactionReceiptsAsync = prune_transaction_receipts,
+		PruneOutboxAsync = prune_outbox,
+		GetInboxStatsAsync = record_impl.get_inbox_stats,
+		GetOutboxStatsAsync = record_impl.get_outbox_stats,
 		MessageAsync = message,
-		EnqueueAsync = enqueue,
-		ProcessQueueAsync = process_queue,
-		GetQueueAsync = get_queue,
-		GetDeadLettersAsync = get_dead_letters,
-		ClaimDeadLetterAsync = claim_dead_letter,
-		ReplayDeadLetterAsync = replay_dead_letter,
-		DiscardDeadLetterAsync = discard_dead_letter,
-		Close = close_record,
-		Delete = delete_record,
-		Stats = stats,
+		BindMailboxV2Async = record_impl.bind_mailbox_v2_async,
+		EnqueueAsync = record_impl.enqueue,
+		ProcessQueueAsync = record_impl.process_queue,
+		GetQueueAsync = record_impl.get_queue,
+		GetDeadLettersAsync = record_impl.get_dead_letters,
+		ClaimDeadLetterAsync = record_impl.claim_dead_letter,
+		ReplayDeadLetterAsync = record_impl.replay_dead_letter,
+		DiscardDeadLetterAsync = record_impl.discard_dead_letter,
+		Close = record_impl.close_record,
+		Delete = record_impl.delete_record,
+		EraseAsync = record_impl.erase_record,
+		Stats = record_impl.stats,
 	}
 	state.public_record = record
 	private[record] = state
@@ -6614,16 +9333,25 @@ local function make_record(name: string, scope: string, key: string, options: Op
 	return record
 end
 
-local function start_scheduler()
+function record_impl.start_scheduler()
 	if scheduler_started then
 		return
 	end
 	scheduler_started = true
 	task.spawn(function()
 		while not closing do
+			local scheduler_now = now_local()
+			refresh_runtime_policy(scheduler_now)
+			if scheduler_now >= runtime_next_budget_sample then
+				request_budget(Enum.DataStoreRequestType.StandardRead)
+				request_budget(Enum.DataStoreRequestType.StandardWrite)
+				runtime_next_budget_sample = scheduler_now + runtime_options.adaptive_sample_interval
+			end
 			for record in active_records do
 				local state = private[record]
-				if state ~= nil and state.state == "active" then
+				if state ~= nil then
+					record_impl.evaluate_durability_risk(record, state)
+					if state.state == "active" then
 					local handled_takeover = false
 					if state.takeover_requested and not state.busy and not state.queue_busy then
 						complete_deferred_takeover(state)
@@ -6636,7 +9364,7 @@ local function start_scheduler()
 					then
 						state.next_renewal = now + (state.options.lease_renewal or DEFAULT_LEASE_RENEWAL)
 						task.spawn(function()
-							renew_internal(state)
+							record_impl.renew_internal(state)
 							sync_public(record)
 						end)
 					elseif not handled_takeover and state.state == "active"
@@ -6663,11 +9391,12 @@ local function start_scheduler()
 						and (state.queue_hint or now >= state.next_queue_poll)
 					then
 						state.queue_hint = false
-						state.next_queue_poll = now + (state.options.queue_poll_interval or DEFAULT_QUEUE_POLL_INTERVAL)
+						state.next_queue_poll = now + effective_queue_poll_interval(state.options.queue_poll_interval or DEFAULT_QUEUE_POLL_INTERVAL)
 						task.spawn(function()
 							process_queue_internal(state, 4)
 							sync_public(record)
 						end)
+					end
 					end
 				end
 			end
@@ -6676,7 +9405,7 @@ local function start_scheduler()
 	end)
 end
 
-local function shutdown()
+function record_impl.shutdown()
 	if shutdown_started then
 		return
 	end
@@ -6709,7 +9438,7 @@ local function shutdown()
 	end
 end
 
-local function normalize_options(options: Options): (Options?, string?)
+function record_impl.normalize_options(options: Options): (Options?, string?)
 	if type(options) ~= "table" then
 		return nil, "options must be a table"
 	end
@@ -6810,37 +9539,37 @@ local function normalize_options(options: Options): (Options?, string?)
 	if type(queue_max_attempts) ~= "number" or not math.isfinite(queue_max_attempts) or queue_max_attempts < 1 or queue_max_attempts > MAX_QUEUE_ATTEMPTS or math.floor(queue_max_attempts) ~= queue_max_attempts then
 		return nil, "queue_max_attempts must be an integer from 1 to " .. tostring(MAX_QUEUE_ATTEMPTS)
 	end
-	local function valid_positive_number(value: unknown): boolean
+	function record_impl.valid_positive_number(value: unknown): boolean
 		return type(value) == "number" and math.isfinite(value) and value > 0
 	end
-	local function valid_nonnegative_number(value: unknown): boolean
+	function record_impl.valid_nonnegative_number(value: unknown): boolean
 		return type(value) == "number" and math.isfinite(value) and value >= 0
 	end
 	if type(copied.schema_version) ~= "number" or not math.isfinite(copied.schema_version) or copied.schema_version < 0 or math.floor(copied.schema_version) ~= copied.schema_version then
 		return nil, "schema_version must be a non-negative integer"
 	end
-	if not valid_positive_number(copied.autosave_interval) then
+	if not record_impl.valid_positive_number(copied.autosave_interval) then
 		return nil, "autosave_interval must be a positive finite number"
 	end
-	if not valid_positive_number(copied.lease_duration) then
+	if not record_impl.valid_positive_number(copied.lease_duration) then
 		return nil, "lease_duration must be a positive finite number"
 	end
-	if not valid_positive_number(copied.lease_renewal) then
+	if not record_impl.valid_positive_number(copied.lease_renewal) then
 		return nil, "lease_renewal must be a positive finite number"
 	end
-	if not valid_positive_number(copied.operation_deadline) then
+	if not record_impl.valid_positive_number(copied.operation_deadline) then
 		return nil, "operation_deadline must be a positive finite number"
 	end
 	if copied.lease_duration <= copied.lease_renewal + copied.operation_deadline then
 		return nil, "lease_duration must exceed lease_renewal plus operation_deadline"
 	end
-	if not valid_positive_number(copied.shutdown_deadline) then
+	if not record_impl.valid_positive_number(copied.shutdown_deadline) then
 		return nil, "shutdown_deadline must be a positive finite number"
 	end
-	if not valid_nonnegative_number(copied.budget_wait) then
+	if not record_impl.valid_nonnegative_number(copied.budget_wait) then
 		return nil, "budget_wait must be a finite non-negative number"
 	end
-	if not valid_positive_number(copied.takeover_wait) then
+	if not record_impl.valid_positive_number(copied.takeover_wait) then
 		return nil, "takeover_wait must be a positive finite number"
 	end
 	if copied.shutdown_attempts ~= nil and (type(copied.shutdown_attempts) ~= "number" or not math.isfinite(copied.shutdown_attempts) or copied.shutdown_attempts < 1 or copied.shutdown_attempts > MAX_RETRY_ATTEMPTS or math.floor(copied.shutdown_attempts) ~= copied.shutdown_attempts) then
@@ -6893,7 +9622,7 @@ local function normalize_options(options: Options): (Options?, string?)
 	return copied, nil
 end
 
-local function enqueue_static(name: string, scope: string, key: string, message_type: string, data: JsonValue?, mock: boolean, queue_store_name: string?, operation_deadline: number?): (ResultCode, string?)
+function record_impl.enqueue_static(name: string, scope: string, key: string, message_type: string, data: JsonValue?, mock: boolean, queue_store_name: string?, operation_deadline: number?): (ResultCode, string?)
 	local valid_identity, identity_message = validate_store_identity(name, scope, key)
 	if not valid_identity then
 		return "invalid", identity_message
@@ -7002,7 +9731,292 @@ local function enqueue_static(name: string, scope: string, key: string, message_
 end
 
 function RecordStore.enqueue_async(name: string, scope: string, key: string, message_type: string, data: JsonValue?, queue_store_name: string?, operation_deadline: number?): (ResultCode, string?)
-	return enqueue_static(name, scope, key, message_type, data, false, queue_store_name, operation_deadline)
+	return record_impl.enqueue_static(name, scope, key, message_type, data, false, queue_store_name, operation_deadline)
+end
+
+
+function record_impl.runtime_class_limit(work_class: string): number
+	local maximum = runtime_effective_concurrent_requests
+	local foreground_limit = math.max(1, maximum - runtime_options.critical_request_reserve)
+	if work_class == "interactive" then return foreground_limit end
+	if work_class == "messaging" then
+		local desired = math.max(1, math.floor(maximum * runtime_options.adaptive_queue_budget_share * 8))
+		return math.min(foreground_limit, desired)
+	end
+	if work_class == "migration" then return math.max(1, math.floor(maximum * 0.25)) end
+	if work_class == "maintenance" or work_class == "tracing" then return 1 end
+	return foreground_limit
+end
+
+function RecordStore.configure_runtime(config: RuntimeOptions): (ResultCode, string?)
+	if type(config) ~= "table" then return "invalid", "runtime config must be a table" end
+	if scheduler_started or next(records) ~= nil then
+		return "busy", "configure_runtime must be called before the first RecordStore record is created"
+	end
+	local policy_patch: { [string]: unknown } = {}
+	local provider: (() -> { [string]: unknown })? = nil
+	for key, value in pairs(config :: { [string]: unknown }) do
+		if key == "runtime_policy_provider" then
+			if value ~= nil and type(value) ~= "function" then return "invalid", "runtime_policy_provider must be a function" end
+			provider = value :: (() -> { [string]: unknown })?
+		else
+			policy_patch[key] = value
+		end
+	end
+	local candidate, message = merge_runtime_policy(policy_patch, runtime_options, false)
+	if candidate == nil then return "invalid", message end
+	runtime_options = candidate
+	runtime_policy_provider = provider
+	runtime_effective_concurrent_requests = runtime_options.adaptive_max_concurrent_requests
+	runtime_next_policy_refresh = now_local() + runtime_options.runtime_policy_refresh_interval
+	runtime_next_budget_sample = now_local()
+	runtime_queue_tokens = math.max(1, runtime_options.adaptive_max_concurrent_requests * runtime_options.adaptive_queue_budget_share * 16)
+	runtime_queue_tokens_updated = now_local()
+	runtime_metrics.last_policy_error = ""
+	return "success", nil
+end
+
+function RecordStore.apply_runtime_policy(config: RuntimeOptions): (ResultCode, string?)
+	if type(config) ~= "table" then
+		return "invalid", "runtime policy must be a table"
+	end
+	local patch: { [string]: unknown } = {}
+	for key, value in pairs(config :: { [string]: unknown }) do
+		if key == "runtime_policy_provider" then
+			return "invalid", "runtime_policy_provider can only be set by configure_runtime before Record creation"
+		end
+		patch[key] = value
+	end
+	local applied, message = apply_runtime_policy(patch, true)
+	if not applied then return "invalid", message end
+	runtime_next_policy_refresh = now_local() + runtime_options.runtime_policy_refresh_interval
+	runtime_next_budget_sample = math.min(runtime_next_budget_sample, now_local())
+	runtime_queue_tokens_updated = now_local()
+	return "success", nil
+end
+
+function RecordStore.get_runtime_stats(): { [string]: unknown }
+	return {
+		policy = table.clone(runtime_options),
+		effective_concurrent_requests = runtime_effective_concurrent_requests,
+		active_requests = active_requests,
+		read_budget = runtime_budget_read,
+		write_budget = runtime_budget_write,
+		queue_tokens = runtime_queue_tokens,
+		metrics = table.clone(runtime_metrics),
+		next_policy_refresh = runtime_next_policy_refresh,
+		policy_provider_configured = runtime_policy_provider ~= nil,
+		degraded_mode = runtime_options.degraded_mode,
+		circuits = {
+			read = table.clone(runtime_breakers.read),
+			write = table.clone(runtime_breakers.write),
+			service = table.clone(runtime_breakers.service),
+		},
+		work_class_in_flight = table.clone(runtime_external_in_flight),
+		work_class_limits = {
+			interactive = record_impl.runtime_class_limit("interactive"), messaging = record_impl.runtime_class_limit("messaging"),
+			migration = record_impl.runtime_class_limit("migration"), maintenance = record_impl.runtime_class_limit("maintenance"), tracing = record_impl.runtime_class_limit("tracing"),
+		},
+		next_budget_sample = runtime_next_budget_sample,
+	}
+end
+
+function RecordStore.get_health_snapshot(max_records: number?): { [string]: unknown }
+	local limit = max_records or 512
+	if type(limit) ~= "number" or not math.isfinite(limit) or math.floor(limit) ~= limit or limit < 1 or limit > 4096 then
+		return { code = "invalid", message = "max_records must be an integer from 1 to 4096" }
+	end
+	local scanned, truncated = 0, false
+	local dirty_records, aged_dirty_records, uncertain_writes, risk_active_records = 0, 0, 0, 0
+	local oldest_dirty_age_seconds, latest_confirmed_save_unix = 0, 0
+	for record in active_records do
+		if scanned >= limit then truncated = true; break end
+		local state = private[record]
+		if state ~= nil then
+			scanned += 1
+			record_impl.evaluate_durability_risk(record, state)
+			local status = record_impl.durability_status_for_state(state)
+			if status.dirty then dirty_records += 1 end
+			if status.dirty_age_exceeded == true then aged_dirty_records += 1 end
+			if status.write_outcome_uncertain then uncertain_writes += 1 end
+			if state.durability_risk_active then risk_active_records += 1 end
+			if status.dirty_age_seconds ~= nil then oldest_dirty_age_seconds = math.max(oldest_dirty_age_seconds, status.dirty_age_seconds) end
+			latest_confirmed_save_unix = math.max(latest_confirmed_save_unix, status.last_confirmed_save_unix)
+		end
+	end
+	local known_risk = aged_dirty_records > 0 or uncertain_writes > 0
+	return {
+		code = "success",
+		scope = "server_local_bounded_observation",
+		state = if closing then "closing" elseif known_risk then "degraded" else "no_observed_durability_risk",
+		state_semantics = "no_observed_durability_risk is not a claim that experience-wide storage is healthy",
+		observed_at_unix = now_unix(),
+		max_dirty_age_seconds = runtime_options.max_dirty_age_seconds,
+		max_records = limit,
+		records_scanned = scanned,
+		truncated = truncated,
+		dirty_records = dirty_records,
+		aged_dirty_records = aged_dirty_records,
+		uncertain_writes = uncertain_writes,
+		risk_active_records = risk_active_records,
+		oldest_observed_dirty_age_seconds = oldest_dirty_age_seconds,
+		latest_confirmed_save_unix = latest_confirmed_save_unix,
+		active_requests = active_requests,
+		read_budget = runtime_budget_read,
+		write_budget = runtime_budget_write,
+		configured_degraded_mode = runtime_options.degraded_mode,
+	}
+end
+
+function RecordStore.register_runtime_governor_hooks(hooks: RuntimeGovernorHooks?): (ResultCode, string?)
+	if hooks == nil then
+		runtime_external_governor_hooks = nil
+		return "success", nil
+	end
+	if type(hooks) ~= "table"
+		or type(hooks.admit) ~= "function"
+		or type(hooks.release) ~= "function"
+		or type(hooks.observe) ~= "function"
+	then
+		return "invalid", "runtime governor hooks require admit, release and observe functions"
+	end
+	runtime_external_governor_hooks = hooks
+	return "success", nil
+end
+
+function record_impl.external_governor_admit(
+	hooks: RuntimeGovernorHooks?,
+	work_class: string,
+	request_kind: string,
+	mutating: boolean
+): (unknown, ResultCode?, string?)
+	if hooks == nil then return nil, nil, nil end
+	local ok, admission = pcall(hooks.admit, work_class, request_kind, mutating)
+	if not ok then return nil, "budget", "external governor admission failed: " .. tostring(admission) end
+	if type(admission) ~= "table" then return nil, "unknown", "external governor returned no admission result" end
+	if admission.code ~= "admitted" then
+		local code: ResultCode = if admission.code == "invalid" then "invalid" else "budget"
+		return nil, code, tostring(admission.message or admission.reason or admission.code or "external governor denied request")
+	end
+	if admission.ticket == nil then return nil, "unknown", "external governor admitted without a release ticket" end
+	-- Release receives the whole admission record: the V2 governor's ticket token alone
+	-- does not contain the class/cost accounting needed to decrement its in-flight counters.
+	return admission, nil, nil
+end
+
+function record_impl.external_governor_release(hooks: RuntimeGovernorHooks?, ticket: unknown)
+	if hooks == nil or ticket == nil then return end
+	local ok, message = pcall(hooks.release, ticket)
+	if not ok then runtime_metrics.last_policy_error = "external governor release failed: " .. tostring(message) end
+end
+
+function record_impl.external_governor_observe(
+	hooks: RuntimeGovernorHooks?,
+	request_kind: string,
+	success: boolean,
+	duration_ms: number,
+	message: string?
+)
+	if hooks == nil then return end
+	local ok, observe_message = pcall(hooks.observe, request_kind, success, duration_ms, message)
+	if not ok then runtime_metrics.last_policy_error = "external governor observation failed: " .. tostring(observe_message) end
+end
+
+function RecordStore.run_runtime_request(
+	kind: string,
+	callback: () -> unknown,
+	operation_deadline: number?,
+	work_class: string?
+): (unknown, ResultCode?, string?)
+	if kind ~= "read" and kind ~= "write" and kind ~= "update" and kind ~= "service" then
+		return nil, "invalid", "kind must be read, write, update or service"
+	end
+	if type(callback) ~= "function" then return nil, "invalid", "callback must be a function" end
+	local class = work_class or "interactive"
+	if class ~= "interactive" and class ~= "messaging" and class ~= "migration"
+		and class ~= "maintenance" and class ~= "tracing"
+	then
+		return nil, "invalid", "unsupported external work class"
+	end
+	local deadline, deadline_error = resolve_operation_deadline(operation_deadline)
+	if deadline == nil then return nil, "invalid", deadline_error end
+	local class_limit = record_impl.runtime_class_limit(class)
+	if runtime_external_in_flight[class] >= class_limit then
+		runtime_metrics.budget_rejections += 1
+		return nil, "budget", "shared runtime governor reached the " .. class .. " work-class concurrency cap"
+	end
+	if runtime_options.adaptive_runtime_enabled and class == "messaging" and not consume_runtime_queue_token() then
+		runtime_metrics.budget_rejections += 1
+		return nil, "budget", "shared runtime governor rejected messaging work under its bounded retry/wake budget"
+	end
+	if kind == "service" then
+		if runtime_degraded_reject(nil, true) then
+			runtime_metrics.budget_rejections += 1
+			return nil, "budget", "shared runtime governor rejected external service work in degraded mode"
+		end
+		local breaker_ok = runtime_breaker_admit("service")
+		if not breaker_ok then
+			runtime_metrics.budget_rejections += 1
+			return nil, "budget", "shared runtime service circuit is open"
+		end
+		local hooks = runtime_external_governor_hooks
+		local governor_ticket, governor_code, governor_message = record_impl.external_governor_admit(hooks, class, "service", true)
+		if governor_code ~= nil then
+			runtime_breaker_cancel_probe("service")
+			runtime_metrics.budget_rejections += 1
+			return nil, governor_code, governor_message
+		end
+		if not acquire_slot(deadline :: number, false) then
+			record_impl.external_governor_release(hooks, governor_ticket)
+			runtime_breaker_cancel_probe("service")
+			runtime_metrics.budget_rejections += 1
+			return nil, "budget", "shared runtime service concurrency reserve is exhausted"
+		end
+		runtime_external_in_flight[class] += 1
+		local service_started = now_local()
+		local service_ok, service_result = pcall(callback)
+		local service_duration = (now_local() - service_started) * 1000
+		release_slot()
+		runtime_external_in_flight[class] = math.max(0, runtime_external_in_flight[class] - 1)
+		record_impl.external_governor_observe(hooks, "service", service_ok, service_duration, if service_ok then nil else tostring(service_result))
+		record_impl.external_governor_release(hooks, governor_ticket)
+		observe_runtime_request("service", service_ok, if service_ok then nil else tostring(service_result), service_duration)
+		if not service_ok then return nil, "unknown", tostring(service_result) end
+		return service_result, nil, nil
+	end
+	if runtime_options.adaptive_runtime_enabled and class == "maintenance"
+		and active_requests >= math.max(1, runtime_effective_concurrent_requests - runtime_options.critical_request_reserve - 1)
+	then
+		runtime_metrics.budget_rejections += 1
+		return nil, "budget", "shared runtime governor deferred maintenance to preserve foreground headroom"
+	end
+	local hooks = runtime_external_governor_hooks
+	local governor_kind = if kind == "read" then "read" else "write"
+	local governor_ticket, governor_code, governor_message = record_impl.external_governor_admit(hooks, class, governor_kind, kind ~= "read")
+	if governor_code ~= nil then
+		runtime_metrics.budget_rejections += 1
+		return nil, governor_code, governor_message
+	end
+	runtime_external_in_flight[class] += 1
+	local request_type = if kind == "read" then Enum.DataStoreRequestType.StandardRead
+		elseif kind == "write" then Enum.DataStoreRequestType.StandardWrite else nil
+	local acquired = acquire_request(nil, deadline :: number, kind ~= "read", request_type)
+	if not acquired then
+		record_impl.external_governor_release(hooks, governor_ticket)
+		runtime_external_in_flight[class] = math.max(0, runtime_external_in_flight[class] - 1)
+		runtime_metrics.budget_rejections += 1
+		return nil, "budget", "shared runtime request admission was unavailable before the operation deadline"
+	end
+	local started_at = now_local()
+	local ok, result = pcall(callback)
+	local duration_ms = (now_local() - started_at) * 1000
+	release_slot()
+	runtime_external_in_flight[class] = math.max(0, runtime_external_in_flight[class] - 1)
+	record_impl.external_governor_observe(hooks, governor_kind, ok, duration_ms, if ok then nil else tostring(result))
+	record_impl.external_governor_release(hooks, governor_ticket)
+	observe_runtime_request(governor_kind, ok, if ok then nil else tostring(result), duration_ms)
+	if not ok then return nil, "unknown", tostring(result) end
+	return result, nil, nil
 end
 
 function RecordStore.new(name: string, scope: string, key: string, options: Options): Record
@@ -7013,7 +10027,7 @@ function RecordStore.new(name: string, scope: string, key: string, options: Opti
 	if not valid_identity then
 		error(identity_message, 2)
 	end
-	local normalized, options_message = normalize_options(options)
+	local normalized, options_message = record_impl.normalize_options(options)
 	if normalized == nil then
 		error(options_message, 2)
 	end
@@ -7021,13 +10035,13 @@ function RecordStore.new(name: string, scope: string, key: string, options: Opti
 	if valid_options == nil then
 		error("normalized options are missing", 2)
 	end
-	local record = make_record(name, scope, key, valid_options, false)
-	start_scheduler()
+	local record = record_impl.make_record(name, scope, key, valid_options, false)
+	record_impl.start_scheduler()
 	return record
 end
 
 RecordStore.Mock = (function()
-	local function mock_new(name: string, scope: string, key: string, options: Options): Record
+	function record_impl.mock_new(name: string, scope: string, key: string, options: Options): Record
 		if closing then
 			error("RecordStore is shutting down", 2)
 		end
@@ -7035,7 +10049,7 @@ RecordStore.Mock = (function()
 		if not valid_identity then
 			error(identity_message, 2)
 		end
-		local normalized, options_message = normalize_options(options)
+		local normalized, options_message = record_impl.normalize_options(options)
 		if normalized == nil then
 			error(options_message, 2)
 		end
@@ -7045,11 +10059,11 @@ RecordStore.Mock = (function()
 		end
 		valid_options.messaging_enabled = false
 		valid_options.takeover_enabled = false
-		start_scheduler()
-		return make_record(name, scope, key, valid_options, true)
+		record_impl.start_scheduler()
+		return record_impl.make_record(name, scope, key, valid_options, true)
 	end
 
-	local function read_async_mock(name: string, scope: string, key: string, operation_deadline: number?, legacy_decoder: LegacyDecoder?): (Snapshot?, ResultCode, string?)
+	function record_impl.read_async_mock(name: string, scope: string, key: string, operation_deadline: number?, legacy_decoder: LegacyDecoder?): (Snapshot?, ResultCode, string?)
 		if legacy_decoder ~= nil and type(legacy_decoder) ~= "function" then
 			return nil, "invalid", "legacy_decoder must be a function"
 		end
@@ -7086,19 +10100,19 @@ RecordStore.Mock = (function()
 		return snapshot_from_envelope(key, envelope, info), "success", nil
 	end
 
-	local function list_versions_mock(name: string, scope: string, key: string, sort_direction: Enum.SortDirection?, min_date_ms: number?, max_date_ms: number?, max_versions: number?, operation_deadline: number?): ({ HistoryEntry }?, ResultCode, string?)
+	function record_impl.list_versions_mock(name: string, scope: string, key: string, sort_direction: Enum.SortDirection?, min_date_ms: number?, max_date_ms: number?, max_versions: number?, operation_deadline: number?): ({ HistoryEntry }?, ResultCode, string?)
 		return list_versions_internal(name, scope, key, sort_direction, min_date_ms, max_date_ms, max_versions, operation_deadline, true)
 	end
 
-	local function get_version_mock(name: string, scope: string, key: string, version: string, operation_deadline: number?, legacy_decoder: LegacyDecoder?): (Snapshot?, ResultCode, string?)
+	function record_impl.get_version_mock(name: string, scope: string, key: string, version: string, operation_deadline: number?, legacy_decoder: LegacyDecoder?): (Snapshot?, ResultCode, string?)
 		return get_version_internal(name, scope, key, version, operation_deadline, legacy_decoder, true)
 	end
 
-	local function get_version_at_time_mock(name: string, scope: string, key: string, timestamp_ms: number, operation_deadline: number?, legacy_decoder: LegacyDecoder?): (Snapshot?, string?, ResultCode, string?)
+	function record_impl.get_version_at_time_mock(name: string, scope: string, key: string, timestamp_ms: number, operation_deadline: number?, legacy_decoder: LegacyDecoder?): (Snapshot?, string?, ResultCode, string?)
 		return get_version_at_time_internal(name, scope, key, timestamp_ms, operation_deadline, legacy_decoder, true)
 	end
 
-	local function mock_seed_queue_value(
+	function record_impl.mock_seed_queue_value(
 		name: string,
 		scope: string,
 		key: string,
@@ -7132,7 +10146,7 @@ RecordStore.Mock = (function()
 		return "success", nil
 	end
 
-	local function mock_get_queue_raw(
+	function record_impl.mock_get_queue_raw(
 		name: string,
 		scope: string,
 		key: string,
@@ -7148,7 +10162,7 @@ RecordStore.Mock = (function()
 		return if entry == nil then nil else copy_value(entry.Value)
 	end
 
-	local function mock_seed_record_raw(name: string, scope: string, key: string, value: unknown): (ResultCode, string?)
+	function record_impl.mock_seed_record_raw(name: string, scope: string, key: string, value: unknown): (ResultCode, string?)
 		local valid_identity, identity_message = validate_store_identity(name, scope, key)
 		if not valid_identity then
 			return "invalid", identity_message
@@ -7173,13 +10187,13 @@ RecordStore.Mock = (function()
 		return "success", nil
 	end
 
-	local function mock_get_record_raw(name: string, scope: string, key: string): unknown
+	function record_impl.mock_get_record_raw(name: string, scope: string, key: string): unknown
 		local store = get_mock_store(name, scope)
 		local entry = store[key]
 		return if entry == nil then nil else copy_value(entry.Value)
 	end
 
-	local function mock_get_record_version_raw(name: string, scope: string, key: string, version: string): unknown
+	function record_impl.mock_get_record_version_raw(name: string, scope: string, key: string, version: string): unknown
 		local store = get_mock_store(name, scope)
 		local entry = store[key]
 		if entry == nil then
@@ -7189,7 +10203,7 @@ RecordStore.Mock = (function()
 		return if historical == nil then nil else copy_value(historical.Value)
 	end
 
-	local function mock_set_test_clock(clock: (() -> number)?)
+	function record_impl.mock_set_test_clock(clock: (() -> number)?)
 		if clock ~= nil and type(clock) ~= "function" then
 			error("test clock must be a function or nil", 2)
 		end
@@ -7197,7 +10211,7 @@ RecordStore.Mock = (function()
 		mock_test_clock_offset = 0
 	end
 
-	local function mock_set_update_replay(retries: number, advance_seconds: number)
+	function record_impl.mock_set_update_replay(retries: number, advance_seconds: number)
 		if type(retries) ~= "number"
 			or not math.isfinite(retries)
 			or math.floor(retries) ~= retries
@@ -7217,7 +10231,7 @@ RecordStore.Mock = (function()
 		mock_update_replay_advance_seconds = advance_seconds
 	end
 
-	local function mock_set_update_failures(count: number, result: ResultCode?, message: string?)
+	function record_impl.mock_set_update_failures(count: number, result: ResultCode?, message: string?)
 		if type(count) ~= "number"
 			or not math.isfinite(count)
 			or math.floor(count) ~= count
@@ -7242,7 +10256,23 @@ RecordStore.Mock = (function()
 		mock_update_failure_message = message
 	end
 
-	local function mock_claim_queue_message(record: Record): (MockQueueClaim?, ResultCode, string?)
+	function record_impl.mock_set_update_response_losses(count: number, message: string?)
+		if type(count) ~= "number"
+			or not math.isfinite(count)
+			or math.floor(count) ~= count
+			or count < 0
+			or count > 100
+		then
+			error("count must be an integer from 0 to 100", 2)
+		end
+		if message ~= nil and type(message) ~= "string" then
+			error("message must be a string or nil", 2)
+		end
+		mock_update_response_lost_count = count
+		mock_update_response_lost_message = message
+	end
+
+	function record_impl.mock_claim_queue_message(record: Record): (MockQueueClaim?, ResultCode, string?)
 		local state = private[record]
 		if state == nil or not state.backend.mock then
 			return nil, "invalid", "queue claim requires a live mock record"
@@ -7261,7 +10291,7 @@ RecordStore.Mock = (function()
 		}, result, message
 	end
 
-	local function mock_dead_letter_queue_message(record: Record, message_id: string, lock_token: string, error_message: string): (ResultCode, string?)
+	function record_impl.mock_dead_letter_queue_message(record: Record, message_id: string, lock_token: string, error_message: string): (ResultCode, string?)
 		local state = private[record]
 		if state == nil or not state.backend.mock then
 			return "invalid", "dead-letter mutation requires a live mock record"
@@ -7278,38 +10308,50 @@ RecordStore.Mock = (function()
 	end
 
 	local Mock = {
-		new = mock_new,
+		new = record_impl.mock_new,
 		renew = function(record: Record): (ResultCode, string?)
 			local state = private[record]
 			if state == nil or not state.backend.mock then
 				return "invalid", "mock renewal requires a live mock record"
 			end
-			local result, message = renew_internal(state)
+			local result, message = record_impl.renew_internal(state)
 			sync_public(record)
 			return result, message
 		end,
-		read_async = read_async_mock,
-		claim_queue_message = mock_claim_queue_message,
-		dead_letter_queue_message = mock_dead_letter_queue_message,
-		list_versions_async = list_versions_mock,
-		get_version_async = get_version_mock,
-		get_version_at_time_async = get_version_at_time_mock,
+		read_async = record_impl.read_async_mock,
+		check_durability_risks = function()
+			local checked = 0
+			for record in active_records do
+				local state = private[record]
+				if state ~= nil and state.backend.mock then
+					record_impl.evaluate_durability_risk(record, state)
+					checked += 1
+				end
+			end
+			return checked
+		end,
+		claim_queue_message = record_impl.mock_claim_queue_message,
+		dead_letter_queue_message = record_impl.mock_dead_letter_queue_message,
+		list_versions_async = record_impl.list_versions_mock,
+		get_version_async = record_impl.get_version_mock,
+		get_version_at_time_async = record_impl.get_version_at_time_mock,
 		enqueue_async = function(name: string, scope: string, key: string, message_type: string, data: JsonValue?, queue_store_name: string?, operation_deadline: number?): (ResultCode, string?)
-			return enqueue_static(name, scope, key, message_type, data, true, queue_store_name, operation_deadline)
+			return record_impl.enqueue_static(name, scope, key, message_type, data, true, queue_store_name, operation_deadline)
 		end,
 		seed_queue_raw = function(name: string, scope: string, key: string, value: unknown, queue_store_name: string?): (ResultCode, string?)
-			return mock_seed_queue_value(name, scope, key, value, false, queue_store_name)
+			return record_impl.mock_seed_queue_value(name, scope, key, value, false, queue_store_name)
 		end,
 		seed_legacy_queue = function(name: string, scope: string, key: string, value: unknown, queue_store_name: string?): (ResultCode, string?)
-			return mock_seed_queue_value(name, scope, key, value, true, queue_store_name)
+			return record_impl.mock_seed_queue_value(name, scope, key, value, true, queue_store_name)
 		end,
-		get_queue_raw = mock_get_queue_raw,
-		seed_record_raw = mock_seed_record_raw,
-		get_record_raw = mock_get_record_raw,
-		get_record_version_raw = mock_get_record_version_raw,
-		set_test_clock = mock_set_test_clock,
-		set_update_replay = mock_set_update_replay,
-		set_update_failures = mock_set_update_failures,
+		get_queue_raw = record_impl.mock_get_queue_raw,
+		seed_record_raw = record_impl.mock_seed_record_raw,
+		get_record_raw = record_impl.mock_get_record_raw,
+		get_record_version_raw = record_impl.mock_get_record_version_raw,
+		set_test_clock = record_impl.mock_set_test_clock,
+		set_update_replay = record_impl.mock_set_update_replay,
+		set_update_failures = record_impl.mock_set_update_failures,
+		set_update_response_losses = record_impl.mock_set_update_response_losses,
 		reset = function()
 			local mock_records: { { id: string, record: Record } } = {}
 			for id, record in pairs(records) do
@@ -7348,6 +10390,8 @@ RecordStore.Mock = (function()
 			mock_update_failure_count = 0
 			mock_update_failure_code = "budget"
 			mock_update_failure_message = nil
+			mock_update_response_lost_count = 0
+			mock_update_response_lost_message = nil
 		end,
 	}
 
@@ -7355,9 +10399,9 @@ RecordStore.Mock = (function()
 end)()
 RecordStore.is_retryable_result = is_retryable_result
 RecordStore.get_diagnostic_code = get_diagnostic_code
-RecordStore.shutdown = shutdown
+RecordStore.shutdown = record_impl.shutdown
 
-game:BindToClose(shutdown)
+game:BindToClose(record_impl.shutdown)
 
 table.freeze(RecordStore)
 

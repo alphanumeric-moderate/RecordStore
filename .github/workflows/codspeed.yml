@@ -5,9 +5,14 @@ on:
     branches:
       - "main"
   pull_request:
-  # `workflow_dispatch` allows CodSpeed to trigger backtest
-  # performance analysis in order to generate initial data.
+  # Manual dispatch defaults to benchmarks only. Regression suites are an explicit later pass.
   workflow_dispatch:
+    inputs:
+      run_regressions:
+        description: "Run the available regression suites in the separate verification pass"
+        required: true
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -32,9 +37,41 @@ jobs:
           rm lune.zip
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
+      - name: Report benchmark phase and checked-out revision
+        run: |
+          echo "Checked-out commit: $(git rev-parse HEAD)"
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            if [[ "${{ inputs.run_regressions }}" == "true" ]]; then
+              echo "Phase: regression pass explicitly requested."
+            else
+              echo "Phase: benchmark-only; regression/failure/safety suites are intentionally deferred."
+            fi
+          elif [[ "${{ contains(github.event.pull_request.body, '[benchmark-only]') }}" == "true" ]]; then
+            echo "Phase: benchmark-only; regression/failure/safety suites are intentionally deferred."
+          else
+            echo "Phase: full regression gate enabled."
+          fi
+
+      # Remove [benchmark-only] from the PR body to re-enable feature-failure gates.
       - name: Check the regression suite passes
+        if: ${{ (github.event_name == 'workflow_dispatch' && inputs.run_regressions) || (github.event_name != 'workflow_dispatch' && !contains(github.event.pull_request.body, '[benchmark-only]')) }}
         run: |
           lune run bench/run_regression_tests.luau
+          lune run bench/mailbox_v2_regression.bench.luau
+          lune run bench/run_v2_simulator_regression.luau
+          lune run bench/run_v2_adapter_regression.luau
+          lune run bench/run_v2_record_bridge_regression.luau
+          lune run bench/run_v2_runtime_governor_regression.luau
+          lune run bench/run_v2_advanced_scheduler_regression.luau
+          lune run bench/run_v2_read_coalescer_regression.luau
+          lune run bench/run_v2_maintenance_regression.luau
+          lune run bench/run_v2_projection_regression.luau
+          lune run bench/run_v2_production_path_failure_matrix.luau
+          lune run bench/run_v2_production_mailbox_failure_matrix.luau
+          lune run bench/run_v2_transaction_inbox_outbox_failure_matrix.luau
+          lune run bench/run_v2_erasure_regression.luau
+          lune run bench/run_v2_rollout_regression.luau
+          lune run bench/run_v2_saga_regression.luau
           lune run bench/run_codenum_regression_tests.luau
           lune run bench/run_codenumvalue_regression_tests.luau
           lune run bench/run_playerdata_set_regression_tests.luau

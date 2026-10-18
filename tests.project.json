@@ -7,6 +7,24 @@
       "RecordStore": {
         "$path": "src/PlayerDataInitializer/RecordStore.luau"
       },
+      "RecordStoreMailboxV2": {
+        "$path": "src/PlayerDataInitializer/RecordStoreMailboxV2.luau"
+      },
+      "RecordStoreV2": {
+        "$path": "src/PlayerDataInitializer/RecordStoreV2.luau"
+      },
+      "RecordStoreV2Simulator": {
+        "$path": "src/PlayerDataInitializer/RecordStoreV2Simulator.luau"
+      },
+      "RecordStoreV2DataStoreAdapter": {
+        "$path": "src/PlayerDataInitializer/RecordStoreV2DataStoreAdapter.luau"
+      },
+      "RecordStoreV2Acceleration": {
+        "$path": "src/PlayerDataInitializer/RecordStoreV2Acceleration.luau"
+      },
+      "RecordStoreMailboxV2Regression": {
+        "$path": "tests/RecordStoreMailboxV2Regression.server.luau"
+      },
       "IntegerInfinityValue": {
         "$path": "src/PlayerDataInitializer/IntegerInfinityValue.luau"
       },
@@ -39,6 +57,9 @@
       },
       "PlayerDataSetRegression": {
         "$path": "tests/PlayerDataSetRegression.server.luau"
+      },
+      "RecordStoreTransactionsRegression": {
+        "$path": "tests/RecordStoreTransactionsRegression.server.luau"
       }
     },
     "ReplicatedStorage": {

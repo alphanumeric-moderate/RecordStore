@@ -199,3 +199,172 @@ lune run bench/run_regression_tests.luau
 # run every benchmark from codspeed.yml with the CodSpeed CLI
 codspeed run --mode simulation
 ```
+
+
+## RecordStore v2 feature services
+
+The v2 feature layer is opt-in and lives at
+`ServerScriptService.PlayerDataInitializer.RecordStoreV2`. It receives explicit dependencies on
+`RecordStore` and `RecordStoreMailboxV2`. Runtime policy must be configured before creating the
+first Record; adaptive mode remains disabled unless explicitly enabled.
+
+This integration example assumes a deployment bootstrap has already moved
+`player-records-v2` to the durable `active` rollout phase using real verifier callbacks and
+the same compatibility digest shown below. The runtime guard checks both the durable rollout phase
+and this binary's expected digest; it does not create attestations or prove that old writers have
+stopped. Configure the rollout separately, and keep V2 disabled until the compatibility,
+writer-drain, activation-freeze, rollback-rehearsal, and profile-key-fencing verifiers return durable
+evidence.
+
+```lua
+local DataStoreService = game:GetService("DataStoreService")
+local MemoryStoreService = game:GetService("MemoryStoreService")
+local HttpService = game:GetService("HttpService")
+
+local RecordStore = require(script.Parent.RecordStore)
+local MailboxV2 = require(script.Parent.RecordStoreMailboxV2)
+local RecordStoreV2 = require(script.Parent.RecordStoreV2)
+local DataStoreAdapter = require(script.Parent.RecordStoreV2DataStoreAdapter)
+local Acceleration = require(script.Parent.RecordStoreV2Acceleration)
+
+local runtime_code, runtime_error = RecordStore.configure_runtime({
+    revision = 2,
+    runtime_profile = "balanced",
+    server_role = "standard",
+    adaptive_runtime_enabled = true,
+    adaptive_min_concurrent_requests = 1,
+    adaptive_max_concurrent_requests = 4,
+    critical_request_reserve = 1,
+    adaptive_queue_budget_share = 0.2,
+})
+assert(runtime_code == "success", runtime_error)
+
+local owner = {
+    store_name = "PlayerRecords",
+    scope = "global",
+    profile_key = "player-" .. tostring(player.UserId),
+    user_id = player.UserId,
+}
+local record = RecordStore.new(owner.store_name, owner.scope, owner.profile_key, {
+    schema_version = 1,
+    user_ids = { owner.user_id },
+})
+local open_code, open_error = record:Open({ coins = 0 })
+assert(open_code == "created" or open_code == "loaded", open_error)
+
+-- The deployment bootstrap must prepare, attest and activate this rollout ID
+-- using real compatibility, old-writer-drain, freeze, rollback and fencing evidence.
+-- Do not replace this durable guard with a constant "true" callback.
+local rollout_store = DataStoreAdapter.new(RecordStore, "RecordStoreV2Rollout", "global")
+-- Use exactly the same immutable digest supplied to PrepareAsync by deployment tooling.
+local rollout_matrix_digest = "matrix-digest-v2"
+local rollout = RecordStoreV2.Rollout.new(rollout_store, {
+    expected_matrix_digest = rollout_matrix_digest,
+})
+local rollout_id = "player-records-v2"
+local function activation_guard(operation)
+    return rollout:ActivationGuard(rollout_id, operation)
+end
+
+local V2 = RecordStoreV2.new(RecordStore, MailboxV2, {
+    acceleration_module = Acceleration,
+    activation_guard = activation_guard,
+})
+local store = DataStoreAdapter.new(RecordStore, "RecordStoreMailboxV2", "global")
+local mailbox = V2.Mailbox.new(store, owner, {
+    active_record = record,
+    encode = function(value)
+        return HttpService:JSONEncode(value)
+    end,
+})
+-- Check and drain the legacy queue before switching this Record to V2.
+local bind_code, bind_error = record:BindMailboxV2Async(mailbox)
+assert(bind_code == "success", bind_error)
+
+local wakeups = Acceleration.new({
+    request_runner = RecordStore,
+    operation_deadline_seconds = 5,
+    memory_map = MemoryStoreService:GetHashMap("RecordStoreV2Wake"),
+})
+local started, start_error = wakeups:Start()
+if not started then warn(start_error) end -- durable polling remains the fallback
+
+local function handle_message(payload, message)
+    if type(payload) ~= "table" or type(payload.coins) ~= "number" then
+        return false, "invalid coin payload"
+    end
+    local command = {
+        message_id = message.Id,
+        message_type = message.Type,
+        payload = payload,
+    }
+    local material = V2.Canonicalize(command)
+    local fingerprint = V2.Fingerprint(command)
+    if type(fingerprint) ~= "string" then return false, "command is not canonical" end
+
+    local code, message_error = record:ApplyInboxAsync(
+        message.Id,
+        fingerprint,
+        function(data)
+            local next_data = if type(data) == "table" then table.clone(data) else {}
+            next_data.coins = (tonumber(next_data.coins) or 0) + payload.coins
+            return next_data
+        end,
+        material
+    )
+    return code == "success" or code == "duplicate", message_error
+end
+
+local bound, bind_error = V2.BindMailboxWakeups(wakeups, owner, mailbox, handle_message, 8)
+assert(bound, bind_error)
+```
+
+The example assumes the surrounding game script has a `player` variable and a
+server-authoritative policy for which messages are allowed to grant coins. The reducer must remain
+deterministic, non-yielding, and free of external side effects. The per-message inbox receipt is what
+makes reprocessing the same mailbox message safe after a crash. Arbitrary effects outside the profile
+transaction remain at-least-once and need their own durable idempotency/reconciliation.
+
+The v2 service exposes bounded inbox batches, grouped outbox dispatch, transaction receipts, a
+server-local governor wired through RecordStore's actual request gate, revisioned runtime profiles,
+critical save/release reserve, backpressure and telemetry, purchase-receipt handling, schema
+migrations, transfer sagas, Profile Doctor and guarded restore, RTBF erasure planning, eventual
+projections and unique reservations, tracing, payload/codec utilities, and resumable compaction.
+After `Record:BindMailboxV2Async(mailbox)` succeeds, `Record:EnqueueAsync`, `Record:ProcessQueueAsync`,
+and `Record:GetQueueAsync` use the bound V2 mailbox; an unbound Record retains the legacy queue behavior.
+Binding first checks the existing legacy queue and returns `busy` if pending legacy messages remain,
+so drain those messages before switching. The legacy `GetDeadLettersAsync` view is bounded to 1,000
+entries; legacy claim/replay/discard methods fail closed on a V2-bound Record because V2 uses operation
+IDs and replay generations. Use `MailboxV2.GetDeadLettersAsync`, `MailboxV2.ReplayDeadLetterAsync`, and
+`MailboxV2.DiscardDeadLetterAsync` directly for V2 dead-letter operations. Important operations should
+supply a caller-stable `idempotency_key` in the optional enqueue options.
+
+The DataStore adapter preserves key UserIds/metadata on updates and uses the shared RecordStore
+request gate. It intentionally exposes no unconditional physical-delete method. The wake-up
+accelerator uses fixed shard topics, a bounded local candidate set, optional expiring MemoryStore
+hints, and periodic per-owner polling. Pass `request_runner = RecordStore` to route MessagingService
+and MemoryStore operations through the shared work-class/concurrency gate. A hint is never an
+acceptance receipt or permission to execute work. Each dispatch requires a bound active Record whose store, scope, profile key, UserIds and session
+state match the mailbox owner.
+
+The library reserves the `__recordstore_v2_` prefix for its optional profile-data ledgers. Do not
+store application fields under this prefix. Cross-key workflows remain sagas, projections are
+eventually consistent, and strict `ordering_key` semantics and exactly-once arbitrary external
+effects are not promised. Erasure still needs complete application inventories, verified Roblox key
+templates, writer fences, dependency clearance, and generation-aware deletion/redaction. The full
+mixed-version rollout protocol and these integration guarantees are release gates, not results of
+adding helper APIs.
+
+The V2 advanced governor is shared by V2 facades that wrap the same core RecordStore module. It applies class admission, request observation, per-kind read/write budget checks, and circuit decisions to V2 DataStore-adapter calls before the core request gate makes the final admission decision. Half-open probes are not reserved until the budget and class caps permit a request. Its `options.runtime` values seed the governor only when it is first created for a core module; use `V2.ApplySchedulerPolicy({ revision = currentRevision + 1, ... })` for later updates. Unknown fields and out-of-range values are rejected. The selector can dispatch mailbox wake-ups, mailbox lease renewals, scheduled outbox batches, bounded maintenance chunks, and generic bounded callbacks through `V2.ScheduleWork(owner, work_id, callback, options)`. Generic work defaults to the rollout guard's `maintenance` operation; set `activation_operation` to a supported operation when a different guard is required. The selector uses owner/work-class cost-aware DRR by default, with FIFO/weighted/deadline alternatives, due-time heaps, deadline/age scoring, bounded dependency inheritance, typed expiry/dependency outcomes, per-owner concurrency caps, and a reserved critical dispatch slot. Outbox jobs use the configured batch window and adapt batch size to observed latency. Scheduled callbacks may opt into bounded retry by returning `{ code = "retryable" }` and setting `max_retries` (default 0, maximum 8); retry attempts consume global and work-class retry-token budgets and use capped exponential backoff, per-owner cooldown, and bounded jitter. `unknown` results and thrown callbacks are not replayed automatically. Shadow comparisons/replay are opt-in and do not change the real selection. Future-due work is timer-woken without spinning when the scheduling clock has not reached its deadline. Existing direct APIs are still valid and are not forcibly routed through the selector; the core RecordStore request gate remains authoritative for shared request admission.
+
+The authoritative section-by-section design map is
+[`docs/superpowers/specs/2026-10-17-recordstore-v2-implementation-matrix.md`](docs/superpowers/specs/2026-10-17-recordstore-v2-implementation-matrix.md).
+It separates code presence from compilation, failure-test, benchmark and Roblox acceptance status.
+
+PR #36 is the active implementation branch. At commit `07b32c0`, the 18 registered regression/failure scripts pass locally under Lune 0.11.0, including the deterministic fake-store, mailbox, rollout, saga, erasure, projection, read-coalescer, maintenance, and scheduler-retry checks. The hosted regression/CodSpeed run for that newest revision is still pending; prior CodSpeed comparisons are affected by CPU-environment differences and syscall-dominated measurements. Lune/Mock measurements are not real Roblox service latency or production acceptance evidence, and the complete 70-group release matrix plus live Roblox acceptance remain open.
+
+## Durability status and session waiting
+
+Call `record:GetDurabilityStatus()` to inspect dirty and durable generations, the tracked age of unsaved changes, the last confirmed save, and whether the local write outcome remains uncertain. `record:SubscribeDurabilityRisk(callback)` sends edge-triggered transitions when the configured dirty-age threshold is exceeded, a write outcome is uncertain, or the condition recovers. The default `max_dirty_age_seconds` is 300 seconds. Set initial policy through `RecordStore.configure_runtime({ ... })` before the first Record is created; after startup, validated revisioned patches can be applied through `RecordStore.apply_runtime_policy({ revision = nextRevision, max_dirty_age_seconds = ... })`. Stale or repeated policy revisions are rejected. If a runtime policy provider is configured, it must also publish monotonically increasing revisions. Observer capacity is bounded per Record.
+
+`RecordStore.get_health_snapshot(max_records)` provides a bounded server-local summary; it does not prove that every profile or every server is healthy. `record:WaitForSessionAsync(default_data, options)` wraps the existing durable `Open` path and reports competing-session observations, retry scheduling, cancellation, acquisition, and fencing/loss. It never treats an observed expired lease as an ownership token and does not bypass the existing cooperative takeover protocol. A `session_status_unavailable` result, especially after an unknown write outcome, requires reconciliation instead of blindly retrying an external effect.

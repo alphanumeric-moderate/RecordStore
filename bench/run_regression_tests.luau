@@ -7,6 +7,28 @@ local Shim = require("./RobloxShim")
 
 for _, path in {
 	"src/PlayerDataInitializer/PlayerDataCore.luau",
+	"src/PlayerDataInitializer/RecordStoreMailboxV2.luau",
+	"src/PlayerDataInitializer/RecordStoreV2.luau",
+	"src/PlayerDataInitializer/RecordStoreV2Simulator.luau",
+	"src/PlayerDataInitializer/RecordStoreV2DataStoreAdapter.luau",
+	"src/PlayerDataInitializer/RecordStoreV2Acceleration.luau",
+	"bench/AtomicFakeDataStore.luau",
+	"bench/run_v2_production_path_failure_matrix.luau",
+	"bench/run_v2_runtime_governor_regression.luau",
+	"bench/run_v2_read_coalescer_regression.luau",
+	"bench/run_v2_maintenance_regression.luau",
+	"bench/run_v2_projection_regression.luau",
+	"bench/run_v2_production_mailbox_failure_matrix.luau",
+	"bench/run_v2_adapter_regression.luau",
+	"bench/run_v2_record_bridge_regression.luau",
+	"bench/run_v2_transaction_inbox_outbox_failure_matrix.luau",
+	"bench/run_v2_erasure_regression.luau",
+	"bench/run_v2_rollout_regression.luau",
+	"bench/run_v2_saga_regression.luau",
+	"tests/RecordStoreMailboxV2Regression.server.luau",
+	"tests/RecordStoreTransactionsRegression.server.luau",
+	"bench/mailbox_v2_regression.bench.luau",
+	"bench/mailbox_v2.bench.luau",
 	"src/PlayerDataInitializer/IntegerInfinityValue.luau",
 	"src/PlayerDataInitializer/NumberFormatter.luau",
 	"src/CodeNum.luau",
@@ -27,6 +49,53 @@ for _, path in {
 	})
 	assert(type(chunk) == "function", ("failed to compile %s"):format(path))
 end
+
+-- Compile every Lua/Luau fenced example in README.md. This catches documentation
+-- snippets that accidentally contain placeholders or drift from valid Luau syntax.
+local function compile_readme_examples()
+	local readme = fs.readFile("README.md")
+	local active_language: string? = nil
+	local snippet_lines: { string } = {}
+	local snippet_count = 0
+	local skipped_fragment_count = 0
+
+	for line in (readme .. "\n"):gmatch("(.-)\n") do
+		if active_language ~= nil then
+			if line:match("^%```%s*$") then
+				snippet_count += 1
+				local source = table.concat(snippet_lines, "\n")
+				-- This intentionally partial example demonstrates values to insert into
+				-- existing CONFIG tables; it is not a standalone Luau chunk.
+				if source:match("^%s*%-%- In CONFIG%.data:") then
+					skipped_fragment_count += 1
+				else
+					local debug_name = ("README %s example #%d"):format(active_language, snippet_count)
+					local compiled, result = pcall(function()
+						return luau.load(source, { debugName = debug_name })
+					end)
+					assert(compiled and type(result) == "function", ("failed to compile %s: %s"):format(debug_name, tostring(result)))
+				end
+				active_language = nil
+				table.clear(snippet_lines)
+			else
+				table.insert(snippet_lines, line)
+			end
+		else
+			local language = line:match("^%```([%w_-]+)")
+			if language == "lua" or language == "luau" then
+				active_language = language
+				table.clear(snippet_lines)
+			end
+		end
+	end
+
+	assert(active_language == nil, "README contains an unclosed Lua/Luau fenced block")
+	assert(snippet_count > 0, "README contains no Lua/Luau fenced examples to compile")
+	assert(snippet_count > skipped_fragment_count, "README contains no standalone Lua/Luau examples to compile")
+	print(("Compiled %d Lua/Luau README examples; skipped %d documented fragment(s)"):format(snippet_count - skipped_fragment_count, skipped_fragment_count))
+end
+
+compile_readme_examples()
 
 -- Exercise the same normalizer used by PlayerDataCore, without relying on
 -- Roblox Instance behavior. The separate Studio Script covers NumberValue.
@@ -89,4 +158,5 @@ assert(not invalid_options_ok, "invalid decimal precision was accepted")
 Shim.run_script("tests/RecordStore_OpenCorrupt_CompatibilityRegression.server.luau")
 Shim.run_script("tests/RecordStore_NonFiniteNumbersRegression.server.luau")
 Shim.run_script("tests/RecordStore_CodeNumRegression.server.luau")
+Shim.run_script("tests/RecordStoreTransactionsRegression.server.luau")
 Shim.close()
