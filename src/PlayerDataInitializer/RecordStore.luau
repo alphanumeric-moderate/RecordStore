@@ -6889,7 +6889,12 @@ local function run_scheduled_record_work(record: Record, state: InternalState, n
 				local bounded_batch_size = if type(batch_size) == "number" then math.clamp(math.floor(batch_size), 1, 4) else 4
 				local code, message = process_queue_internal(state, bounded_batch_size)
 				sync_public(record)
-				return { code = code, message = message }
+				local processed_count = if code == "processed" then tonumber(message) else 0
+				return {
+					code = code,
+					message = message,
+					processed_count = if finite(processed_count) then processed_count else 0,
+				}
 			end,
 			{ service_class = "normal", read_units = 1, write_units = 1, handler_slots = 1,
 				batchable = true, batch_size = 4, batch_backlog = 4, batch_window_ms = 0,
