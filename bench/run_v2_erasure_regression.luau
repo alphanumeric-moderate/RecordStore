@@ -156,9 +156,10 @@ local verified = V2.Erasure.new(verified_store, { family(true) }, {
 local verified_plan = verified:PlanAsync(113, "erasure-verified")
 assert(verified_plan.code == "success" and verified_plan.rtbf_coverage_verified == true,
 	"verified family and template checks did not produce a verified plan")
+local delete_calls_before_verified = delete_calls
 local verified_result = verified:ExecuteAsync(113, "erasure-verified", 16)
 assert(verified_result.code == "committed", "verified erasure did not finish: " .. tostring(verified_result.code))
-assert(delete_calls == 1, "verified erasure did not perform exactly the one planned action")
+assert(delete_calls == delete_calls_before_verified + 1, "verified erasure did not perform exactly the one planned action")
 assert(fence_calls >= 1, "verified erasure did not fence writers before deleting")
 
 local untemplated = V2.Erasure.new(new_store(), {
