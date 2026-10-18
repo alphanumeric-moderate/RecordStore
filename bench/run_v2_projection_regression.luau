@@ -57,6 +57,11 @@ local registered, register_error = projections:Register("player_balance_v1", 1, 
 	return changed
 end, { consistency = "eventual" })
 assert(registered, tostring(register_error))
+local changed_projection_revision = projections:Register("player_balance_v1", 1, function(current)
+	return current
+end, { consistency = "eventual" })
+assert(changed_projection_revision == false,
+	"projection implementation changed without incrementing its declared version")
 
 store.replay_next = true
 local first = projections:ApplyAsync("player_balance_v1", {
