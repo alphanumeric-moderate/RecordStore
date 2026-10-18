@@ -309,6 +309,22 @@ group("07 consumer reducers cannot modify RecordStore reserved sidecars", functi
 	assert(normal.code == "committed", "ordinary consumer mutation was rejected while preserving reserved fields")
 	assert(record:Get().coins == 2 and record:Get()[sidecar_key].value == "must survive",
 		"ordinary mutation failed to preserve a reserved sidecar")
+
+	local migrations = V2.Migrations.new()
+	local registered, register_error = migrations:Register(
+		"reserved-sidecar-guard", 0, 1, "migration-reserved-sidecar", "revision-1",
+		function(current)
+			local changed = table.clone(current)
+			changed[sidecar_key] = nil
+			return changed
+		end
+	)
+	assert(registered, tostring(register_error))
+	local preview = migrations:Preview(record, "reserved-sidecar-guard", 1)
+	assert(preview.code == "invalid",
+		"migration preview accepted a transform that removes an internal reserved sidecar")
+	assert(record:Get().coins == 2 and record:Get()[sidecar_key].value == "must survive",
+		"rejected migration preview mutated the active profile")
 end)
 
 print(("[PASS] %d transaction/inbox/outbox failure-recovery groups using the deterministic DataStore fake."):format(passed))
