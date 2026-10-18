@@ -781,6 +781,35 @@ assert(admission_governor:Stats().in_flight == 0,
 	"request admission leaked its in-flight reservation")
 admission_dispatcher:Close()
 
+-- A job whose scalar cost exceeds its work-class cap must terminate instead of
+-- remaining queued forever as if capacity might eventually free up.
+local impossible_governor = new_scheduler()
+local impossible_dispatcher = Scheduler.new_dispatcher(impossible_governor, {
+	now_ms = function() return now_ms end,
+})
+local impossible_callback_ran, impossible_completion = false, nil
+local impossible_job = impossible_dispatcher:Schedule(
+	"impossible-cost-owner", "over-class-cap", function()
+		impossible_callback_ran = true
+		return { code = "committed" }
+	end,
+	{
+		operation_class = "tracing",
+		work_class = "maintenance",
+		cost = 9,
+		mutating = false,
+		on_complete = function(result) impossible_completion = result end,
+	}
+)
+assert(impossible_job.code == "accepted", "impossible-cost fixture did not reach scheduler admission")
+for _ = 1, 100 do if impossible_completion ~= nil then break end; task.wait(0.001) end
+assert(not impossible_callback_ran, "job above its work-class cap was executed")
+assert(type(impossible_completion) == "table" and impossible_completion.code == "capacity",
+	"job above its work-class cap did not receive a terminal capacity result")
+assert(impossible_governor:Stats().queue_items == 0,
+	"impossible admission remained queued forever")
+impossible_dispatcher:Close()
+
 -- StandardRead and StandardWrite reservations are independent because UpdateAsync
 -- consumes both request budgets while a read-only operation consumes only StandardRead.
 local dimensions_governor = new_scheduler()
