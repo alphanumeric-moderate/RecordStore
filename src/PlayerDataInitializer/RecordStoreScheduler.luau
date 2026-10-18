@@ -495,7 +495,7 @@ local function new_governor(options)
 		return nil
 	end
 	function governor:Enqueue(item)
-		if type(item) ~= "table" or not valid_text(item.id, 128) or not valid_text(item.owner_id, 256) then return { code = "invalid" } end
+		if type(item) ~= "table" or not valid_text(item.id, 128) or not valid_text(item.owner_id, 512) then return { code = "invalid" } end
 		if self.known[item.id] then return { code = "duplicate" } end
 		if #self.queue >= self.policy.queue_capacity then self.stats.rejected += 1; return { code = "capacity", message = "local queue full; no accepted durable work is evicted" } end
 		local lane = item.lane or "normal"
@@ -1080,7 +1080,7 @@ local function new_dispatcher(governor, options)
 	}
 	function dispatcher:Schedule(owner_id, work_id, callback, schedule_options)
 		if self.closed then return { code = "closed", message = "scheduler dispatcher is closed" } end
-		if not valid_text(owner_id, 256) or not valid_text(work_id, 96) or type(callback) ~= "function" then
+		if not valid_text(owner_id, 512) or not valid_text(work_id, 96) or type(callback) ~= "function" then
 			return { code = "invalid", message = "owner_id, work_id and callback are required" }
 		end
 		if schedule_options == nil then schedule_options = {} end
