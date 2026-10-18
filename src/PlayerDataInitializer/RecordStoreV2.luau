@@ -2604,9 +2604,23 @@ local function new_projections(store, options)
 		local key = key_for(name, event.entity_id)
 		local attempt_id = digest(event.event_id .. ":" .. tostring(os.clock()) .. ":" .. tostring(math.random()))
 		local updated_at = os.time()
+		local function valid_recent_events(events)
+			if type(events) ~= "table" then return false end
+			local count = key_count(events)
+			if count > 64 then return false end
+			for index in pairs(events) do
+				if type(index) ~= "number" or not finite(index) or math.floor(index) ~= index or index < 1 or index > count then return false end
+			end
+			for index = 1, count do if not valid_text(events[index], 128) then return false end end
+			return true
+		end
 		local value, write_error = adapter_call(store, "UpdateAsync", key, function(old)
-			if old ~= nil and (old.entity_id ~= event.entity_id or old.projection_name ~= name) then return old end
-			if old ~= nil and old.version ~= def.version then return old end
+			if old ~= nil and type(old) ~= "table" then return old end
+			if type(old) == "table" and (old.entity_id ~= event.entity_id or old.projection_name ~= name) then return old end
+			if type(old) == "table" and old.version ~= def.version then return old end
+			if type(old) == "table" and (type(old.value) ~= "table" or not finite(old.source_revision)
+				or not valid_recent_events(old.recent_events)
+			) then return old end
 			local current = if type(old) == "table" then old else {
 				projection_name = name,
 				version = def.version,
@@ -2635,16 +2649,20 @@ local function new_projections(store, options)
 		end)
 
 		local function classify(observed, ambiguous)
-			if type(observed) ~= "table" then
+			if observed == nil then
 				return { code = "unknown", message = write_error or "projection update returned no canonical row" }
 			end
+			if type(observed) ~= "table" then return { code = "corrupt", message = "projection row is not a table" } end
 			if observed.entity_id ~= event.entity_id or observed.projection_name ~= name then
 				return { code = "conflict", message = "projection key collision" }
 			end
 			if observed.version ~= def.version then
 				return { code = "unsupported_schema", message = "projection schema revision changed" }
 			end
-			for _, event_id in ipairs(observed.recent_events or {}) do
+			if type(observed.value) ~= "table" or not finite(observed.source_revision) or not valid_recent_events(observed.recent_events) then
+				return { code = "corrupt", message = "projection row has malformed value, revision or event ledger" }
+			end
+			for _, event_id in ipairs(observed.recent_events) do
 				if event_id == event.event_id then
 					if observed.last_attempt_id == attempt_id and observed.last_event_id == event.event_id
 						and observed.last_event_revision == event.source_revision
