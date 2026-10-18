@@ -807,7 +807,8 @@ local function new_governor(options)
 			active_renewals_by_owner = copy(self.active_renewals_by_owner),
 			drr_deficit = copy(self.drr_deficit), drr_cursor_key = self.drr_cursor_key,
 			high_streak = self.high_streak, urgent_streak = self.urgent_streak,
-			policy = copy(self.policy),
+			policy = copy(self.policy), in_flight = self.in_flight, by_class = copy(self.by_class),
+			last_budget_by_kind = copy(self.last_budget_by_kind), circuits = copy(self.circuits),
 		}
 	end
 	function governor:MarkCompleted(id, outcome)
