@@ -53,10 +53,12 @@ local coalescer = V2.ReadCoalescer.new(function(key)
 	reads += 1
 	return { key = key, value = 42 }
 end, { ttl_seconds = 60, max_entries = 128 })
-assert(coalescer:GetAsync("profile-1").value == "profile-1")
-assert(coalescer:GetAsync("profile-1").value == "profile-1")
-assert(reads == 1)
-assert(coalescer:Stats().hits == 1)
+local first_read = coalescer:GetAsync("profile-1")
+local second_read = coalescer:GetAsync("profile-1")
+assert(first_read.key == "profile-1" and first_read.value == 42)
+assert(second_read.key == "profile-1" and second_read.value == 42)
+assert(reads == 2, "read coalescer retained a completed result instead of fetching fresh state")
+assert(coalescer:Stats().completed_cache_entries == 0)
 
 local payload = { items = {} }
 for index = 1, 100 do table.insert(payload.items, { id = index, description = string.rep("record-store", 8) }) end
