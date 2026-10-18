@@ -2601,28 +2601,77 @@ local function new_projections(store, options)
 				if erased == true then return { code = "erased" } elseif erased == nil then return { code = "unknown", message = error_value or "erasure state unresolved" } end
 			end
 		end
-		local key, decision = key_for(name, event.entity_id), "unknown"
+		local key = key_for(name, event.entity_id)
+		local attempt_id = digest(event.event_id .. ":" .. tostring(os.clock()) .. ":" .. tostring(math.random()))
+		local updated_at = os.time()
 		local value, write_error = adapter_call(store, "UpdateAsync", key, function(old)
-			decision = "unknown"
-			if old ~= nil and (old.entity_id ~= event.entity_id or old.projection_name ~= name) then decision = "conflict"; return old end
-			if old ~= nil and old.version ~= def.version then decision = "unsupported_schema"; return old end
-			local current = if type(old) == "table" then old else { projection_name = name, version = def.version, entity_id = event.entity_id, value = {}, source_revision = -1, recent_events = {} }
-			for _, event_id in ipairs(current.recent_events or {}) do if event_id == event.event_id then decision = "duplicate"; return current end end
-			if event.source_revision <= current.source_revision then decision = "stale"; return current end
+			if old ~= nil and (old.entity_id ~= event.entity_id or old.projection_name ~= name) then return old end
+			if old ~= nil and old.version ~= def.version then return old end
+			local current = if type(old) == "table" then old else {
+				projection_name = name,
+				version = def.version,
+				entity_id = event.entity_id,
+				value = {},
+				source_revision = -1,
+				recent_events = {},
+			}
+			for _, event_id in ipairs(current.recent_events or {}) do
+				if event_id == event.event_id then return current end
+			end
+			if event.source_revision <= current.source_revision then return current end
 			local next_value = pure(def.projector, copy(current.value), copy(event))
-			if type(next_value) ~= "table" then decision = "invalid"; return current end
-			local result = copy(current); result.value = next_value; result.source_revision = event.source_revision; result.updated_at = os.time()
-			result.recent_events = copy(current.recent_events or {}); table.insert(result.recent_events, event.event_id)
+			if type(next_value) ~= "table" then return current end
+			local result = copy(current)
+			result.value = next_value
+			result.source_revision = event.source_revision
+			result.updated_at = updated_at
+			result.last_event_id = event.event_id
+			result.last_event_revision = event.source_revision
+			result.last_attempt_id = attempt_id
+			result.recent_events = copy(current.recent_events or {})
+			table.insert(result.recent_events, event.event_id)
 			while #result.recent_events > 64 do table.remove(result.recent_events, 1) end
-			decision = "committed"
 			return result
 		end)
-		if write_error then
-			local observed = adapter_call(store, "GetAsync", key)
-			if type(observed) == "table" then for _, id in ipairs(observed.recent_events or {}) do if id == event.event_id then return { code = "committed", row = observed, reconciled = true, consistency = "eventual" } end end end
-			return { code = "unknown", message = write_error }
+
+		local function classify(observed, ambiguous)
+			if type(observed) ~= "table" then
+				return { code = "unknown", message = write_error or "projection update returned no canonical row" }
+			end
+			if observed.entity_id ~= event.entity_id or observed.projection_name ~= name then
+				return { code = "conflict", message = "projection key collision" }
+			end
+			if observed.version ~= def.version then
+				return { code = "unsupported_schema", message = "projection schema revision changed" }
+			end
+			for _, event_id in ipairs(observed.recent_events or {}) do
+				if event_id == event.event_id then
+					if observed.last_attempt_id == attempt_id and observed.last_event_id == event.event_id
+						and observed.last_event_revision == event.source_revision
+					then
+						return { code = if ambiguous then "committed" else "committed", row = observed, reconciled = ambiguous or nil, consistency = "eventual" }
+					end
+					return { code = "duplicate", row = observed, consistency = "eventual" }
+				end
+			end
+			if observed.source_revision >= event.source_revision then
+				return { code = "stale", row = observed, consistency = "eventual" }
+			end
+			local projected = pure(def.projector, copy(observed.value), copy(event))
+			if type(projected) ~= "table" then
+				return { code = "invalid", message = "projection reducer rejected the event" }
+			end
+			return { code = "unknown", row = observed, message = write_error or "projection update was not durably observed", consistency = "eventual" }
 		end
-		return { code = decision, row = value, consistency = "eventual" }
+
+		if write_error then
+			local observed, read_error = adapter_call(store, "GetAsync", key)
+			if read_error then return { code = "unknown", message = write_error .. "; reconciliation read failed: " .. tostring(read_error) } end
+			local result = classify(observed, true)
+			if result.code == "unknown" then result.message = write_error end
+			return result
+		end
+		return classify(value, false)
 	end
 	function service:GetAsync(name, entity_id)
 		if not self.projections[name] or not valid_text(entity_id, 128) then return { code = "not_found" } end
