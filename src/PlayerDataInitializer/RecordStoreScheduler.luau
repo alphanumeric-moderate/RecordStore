@@ -1413,17 +1413,18 @@ local function new_dispatcher(governor, options)
 		local token, wait_ms = governor:AcquireRetryToken(entry.work_class)
 		local now = now_ms()
 		local delay_ms
+		local retry_after_ms = if type(result) == "table" and finite(result.retry_after_ms)
+			then math.clamp(math.floor(result.retry_after_ms), 0, 60000) else 0
 		if token then
 			local class_multiplier = if retry_class == "throttled" then 4 elseif retry_class == "conflict" then 2 else 1
 			local exponential = math.min(60000, entry.retry_delay_ms * class_multiplier * (2 ^ entry.retry_attempt))
 			local jitter_span = exponential * entry.retry_jitter_percent / 100
 			local jitter = if jitter_span > 0 then (math.random() * 2 - 1) * jitter_span else 0
-			local retry_after_ms = if type(result) == "table" and finite(result.retry_after_ms)
-				then math.clamp(math.floor(result.retry_after_ms), 0, 60000) else 0
 			delay_ms = math.clamp(math.max(retry_after_ms, math.floor(exponential + jitter), 10), 10, 60000)
 		else
-			-- A depleted token bucket defers retry traffic; it must not spin a tight timer.
-			delay_ms = if finite(wait_ms) then math.clamp(math.floor(wait_ms), 10, 60000) else 60000
+			-- Token pressure can defer retries, but cannot shorten a caller's retry-after.
+			local token_wait_ms = if finite(wait_ms) then math.floor(wait_ms) else 60000
+			delay_ms = math.clamp(math.max(token_wait_ms, retry_after_ms), 10, 60000)
 		end
 		local due_at_ms = now + delay_ms
 		local queued, message = governor:Reschedule(item.id, due_at_ms)
@@ -1624,11 +1625,11 @@ local function new_dispatcher(governor, options)
 			-- keep observations keyed exactly like the admission reservation.
 			local operation_kind = if type(entry) == "table"
 				then entry.operation_class or entry.work_class or "default" else "scheduled_callback"
-			local failed = not callback_ok or result_code == "unknown" or result_code == "budget"
-				or result_code == "retryable" or result_code == "retry_rejected" or result_code == "retry_exhausted"
+			local outcome_class = classify_outcome(callback_result, callback_ok)
+			local failed = outcome_class ~= "success"
 			local observed_budget = if type(callback_result) == "table" and finite(callback_result.budget)
 				then callback_result.budget else nil
-			governor:Observe(operation_kind, not failed, elapsed_ms, if failed then tostring(result_code or "unknown") else nil, observed_budget)
+			governor:Observe(operation_kind, not failed, elapsed_ms, if failed then outcome_class else nil, observed_budget)
 			local prior_service_latency = governor.latency_ewma.service
 			governor.latency_ewma.service = if finite(prior_service_latency)
 				then prior_service_latency * 0.8 + elapsed_ms * 0.2 else elapsed_ms
