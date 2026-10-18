@@ -207,7 +207,7 @@ local scheduled_outbox_submitted = V2.ScheduleOutboxDispatch(
 		return true, "scheduled-outbox-destination-receipt"
 	end,
 	1,
-	1,
+	2,
 	function(result) scheduled_outbox_result = result end,
 	{ lane = "background" }
 )
