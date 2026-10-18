@@ -212,6 +212,7 @@ local scheduled_outbox_submitted = V2.ScheduleOutboxDispatch(
 	{ lane = "background" }
 )
 assert(scheduled_outbox_submitted.code == "accepted", "outbox dispatch did not enter the shared selector")
+now_ms += 10 -- advance the injected clock through the opt-in outbox batch window
 for _ = 1, 100 do
 	if scheduled_outbox_result ~= nil then break end
 	task.wait(0.01)
