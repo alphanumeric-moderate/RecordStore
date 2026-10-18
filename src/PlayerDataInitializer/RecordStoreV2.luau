@@ -49,6 +49,11 @@ local function valid_text(value, maximum)
 	return type(value) == "string" and value ~= "" and #value <= maximum
 end
 
+local function bounded_integer(value, default_value, minimum, maximum)
+	local selected = if finite(value) then value else default_value
+	return math.clamp(math.floor(selected), minimum, maximum)
+end
+
 local function copy(value, depth, seen)
 	depth = depth or 0
 	seen = seen or {}
@@ -411,7 +416,7 @@ local function new_inbox()
 	end
 	function service.PruneReceipts(record, older_than_unix, max_items, operation_id)
 		if not finite(older_than_unix) then return { code = "invalid", message = "cutoff must be finite Unix seconds" } end
-		max_items = math.clamp(math.floor(max_items or 16), 1, MAX_INBOX_RECEIPTS)
+		max_items = bounded_integer(max_items, 16, 1, MAX_INBOX_RECEIPTS)
 		operation_id = operation_id or ("rv2:inbox-prune:" .. digest(tostring(older_than_unix) .. ":" .. tostring(max_items)))
 		return transaction_run(record, operation_id, { older_than_unix = older_than_unix, max_items = max_items }, function(current)
 			if type(current) ~= "table" then error("table profile data required") end
@@ -434,8 +439,8 @@ end
 local function new_outbox()
 	local service = {}
 	function service.DispatchBatches(record, dispatcher, batch_size, max_batches)
-		batch_size = math.clamp(math.floor(batch_size or 8), 1, 16)
-		max_batches = math.clamp(math.floor(max_batches or 4), 1, 32)
+		batch_size = bounded_integer(batch_size, 8, 1, 16)
+		max_batches = bounded_integer(max_batches, 4, 1, 32)
 		if type(record) ~= "table" or (type(record.DispatchOutboxBatchAsync) ~= "function" and type(record.DispatchOutboxAsync) ~= "function") then return { code = "invalid", dispatched = 0 } end
 		local total = 0
 		for batch = 1, max_batches do
@@ -450,8 +455,8 @@ local function new_outbox()
 		return { code = "incomplete", dispatched = total, batches = max_batches, message = "batch cap reached; resume later" }
 	end
 	function service.PruneBatches(record, cutoff_ms, batch_size, max_batches)
-		batch_size = math.clamp(math.floor(batch_size or 16), 1, 32)
-		max_batches = math.clamp(math.floor(max_batches or 4), 1, 32)
+		batch_size = bounded_integer(batch_size, 16, 1, 32)
+		max_batches = bounded_integer(max_batches, 4, 1, 32)
 		local total = 0
 		for batch = 1, max_batches do
 			local count, code, message = record:PruneOutboxAsync(cutoff_ms, batch_size)
@@ -463,8 +468,8 @@ local function new_outbox()
 		return { code = "incomplete", pruned = total, message = "batch cap reached; resume later" }
 	end
 	function service.PruneTransactionReceiptsBatches(record, cutoff_ms, batch_size, max_batches)
-		batch_size = math.clamp(math.floor(batch_size or 16), 1, 32)
-		max_batches = math.clamp(math.floor(max_batches or 4), 1, 32)
+		batch_size = bounded_integer(batch_size, 16, 1, 32)
+		max_batches = bounded_integer(max_batches, 4, 1, 32)
 		local total = 0
 		for batch = 1, max_batches do
 			local count, code, message = record:PruneTransactionReceiptsAsync(cutoff_ms, batch_size)
@@ -633,7 +638,7 @@ local function new_governor(options)
 		return true, 0
 	end
 	function governor:ChooseBatchSize(requested, latency_ms)
-		local maximum = math.min(math.clamp(math.floor(requested or self.policy.max_batch), 1, 16), self.policy.max_batch)
+		local maximum = math.min(bounded_integer(requested, self.policy.max_batch, 1, 16), self.policy.max_batch)
 		latency_ms = if finite(latency_ms) then latency_ms else 0
 		if latency_ms >= self.policy.batch_latency_ceiling_ms then return 1 end
 		if latency_ms >= self.policy.batch_latency_ceiling_ms * 0.75 then return math.max(1, math.floor(maximum / 2)) end
@@ -645,7 +650,7 @@ local function new_governor(options)
 		return true
 	end
 	function governor:PopDue(limit)
-		limit = math.clamp(math.floor(limit or 32), 1, 256)
+		limit = bounded_integer(limit, 32, 1, 256)
 		local ids = {}
 		for id, item in pairs(self.due) do if item.due_at_ms <= now_ms() then table.insert(ids, id) end end
 		table.sort(ids, function(a, b)
@@ -801,8 +806,8 @@ end
 
 local function path_diff(left, right, options)
 	options = options or {}
-	local max_nodes = math.clamp(math.floor(options.max_nodes or 256), 1, 2048)
-	local max_bytes = math.clamp(math.floor(options.max_bytes or 16384), 256, 131072)
+	local max_nodes = bounded_integer(options.max_nodes, 256, 1, 2048)
+	local max_bytes = bounded_integer(options.max_bytes, 16384, 256, 131072)
 	local changes, nodes, bytes, truncated = {}, 0, 0, false
 	local function add(path, before, after)
 		nodes += 1
@@ -842,8 +847,8 @@ end
 
 local function new_tracer(options)
 	options = options or {}
-	local capacity = math.clamp(math.floor(options.max_events or 256), 16, MAX_TRACE_EVENTS)
-	local sample_every = math.clamp(math.floor(options.success_sample_every or 1), 1, 10000)
+	local capacity = bounded_integer(options.max_events, 256, 16, MAX_TRACE_EVENTS)
+	local sample_every = bounded_integer(options.success_sample_every, 1, 1, 10000)
 	local tracer = { events = {}, next_sequence = 1, dropped = 0, emitted = 0, sampled = 0, store = options.store }
 	function tracer:Emit(event)
 		if type(event) ~= "table" then return false, "trace event required" end
@@ -875,7 +880,7 @@ local function new_tracer(options)
 		for _, event in ipairs(self.events) do
 			if event.operation_id == operation_id or event.correlation_id == operation_id or event.causation_id == operation_id then table.insert(matches, copy(event)) end
 		end
-		limit = math.clamp(math.floor(limit or 128), 1, 256)
+		limit = bounded_integer(limit, 128, 1, 256)
 		local truncated = #matches > limit
 		while #matches > limit do table.remove(matches, 1) end
 		return { code = "success", events = matches, truncated = truncated or self.dropped > 0, dropped_local_events = self.dropped, completeness = if self.dropped == 0 and not truncated then "local_ring_complete" else "incomplete", note = "not a linearizable cross-server snapshot" }
@@ -883,7 +888,7 @@ local function new_tracer(options)
 	function tracer:FlushAsync(operation_id, maximum)
 		if not self.store then return { code = "unsupported", message = "no durable trace adapter configured" } end
 		if not valid_text(operation_id, 128) then return { code = "invalid" } end
-		maximum = math.clamp(math.floor(maximum or 32), 1, 128)
+		maximum = bounded_integer(maximum, 32, 1, 128)
 		local batch = {}
 		for _, event in ipairs(self.events) do
 			if event.operation_id == operation_id or event.correlation_id == operation_id or event.causation_id == operation_id then table.insert(batch, copy(event)); if #batch >= maximum then break end end
@@ -918,14 +923,14 @@ local function new_tracer(options)
 		for _, event in ipairs(stored.events or {}) do local id = tostring(event.sequence); if not seen[id] then seen[id] = true; table.insert(merged, copy(event)) end end
 		for _, event in ipairs(result.events) do local id = tostring(event.sequence); if not seen[id] then seen[id] = true; table.insert(merged, copy(event)) end end
 		table.sort(merged, function(a, b) return a.sequence < b.sequence end)
-		limit = math.clamp(math.floor(limit or 128), 1, 256)
+		limit = bounded_integer(limit, 128, 1, 256)
 		while #merged > limit do table.remove(merged, 1); result.truncated = true end
 		result.events, result.durable_read = merged, "success"
 		result.truncated = result.truncated or stored.truncated == true
 		return result
 	end
 	function tracer:Drain(limit)
-		limit = math.clamp(math.floor(limit or 64), 1, 256)
+		limit = bounded_integer(limit, 64, 1, 256)
 		local result = {}
 		for _ = 1, math.min(limit, #self.events) do table.insert(result, table.remove(self.events, 1)) end
 		return result
@@ -2517,7 +2522,7 @@ local function new_projections(store, options)
 	end
 	function service:RebuildAsync(name, fetch_page, cursor, max_pages)
 		if not self.projections[name] or type(fetch_page) ~= "function" then return { code = "invalid" } end
-		max_pages = math.clamp(math.floor(max_pages or 4), 1, 64)
+		max_pages = bounded_integer(max_pages, 4, 1, 64)
 		local processed = 0
 		for _ = 1, max_pages do
 			local items, next_cursor, complete = io_call(fetch_page, cursor, 64)
@@ -2854,8 +2859,8 @@ local function new_maintenance()
 		config = config or {}
 		local compactor = { status = "idle", cursor = config.initial_cursor, processed = 0, removed = 0, last_error = nil }
 		function compactor:RunStep(max_items, budget_ms)
-			max_items = math.clamp(math.floor(max_items or 32), 1, 256)
-			budget_ms = math.clamp(math.floor(budget_ms or 25), 1, 1000)
+			max_items = bounded_integer(max_items, 32, 1, 256)
+			budget_ms = bounded_integer(budget_ms, 25, 1, 1000)
 			if type(config.next_page) ~= "function" or type(config.inspect) ~= "function" or type(config.delete_if_generation) ~= "function" or type(config.persist_progress) ~= "function" then return { code = "invalid", message = "compactor requires page, inspect, generation-aware delete, and checkpoint adapters" } end
 			local start = os.clock() * 1000
 			local items, next_cursor, complete = io_call(config.next_page, self.cursor, max_items)
@@ -3106,7 +3111,7 @@ function V2.new(record_store, mailbox_module, options)
 		local owner_text, owner_error = request_material(owner)
 		if owner_text == nil then return false, owner_error or "mailbox owner is not canonicalizable" end
 		local owner_digest = digest(owner_text)
-		local limit = math.clamp(math.floor(max_messages_per_wake or 4), 1, 32)
+		local limit = bounded_integer(max_messages_per_wake, 4, 1, 32)
 		local bound, bind_error = mailbox:BindWakeups(accelerator)
 		if not bound then return false, bind_error end
 		return accelerator:Register(owner_text, function(reason)
