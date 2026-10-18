@@ -726,6 +726,8 @@ local function new_governor(options)
 		local code = if type(outcome) == "table" then outcome.code else outcome
 		if code == nil or code == true or code == "success" or code == "committed"
 			or code == "acknowledged" or code == "processed" or code == "completed" or code == "duplicate" or code == "renewed"
+			or code == "saved" or code == "closed" or code == "created" or code == "loaded"
+			or code == "enqueued" or code == "deleted" or code == "released" or code == "committed_reconciled"
 		then
 			self.completed[id] = true
 			self.failed[id] = nil
