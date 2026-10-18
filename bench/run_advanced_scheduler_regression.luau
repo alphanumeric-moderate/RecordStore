@@ -141,6 +141,24 @@ assert(per_owner:MarkCompleted(first.id, "committed"))
 assert(per_owner:MarkCompleted(second.id, "committed"))
 take(per_owner, "owner-one-b")
 
+-- One owner/claim cannot hold more than one active renewal, even if its
+-- general work concurrency limit is larger.
+local renewal_cap = new_scheduler()
+local renewal_policy = renewal_cap:Stats().policy
+assert(renewal_cap:SetPolicy({
+	revision = renewal_policy.revision + 1,
+	max_per_owner_in_flight = 4,
+}), "renewal cap policy was rejected")
+enqueue(renewal_cap, { id = "renewal-a", owner_id = "one-claim", lane = "lease_renewal", work_class = "lease_renewal" })
+enqueue(renewal_cap, { id = "renewal-b", owner_id = "one-claim", lane = "lease_renewal", work_class = "lease_renewal" })
+local active_renewal = renewal_cap:TakeNext(true)
+assert(active_renewal ~= nil and active_renewal.id == "renewal-a", "first renewal was not selected")
+assert(renewal_cap:TakeNext(true) == nil, "a second renewal started concurrently for the same owner")
+assert(renewal_cap:MarkCompleted(active_renewal.id, "renewed"))
+local next_renewal = renewal_cap:TakeNext(true)
+assert(next_renewal ~= nil and next_renewal.id == "renewal-b", "second renewal did not proceed after the first completed")
+assert(renewal_cap:MarkCompleted(next_renewal.id, "renewed"))
+
 -- Shadow comparison is read-only; real selection remains authoritative.
 local shadow = new_scheduler()
 local shadow_policy = shadow:Stats().policy
