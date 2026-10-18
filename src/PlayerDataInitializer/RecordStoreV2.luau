@@ -2403,6 +2403,16 @@ local function new_rollout(store, options)
 		end
 		return value, nil
 	end
+	local function expected_digest_matches(manifest)
+		local expected = options.expected_matrix_digest
+		if not valid_text(expected, 128) then
+			return false, "rollout requires expected_matrix_digest bound to this implementation"
+		end
+		if manifest.matrix_digest ~= expected then
+			return false, "rollout matrix digest does not match expected_matrix_digest"
+		end
+		return true, nil
+	end
 	local function attest(id, manifest)
 		local evidence = {}
 		for _, name in ipairs(required_verifiers) do
@@ -2422,6 +2432,8 @@ local function new_rollout(store, options)
 		if not valid_text(id, 96) then return { code = "invalid", message = "rollout ID must be 1..96 bytes" } end
 		local manifest, read_error = read(id)
 		if not manifest then return read_error end
+		local digest_matches, digest_error = expected_digest_matches(manifest)
+		if not digest_matches then return { code = "blocked", message = digest_error } end
 		if manifest.phase == next_phase and operation_id ~= nil and manifest[operation_field] == operation_id then
 			local result = copy(manifest); result.code = "duplicate"; return result
 		end
@@ -2460,6 +2472,11 @@ local function new_rollout(store, options)
 	end
 	function api:PrepareAsync(id, matrix_digest)
 		if not valid_text(id, 96) or not valid_text(matrix_digest, 128) then return { code = "invalid" } end
+		local digest_matches, digest_error = expected_digest_matches({ matrix_digest = matrix_digest })
+		if not digest_matches then
+			local code = if valid_text(options.expected_matrix_digest, 128) then "conflict" else "invalid"
+			return { code = code, message = digest_error }
+		end
 		local now = os.time()
 		local initial = {
 			version = 1, rollout_id = id, matrix_digest = matrix_digest, phase = "prepared",
@@ -2489,6 +2506,8 @@ local function new_rollout(store, options)
 	function api:AttestAsync(id)
 		local manifest, read_error = read(id)
 		if not manifest then return read_error end
+		local digest_matches, digest_error = expected_digest_matches(manifest)
+		if not digest_matches then return { code = "blocked", message = digest_error } end
 		if manifest.phase ~= "prepared" then return { code = "conflict", phase = manifest.phase } end
 		local evidence, evidence_error = attest(id, manifest)
 		if not evidence then return evidence_error end
@@ -2500,6 +2519,8 @@ local function new_rollout(store, options)
 		if not valid_text(activation_id, 96) then return { code = "invalid", message = "activation_id must be stable and 1..96 bytes" } end
 		local manifest, read_error = read(id)
 		if not manifest then return read_error end
+		local digest_matches, digest_error = expected_digest_matches(manifest)
+		if not digest_matches then return { code = "blocked", message = digest_error } end
 		if manifest.phase == "active" and manifest.activation_id == activation_id then
 			local result = copy(manifest); result.code = "duplicate"; return result
 		end
@@ -2520,6 +2541,8 @@ local function new_rollout(store, options)
 		if not valid_text(rollback_id, 96) then return { code = "invalid" } end
 		local manifest, read_error = read(id)
 		if not manifest then return read_error end
+		local digest_matches, digest_error = expected_digest_matches(manifest)
+		if not digest_matches then return { code = "blocked", message = digest_error } end
 		if manifest.phase == "rolled_back" and manifest.rollback_id == rollback_id then
 			local result = copy(manifest); result.code = "duplicate"; return result
 		end
@@ -2558,6 +2581,8 @@ local function new_rollout(store, options)
 		if operation == "read" then return true, "read-only diagnostics allowed" end
 		local manifest, read_error = read(id)
 		if not manifest then return false, "rollout state is unavailable: " .. tostring(read_error and read_error.code), read_error end
+		local digest_matches, digest_error = expected_digest_matches(manifest)
+		if not digest_matches then return false, digest_error, copy(manifest) end
 		if manifest.phase == "active" then return true, manifest.phase, copy(manifest) end
 		-- Verified preflight may perform schema migration and revisioned policy setup
 		-- while writes remain otherwise closed. Attestation itself must already have
