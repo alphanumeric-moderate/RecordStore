@@ -398,6 +398,31 @@ assert(public_callback_ran, "public scheduled callback did not run")
 assert(RecordStore.get_scheduler_snapshot().dispatcher.completed >= 1,
 	"public scheduler API did not publish completion metrics")
 
+-- Public trace replay is isolated: it cannot mutate the live server queue.
+local delayed_callback_ran = false
+local delayed_job = RecordStore.schedule_work("integration-owner", "delayed-replay-safety", function()
+	delayed_callback_ran = true
+	return { code = "success" }
+end, {
+	lane = "normal",
+	work_class = "integration-test",
+	due_at_ms = os.clock() * 1000 + 40,
+})
+assert(delayed_job.code == "accepted", "delayed scheduler fixture was rejected")
+local queue_before_replay = RecordStore.get_scheduler_snapshot().governor.queue_items
+local replay_result = RecordStore.replay_scheduler_trace({
+	{ kind = "enqueue", item = { id = "sandbox-trace-item", owner_id = "trace-owner", lane = "normal" } },
+	{ kind = "take" },
+})
+assert(replay_result[1] == "sandbox-trace-item", "isolated trace replay returned the wrong decision")
+assert(RecordStore.get_scheduler_snapshot().governor.queue_items == queue_before_replay,
+	"trace replay mutated the live scheduler queue")
+for _ = 1, 200 do
+	if delayed_callback_ran then break end
+	task.wait(0.001)
+end
+assert(delayed_callback_ran, "future-due live work was lost after isolated trace replay")
+
 -- A dirty mock Record is autosaved through the selector when explicitly enabled.
 local core_record = RecordStore.Mock.new("SchedulerRegression", "global", "scheduler-player", {
 	schema_version = 1,
@@ -419,8 +444,8 @@ for _ = 1, 300 do
 end
 assert(saved, "core background autosave did not complete through the selector")
 local dispatch_snapshot = RecordStore.get_scheduler_snapshot().dispatcher
-assert(dispatch_snapshot.accepted >= 2 and dispatch_snapshot.completed >= 2,
-	"core background autosave was not represented in scheduler metrics")
+assert(dispatch_snapshot.accepted >= 3 and dispatch_snapshot.completed >= 3,
+	"public, delayed, and core background work were not represented in scheduler metrics")
 local closed_code = core_record:Close()
 assert(closed_code == "closed", "scheduler regression fixture failed to close")
 assert(RecordStore.set_scheduler_enabled(false), "core scheduling kill switch failed")
