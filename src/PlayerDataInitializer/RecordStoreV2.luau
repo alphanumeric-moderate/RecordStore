@@ -2651,6 +2651,9 @@ local function new_projections(store, options)
 			or not finite(event.source_revision) or event.source_revision < 0 or math.floor(event.source_revision) ~= event.source_revision then return { code = "invalid" } end
 		local subjects_ok, subject_error = verify_subjects(event.subject_user_ids)
 		if not subjects_ok then return subject_error end
+		local event_subjects = copy(event.subject_user_ids or {})
+		local event_subject_set = {}
+		for _, user_id in ipairs(event_subjects) do event_subject_set[user_id] = true end
 		local key = key_for(name, event.entity_id)
 		local attempt_id = digest(event.event_id .. ":" .. tostring(os.clock()) .. ":" .. tostring(math.random()))
 		local updated_at = os.time()
@@ -2670,8 +2673,23 @@ local function new_projections(store, options)
 			if type(old) == "table" and old.version ~= def.version then return old end
 			if type(old) == "table" and (type(old.value) ~= "table" or not finite(old.source_revision)
 				or math.floor(old.source_revision) ~= old.source_revision or old.source_revision < -1
-				or not valid_recent_events(old.recent_events)
+				or not valid_recent_events(old.recent_events) or type(old.subject_user_ids) ~= "table"
 			) then return old end
+			if type(old) == "table" then
+				local existing_subject_count = key_count(old.subject_user_ids)
+				if existing_subject_count > 100 then return old end
+				for index in pairs(old.subject_user_ids) do
+					if type(index) ~= "number" or not finite(index) or math.floor(index) ~= index
+						or index < 1 or index > existing_subject_count
+					then return old end
+				end
+				for index = 1, existing_subject_count do
+					local user_id = old.subject_user_ids[index]
+					if not finite(user_id) or user_id < 1 or math.floor(user_id) ~= user_id or not event_subject_set[user_id] then
+						return old
+					end
+				end
+			end
 			local current = if type(old) == "table" then old else {
 				projection_name = name,
 				version = def.version,
@@ -2679,6 +2697,7 @@ local function new_projections(store, options)
 				value = {},
 				source_revision = -1,
 				recent_events = {},
+				subject_user_ids = {},
 			}
 			for _, event_id in ipairs(current.recent_events or {}) do
 				if event_id == event.event_id then return current end
@@ -2689,6 +2708,7 @@ local function new_projections(store, options)
 			local result = copy(current)
 			result.value = next_value
 			result.source_revision = event.source_revision
+			result.subject_user_ids = copy(event_subjects)
 			result.updated_at = updated_at
 			result.last_event_id = event.event_id
 			result.last_event_revision = event.source_revision
@@ -2712,8 +2732,24 @@ local function new_projections(store, options)
 			end
 			if type(observed.value) ~= "table" or not finite(observed.source_revision)
 				or math.floor(observed.source_revision) ~= observed.source_revision or observed.source_revision < -1
-				or not valid_recent_events(observed.recent_events) then
-				return { code = "corrupt", message = "projection row has malformed value, revision or event ledger" }
+				or not valid_recent_events(observed.recent_events) or type(observed.subject_user_ids) ~= "table" then
+				return { code = "corrupt", message = "projection row has malformed value, revision, event ledger or subject association" }
+			end
+			local observed_subject_count = key_count(observed.subject_user_ids)
+			if observed_subject_count > 100 then return { code = "corrupt", message = "projection subject association exceeds its bound" } end
+			for index in pairs(observed.subject_user_ids) do
+				if type(index) ~= "number" or not finite(index) or math.floor(index) ~= index or index < 1 or index > observed_subject_count then
+					return { code = "corrupt", message = "projection subject association is not a dense array" }
+				end
+			end
+			for index = 1, observed_subject_count do
+				local user_id = observed.subject_user_ids[index]
+				if not finite(user_id) or user_id < 1 or math.floor(user_id) ~= user_id then
+					return { code = "corrupt", message = "projection subject association contains an invalid UserId" }
+				end
+				if not event_subject_set[user_id] then
+					return { code = "conflict", message = "projection update omitted a previously associated subject UserId" }
+				end
 			end
 			for _, event_id in ipairs(observed.recent_events) do
 				if event_id == event.event_id then
@@ -2748,8 +2784,13 @@ local function new_projections(store, options)
 		if not self.projections[name] or not valid_text(entity_id, 128) then return { code = "not_found" } end
 		local value, message = adapter_call(store, "GetAsync", key_for(name, entity_id))
 		if message then return { code = "unknown", message = message } end
-		if value and value.entity_id ~= entity_id then return { code = "conflict", message = "projection key collision" } end
-		return { code = if value then "success" else "not_found", row = value, consistency = "eventual" }
+		if value and (type(value) ~= "table" or value.entity_id ~= entity_id) then return { code = "conflict", message = "projection key collision" } end
+		if value then
+			if type(value.subject_user_ids) ~= "table" then return { code = "unsupported_schema", message = "projection row lacks subject-erasure metadata" } end
+			local subjects_ok, subject_error = verify_subjects(value.subject_user_ids)
+			if not subjects_ok then return subject_error end
+		end
+		return { code = if value then "success" else "not_found", row = if value then copy(value) else nil, consistency = "eventual" }
 	end
 	function service:RebuildAsync(name, fetch_page, cursor, max_pages)
 		if not self.projections[name] or type(fetch_page) ~= "function" then return { code = "invalid" } end
