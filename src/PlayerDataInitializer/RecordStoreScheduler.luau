@@ -1003,8 +1003,15 @@ local function new_governor(options)
 		while true do
 			local entry = self.queued_due_heap[1]
 			if entry == nil then return nil end
-			if entry.item.queued ~= true or self.known[entry.id] ~= entry.item then heap_pop(self.queued_due_heap)
-			else return entry.due_at_ms end
+			if entry.item.queued ~= true or self.known[entry.id] ~= entry.item
+				or entry.due_at_ms ~= entry.item.due_at_ms
+			then
+				-- Reschedule mutates the queue item's due time and pushes a replacement
+				-- heap entry. Ignore the stale entry or observers may see the old deadline.
+				heap_pop(self.queued_due_heap)
+			else
+				return entry.due_at_ms
+			end
 		end
 	end
 	function governor:NextWakeAt()
