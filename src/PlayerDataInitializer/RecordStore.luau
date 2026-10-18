@@ -6814,7 +6814,27 @@ local function run_scheduled_record_work(record: Record, state: InternalState, n
 			retry_delay_ms = 25,
 			retry_jitter_percent = 10,
 		}
-		if remaining_ms ~= nil then renewal_options.deadline_ms = now_local() * 1000 + remaining_ms * 0.5 end
+		if remaining_ms ~= nil then
+			local scheduler_stats = scheduler_governor:Stats()
+			local latency = scheduler_stats.latency_ewma or {}
+			local tails = scheduler_stats.latency_percentiles_by_operation or {}
+			local renewal_tail = if tails.lease_renewal ~= nil then tails.lease_renewal.p95_ms
+				elseif tails.update_async ~= nil then tails.update_async.p95_ms
+				else nil
+			local observed_service_ms = math.max(
+				if finite(renewal_tail) then renewal_tail else 0,
+				latency.lease_renewal or 0,
+				latency.update_async or 0,
+				latency.service or 0
+			)
+			-- Reserve a conservative service-time and current queue-delay margin from
+			-- the remaining durable lease. The deadline is advisory; the lease-token
+			-- check in renew_internal remains the ownership authority.
+			local queue_delay_ms = math.max(0, scheduler_stats.scheduler.oldest_eligible_age_ms or 0)
+			local safety_margin_ms = math.max(100, observed_service_ms * 2 + queue_delay_ms)
+			local safe_slack_ms = math.max(0, remaining_ms - safety_margin_ms)
+			renewal_options.deadline_ms = now_local() * 1000 + safe_slack_ms
+		end
 		local result = enqueue_state_work(record, state, "lease_renewal", "lease_renewal",
 			"profile_lease_renewal", "lease_renewal", function()
 				if state.busy or state.queue_busy then
