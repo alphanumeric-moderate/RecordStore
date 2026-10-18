@@ -382,6 +382,17 @@ end, {
 	on_complete = function(result) retry_done = result.code == "committed" end,
 })
 assert(retry_job.code == "accepted", "retry callback was not accepted")
+for _ = 1, 100 do
+	if callback_attempts >= 1 then break end
+	task.wait(0.001)
+end
+assert(callback_attempts == 1, "explicit retryable callback did not run initially")
+-- This test injects a mock clock. Wall-clock delay alone must not advance its
+-- retry deadline; advance the mock clock explicitly and wake the dispatcher.
+task.wait(0.02)
+assert(callback_attempts == 1, "retry ran before the mock clock reached retry_due_at_ms")
+now_ms += 11
+dispatcher:Kick()
 for _ = 1, 200 do if retry_done then break end; task.wait(0.002) end
 assert(retry_done and callback_attempts == 2, "explicit retryable result did not retry exactly once")
 
