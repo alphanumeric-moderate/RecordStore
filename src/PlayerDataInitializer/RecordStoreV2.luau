@@ -1882,7 +1882,7 @@ local function new_erasure(store, families, options)
 	end
 	local function contract_digest_for(user_id, rendered)
 		local family_contract = {}
-		for _, family in ipairs(self.families) do
+		for _, family in ipairs(coordinator.families) do
 			table.insert(family_contract, {
 				name = family.name,
 				templates_verified = family.templates_verified == true,
