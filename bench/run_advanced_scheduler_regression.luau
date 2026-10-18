@@ -343,6 +343,8 @@ local retry_first, retry_status = retry_queue:TakeNext()
 assert(retry_first ~= nil and retry_status == "success", "retry fixture was not selectable")
 local requeued, requeue_error, retry_due = retry_queue:Reschedule(retry_first.id, now_ms + 50)
 assert(requeued, "same-ID retry was not requeued: " .. tostring(requeue_error))
+assert(retry_queue:NextQueuedDueAt() == retry_due,
+	"queued due-time heap retained the prior deadline after same-ID reschedule")
 assert(retry_queue:Stats().queue_items == 1, "retry changed bounded queue accounting")
 assert(retry_queue:TakeNext() == nil, "retry became eligible before its due time")
 now_ms = retry_due
