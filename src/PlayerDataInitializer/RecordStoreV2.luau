@@ -1035,7 +1035,8 @@ local function new_governor(options)
 		end
 		if self.policy.shadow_enabled and self.policy.shadow_sample_rate > 0 then
 			local interval = math.max(1, math.floor(1 / self.policy.shadow_sample_rate))
-			if self.stats.scheduled_selected % interval == 0 then self:ShadowDecision() end
+			local decision_count = self.stats.scheduled_selected + self.stats.shadow_samples + 1
+			if decision_count % interval == 0 then self:ShadowDecision(renewal_mode) end
 		end
 		local index = choose_index(self, self.policy.algorithm or "drr", renewal_mode)
 		if not index then return nil, "empty" end
@@ -1207,10 +1208,10 @@ local function new_governor(options)
 		local index = choose_index(shadow, algorithm or shadow.policy.shadow_algorithm)
 		return if index then copy(shadow.queue[index]) else nil
 	end
-	function governor:ShadowDecision()
+	function governor:ShadowDecision(renewal_mode)
 		local real_state, shadow_state = make_shadow_state(self), make_shadow_state(self)
-		local real_index = choose_index(real_state, self.policy.algorithm)
-		local shadow_index = choose_index(shadow_state, self.policy.shadow_algorithm)
+		local real_index = choose_index(real_state, self.policy.algorithm, renewal_mode)
+		local shadow_index = choose_index(shadow_state, self.policy.shadow_algorithm, renewal_mode)
 		local real = if real_index then self.queue[real_index] else nil
 		local shadow = if shadow_index then self.queue[shadow_index] else nil
 		local now = now_ms()
