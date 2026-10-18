@@ -240,9 +240,87 @@ assert(type(scheduled_maintenance_result) == "table"
 	and scheduled_maintenance_result.code == "committed"
 	and scheduled_maintenance_result.cursor == 1,
 	"bounded maintenance chunk did not complete through the shared selector")
+local retry_calls = 0
+local retry_result = nil
+local retry_job = V2.ScheduleMaintenance(
+	"maintenance-owner",
+	"retryable-chunk",
+	function(maintenance_id)
+		retry_calls += 1
+		if retry_calls < 3 then return { code = "retryable", message = "transient pre-commit failure" } end
+		return { code = "committed", maintenance_id = maintenance_id, attempts = retry_calls }
+	end,
+	{
+		lane = "background",
+		max_retries = 2,
+		retry_delay_ms = 10,
+		on_complete = function(result) retry_result = result end,
+	}
+)
+assert(retry_job.code == "accepted", "retryable maintenance job was not accepted")
+for _ = 1, 200 do
+	now_ms += 10
+	if retry_result ~= nil then break end
+	task.wait(0.01)
+end
+assert(retry_calls == 3, "explicit retryable results were not retried up to the configured cap")
+assert(type(retry_result) == "table" and retry_result.code == "committed" and retry_result.attempts == 3,
+	"scheduled retry did not report the final committed result")
+
+local unknown_calls = 0
+local unknown_result = nil
+local unknown_job = V2.ScheduleMaintenance(
+	"maintenance-owner",
+	"unknown-result-must-not-retry",
+	function()
+		unknown_calls += 1
+		return { code = "unknown", message = "the write may have committed" }
+	end,
+	{
+		max_retries = 3,
+		retry_delay_ms = 10,
+		on_complete = function(result) unknown_result = result end,
+	}
+)
+assert(unknown_job.code == "accepted", "unknown-outcome fixture was not accepted")
+for _ = 1, 100 do
+	now_ms += 10
+	if unknown_result ~= nil then break end
+	task.wait(0.01)
+end
+assert(unknown_calls == 1, "scheduler retried an unknown outcome and risked duplicating side effects")
+assert(type(unknown_result) == "table" and unknown_result.code == "unknown",
+	"scheduler did not preserve the unknown outcome")
+
+local thrown_calls = 0
+local thrown_result = nil
+local thrown_job = V2.ScheduleMaintenance(
+	"maintenance-owner",
+	"callback-error-must-not-retry",
+	function()
+		thrown_calls += 1
+		error("ambiguous callback failure")
+	end,
+	{
+		max_retries = 3,
+		retry_delay_ms = 10,
+		on_complete = function(result) thrown_result = result end,
+	}
+)
+assert(thrown_job.code == "accepted", "throwing callback fixture was not accepted")
+for _ = 1, 100 do
+	now_ms += 10
+	if thrown_result ~= nil then break end
+	task.wait(0.01)
+end
+assert(thrown_calls == 1, "scheduler retried a thrown callback with potentially ambiguous side effects")
+assert(type(thrown_result) == "table" and thrown_result.code == "unknown",
+	"thrown callback did not surface an unknown outcome")
+
 local dispatch_stats = V2.GetSchedulerDispatchStats()
-assert(dispatch_stats.accepted >= 2 and dispatch_stats.dispatched >= 2,
-	"shared scheduler did not account for outbox and maintenance work")
+assert(dispatch_stats.accepted >= 5 and dispatch_stats.dispatched >= 4,
+	"shared scheduler did not account for outbox, maintenance and retried work")
+assert(dispatch_stats.retries == 2, "scheduler retry metric did not count explicit retries")
 
 print("[PASS] RecordStoreV2 runtime policy and advanced adapter admission hooks.")
 Shim.close()
