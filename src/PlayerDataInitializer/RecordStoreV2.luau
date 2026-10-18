@@ -3186,7 +3186,7 @@ function V2.new(record_store, mailbox_module, options)
 	-- Mutation entrypoints share one durable rollout decision. Read-only
 	-- inspection remains available during freeze and after rollback.
 	guard_methods(api.Transactions, { Run = "transact", CommitWithOutbox = "transact" })
-	guard_methods(api.Inbox, { ApplyBatch = "inbox", ApplyAsync = "inbox", Prune = "maintenance" })
+	guard_methods(api.Inbox, { ApplyBatch = "inbox", ApplyAsync = "inbox", PruneReceipts = "maintenance" })
 	guard_methods(api.Outbox, {
 		DispatchBatches = "dispatch",
 		PruneBatches = "maintenance",
