@@ -86,6 +86,30 @@ assert(expired.terminal_result.code == "expired", "expiry did not return a typed
 assert(expiration:Stats().stats.scheduled_expired == 1, "expiry metric did not increment")
 assert(expiration:MarkCompleted(expired.id, expired.terminal_result.code), "expired work could not be reconciled")
 
+-- Expiry wakes earlier than availability and accepted work is never evicted
+-- to make room when the bounded local queue is full.
+local early_expiry = new_scheduler()
+enqueue(early_expiry, {
+	id = "expiry-before-availability",
+	owner_id = "expiry-owner",
+	lane = "background",
+	due_at_ms = now_ms + 100,
+	expires_at_ms = now_ms + 20,
+})
+assert(early_expiry:NextWakeAt() == now_ms + 20,
+	"dispatcher wake was scheduled after an earlier expiry boundary")
+local capacity = new_scheduler()
+local capacity_policy = capacity:Stats().policy
+assert(capacity:SetPolicy({
+	revision = capacity_policy.revision + 1,
+	queue_capacity = 2,
+}), "bounded queue capacity policy was rejected")
+enqueue(capacity, { id = "capacity-1", owner_id = "owner-1", lane = "normal" })
+enqueue(capacity, { id = "capacity-2", owner_id = "owner-2", lane = "normal" })
+local capacity_rejected = capacity:Enqueue({ id = "capacity-3", owner_id = "owner-3", lane = "normal" })
+assert(capacity_rejected.code == "capacity", "full scheduler queue did not apply explicit backpressure")
+assert(capacity:Stats().queue_items == 2, "queue capacity overflow evicted or silently accepted work")
+
 -- Dependencies cannot bypass a missing, failed or unknown prerequisite.
 local dependencies = new_scheduler()
 assert(dependencies:Enqueue({ id = "missing-dependent", owner_id = "x", dependencies = { "missing" } }).code == "invalid",
