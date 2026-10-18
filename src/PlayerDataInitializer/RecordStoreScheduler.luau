@@ -1325,9 +1325,10 @@ local function new_dispatcher(governor, options)
 		wake_thread = nil,
 		metrics = {
 			accepted = 0, rejected = 0, completed = 0, retries = 0, retry_deferred = 0,
-			expired = 0, dependency_failed = 0, callback_errors = 0,
+			expired = 0, dependency_failed = 0, callback_errors = 0, retry_exhausted = 0,
 			batch_calls = 0, batch_items_requested = 0, max_batch_size = 0,
-			max_in_flight = 0, cancelled = 0, last_error = nil,
+			outcome_classes = { transient = 0, throttled = 0, permanent = 0, conflict = 0, unknown = 0, success = 0 },
+			max_in_flight = 0, cancelled = 0, last_error = nil, last_outcome_class = nil,
 		},
 	}
 	local function now_ms()
@@ -1363,18 +1364,63 @@ local function new_dispatcher(governor, options)
 			dispatcher.metrics.last_error = string.sub(tostring(message), 1, 200)
 		end
 	end
+	local retry_classes = { transient = true, throttled = true, conflict = true }
+	local function classify_outcome(result, callback_ok)
+		if not callback_ok or type(result) ~= "table" then
+			if not callback_ok then return "unknown" end
+			local simple_code = if result == true or result == nil then "success" else tostring(result)
+			if simple_code == "success" or simple_code == "committed" or simple_code == "completed" then return "success" end
+			if simple_code == "throttled" or simple_code == "budget" then return "throttled" end
+			if simple_code == "conflict" then return "conflict" end
+			if simple_code == "unknown" then return "unknown" end
+			if simple_code == "busy" or simple_code == "backpressure" or simple_code == "capacity" then return "transient" end
+			return "permanent"
+		end
+		local code = result.code
+		if code == nil or code == "success" or code == "committed" or code == "acknowledged"
+			or code == "processed" or code == "completed" or code == "saved" or code == "renewed"
+			or code == "released" or code == "closed" or code == "deleted" or code == "duplicate"
+		then
+			return "success"
+		end
+		if code == "unknown" then return "unknown" end
+		if code == "throttled" or code == "budget" then return "throttled" end
+		if code == "conflict" then return "conflict" end
+		if code == "retryable" or code == "retry_exhausted" then
+			local retry_class = result.retry_class
+			return if retry_class == "throttled" or retry_class == "conflict" or retry_class == "transient"
+				then retry_class else "transient"
+		end
+		if code == "busy" or code == "backpressure" or code == "capacity" or code == "circuit_open" then return "transient" end
+		return "permanent"
+	end
+	local function record_outcome(result, callback_ok)
+		local class = classify_outcome(result, callback_ok)
+		dispatcher.metrics.outcome_classes[class] = (dispatcher.metrics.outcome_classes[class] or 0) + 1
+		dispatcher.metrics.last_outcome_class = class
+		return class
+	end
 	local function retry_due(item, entry, result)
+		local retry_class = if type(result) == "table" and type(result.retry_class) == "string"
+			then result.retry_class else "transient"
+		if retry_classes[retry_class] ~= true then
+			local code = if retry_class == "unknown" then "unknown" else "retry_rejected"
+			return false, { code = code, message = "retry was requested with a non-retryable outcome class", retry_class = retry_class, last_result = copy(result) }
+		end
 		if entry.retry_attempt >= entry.max_retries then
-			return false, { code = "retry_exhausted", message = "configured retry cap reached", last_result = copy(result) }
+			return false, { code = "retry_exhausted", message = "configured retry cap reached", retry_class = retry_class, last_result = copy(result) }
 		end
 		local token, wait_ms = governor:AcquireRetryToken(entry.work_class)
 		local now = now_ms()
 		local delay_ms
 		if token then
-			local exponential = math.min(60000, entry.retry_delay_ms * (2 ^ entry.retry_attempt))
+			local class_multiplier = if retry_class == "throttled" then 4 elseif retry_class == "conflict" then 2 else 1
+			local exponential = math.min(60000, entry.retry_delay_ms * class_multiplier * (2 ^ entry.retry_attempt))
 			local jitter_span = exponential * entry.retry_jitter_percent / 100
 			local jitter = if jitter_span > 0 then (math.random() * 2 - 1) * jitter_span else 0
-			delay_ms = math.max(10, math.floor(exponential + jitter))
+			local retry_after_ms = if type(result) == "table" and finite(result.retry_after_ms)
+				then math.clamp(math.floor(result.retry_after_ms), 0, 60000) else 0
+			delay_ms = math.clamp(math.max(retry_after_ms, math.floor(exponential + jitter), 10), 10, 60000)
 		else
 			-- A depleted token bucket defers retry traffic; it must not spin a tight timer.
 			delay_ms = if finite(wait_ms) then math.clamp(math.floor(wait_ms), 10, 60000) else 60000
@@ -1437,6 +1483,12 @@ local function new_dispatcher(governor, options)
 			dispatcher.in_flight = math.max(0, dispatcher.in_flight - 1)
 			if item.lane ~= "lease_renewal" then
 				dispatcher.normal_in_flight = math.max(0, dispatcher.normal_in_flight - 1)
+			end
+		end
+		if status == "success" then
+			record_outcome(callback_result, callback_ok)
+			if type(callback_result) == "table" and callback_result.code == "retry_exhausted" then
+				dispatcher.metrics.retry_exhausted += 1
 			end
 		end
 		if not retry_scheduled then
