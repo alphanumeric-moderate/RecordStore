@@ -57,17 +57,24 @@ local function compile_readme_examples()
 	local active_language: string? = nil
 	local snippet_lines: { string } = {}
 	local snippet_count = 0
+	local skipped_fragment_count = 0
 
 	for line in (readme .. "\n"):gmatch("(.-)\n") do
 		if active_language ~= nil then
 			if line:match("^%```%s*$") then
 				snippet_count += 1
 				local source = table.concat(snippet_lines, "\n")
-				local debug_name = ("README %s example #%d"):format(active_language, snippet_count)
-				local compiled, result = pcall(function()
-					return luau.load(source, { debugName = debug_name })
-				end)
-				assert(compiled and type(result) == "function", ("failed to compile %s: %s"):format(debug_name, tostring(result)))
+				-- This intentionally partial example demonstrates values to insert into
+				-- existing CONFIG tables; it is not a standalone Luau chunk.
+				if source:match("^%s*%-%- In CONFIG%.data:") then
+					skipped_fragment_count += 1
+				else
+					local debug_name = ("README %s example #%d"):format(active_language, snippet_count)
+					local compiled, result = pcall(function()
+						return luau.load(source, { debugName = debug_name })
+					end)
+					assert(compiled and type(result) == "function", ("failed to compile %s: %s"):format(debug_name, tostring(result)))
+				end
 				active_language = nil
 				table.clear(snippet_lines)
 			else
@@ -84,7 +91,8 @@ local function compile_readme_examples()
 
 	assert(active_language == nil, "README contains an unclosed Lua/Luau fenced block")
 	assert(snippet_count > 0, "README contains no Lua/Luau fenced examples to compile")
-	print(("Compiled %d Lua/Luau README examples"):format(snippet_count))
+	assert(snippet_count > skipped_fragment_count, "README contains no standalone Lua/Luau examples to compile")
+	print(("Compiled %d Lua/Luau README examples; skipped %d documented fragment(s)"):format(snippet_count - skipped_fragment_count, skipped_fragment_count))
 end
 
 compile_readme_examples()
