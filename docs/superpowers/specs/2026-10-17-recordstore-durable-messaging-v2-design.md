@@ -1640,9 +1640,9 @@ This section supersedes any less precise statement elsewhere in the document. It
 The design is improved, but v2 is **not implementation-ready for production activation** until the P0 items above have concrete protocols and executable tests. Close each blocker with an implementation PR, failure-injection coverage and relevant Studio tests. Then rerun the full 70-group matrix against the real production-path code plus the fake-service harness. CodSpeed measurements establish local CPU/wall-time behavior only for their instrumented workload; they do not prove Roblox DataStore latency, delivery or quota behavior.
 
 
-## 32. PR #35 implementation coverage and verification status
+## 32. PR #36 implementation coverage and verification status
 
-PR #35 now contains opt-in implementation surfaces for most of the feature categories in this design. This still does **not** mean every section's complete protocol or release acceptance requirement is fulfilled. The auditable section-by-section inventory is
+PR #36 now contains opt-in implementation surfaces for most of the feature categories in this design. This still does **not** mean every section's complete protocol or release acceptance requirement is fulfilled. The auditable section-by-section inventory is
 [`docs/superpowers/specs/2026-10-17-recordstore-v2-implementation-matrix.md`](./2026-10-17-recordstore-v2-implementation-matrix.md).
 
 ### Core persistence and messaging integration added
