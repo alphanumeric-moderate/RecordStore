@@ -355,16 +355,13 @@ templates, writer fences, dependency clearance, and generation-aware deletion/re
 mixed-version rollout protocol and these integration guarantees are release gates, not results of
 adding helper APIs.
 
-The V2 advanced governor is shared by V2 facades that wrap the same core RecordStore module. It applies class admission, request observation, per-kind read/write budget checks, and circuit decisions to V2 DataStore-adapter calls before the core request gate makes the final admission decision. Half-open probes are not reserved until the budget and class caps permit a request. Its `options.runtime` values seed the governor only when it is first created for a core module; use `V2.ApplySchedulerPolicy({ revision = currentRevision + 1, ... })` for later updates. Unknown fields and out-of-range values are rejected. It remains a local scheduling model, not the production selector for every mailbox, outbox, and maintenance operation; the core RecordStore request gate remains authoritative for shared request admission.
+The V2 advanced governor is shared by V2 facades that wrap the same core RecordStore module. It applies class admission, request observation, per-kind read/write budget checks, and circuit decisions to V2 DataStore-adapter calls before the core request gate makes the final admission decision. Half-open probes are not reserved until the budget and class caps permit a request. Its `options.runtime` values seed the governor only when it is first created for a core module; use `V2.ApplySchedulerPolicy({ revision = currentRevision + 1, ... })` for later updates. Unknown fields and out-of-range values are rejected. The selector can dispatch mailbox wake-ups, scheduled outbox batches, and bounded maintenance chunks. Scheduled callbacks may opt into bounded retry by returning `{ code = "retryable" }` and setting `max_retries` (default 0, maximum 8); retry attempts consume the governor's retry-token budget and use capped exponential backoff. `unknown` results and thrown callbacks are not replayed automatically. Future-due work is timer-woken without spinning when the scheduling clock has not reached its deadline. Existing direct APIs are still valid and are not forcibly routed through the selector; the core RecordStore request gate remains authoritative for shared request admission.
 
 The authoritative section-by-section design map is
 [`docs/superpowers/specs/2026-10-17-recordstore-v2-implementation-matrix.md`](docs/superpowers/specs/2026-10-17-recordstore-v2-implementation-matrix.md).
 It separates code presence from compilation, failure-test, benchmark and Roblox acceptance status.
 
-PR #36 is the active implementation branch. Its CodSpeed workflow registers the regression,
-failure and benchmark suites, but no run on the current head has been verified. Keep that distinction
-explicit until the separate verification pass records actual results. Lune/Mock measurements are not
-real Roblox service latency or production acceptance evidence.
+PR #36 is the active implementation branch. At commit `07b32c0`, the 18 registered regression/failure scripts pass locally under Lune 0.11.0, including the deterministic fake-store, mailbox, rollout, saga, erasure, projection, read-coalescer, maintenance, and scheduler-retry checks. The hosted regression/CodSpeed run for that newest revision is still pending; prior CodSpeed comparisons are affected by CPU-environment differences and syscall-dominated measurements. Lune/Mock measurements are not real Roblox service latency or production acceptance evidence, and the complete 70-group release matrix plus live Roblox acceptance remain open.
 
 ## Durability status and session waiting
 
