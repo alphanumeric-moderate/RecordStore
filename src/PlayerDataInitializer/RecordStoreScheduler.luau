@@ -448,7 +448,7 @@ local function new_governor(options)
 				-- At most one renewal may be active for a single claim/owner at a time.
 				local owner_can_renew = effective_lane ~= "lease_renewal" or renewal_count < 1
 				if owner_can_renew and (effective_lane == "lease_renewal" or owner_active < self.policy.max_per_owner_in_flight) then
-					local admission = self:CanAdmit(
+					local admission = admission_decision(self,
 						item.work_class, item.operation_class, effective_cost(item), item.mutating ~= false,
 						item.service_class == "critical" or item.lane == "lease_renewal"
 					)
@@ -665,7 +665,7 @@ local function new_governor(options)
 				remember_terminal(self, item.id, "expired")
 				return item, "expired"
 			else
-				local admission = self:CanAdmit(
+				local admission = admission_decision(self,
 					item.work_class, item.operation_class, effective_cost(item), item.mutating ~= false,
 					item.service_class == "critical" or item.lane == "lease_renewal"
 				)
