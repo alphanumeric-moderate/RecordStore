@@ -335,8 +335,14 @@ group("07 consumer reducers cannot modify RecordStore reserved sidecars", functi
 	local preview = migrations:Preview(record, "reserved-sidecar-guard", 1)
 	assert(preview.code == "invalid",
 		"migration preview accepted a transform that removes an internal reserved sidecar")
+	local reserved_field_preview = migrations:Preview(record, "reserved-sidecar-guard", 1, { schema_field = sidecar_key })
+	assert(reserved_field_preview.code == "invalid",
+		"migration preview allowed a consumer-selected reserved sidecar as its schema marker")
+	local reserved_field_migration = migrations:MigrateAsync(record, "reserved-sidecar-guard", 1, { schema_field = sidecar_key })
+	assert(reserved_field_migration.code == "invalid",
+		"migration execution allowed a consumer-selected reserved sidecar as its schema marker")
 	assert(record:Get().coins == 2 and record:Get()[sidecar_key].value == "must survive",
-		"rejected migration preview mutated the active profile")
+		"rejected migration preview/execution mutated the active profile")
 end)
 
 print(("[PASS] %d transaction/inbox/outbox failure-recovery groups using the deterministic DataStore fake."):format(passed))
