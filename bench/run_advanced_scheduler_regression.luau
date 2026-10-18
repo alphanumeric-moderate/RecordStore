@@ -76,6 +76,48 @@ local overdue = deadline:TakeNext()
 assert(overdue ~= nil and overdue.id == "no-deadline", "eligible work was lost after a deadline passed")
 assert(deadline:MarkCompleted(overdue.id, "committed"), "overdue item did not release scheduler capacity")
 
+-- Availability is a hard no-start boundary even if due_at_ms is earlier.
+local availability = new_scheduler()
+local availability_at = now_ms + 100
+enqueue(availability, {
+	id = "availability-lower-bound",
+	owner_id = "availability-owner",
+	lane = "normal",
+	due_at_ms = now_ms,
+	available_at_ms = availability_at,
+	deadline_ms = now_ms + 50,
+})
+assert(availability:TakeNext() == nil, "scheduler selected work before available_at_ms")
+now_ms = availability_at
+take(availability, "availability-lower-bound")
+
+-- A missed advisory deadline must not rewrite a future availability time.
+local scheduled_availability = new_scheduler()
+local scheduled_dispatcher = Scheduler.new_dispatcher(scheduled_availability, {
+	now_ms = function() return now_ms end,
+})
+local dispatcher_available_at = now_ms + 100
+local callback_started_before_availability = false
+local scheduled_boundary = scheduled_dispatcher:Schedule(
+	"availability-owner",
+	"deadline-before-availability",
+	function()
+		callback_started_before_availability = true
+		return { code = "committed" }
+	end,
+	{
+		lane = "normal",
+		available_at_ms = dispatcher_available_at,
+		deadline_ms = now_ms + 50,
+	}
+)
+scheduled_dispatcher:Close()
+assert(scheduled_boundary.code == "accepted", "deadline/availability work was rejected")
+assert(scheduled_boundary.due_at_ms == dispatcher_available_at,
+	"deadline moved scheduled work ahead of its availability boundary")
+assert(not callback_started_before_availability,
+	"callback executed before its availability boundary")
+
 -- Expiry is a no-new-start boundary and emits an explicit terminal status.
 local expiration = new_scheduler()
 enqueue(expiration, { id = "expires-before-start", owner_id = "expiry-owner", lane = "normal", expires_at_ms = now_ms + 1 })
