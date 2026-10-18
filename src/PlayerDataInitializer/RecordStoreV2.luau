@@ -2035,7 +2035,6 @@ local function new_erasure(store, families, options)
 			return { code = "blocked", cursor = manifest.cursor or 0, completed_count = manifest.completed_count or 0,
 				message = "RTBF coverage is not verified for every declared family, template and authoritative inventory; no erasure actions were run" }
 		end
-		if manifest.status == "completed" then return { code = "committed", completed_count = manifest.completed_count or 0, rtbf_coverage_verified = true } end
 		if type(manifest.entries) ~= "table" or not finite(manifest.cursor) or math.floor(manifest.cursor) ~= manifest.cursor
 			or manifest.cursor < 0 or manifest.cursor > #manifest.entries
 			or not finite(manifest.completed_count) or math.floor(manifest.completed_count) ~= manifest.completed_count
@@ -2061,6 +2060,12 @@ local function new_erasure(store, families, options)
 			then
 				return { code = "corrupt", message = "erasure manifest contains a malformed or unknown entry" }
 			end
+		end
+		if manifest.status == "completed" then
+			if manifest.cursor ~= entry_count or manifest.completed_count ~= entry_count then
+				return { code = "corrupt", message = "completed erasure manifest has incomplete progress counters" }
+			end
+			return { code = "committed", completed_count = manifest.completed_count, rtbf_coverage_verified = true }
 		end
 		for _, family in ipairs(self.families) do
 			if type(family.fence_user) ~= "function" or type(family.dependencies_clear) ~= "function"
