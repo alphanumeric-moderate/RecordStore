@@ -122,6 +122,11 @@ local missing_erasure_gate = protected_projections:ApplyAsync("subject_projectio
 })
 assert(missing_erasure_gate.code == "unsupported",
 	"subject-bound projection bypassed the required authoritative erasure adapter")
+local missing_unique_erasure_gate = protected_projections:ReserveUnique(
+	"subject-username", "ErasedName", "player-erased", "reserve-erased", { 987654321 }
+)
+assert(missing_unique_erasure_gate.code == "unsupported",
+	"subject-bound unique reservation bypassed the required authoritative erasure adapter")
 local erased_projections = V2.Projections.new(protected_store, {
 	is_erased = function(_user_id) return true end,
 })
