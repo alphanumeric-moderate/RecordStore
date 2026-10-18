@@ -629,8 +629,11 @@ local function new_governor(options)
 				(self.active_renewals_by_owner[item.owner_id] or 0) < self.policy.max_per_owner_in_flight
 			if dependencies_ready(self, item) and (renewal_can_run or not owner_at_cap) then
 				local candidate
-				if (item.due_at_ms or 0) > now then candidate = item.due_at_ms
-				elseif item.expires_at_ms ~= nil and item.expires_at_ms > now then candidate = item.expires_at_ms end
+				if (item.due_at_ms or 0) > now then candidate = item.due_at_ms end
+				-- Expiry must wake the dispatcher even when it precedes available_at.
+				if item.expires_at_ms ~= nil and item.expires_at_ms > now
+					and (candidate == nil or item.expires_at_ms < candidate)
+				then candidate = item.expires_at_ms end
 				if candidate ~= nil and (next_wake == nil or candidate < next_wake) then next_wake = candidate end
 			elseif item.expires_at_ms ~= nil and item.expires_at_ms > now
 				and (next_wake == nil or item.expires_at_ms < next_wake)
