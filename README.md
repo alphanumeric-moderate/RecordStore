@@ -244,6 +244,27 @@ queue/latency metrics. Governor reservations are released on completion and befo
 retry is queued. It never combines separate callbacks into a new business transaction.
 Owner IDs are bounded to 512 bytes, work IDs to 96 bytes, and work classes to 64 bytes.
 
+An explicitly batchable callback can accept one optional `batch_size` argument:
+```lua
+RecordStore.schedule_work("outbox:dispatch", "dispatch-window", function(batch_size)
+    return dispatch_outbox_batch(batch_size)
+end, {
+    batchable = true,
+    batch_size = 8,
+    batch_backlog = 8,
+    batch_window_ms = 5,
+    work_class = "outbox_dispatch",
+    operation_class = "outbox_dispatch",
+})
+```
+
+The selected count is bounded by the configured maximum, declared eligible backlog,
+recent service latency, request-budget headroom, and in-flight reservations. Admission
+reserves the estimated read/write units and bytes for that count before invoking the
+callback. The count is a limit for the callback's already-defined batch, not permission
+to merge separate callbacks or business transactions. Callbacks that are not marked
+`batchable = true` continue to run without a batch-size argument.
+
 Admission uses operation_class as the request-kind key and a conservative estimate for
 each operation class. Explicit read_units, write_units, estimated_bytes and handler_slots
 can raise the estimate; they cannot lower the class's configured minimum. An UpdateAsync
