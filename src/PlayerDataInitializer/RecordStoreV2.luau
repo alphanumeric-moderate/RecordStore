@@ -2014,8 +2014,13 @@ local function new_erasure(store, families, options)
 						if expected_by_identity[identity] == nil then
 							unmatched += 1
 						end
-						local normalized_item = copy(item)
-						normalized_item.exists = exists
+						local normalized_item = {
+							store_name = item.store_name,
+							scope = item.scope,
+							key = item.key,
+							generation = item.generation,
+							exists = exists,
+						}
 						table.insert(entries, { family = family.name, item = normalized_item })
 						if #entries > MAX_ERASURE_ITEMS then
 							return { code = "capacity", message = "erasure plan exceeds bounded item count" }
