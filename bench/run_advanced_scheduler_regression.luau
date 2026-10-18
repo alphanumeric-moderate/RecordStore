@@ -65,6 +65,35 @@ enqueue(weighted_cost, { id = "small", owner_id = "small-owner", lane = "normal"
 take(weighted_cost, "small")
 take(weighted_cost, "large")
 
+-- Governor reservation tickets are single-use and cannot be forged by mutating ticket data.
+local ticket_governor = new_scheduler()
+local ticket_policy = ticket_governor:Stats().policy
+assert(ticket_governor:SetPolicy({
+	revision = ticket_policy.revision + 1,
+	max_in_flight = 2,
+	critical_reserve = 0,
+}), "single-use reservation policy was rejected")
+local ticket_dimensions = { read_units = 0, write_units = 0, estimated_bytes = 1024, handler_slots = 1 }
+local reservation_a = ticket_governor:Admit("maintenance", "tracing", 1, false, false, ticket_dimensions)
+local reservation_b = ticket_governor:Admit("maintenance", "tracing", 1, false, false, ticket_dimensions)
+assert(reservation_a.code == "admitted" and reservation_b.code == "admitted",
+	"ticket fixture could not consume its two-slot capacity")
+assert(ticket_governor:Stats().active_reservation_tickets == 2, "active reservation tickets were not recorded")
+assert(ticket_governor:Release(reservation_a), "first reservation release failed")
+assert(not ticket_governor:Release(reservation_a), "duplicate reservation release was accepted")
+reservation_a.cost = 0
+reservation_a.read_units = 0
+local reservation_c = ticket_governor:Admit("maintenance", "tracing", 1, false, false, ticket_dimensions)
+assert(reservation_c.code == "admitted", "released reservation slot could not be reused")
+local reservation_d = ticket_governor:Admit("maintenance", "tracing", 1, false, false, ticket_dimensions)
+assert(reservation_d.code == "capacity", "duplicate release undercounted in-flight work")
+assert(ticket_governor:Stats().in_flight == 2 and ticket_governor:Stats().active_reservation_tickets == 2,
+	"reservation accounting diverged from the live ticket set")
+assert(ticket_governor:Release(reservation_b) and ticket_governor:Release(reservation_c),
+	"remaining reservation tickets were not released")
+assert(ticket_governor:Stats().in_flight == 0 and ticket_governor:Stats().active_reservation_tickets == 0,
+	"reservation capacity remained allocated after all live tickets were released")
+
 -- Queue wait and operation latency percentiles are exposed per bounded dimensions.
 local latency_metrics = new_scheduler()
 enqueue(latency_metrics, {
