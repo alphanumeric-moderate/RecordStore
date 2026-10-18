@@ -445,6 +445,22 @@ assert(old_generation_delete.code == "deleted",
 assert(stale_record:Stats().generation == before_erase.generation + 1,
 	"repeated erasure changed the tombstone generation")
 
+local changed_contract_family = family(true)
+local changed_contract_store = new_store()
+local changed_contract = V2.Erasure.new(changed_contract_store, { changed_contract_family }, {
+	verify_templates = function(_user_id, rendered) return type(rendered) == "table" and #rendered == 1 end,
+})
+local changed_contract_plan = changed_contract:PlanAsync(126, "erasure-template-contract-change")
+assert(changed_contract_plan.code == "success" and changed_contract_plan.rtbf_coverage_verified == true,
+	"template-contract fixture did not create a verified plan")
+local deletes_before_contract_change = delete_calls
+changed_contract_family.templates[1].key = "Backup_{user_id}"
+local changed_contract_result = changed_contract:ExecuteAsync(126, "erasure-template-contract-change", 1)
+assert(changed_contract_result.code == "conflict",
+	"erasure proceeded after the declared template contract changed")
+assert(delete_calls == deletes_before_contract_change,
+	"erasure performed a destructive action after template-contract drift")
+
 local corrupt_completed_store = new_store()
 local corrupt_completed = V2.Erasure.new(corrupt_completed_store, { family(true) }, {
 	verify_templates = function(_user_id, rendered) return type(rendered) == "table" and #rendered == 1 end,
