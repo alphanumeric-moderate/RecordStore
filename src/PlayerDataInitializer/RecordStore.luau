@@ -6553,7 +6553,7 @@ end
 local record_impl = {}
 
 function record_impl.bound_mailbox_for_state(state: InternalState): (any?, ResultCode?, string?)
-	local mailbox = state.record_impl
+	local mailbox = state.mailbox_v2
 	if mailbox == nil then return nil, nil, nil end
 	if type(mailbox) ~= "table"
 		or type((mailbox :: any).GetOwner) ~= "function"
@@ -6628,7 +6628,7 @@ function record_impl.bind_mailbox_v2(self: Record, mailbox: unknown): (ResultCod
 	if state == nil then return "invalid", "record does not exist" end
 	if state.state ~= "active" then return "fenced", "V2 mailbox binding requires an active Record" end
 	if state.takeover_requested then return "closing", "session takeover has been requested" end
-	if state.record_impl ~= nil and state.record_impl ~= mailbox then
+	if state.mailbox_v2 ~= nil and state.mailbox_v2 ~= mailbox then
 		return "conflict", "this Record is already bound to a different V2 mailbox"
 	end
 	if type(mailbox) ~= "table" or type((mailbox :: any).GetOwner) ~= "function"
@@ -6663,7 +6663,7 @@ function record_impl.bind_mailbox_v2(self: Record, mailbox: unknown): (ResultCod
 		for _, user_id in ipairs(state.user_ids) do if user_id == owner_fields.user_id then found = true; break end end
 		if not found then return "fenced", "mailbox UserId does not match the Record's persisted UserIds" end
 	end
-	state.record_impl = mailbox
+	state.mailbox_v2 = mailbox
 	return "success", nil
 end
 
@@ -6673,7 +6673,7 @@ function record_impl.enqueue(self: Record, message_type: string, data: JsonValue
 	if state.mailbox_v2_binding then return "busy", "V2 mailbox binding is checking the legacy queue" end
 	if state.state ~= "active" then return "fenced", "record is not actively owned" end
 	if state.takeover_requested then return "closing", "session takeover has been requested" end
-	if state.record_impl ~= nil then
+	if state.mailbox_v2 ~= nil then
 		local mailbox, bound_code, bound_message = record_impl.bound_mailbox_for_state(state)
 		if mailbox == nil then return bound_code or "fenced", bound_message end
 		local call_ok, result = pcall(function()
@@ -6710,7 +6710,7 @@ function record_impl.process_queue(self: Record, max_messages: number?): (Result
 	local state = private[self]
 	if state == nil then return "invalid", "record does not exist" end
 	if state.mailbox_v2_binding then return "busy", "V2 mailbox binding is checking the legacy queue" end
-	if state.record_impl == nil then return process_queue_internal(state, max_messages or 1) end
+	if state.mailbox_v2 == nil then return process_queue_internal(state, max_messages or 1) end
 	local mailbox, bound_code, bound_message = record_impl.bound_mailbox_for_state(state)
 	if mailbox == nil then return bound_code or "fenced", bound_message end
 	if state.state ~= "active" then return "fenced", "record is not actively owned" end
@@ -6814,7 +6814,7 @@ function record_impl.get_queue(self: Record): ({ QueueMessage }, ResultCode, str
 	if state == nil then
 		return {}, "invalid", "record does not exist"
 	end
-	if state.record_impl ~= nil then
+	if state.mailbox_v2 ~= nil then
 		local mailbox, bound_code, bound_message = record_impl.bound_mailbox_for_state(state)
 		if mailbox == nil then return {}, bound_code or "fenced", bound_message end
 		local call_ok, rows, result = pcall(function()
@@ -6894,7 +6894,7 @@ function record_impl.bind_mailbox_v2_async(self: Record, mailbox: unknown): (Res
 	if state == nil then return "invalid", "record does not exist" end
 	if state.state ~= "active" then return "fenced", "V2 mailbox binding requires an active Record" end
 	if state.takeover_requested then return "closing", "session takeover has been requested" end
-	if state.record_impl ~= nil then return record_impl.bind_mailbox_v2(self, mailbox) end
+	if state.mailbox_v2 ~= nil then return record_impl.bind_mailbox_v2(self, mailbox) end
 	if type(mailbox) ~= "table"
 		or type((mailbox :: any).GetOwner) ~= "function"
 		or type((mailbox :: any).GetActiveRecord) ~= "function"
@@ -6936,7 +6936,7 @@ function record_impl.get_dead_letters(self: Record): ({ DeadLetterMessage }, Res
 		return {}, "invalid", "record does not exist"
 	end
 	if state.mailbox_v2_binding then return {}, "busy", "V2 mailbox binding is checking the legacy queue" end
-	if state.record_impl ~= nil then
+	if state.mailbox_v2 ~= nil then
 		local mailbox, bound_code, bound_message = record_impl.bound_mailbox_for_state(state)
 		if mailbox == nil then return {}, bound_code or "fenced", bound_message end
 		local result_rows: { DeadLetterMessage } = {}
@@ -7028,7 +7028,7 @@ function record_impl.claim_dead_letter(self: Record, message_id: string): (DeadL
 		return nil, "invalid", "record does not exist"
 	end
 	if state.mailbox_v2_binding then return nil, "busy", "V2 mailbox binding is checking the legacy queue" end
-	if state.record_impl ~= nil then
+	if state.mailbox_v2 ~= nil then
 		local mailbox, bound_code, bound_message = record_impl.bound_mailbox_for_state(state)
 		if mailbox == nil then return nil, bound_code or "fenced", bound_message end
 		return nil, "invalid", "V2 dead-letter claims use generation-aware V2 APIs; use MailboxV2 directly"
@@ -7138,7 +7138,7 @@ function record_impl.replay_dead_letter(self: Record, message_id: string, lock_t
 		return "invalid", "record does not exist"
 	end
 	if state.mailbox_v2_binding then return "busy", "V2 mailbox binding is checking the legacy queue" end
-	if state.record_impl ~= nil then
+	if state.mailbox_v2 ~= nil then
 		local mailbox, bound_code, bound_message = record_impl.bound_mailbox_for_state(state)
 		if mailbox == nil then return bound_code or "fenced", bound_message end
 		return "invalid", "V2 replay requires a stable operation_id; use MailboxV2.ReplayDeadLetterAsync"
@@ -7248,7 +7248,7 @@ function record_impl.discard_dead_letter(self: Record, message_id: string, lock_
 		return "invalid", "record does not exist"
 	end
 	if state.mailbox_v2_binding then return "busy", "V2 mailbox binding is checking the legacy queue" end
-	if state.record_impl ~= nil then
+	if state.mailbox_v2 ~= nil then
 		local mailbox, bound_code, bound_message = record_impl.bound_mailbox_for_state(state)
 		if mailbox == nil then return bound_code or "fenced", bound_message end
 		return "invalid", "V2 discard requires expected_replay_count; use MailboxV2.DiscardDeadLetterAsync"
@@ -9125,7 +9125,7 @@ function record_impl.make_record(name: string, scope: string, key: string, optio
 		retired = false,
 		takeover_requested = false,
 		queue_hint = false,
-		record_impl = nil,
+		mailbox_v2 = nil,
 		message_topic = make_message_topic(options.message_topic_prefix or DEFAULT_MESSAGE_TOPIC_PREFIX, name, scope, key),
 		message_subscription = nil,
 		last_error = nil,
@@ -10271,9 +10271,9 @@ RecordStore.Mock = (function()
 end)()
 RecordStore.is_retryable_result = is_retryable_result
 RecordStore.get_diagnostic_code = get_diagnostic_code
-RecordStore.shutdown = shutdown
+RecordStore.shutdown = record_impl.shutdown
 
-game:BindToClose(shutdown)
+game:BindToClose(record_impl.shutdown)
 
 table.freeze(RecordStore)
 
