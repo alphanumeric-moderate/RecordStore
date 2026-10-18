@@ -3387,61 +3387,196 @@ function V2.new(record_store, mailbox_module, options)
 	api.RenderErasureTemplate = render_template
 	api.Acceleration = options.acceleration_module
 	local activation_block
-	local dispatch_metrics = { accepted = 0, rejected = 0, dispatched = 0, callback_errors = 0, last_error = nil }
+	local dispatch_metrics = { accepted = 0, rejected = 0, dispatched = 0, retries = 0, callback_errors = 0, last_error = nil }
 	local dispatch_callbacks = {}
 	local dispatch_sequence = 0
 	local dispatcher_running = false
-	local function kick_dispatcher()
+	local kick_dispatcher
+
+	local function current_schedule_time_ms()
+		return if options.runtime ~= nil and type(options.runtime.now_ms) == "function"
+			then options.runtime.now_ms() else os.clock() * 1000
+	end
+
+	local function has_delay_scheduler()
+		local scheduler = task_api()
+		return scheduler ~= nil and type(scheduler.delay) == "function"
+	end
+
+	local function wake_dispatcher_after(delay_ms)
+		if not has_delay_scheduler() then return false end
+		local function wake()
+			if dispatcher_running then
+				if not delay_scheduled(0.01, wake) then return end
+			else
+				kick_dispatcher()
+			end
+		end
+		return delay_scheduled(math.max(0, delay_ms) / 1000, wake)
+	end
+
+	local function enqueue_scheduled_retry(entry, prior_result)
+		if not has_delay_scheduler() then
+			return false, { code = "retry_exhausted", message = "task.delay is unavailable; retry remains caller-controlled" }
+		end
+		local token_ok, retry_after_ms = runtime_governor:AcquireRetryToken()
+		if not token_ok then
+			return false, {
+				code = "retry_exhausted",
+				message = "scheduler retry-token budget is exhausted",
+				retry_after_ms = retry_after_ms,
+			}
+		end
+
+		local delay_ms = math.min(60000, entry.retry_delay_ms * (2 ^ entry.retry_attempt))
+		if type(prior_result) == "table" and finite(prior_result.retry_after_ms) then
+			delay_ms = math.max(delay_ms, math.min(60000, math.max(0, prior_result.retry_after_ms)))
+		end
+
+		dispatch_sequence += 1
+		local retry_id = "rv2job:" .. tostring(dispatch_sequence)
+		local accepted = runtime_governor:Enqueue({
+			id = retry_id,
+			owner_id = entry.owner_id,
+			lane = entry.lane,
+			due_at_ms = current_schedule_time_ms() + delay_ms,
+			wake_reason = entry.reason,
+		})
+		if type(accepted) ~= "table" or accepted.code ~= "accepted" then
+			return false, {
+				code = "retry_exhausted",
+				message = "scheduler could not queue the retry",
+				reason = if type(accepted) == "table" then accepted.code else "unknown",
+			}
+		end
+
+		entry.retry_attempt += 1
+		dispatch_callbacks[retry_id] = entry
+		dispatch_metrics.retries += 1
+		wake_dispatcher_after(delay_ms)
+		return true, nil
+	end
+
+	kick_dispatcher = function()
 		if dispatcher_running then return end
 		dispatcher_running = true
 		spawn_scheduled(function()
 			while true do
 				local item = runtime_governor:TakeNext()
 				if item == nil then break end
-				local callback = dispatch_callbacks[item.id]
+
+				local callback_entry = dispatch_callbacks[item.id]
 				dispatch_callbacks[item.id] = nil
+				local callback = if type(callback_entry) == "table" then callback_entry.callback else callback_entry
+				local callback_ok, callback_result = true, nil
 				if callback ~= nil then
-					local callback_ok, callback_error = pcall(callback)
-					if callback_ok then
-						dispatch_metrics.dispatched += 1
+					local results = table.pack(pcall(callback))
+					callback_ok = results[1]
+					callback_result = results[2]
+				end
+
+				local retry_scheduled = false
+				if not callback_ok then
+					dispatch_metrics.callback_errors += 1
+					dispatch_metrics.last_error = text_error(callback_result, 200)
+					-- A raised callback may have performed a side effect before failing.
+					-- Keep it unknown and never replay it automatically.
+					callback_result = {
+						code = "unknown",
+						message = "scheduled callback raised; side effects may have committed",
+					}
+				elseif type(callback_entry) == "table" and type(callback_result) == "table"
+					and callback_result.code == "retryable"
+				then
+					if callback_entry.retry_attempt < callback_entry.max_retries then
+						local queued, retry_error = enqueue_scheduled_retry(callback_entry, callback_result)
+						if queued then
+							retry_scheduled = true
+						else
+							callback_result = retry_error
+						end
 					else
-						dispatch_metrics.callback_errors += 1
-						dispatch_metrics.last_error = text_error(callback_error, 200)
+						callback_result = {
+							code = "retry_exhausted",
+							message = "configured retry cap reached",
+							last_result = copy(callback_result),
+						}
+					end
+				end
+
+				if not retry_scheduled then
+					if callback_ok then dispatch_metrics.dispatched += 1 end
+					if type(callback_entry) == "table" and type(callback_entry.on_complete) == "function" then
+						local completed, completion_error = pcall(callback_entry.on_complete, copy(callback_result))
+						if not completed then
+							dispatch_metrics.callback_errors += 1
+							dispatch_metrics.last_error = text_error(completion_error, 200)
+						end
 					end
 				end
 				runtime_governor:MarkCompleted(item.id)
 			end
 			dispatcher_running = false
-			-- Recheck after releasing the single dispatcher; enqueue never drops
-			-- durable mailbox work, and later polling remains the liveness fallback.
-			if runtime_governor:Stats().queue_items > 0 then kick_dispatcher() end
+			-- Do not spin when the queue contains future-due work. Enqueue and retry
+			-- arrange timer wakes; the durable sources and pollers remain authoritative.
 		end)
 	end
+
 	api.GetSchedulerDispatchStats = function() return copy(dispatch_metrics) end
-	local function enqueue_scheduled_callback(owner, lane, reason, callback, due_at_ms)
+	local function enqueue_scheduled_callback(owner, lane, reason, callback, due_at_ms, schedule_options, on_complete)
 		if type(callback) ~= "function" then return { code = "invalid", message = "scheduled callback is required" } end
+		schedule_options = schedule_options or {}
+		local max_retries = if schedule_options.max_retries == nil then 0 else schedule_options.max_retries
+		local retry_delay_ms = if schedule_options.retry_delay_ms == nil then 100 else schedule_options.retry_delay_ms
+		if not finite(max_retries) or math.floor(max_retries) ~= max_retries or max_retries < 0 or max_retries > 8 then
+			return { code = "invalid", message = "max_retries must be an integer in 0..8" }
+		end
+		if not finite(retry_delay_ms) or math.floor(retry_delay_ms) ~= retry_delay_ms or retry_delay_ms < 10 or retry_delay_ms > 60000 then
+			return { code = "invalid", message = "retry_delay_ms must be an integer in 10..60000" }
+		end
+		if on_complete ~= nil and type(on_complete) ~= "function" then
+			return { code = "invalid", message = "on_complete must be a function" }
+		end
 		local owner_material, owner_error = request_material(owner)
 		if owner_material == nil then return { code = "invalid", message = owner_error or "owner identity is invalid" } end
+
+		local owner_id = digest(owner_material)
+		local due_now = if finite(due_at_ms) then due_at_ms else current_schedule_time_ms()
+		local delay_ms = math.max(0, due_now - current_schedule_time_ms())
+		if delay_ms > 0 and not has_delay_scheduler() then
+			return { code = "unsupported", message = "task.delay is required for future-due scheduled work" }
+		end
+
 		dispatch_sequence += 1
 		local job_id = "rv2job:" .. tostring(dispatch_sequence)
-		local due_now = if finite(due_at_ms) then due_at_ms
-			elseif options.runtime ~= nil and type(options.runtime.now_ms) == "function" then options.runtime.now_ms()
-			else os.clock() * 1000
 		local accepted = runtime_governor:Enqueue({
 			id = job_id,
-			owner_id = digest(owner_material),
+			owner_id = owner_id,
 			lane = lane or "normal",
 			due_at_ms = due_now,
 			wake_reason = reason,
 		})
 		if type(accepted) ~= "table" or accepted.code ~= "accepted" then
 			dispatch_metrics.rejected += 1
-			return { code = if type(accepted) == "table" then accepted.code else "unknown",
-				message = if type(accepted) == "table" then accepted.message else "scheduler rejected work" }
+			return {
+				code = if type(accepted) == "table" then accepted.code else "unknown",
+				message = if type(accepted) == "table" then accepted.message else "scheduler rejected work",
+			}
 		end
-		dispatch_callbacks[job_id] = callback
+
+		dispatch_callbacks[job_id] = {
+			callback = callback,
+			owner_id = owner_id,
+			lane = lane or "normal",
+			reason = reason,
+			retry_attempt = 0,
+			max_retries = max_retries,
+			retry_delay_ms = retry_delay_ms,
+			on_complete = on_complete,
+		}
 		dispatch_metrics.accepted += 1
 		kick_dispatcher()
+		if delay_ms > 0 then wake_dispatcher_after(delay_ms) end
 		return { code = "accepted", job_id = job_id }
 	end
 	-- Outbox dispatch is a durable side-effect runner. The selector is advisory
@@ -3457,12 +3592,8 @@ function V2.new(record_store, mailbox_module, options)
 		if type(dispatcher) ~= "function" then return { code = "invalid", message = "outbox dispatcher is required" } end
 		if on_complete ~= nil and type(on_complete) ~= "function" then return { code = "invalid", message = "on_complete must be a function" } end
 		return enqueue_scheduled_callback(owner, schedule_options.lane or "background", "outbox_dispatch", function()
-			local result = api.Outbox.DispatchBatches(record, dispatcher, batch_size, max_batches)
-			if type(on_complete) == "function" then
-				local completed, callback_error = pcall(on_complete, copy(result))
-				if not completed then error("outbox completion callback failed: " .. tostring(callback_error)) end
-			end
-		end, schedule_options.due_at_ms)
+			return api.Outbox.DispatchBatches(record, dispatcher, batch_size, max_batches)
+		end, schedule_options.due_at_ms, schedule_options, on_complete)
 	end
 	-- Maintenance uses this same work selector but stays bounded and resumable:
 	-- callback code must process one bounded chunk and persist its own cursor.
@@ -3476,16 +3607,9 @@ function V2.new(record_store, mailbox_module, options)
 		end
 		return enqueue_scheduled_callback(owner, lane, "maintenance:" .. maintenance_id, function()
 			local blocked = activation_block("maintenance")
-			if blocked ~= nil then
-				if type(schedule_options.on_complete) == "function" then schedule_options.on_complete(copy(blocked)) end
-				return
-			end
-			local result = callback(maintenance_id)
-			if type(schedule_options.on_complete) == "function" then
-				local completed, callback_error = pcall(schedule_options.on_complete, copy(result))
-				if not completed then error("maintenance completion callback failed: " .. tostring(callback_error)) end
-			end
-		end, schedule_options.due_at_ms)
+			if blocked ~= nil then return blocked end
+			return callback(maintenance_id)
+		end, schedule_options.due_at_ms, schedule_options, schedule_options.on_complete)
 	end
 	api.BindMailboxWakeups = function(accelerator, owner, mailbox, handler, max_messages_per_wake)
 		if type(accelerator) ~= "table" or type(accelerator.Register) ~= "function" then
