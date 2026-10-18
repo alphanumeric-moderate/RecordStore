@@ -5,7 +5,7 @@ local luau = require("@lune/luau")
 local Shim = require("./RobloxShim")
 local RecordStore = Shim.load()
 local MailboxV2 = luau.load(fs.readFile("src/PlayerDataInitializer/RecordStoreMailboxV2.luau"), { debugName = "RecordStoreMailboxV2" })()
-local V2 = luau.load(fs.readFile("src/PlayerDataInitializer/RecordStoreV2.luau"), { debugName = "RecordStoreV2" })().new(RecordStore, MailboxV2)
+local V2 = luau.load(fs.readFile("src/PlayerDataInitializer/RecordStoreV2.luau"), { debugName = "RecordStoreV2" })().new(RecordStore, MailboxV2, { allow_unattested_activation = true })
 
 -- Exercise the actual core request gate with successful callbacks only.
 local runtime_code, runtime_error = RecordStore.configure_runtime({
