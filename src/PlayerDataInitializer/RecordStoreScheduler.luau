@@ -53,14 +53,16 @@ local operation_dimension_defaults = {
 	batch = { read = 1, write = 1, bytes = 65536, handlers = 1 },
 }
 
-local function estimate_dimensions(item)
+local function estimate_dimensions(item, batch_count)
 	local request_kind = if type(item.operation_class) == "string" then item.operation_class
 		elseif type(item.work_class) == "string" then item.work_class else "default"
 	local defaults = operation_dimension_defaults[request_kind] or operation_dimension_defaults.default
+	local multiplier = if item.batchable == true and finite(batch_count)
+		then math.clamp(math.floor(batch_count), 1, 16) else 1
 	return {
-		read_units = math.max(defaults.read, if finite(item.read_units) then item.read_units else 0),
-		write_units = math.max(defaults.write, if finite(item.write_units) then item.write_units else 0),
-		estimated_bytes = math.max(defaults.bytes, if finite(item.estimated_bytes) then item.estimated_bytes else 0),
+		read_units = math.max(defaults.read, if finite(item.read_units) then item.read_units else 0) * multiplier,
+		write_units = math.max(defaults.write, if finite(item.write_units) then item.write_units else 0) * multiplier,
+		estimated_bytes = math.max(defaults.bytes, if finite(item.estimated_bytes) then item.estimated_bytes else 0) * multiplier,
 		handler_slots = math.max(defaults.handlers, if finite(item.handler_slots) then item.handler_slots else 1),
 	}
 end
@@ -413,12 +415,60 @@ local function new_governor(options)
 		if not ok or type(budgets) ~= "table" then return false end
 		return self:ObserveRequestBudgets(budgets.read, budgets.write)
 	end
-	function governor:ChooseBatchSize(requested, latency_ms)
+	function governor:ChooseBatchSize(requested, latency_ms, backlog, oldest_age_ms, budget_headroom)
 		local maximum = math.min(bounded_integer(requested, self.policy.max_batch, 1, 16), self.policy.max_batch)
+		if finite(backlog) then
+			maximum = math.min(maximum, bounded_integer(backlog, 1, 1, self.policy.queue_capacity))
+		end
 		latency_ms = if finite(latency_ms) then latency_ms else 0
+		if finite(budget_headroom) and budget_headroom < self.policy.minimum_budget then return 1 end
 		if latency_ms >= self.policy.batch_latency_ceiling_ms then return 1 end
-		if latency_ms >= self.policy.batch_latency_ceiling_ms * 0.75 then return math.max(1, math.floor(maximum / 2)) end
+		if latency_ms >= self.policy.batch_latency_ceiling_ms * 0.75 then
+			maximum = math.max(1, math.floor(maximum / 2))
+		end
+		if finite(oldest_age_ms) and oldest_age_ms >= self.policy.batch_window_ms then
+			return maximum
+		end
 		return maximum
+	end
+	local function selected_batch_size(self, item)
+		if item.batchable ~= true then return nil end
+		local now = now_ms()
+		local latency = math.max(
+			self.latency_ewma[item.operation_class or "default"] or 0,
+			self.latency_ewma.service or 0
+		)
+		local budgets = self.request_budgets
+		local budget_headroom
+		local budget_fresh = finite(budgets.sampled_at_ms) and now - budgets.sampled_at_ms <= 1000
+		if budget_fresh then
+			budget_headroom = math.min(budgets.read or math.huge, budgets.write or math.huge)
+		end
+		local oldest_age = math.max(0, now - (item.enqueued_at_ms or now))
+		local requested = item.batch_size or 1
+		local backlog = item.batch_backlog or requested
+		local count = self:ChooseBatchSize(requested, latency, backlog, oldest_age, budget_headroom)
+		local unit = estimate_dimensions(item, 1)
+		local critical = item.service_class == "critical" or item.lane == "lease_renewal"
+		local read_limit = self.policy.max_read_units_in_flight - self.read_units_in_flight
+		local write_limit = self.policy.max_write_units_in_flight - self.write_units_in_flight
+		local byte_limit = self.policy.max_estimated_bytes_in_flight - self.estimated_bytes_in_flight
+		if not critical then
+			read_limit -= self.policy.read_critical_reserve
+			write_limit -= self.policy.write_critical_reserve
+		end
+		if unit.read_units > 0 then count = math.min(count, math.max(1, math.floor(math.max(0, read_limit) / unit.read_units))) end
+		if unit.write_units > 0 then count = math.min(count, math.max(1, math.floor(math.max(0, write_limit) / unit.write_units))) end
+		if unit.estimated_bytes > 0 then count = math.min(count, math.max(1, math.floor(math.max(0, byte_limit) / unit.estimated_bytes))) end
+		if budget_fresh and not critical then
+			if unit.read_units > 0 and finite(budgets.read) then
+				count = math.min(count, math.max(1, math.floor(math.max(0, budgets.read) / unit.read_units)))
+			end
+			if unit.write_units > 0 and finite(budgets.write) then
+				count = math.min(count, math.max(1, math.floor(math.max(0, budgets.write) / unit.write_units)))
+			end
+		end
+		return math.clamp(math.floor(count), 1, self.policy.max_batch)
 	end
 	local function heap_less(left, right)
 		if left.due_at_ms ~= right.due_at_ms then return left.due_at_ms < right.due_at_ms end
@@ -539,7 +589,8 @@ local function new_governor(options)
 		return (left.enqueued_at_ms or 0) < (right.enqueued_at_ms or 0)
 	end
 	local function effective_cost(item)
-		local dimensions = estimate_dimensions(item)
+		local dimensions = estimate_dimensions(item, if item.batchable == true
+			then math.min(item.batch_size or 1, item.batch_backlog or item.batch_size or 1) else nil)
 		local estimated = math.max(
 			1,
 			dimensions.read_units + dimensions.write_units,
@@ -581,12 +632,13 @@ local function new_governor(options)
 				-- At most one renewal may be active for a single claim/owner at a time.
 				local owner_can_renew = effective_lane ~= "lease_renewal" or renewal_count < 1
 				if owner_can_renew and (effective_lane == "lease_renewal" or owner_active < self.policy.max_per_owner_in_flight) then
+					local batch_count = selected_batch_size(self, item)
 					local admission = admission_decision(self,
 						item.work_class, item.operation_class, effective_cost(item), item.mutating ~= false,
-						item.service_class == "critical" or item.lane == "lease_renewal", estimate_dimensions(item)
+						item.service_class == "critical" or item.lane == "lease_renewal", estimate_dimensions(item, batch_count)
 					)
 					if admission.code == "admitted" then
-						eligible[#eligible + 1] = { index = index, item = item, effective_lane = effective_lane }
+						eligible[#eligible + 1] = { index = index, item = item, effective_lane = effective_lane, batch_count = batch_count }
 					elseif finite(admission.retry_after_ms) then
 						if admission.budget_limited then
 							self.stats.rejected += 1
@@ -802,9 +854,10 @@ local function new_governor(options)
 				remember_terminal(self, item.id, "expired")
 				return item, "expired"
 			else
+				local batch_count = selected_batch_size(self, item)
 				local admission = admission_decision(self,
 					item.work_class, item.operation_class, effective_cost(item), item.mutating ~= false,
-					item.service_class == "critical" or item.lane == "lease_renewal", estimate_dimensions(item)
+					item.service_class == "critical" or item.lane == "lease_renewal", estimate_dimensions(item, batch_count)
 				)
 				if admission.terminal then
 					self.stats.rejected += 1
@@ -822,7 +875,10 @@ local function new_governor(options)
 			local interval = math.max(1, math.floor(1 / self.policy.shadow_sample_rate))
 			if (self.stats.scheduled_selected + 1) % interval == 0 then self:ShadowDecision(renewal_mode) end
 		end
+		local selected_item = self.queue[index]
+		local selected_count = selected_batch_size(self, selected_item)
 		local item = table.remove(self.queue, index)
+		item.admission_batch_size = selected_count
 		item.queued = false
 		local age = math.max(0, now - (item.enqueued_at_ms or now))
 		self.scheduler_metrics.wait_ms[#self.scheduler_metrics.wait_ms + 1] = age
@@ -1170,6 +1226,7 @@ local function new_dispatcher(governor, options)
 		metrics = {
 			accepted = 0, rejected = 0, completed = 0, retries = 0, retry_deferred = 0,
 			expired = 0, dependency_failed = 0, callback_errors = 0,
+			batch_calls = 0, batch_items_requested = 0, max_batch_size = 0,
 			max_in_flight = 0, cancelled = 0, last_error = nil,
 		},
 	}
@@ -1351,7 +1408,8 @@ local function new_dispatcher(governor, options)
 		end
 		local admission = governor:Admit(
 			item.work_class, item.operation_class, item.cost or 1, item.mutating ~= false,
-			item.service_class == "critical" or item.lane == "lease_renewal", estimate_dimensions(item)
+			item.service_class == "critical" or item.lane == "lease_renewal",
+			estimate_dimensions(item, item.admission_batch_size)
 		)
 		if admission.code ~= "admitted" then
 			-- Admission is checked during selection and cannot race in this
@@ -1394,7 +1452,15 @@ local function new_dispatcher(governor, options)
 			local started_at_ms = now_ms()
 			local callback_ok, callback_result
 			if type(entry) == "table" and type(entry.callback) == "function" then
-				callback_ok, callback_result = pcall(entry.callback)
+				if entry.batchable == true then
+					local batch_count = item.admission_batch_size or 1
+					dispatcher.metrics.batch_calls += 1
+					dispatcher.metrics.batch_items_requested += batch_count
+					dispatcher.metrics.max_batch_size = math.max(dispatcher.metrics.max_batch_size, batch_count)
+					callback_ok, callback_result = pcall(entry.callback, batch_count)
+				else
+					callback_ok, callback_result = pcall(entry.callback)
+				end
 			else
 				callback_ok, callback_result = false, "scheduled callback is missing"
 			end
@@ -1442,7 +1508,7 @@ local function new_dispatcher(governor, options)
 		service_class = true, work_class = true, operation_class = true, dependencies = true,
 		read_units = true, write_units = true, estimated_bytes = true, handler_slots = true, cost = true,
 		max_retries = true, retry_delay_ms = true, retry_jitter_percent = true, batch_window_ms = true,
-		batchable = true, on_complete = true, mutating = true,
+		batchable = true, batch_size = true, batch_backlog = true, on_complete = true, mutating = true,
 	}
 	function dispatcher:Schedule(owner_id, work_id, callback, schedule_options)
 		if self.closed or self.closing then return { code = "closed", message = "scheduler dispatcher is closing or closed" } end
@@ -1460,8 +1526,9 @@ local function new_dispatcher(governor, options)
 		end
 		local retry_limit = if schedule_options.max_retries == nil then 0 else schedule_options.max_retries
 		local retry_delay_ms = if schedule_options.retry_delay_ms == nil then 100 else schedule_options.retry_delay_ms
+		local current_policy = governor:Stats().policy
 		local jitter = if schedule_options.retry_jitter_percent == nil
-			then governor:Stats().policy.retry_jitter_percent else schedule_options.retry_jitter_percent
+			then current_policy.retry_jitter_percent else schedule_options.retry_jitter_percent
 		if not finite(retry_limit) or math.floor(retry_limit) ~= retry_limit or retry_limit < 0 or retry_limit > 8 then
 			return { code = "invalid", message = "max_retries must be an integer in 0..8" }
 		end
@@ -1473,6 +1540,21 @@ local function new_dispatcher(governor, options)
 		end
 		if schedule_options.batchable ~= nil and type(schedule_options.batchable) ~= "boolean" then
 			return { code = "invalid", message = "batchable must be a boolean" }
+		end
+		local batch_size = if schedule_options.batch_size == nil then math.min(4, current_policy.max_batch) else schedule_options.batch_size
+		local batch_backlog = if schedule_options.batch_backlog == nil then batch_size else schedule_options.batch_backlog
+		if not finite(batch_size) or math.floor(batch_size) ~= batch_size
+			or batch_size < 1 or batch_size > current_policy.max_batch
+		then
+			return { code = "invalid", message = "batch_size must be an integer within max_batch" }
+		end
+		if not finite(batch_backlog) or math.floor(batch_backlog) ~= batch_backlog
+			or batch_backlog < 1 or batch_backlog > current_policy.queue_capacity
+		then
+			return { code = "invalid", message = "batch_backlog must be an integer within queue_capacity" }
+		end
+		if schedule_options.batchable ~= true and (schedule_options.batch_size ~= nil or schedule_options.batch_backlog ~= nil) then
+			return { code = "invalid", message = "batch_size and batch_backlog require batchable = true" }
 		end
 		if schedule_options.on_complete ~= nil and type(schedule_options.on_complete) ~= "function" then
 			return { code = "invalid", message = "on_complete must be a function" }
@@ -1500,12 +1582,25 @@ local function new_dispatcher(governor, options)
 		if not valid_text(work_class, 64) then return { code = "invalid", message = "work_class must be 1..64 bytes" } end
 		local batch_window = 0
 		if schedule_options.batchable == true then
-			local policy = governor:Stats().policy
-			batch_window = if finite(schedule_options.batch_window_ms) then schedule_options.batch_window_ms else policy.batch_window_ms
-			local latency = math.max(governor.latency_ewma.outbox_dispatch or 0, governor.latency_ewma.write or 0,
-				governor.latency_ewma.update_async or 0, governor.latency_ewma.service or 0)
-			if latency >= policy.batch_latency_ceiling_ms then batch_window = 0
-			elseif latency >= policy.batch_latency_ceiling_ms * 0.75 then batch_window = math.floor(batch_window / 2) end
+			batch_window = if finite(schedule_options.batch_window_ms) then schedule_options.batch_window_ms else current_policy.batch_window_ms
+			local latency = math.max(governor.latency_ewma[work_class] or 0, governor.latency_ewma.outbox_dispatch or 0,
+				governor.latency_ewma.write or 0, governor.latency_ewma.update_async or 0, governor.latency_ewma.service or 0)
+			local snapshot = governor:Stats()
+			local budget_headroom
+			local budgets = snapshot.request_budgets
+			if finite(budgets.sampled_at_ms) and now - budgets.sampled_at_ms <= 1000 then
+				budget_headroom = math.min(budgets.read or math.huge, budgets.write or math.huge)
+			end
+			if latency >= current_policy.batch_latency_ceiling_ms
+				or (finite(budget_headroom) and budget_headroom < current_policy.minimum_budget)
+				or (finite(snapshot.scheduler.oldest_eligible_age_ms) and snapshot.scheduler.oldest_eligible_age_ms >= batch_window)
+			then
+				batch_window = 0
+			elseif latency >= current_policy.batch_latency_ceiling_ms * 0.75 then
+				batch_window = math.floor(batch_window / 2)
+			elseif batch_backlog < batch_size then
+				batch_window = math.min(batch_window, 2)
+			end
 		end
 		due = math.max(due, now + batch_window)
 		if finite(schedule_options.available_at_ms) then due = math.max(due, schedule_options.available_at_ms) end
@@ -1519,7 +1614,8 @@ local function new_dispatcher(governor, options)
 			dependencies = schedule_options.dependencies, read_units = schedule_options.read_units,
 			write_units = schedule_options.write_units, estimated_bytes = schedule_options.estimated_bytes,
 			handler_slots = schedule_options.handler_slots, cost = schedule_options.cost,
-			mutating = schedule_options.mutating,
+			mutating = schedule_options.mutating, batchable = schedule_options.batchable,
+			batch_size = batch_size, batch_backlog = batch_backlog,
 		}
 		local accepted = governor:Enqueue(item)
 		if type(accepted) ~= "table" or accepted.code ~= "accepted" then
@@ -1531,6 +1627,7 @@ local function new_dispatcher(governor, options)
 			callback = callback, on_complete = schedule_options.on_complete,
 			work_id = work_id, work_class = work_class,
 			operation_class = schedule_options.operation_class or work_class,
+			batchable = schedule_options.batchable == true, batch_size = batch_size, batch_backlog = batch_backlog,
 			retry_attempt = 0, max_retries = retry_limit,
 			retry_delay_ms = retry_delay_ms, retry_jitter_percent = jitter,
 		}
