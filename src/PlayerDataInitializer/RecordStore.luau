@@ -703,6 +703,8 @@ export type Record = {
 	DispatchOutboxBatchAsync: (self: Record, dispatcher: OutboxDispatcher, max_items: number?) -> (number, ResultCode, string?),
 	PruneTransactionReceiptsAsync: (self: Record, committed_before_ms: number, max_items: number?) -> (number, ResultCode, string?),
 	PruneOutboxAsync: (self: Record, dispatched_before_ms: number, max_items: number?) -> (number, ResultCode, string?),
+	GetInboxStatsAsync: (self: Record) -> ({ [string]: unknown }, ResultCode, string?),
+	GetOutboxStatsAsync: (self: Record) -> ({ [string]: unknown }, ResultCode, string?),
 	MessageAsync: (self: Record, message_type: string, data: JsonValue?) -> (ResultCode, string?),
 	BindMailboxV2Async: (self: Record, mailbox: unknown) -> (ResultCode, string?),
 	EnqueueAsync: (self: Record, message_type: string, data: JsonValue?, enqueue_options: { [string]: unknown }?) -> (ResultCode, string?),
@@ -4733,6 +4735,18 @@ local function clone_read_snapshot(snapshot: Snapshot?): Snapshot?
 	return result
 end
 
+function RecordStore.get_inbox_stats_async(name: string, scope: string, key: string, operation_deadline: number?): ({ [string]: unknown }, ResultCode, string?)
+	local valid_identity, identity_message = validate_store_identity(name, scope, key)
+	if not valid_identity then return {}, "invalid", identity_message end
+	return get_envelope_sidecar_stats(make_backend(name, scope, key, false), operation_deadline, "inbox", nil)
+end
+
+function RecordStore.get_outbox_stats_async(name: string, scope: string, key: string, operation_deadline: number?): ({ [string]: unknown }, ResultCode, string?)
+	local valid_identity, identity_message = validate_store_identity(name, scope, key)
+	if not valid_identity then return {}, "invalid", identity_message end
+	return get_envelope_sidecar_stats(make_backend(name, scope, key, false), operation_deadline, "outbox", nil)
+end
+
 function RecordStore.read_async(name: string, scope: string, key: string, operation_deadline: number?, legacy_decoder: LegacyDecoder?): (Snapshot?, ResultCode, string?)
 	-- Legacy decoders are application callbacks; do not coalesce across different callback identities.
 	if legacy_decoder ~= nil then
@@ -6352,6 +6366,113 @@ local function get_outbox(self: Record, max_items: number?): ({ OutboxEvent }, R
 	end)
 	while #result > limit do table.remove(result) end
 	return result, "success", nil
+end
+
+local function get_envelope_sidecar_stats(
+	backend: Backend,
+	operation_deadline: number?,
+	kind: "inbox" | "outbox",
+	state: InternalState?
+): ({ [string]: unknown }, ResultCode, string?)
+	local valid_identity, identity_message = validate_store_identity(backend.name, backend.scope, backend.key)
+	if not valid_identity then return {}, "invalid", identity_message end
+	local deadline, deadline_error = resolve_operation_deadline(operation_deadline)
+	if deadline == nil then return {}, "invalid", deadline_error end
+	local raw, _info, read_code, read_message = backend_get(backend, false, deadline, state)
+	if read_code ~= nil then return {}, read_code, read_message end
+	if raw == nil then return {}, "not_found", "record does not exist" end
+	local envelope, parse_error, current_format = parse_envelope(raw)
+	if not current_format then
+		local code = if parse_error == "legacy payload" then "legacy"
+			elseif parse_error == "future implementation version" then "future_schema" else "corrupt"
+		return {}, code, parse_error or "durable envelope is invalid"
+	end
+	if envelope == nil then return {}, "corrupt", parse_error or "durable envelope is missing" end
+	if state ~= nil then
+		if state.state ~= "active" or state.token == nil then
+			return {}, "fenced", "record is not actively owned"
+		end
+		if not matches_session(envelope, state.token, state.generation)
+			or envelope.session == nil
+			or envelope.session.lease_until <= session_now_unix(state.backend.mock)
+		then
+			return {}, "fenced", "durable profile session fence is no longer valid"
+		end
+	end
+	local observed_at = session_now_unix(backend.mock)
+	local stats: { [string]: unknown } = {
+		observed_at = observed_at,
+		consistency = "single_envelope_read",
+		completeness = "complete_for_observed_envelope",
+		exactness = "exact_for_observed_envelope",
+		revision = envelope.revision,
+		generation = envelope.fencing_generation,
+	}
+	if kind == "inbox" then
+		local receipts = envelope.inbox_receipts or {}
+		if type(receipts) ~= "table" then return {}, "corrupt", "inbox receipt sidecar is malformed" end
+		local count = 0
+		local oldest_committed_at: number? = nil
+		local newest_committed_at: number? = nil
+		for operation_id, receipt in receipts do
+			if type(operation_id) ~= "string" or type(receipt) ~= "table" or not finite(receipt.committed_at) then
+				return {}, "corrupt", "inbox receipt sidecar contains a malformed row"
+			end
+			count += 1
+			oldest_committed_at = if oldest_committed_at == nil
+				then receipt.committed_at else math.min(oldest_committed_at, receipt.committed_at)
+			newest_committed_at = if newest_committed_at == nil
+				then receipt.committed_at else math.max(newest_committed_at, receipt.committed_at)
+		end
+		stats.receipt_count = count
+		stats.oldest_receipt_committed_at = oldest_committed_at
+		stats.newest_receipt_committed_at = newest_committed_at
+		stats.oldest_receipt_age_seconds = if oldest_committed_at == nil then 0 else math.max(0, observed_at - oldest_committed_at)
+		return stats, "success", nil
+	end
+	local outbox = envelope.outbox or {}
+	if type(outbox) ~= "table" then return {}, "corrupt", "outbox sidecar is malformed" end
+	local pending, dispatched = 0, 0
+	local oldest_pending_created_at: number? = nil
+	local total_attempts, maximum_attempts = 0, 0
+	for event_id, event in outbox do
+		if type(event_id) ~= "string" or type(event) ~= "table"
+			or not finite(event.created_at) or not finite(event.attempts)
+		then
+			return {}, "corrupt", "outbox sidecar contains a malformed row"
+		end
+		if event.state == "pending" then
+			pending += 1
+			oldest_pending_created_at = if oldest_pending_created_at == nil
+				then event.created_at else math.min(oldest_pending_created_at, event.created_at)
+		elseif event.state == "dispatched" then
+			dispatched += 1
+		else
+			return {}, "corrupt", "outbox sidecar contains an unsupported state"
+		end
+		total_attempts += event.attempts
+		maximum_attempts = math.max(maximum_attempts, event.attempts)
+	end
+	stats.pending_count = pending
+	stats.dispatched_count = dispatched
+	stats.total_count = pending + dispatched
+	stats.oldest_pending_created_at = oldest_pending_created_at
+	stats.oldest_pending_age_seconds = if oldest_pending_created_at == nil then 0 else math.max(0, observed_at - oldest_pending_created_at)
+	stats.total_dispatch_attempts = total_attempts
+	stats.max_dispatch_attempts = maximum_attempts
+	return stats, "success", nil
+end
+
+local function get_record_inbox_stats(self: Record): ({ [string]: unknown }, ResultCode, string?)
+	local state = private[self]
+	if state == nil then return {}, "invalid", "record does not exist" end
+	return get_envelope_sidecar_stats(state.backend, state.options.operation_deadline, "inbox", state)
+end
+
+local function get_record_outbox_stats(self: Record): ({ [string]: unknown }, ResultCode, string?)
+	local state = private[self]
+	if state == nil then return {}, "invalid", "record does not exist" end
+	return get_envelope_sidecar_stats(state.backend, state.options.operation_deadline, "outbox", state)
 end
 
 local function set_outbox_result(
@@ -9186,6 +9307,8 @@ function record_impl.make_record(name: string, scope: string, key: string, optio
 		DispatchOutboxBatchAsync = dispatch_outbox_batch,
 		PruneTransactionReceiptsAsync = prune_transaction_receipts,
 		PruneOutboxAsync = prune_outbox,
+		GetInboxStatsAsync = get_record_inbox_stats,
+		GetOutboxStatsAsync = get_record_outbox_stats,
 		MessageAsync = message,
 		BindMailboxV2Async = record_impl.bind_mailbox_v2_async,
 		EnqueueAsync = record_impl.enqueue,
