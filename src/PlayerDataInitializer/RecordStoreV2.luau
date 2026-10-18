@@ -497,7 +497,9 @@ local dirty_seen = setmetatable({}, { __mode = "k" })
 
 local function new_governor(options)
 	options = options or {}
-	local function now_ms() return if type(options.now_ms) == "function" then options.now_ms() else os.clock() * 1000 end end
+	local function now_ms()
+		return if type(options.now_ms) == "function" then options.now_ms() else os.clock() * 1000
+	end
 	local governor = {
 		policy = {
 			revision = 1, mode = "normal", max_in_flight = 32, critical_reserve = 4,
