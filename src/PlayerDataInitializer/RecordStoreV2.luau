@@ -3030,6 +3030,7 @@ local function new_read_coalescer(fetch, options)
 			if not waiter.done then coroutine.yield() end
 			waiter.waiting = false
 			if waiter.source == "timeout" then return nil, waiter.message, "timeout" end
+			if waiter.source == "invalidated" then return nil, waiter.message, "invalidated" end
 			if waiter.value == nil then return nil, waiter.message, "coalesced" end
 			local copied, value = pcall(copy, waiter.value)
 			if not copied then return nil, tostring(value), "invalid" end
