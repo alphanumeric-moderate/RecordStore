@@ -1923,6 +1923,16 @@ local function new_erasure(store, families, options)
 		if #material > MAX_REQUEST_BYTES * 4 then return nil, "RTBF template contract exceeds its bounded material limit" end
 		return digest(material), material
 	end
+	local function progress_material_for(manifest)
+		local ok, material = pcall(canonical, {
+			plan_material = manifest.plan_material,
+			status = manifest.status,
+			cursor = manifest.cursor,
+			completed_count = manifest.completed_count,
+		})
+		if not ok then return nil end
+		return material
+	end
 	function coordinator:PlanAsync(user_id, erasure_id)
 		if not finite(user_id) or user_id < 1 or math.floor(user_id) ~= user_id or not valid_text(erasure_id, 96) then
 			return { code = "invalid", message = "valid UserId and stable erasure ID are required" }
@@ -2084,6 +2094,8 @@ local function new_erasure(store, families, options)
 			return { code = "capacity", message = "immutable erasure plan material exceeds the bounded manifest limit" }
 		end
 		manifest.plan_material = plan_material
+		manifest.progress_material = progress_material_for(manifest)
+		if manifest.progress_material == nil then return { code = "invalid", message = "erasure progress material could not be canonicalized" } end
 		local value, message = adapter_call(store, "UpdateAsync", manifest_key(user_id), function(old)
 			-- The erasure ID owns one immutable plan. A retry must not reset progress
 			-- or replace the authoritative inventory with a later, different snapshot.
@@ -2124,6 +2136,7 @@ local function new_erasure(store, families, options)
 			or not valid_text(manifest.template_contract_material, MAX_REQUEST_BYTES * 4)
 			or type(manifest.template_verification_passed) ~= "boolean"
 			or not valid_text(manifest.plan_material, MAX_REQUEST_BYTES * 64)
+			or not valid_text(manifest.progress_material, MAX_REQUEST_BYTES * 64)
 		then
 			return { code = "unsupported_schema", message = "erasure manifest has an unsupported version or malformed state" }
 		end
@@ -2141,6 +2154,9 @@ local function new_erasure(store, families, options)
 		})
 		if not plan_ok or expected_plan_material ~= manifest.plan_material then
 			return { code = "corrupt", message = "erasure manifest immutable plan material failed integrity reconciliation" }
+		end
+		if progress_material_for(manifest) ~= manifest.progress_material then
+			return { code = "corrupt", message = "erasure manifest progress material failed integrity reconciliation" }
 		end
 		local current_templates, current_templates_error = self:RenderTemplates(user_id)
 		if current_templates == nil then return { code = "blocked", message = current_templates_error or "current RTBF templates are invalid" } end
@@ -2236,6 +2252,7 @@ local function new_erasure(store, families, options)
 					local value = copy(old)
 					value.status = if status == "unknown" then "unknown" else "in_progress"
 					value.last_error = text_error(action_error or status, 256)
+					value.progress_material = progress_material_for(value)
 					return value
 				end)
 				if state_error == nil and type(observed) == "table" and observed.erasure_id == erasure_id
@@ -2260,6 +2277,7 @@ local function new_erasure(store, families, options)
 					local value = copy(old)
 					value.status = if history_cleared == "unknown" then "unknown" else "in_progress"
 					value.last_error = text_error(history_error or "history cleanup is unresolved", 256)
+					value.progress_material = progress_material_for(value)
 					return value
 				end)
 				if state_error == nil and type(observed) == "table" and observed.erasure_id == erasure_id
@@ -2287,6 +2305,7 @@ local function new_erasure(store, families, options)
 				value.status = "in_progress"
 				value.updated_at = os.time()
 				value.last_error = nil
+				value.progress_material = progress_material_for(value)
 				return value
 			end)
 			if progress_error then
@@ -2315,6 +2334,7 @@ local function new_erasure(store, families, options)
 			value.status = if value.cursor >= #value.entries then "completed" else "in_progress"
 			value.completed_at = if value.status == "completed" then (old.completed_at or os.time()) else nil
 			value.updated_at = os.time()
+			value.progress_material = progress_material_for(value)
 			return value
 		end)
 		if final_error then return { code = "unknown", message = final_error } end
