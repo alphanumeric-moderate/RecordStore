@@ -445,6 +445,25 @@ assert(old_generation_delete.code == "deleted",
 assert(stale_record:Stats().generation == before_erase.generation + 1,
 	"repeated erasure changed the tombstone generation")
 
+local mutating_adapter_family = family(true)
+local mutating_adapter_calls = 0
+mutating_adapter_family.redact_or_delete_if_generation = function(item, _user_id, _erasure_id)
+	assert(item.generation == 1, "erasure adapter received a mutated manifest generation")
+	item.generation = 999
+	mutating_adapter_calls += 1
+	if mutating_adapter_calls == 1 then return "retryable", "injected retry after adapter mutation" end
+	return "deleted"
+end
+local mutating_adapter = V2.Erasure.new(new_store(), { mutating_adapter_family }, {
+	verify_templates = function(_user_id, rendered) return type(rendered) == "table" and #rendered == 1 end,
+})
+local mutating_adapter_plan = mutating_adapter:PlanAsync(127, "erasure-adapter-mutation")
+assert(mutating_adapter_plan.rtbf_coverage_verified == true, "adapter mutation fixture was not verified")
+assert(mutating_adapter:ExecuteAsync(127, "erasure-adapter-mutation", 1).code == "retryable",
+	"adapter mutation fixture did not pause for retry")
+assert(mutating_adapter:ExecuteAsync(127, "erasure-adapter-mutation", 1).code == "committed",
+	"mutating erasure adapter corrupted the immutable generation on retry")
+
 local changed_contract_family = family(true)
 local changed_contract_store = new_store()
 local changed_contract = V2.Erasure.new(changed_contract_store, { changed_contract_family }, {
