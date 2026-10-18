@@ -2791,16 +2791,50 @@ local function new_projections(store, options)
 		return classify(value, false)
 	end
 	function service:GetAsync(name, entity_id)
-		if not self.projections[name] or not valid_text(entity_id, 128) then return { code = "not_found" } end
+		local def = self.projections[name]
+		if not def or not valid_text(entity_id, 128) then return { code = "not_found" } end
 		local value, message = adapter_call(store, "GetAsync", key_for(name, entity_id))
 		if message then return { code = "unknown", message = message } end
-		if value and (type(value) ~= "table" or value.entity_id ~= entity_id) then return { code = "conflict", message = "projection key collision" } end
-		if value then
-			if type(value.subject_user_ids) ~= "table" then return { code = "unsupported_schema", message = "projection row lacks subject-erasure metadata" } end
-			local subjects_ok, subject_error = verify_subjects(value.subject_user_ids)
-			if not subjects_ok then return subject_error end
+		if value == nil then return { code = "not_found", consistency = "eventual" } end
+		if type(value) ~= "table" then return { code = "corrupt", message = "projection row is not a table" } end
+		if value.entity_id ~= entity_id or value.projection_name ~= name then return { code = "conflict", message = "projection key collision" } end
+		if value.version ~= def.version then return { code = "unsupported_schema", message = "projection schema revision changed" } end
+		if type(value.value) ~= "table" or not finite(value.source_revision)
+			or math.floor(value.source_revision) ~= value.source_revision or value.source_revision < -1
+		then
+			return { code = "corrupt", message = "projection row has a malformed value or source revision" }
 		end
-		return { code = if value then "success" else "not_found", row = if value then copy(value) else nil, consistency = "eventual" }
+		if type(value.recent_events) ~= "table" then return { code = "corrupt", message = "projection event ledger is missing" } end
+		local event_count = key_count(value.recent_events)
+		if event_count > 64 then return { code = "corrupt", message = "projection event ledger exceeds its bound" } end
+		for index in pairs(value.recent_events) do
+			if type(index) ~= "number" or not finite(index) or math.floor(index) ~= index or index < 1 or index > event_count then
+				return { code = "corrupt", message = "projection event ledger is not a dense array" }
+			end
+		end
+		local seen_events = {}
+		for index = 1, event_count do
+			local event_id = value.recent_events[index]
+			if not valid_text(event_id, 128) or seen_events[event_id] then
+				return { code = "corrupt", message = "projection event ledger contains an invalid or duplicate event ID" }
+			end
+			seen_events[event_id] = true
+		end
+		if type(value.subject_user_ids) ~= "table" then
+			return { code = "unsupported_schema", message = "projection row lacks subject-erasure metadata" }
+		end
+		if value.source_revision >= 0 then
+			if not valid_text(value.last_event_id, 128) or value.last_event_revision ~= value.source_revision
+				or not valid_text(value.last_attempt_id, 128) or not seen_events[value.last_event_id]
+			then
+				return { code = "corrupt", message = "projection row's latest-event receipt is inconsistent with its source revision" }
+			end
+		elseif event_count > 0 or value.last_event_id ~= nil or value.last_event_revision ~= nil or value.last_attempt_id ~= nil then
+			return { code = "corrupt", message = "empty projection row contains event receipt state" }
+		end
+		local subjects_ok, subject_error = verify_subjects(value.subject_user_ids)
+		if not subjects_ok then return subject_error end
+		return { code = "success", row = copy(value), consistency = "eventual" }
 	end
 	function service:RebuildAsync(name, fetch_page, cursor, max_pages)
 		if not self.projections[name] or type(fetch_page) ~= "function" then return { code = "invalid" } end
