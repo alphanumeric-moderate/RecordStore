@@ -1326,7 +1326,8 @@ local function new_dispatcher(governor, options)
 		metrics = {
 			accepted = 0, rejected = 0, completed = 0, retries = 0, retry_deferred = 0,
 			expired = 0, dependency_failed = 0, callback_errors = 0, retry_exhausted = 0,
-			batch_calls = 0, batch_items_requested = 0, max_batch_size = 0,
+			batch_calls = 0, batch_items_requested = 0, batch_items_processed = 0, max_batch_size = 0,
+			batch_utilization_samples = {},
 			outcome_classes = { transient = 0, throttled = 0, permanent = 0, conflict = 0, unknown = 0, success = 0 },
 			max_in_flight = 0, cancelled = 0, last_error = nil, last_outcome_class = nil,
 		},
@@ -1378,7 +1379,7 @@ local function new_dispatcher(governor, options)
 		end
 		local code = result.code
 		if code == nil or code == "success" or code == "committed" or code == "acknowledged"
-			or code == "processed" or code == "completed" or code == "saved" or code == "renewed"
+			or code == "processed" or code == "empty" or code == "completed" or code == "saved" or code == "renewed"
 			or code == "released" or code == "closed" or code == "deleted" or code == "duplicate"
 		then
 			return "success"
@@ -1458,6 +1459,19 @@ local function new_dispatcher(governor, options)
 		if type(entry) == "table" then entry.admission_ticket = nil end
 		item.admission_ticket = nil
 		local retry_scheduled = false
+		if status == "success" and callback_ok and type(entry) == "table" and entry.batchable == true
+			and type(callback_result) == "table" and finite(callback_result.processed_count)
+			and classify_outcome(callback_result, callback_ok) == "success"
+		then
+			local requested_count = math.max(1, item.admission_batch_size or entry.batch_size or 1)
+			local processed_count = math.clamp(math.floor(callback_result.processed_count), 0, requested_count)
+			dispatcher.metrics.batch_items_processed += processed_count
+			local utilization = processed_count / requested_count
+			dispatcher.metrics.batch_utilization_samples[#dispatcher.metrics.batch_utilization_samples + 1] = utilization
+			if #dispatcher.metrics.batch_utilization_samples > 256 then
+				table.remove(dispatcher.metrics.batch_utilization_samples, 1)
+			end
+		end
 		if status ~= "success" then
 			callback_ok = true
 			callback_result = terminal_result(item, status)
@@ -1801,6 +1815,20 @@ local function new_dispatcher(governor, options)
 	end
 	function dispatcher:Stats()
 		local snapshot = copy(self.metrics)
+		local utilization = snapshot.batch_utilization_samples
+		snapshot.batch_utilization_samples = nil
+		table.sort(utilization)
+		local function percentile(p)
+			if #utilization == 0 then return 0 end
+			return utilization[math.clamp(math.ceil(#utilization * p), 1, #utilization)]
+		end
+		local utilization_total = 0
+		for _, value in ipairs(utilization) do utilization_total += value end
+		snapshot.batch_utilization = {
+			samples = #utilization,
+			average = if #utilization > 0 then utilization_total / #utilization else 0,
+			p50 = percentile(0.50), p95 = percentile(0.95), p99 = percentile(0.99),
+		}
 		snapshot.in_flight = self.in_flight
 		snapshot.normal_in_flight = self.normal_in_flight
 		snapshot.next_wake_due_ms = self.wake_due_ms
