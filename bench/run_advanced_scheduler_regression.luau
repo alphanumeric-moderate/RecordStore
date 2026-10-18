@@ -297,6 +297,44 @@ take(urgent, "oldest-urgent-lane")
 take(urgent, "near-deadline-1")
 
 -- A strict reserved slot remains unused by normal work and remains available to
+-- Deadline-preferred algorithms must not monopolize service after the urgent burst.
+for _, algorithm in ipairs({"weighted", "deadline"}) do
+	local bounded_urgent = new_scheduler()
+	local bounded_policy = bounded_urgent:Stats().policy
+	assert(bounded_urgent:SetPolicy({
+		revision = bounded_policy.revision + 1,
+		algorithm = algorithm,
+		urgent_deadline_burst = 2,
+	}), algorithm .. " urgent-burst policy was rejected")
+	enqueue(bounded_urgent, {
+		id = algorithm .. "-oldest",
+		owner_id = algorithm .. "-owner",
+		lane = "normal",
+		deadline_ms = now_ms + 4500,
+	})
+	enqueue(bounded_urgent, {
+		id = algorithm .. "-tight-1",
+		owner_id = algorithm .. "-owner",
+		lane = "normal",
+		deadline_ms = now_ms + 300,
+	})
+	enqueue(bounded_urgent, {
+		id = algorithm .. "-tight-2",
+		owner_id = algorithm .. "-owner",
+		lane = "normal",
+		deadline_ms = now_ms + 200,
+	})
+	enqueue(bounded_urgent, {
+		id = algorithm .. "-tight-3",
+		owner_id = algorithm .. "-owner",
+		lane = "normal",
+		deadline_ms = now_ms + 100,
+	})
+	take(bounded_urgent, algorithm .. "-tight-3")
+	take(bounded_urgent, algorithm .. "-tight-2")
+	take(bounded_urgent, algorithm .. "-oldest")
+end
+
 -- a lease renewal even while a normal callback is yielding.
 local shared = new_scheduler()
 local shared_policy = shared:Stats().policy
@@ -551,7 +589,32 @@ assert(dispatch_snapshot.accepted >= 3 and dispatch_snapshot.completed >= 3,
 	"public, delayed, and core background work were not represented in scheduler metrics")
 local closed_code = core_record:Close()
 assert(closed_code == "closed", "scheduler regression fixture failed to close")
+
+-- Disabling the scheduler immediately cancels queued future work and releases its callback.
+local cancelled_callback_ran = false
+local cancellation_result: any = nil
+local future_kill_switch_job = RecordStore.schedule_work(
+	"integration-owner",
+	"future-work-cancelled-by-kill-switch",
+	function()
+		cancelled_callback_ran = true
+		return { code = "success" }
+	end,
+	{
+		lane = "normal",
+		due_at_ms = os.clock() * 1000 + 60000,
+		on_complete = function(result) cancellation_result = result end,
+	}
+)
+assert(future_kill_switch_job.code == "accepted", "future kill-switch fixture was rejected")
 assert(RecordStore.set_scheduler_enabled(false), "core scheduling kill switch failed")
+assert(type(cancellation_result) == "table" and cancellation_result.code == "cancelled",
+	"disabling the scheduler did not notify completion for queued work")
+assert(RecordStore.get_scheduler_snapshot().governor.queue_items == 0,
+	"disabling the scheduler left queued work retained")
+assert(not cancelled_callback_ran, "future work executed after the scheduler kill switch")
+assert(RecordStore.set_scheduler_enabled(true), "scheduler could not be re-enabled after a kill-switch drain")
+assert(RecordStore.set_scheduler_enabled(false), "scheduler kill switch could not be re-applied")
 local disabled_after_kill = RecordStore.schedule_work("integration-owner", "must-stay-disabled-after-kill", function()
 	error("scheduled callback ran after the scheduler kill switch")
 end, { lane = "normal" })
