@@ -506,18 +506,30 @@ local function new_governor(options)
 			queue_capacity = 1024, max_batch = 16, batch_window_ms = 5,
 			batch_latency_ceiling_ms = 40, high_burst = 4, retry_token_capacity = 32,
 			retry_tokens_per_second = 4, minimum_budget = 2, circuit_threshold = 5, circuit_cooldown_ms = 15000,
+			max_scheduled_in_flight = 8, scheduler_critical_reserve = 1, max_per_owner_in_flight = 2,
+			drr_quantum = 4, max_item_cost = 64, urgent_deadline_burst = 4,
+			priority_inheritance_max_ms = 1000, retry_jitter_percent = 20,
+			algorithm = "drr", shadow_algorithm = "weighted", shadow_enabled = false, shadow_sample_rate = 0,
 		},
-		in_flight = 0, by_class = {}, queue = {}, due = {}, completed = {}, known = {},
-		owner_finish = {}, high_streak = 0, retry_tokens = 32, last_token_time = now_ms(),
+		in_flight = 0, by_class = {}, queue = {}, due = {}, due_heap = {}, queued_due_heap = {},
+		completed = {}, completed_order = {}, known = {}, active_owner = {}, active_renewals_by_owner = {},
+		drr_deficit = {}, drr_cursor_key = nil, high_streak = 0, urgent_streak = 0,
+		failed = {}, failed_order = {}, due_sequence = 0,
+		retry_tokens = 32, last_token_time = now_ms(),
 		last_budget = nil, last_budget_by_kind = {}, latency_ewma = {}, consecutive_errors = {}, circuits = {},
-		stats = { admitted = 0, rejected = 0, completed = 0, throttled = 0, errors = 0 },
+		stats = { admitted = 0, rejected = 0, completed = 0, throttled = 0, errors = 0,
+			scheduled_selected = 0, scheduled_expired = 0, scheduled_overdue = 0, shadow_samples = 0 },
+		scheduler_metrics = { by_lane = {}, wait_ms = {}, last_shadow = nil },
 	}
 	local limits = { critical = 32, profile_save = 32, profile_release = 32, interactive = 24, messaging = 20, migration = 4, maintenance = 2, tracing = 1 }
 	local function policy_valid(policy)
 		if type(policy) ~= "table" then return false, "policy must be a table" end
-		local fields = { "revision", "max_in_flight", "critical_reserve", "queue_capacity", "max_batch", "batch_window_ms", "batch_latency_ceiling_ms", "high_burst", "retry_token_capacity", "retry_tokens_per_second", "minimum_budget", "circuit_threshold", "circuit_cooldown_ms" }
+		local fields = { "revision", "max_in_flight", "critical_reserve", "queue_capacity", "max_batch", "batch_window_ms", "batch_latency_ceiling_ms", "high_burst", "retry_token_capacity", "retry_tokens_per_second", "minimum_budget", "circuit_threshold", "circuit_cooldown_ms", "max_scheduled_in_flight", "scheduler_critical_reserve", "max_per_owner_in_flight", "drr_quantum", "max_item_cost", "urgent_deadline_burst", "priority_inheritance_max_ms", "retry_jitter_percent", "shadow_sample_rate" }
 		for _, field in ipairs(fields) do if not finite(policy[field]) then return false, "policy." .. field .. " must be finite" end end
 		if policy.mode ~= "normal" and policy.mode ~= "reject_noncritical" and policy.mode ~= "bounded_buffer" and policy.mode ~= "read_only" then return false, "invalid degraded mode" end
+		if policy.algorithm ~= "drr" and policy.algorithm ~= "weighted" and policy.algorithm ~= "fifo" and policy.algorithm ~= "deadline" then return false, "invalid scheduler algorithm" end
+		if policy.shadow_algorithm ~= "drr" and policy.shadow_algorithm ~= "weighted" and policy.shadow_algorithm ~= "fifo" and policy.shadow_algorithm ~= "deadline" then return false, "invalid shadow scheduler algorithm" end
+		if type(policy.shadow_enabled) ~= "boolean" then return false, "shadow_enabled must be boolean" end
 		if policy.revision < 1 or math.floor(policy.revision) ~= policy.revision then return false, "revision must be positive integer" end
 		if policy.max_in_flight < 1 or policy.max_in_flight > 256 or math.floor(policy.max_in_flight) ~= policy.max_in_flight then return false, "invalid max_in_flight" end
 		if policy.critical_reserve < 0 or policy.critical_reserve >= policy.max_in_flight
@@ -545,6 +557,15 @@ local function new_governor(options)
 		if policy.circuit_cooldown_ms < 100 or policy.circuit_cooldown_ms > 600000 or math.floor(policy.circuit_cooldown_ms) ~= policy.circuit_cooldown_ms then
 			return false, "circuit_cooldown_ms must be an integer from 100 to 600000"
 		end
+		if policy.max_scheduled_in_flight < 1 or policy.max_scheduled_in_flight > 64 or math.floor(policy.max_scheduled_in_flight) ~= policy.max_scheduled_in_flight then return false, "invalid max_scheduled_in_flight" end
+		if policy.scheduler_critical_reserve < 0 or policy.scheduler_critical_reserve >= policy.max_scheduled_in_flight or math.floor(policy.scheduler_critical_reserve) ~= policy.scheduler_critical_reserve then return false, "scheduler_critical_reserve must be below max_scheduled_in_flight" end
+		if policy.max_per_owner_in_flight < 1 or policy.max_per_owner_in_flight > 16 or math.floor(policy.max_per_owner_in_flight) ~= policy.max_per_owner_in_flight then return false, "invalid max_per_owner_in_flight" end
+		if policy.drr_quantum < 1 or policy.drr_quantum > 32 or math.floor(policy.drr_quantum) ~= policy.drr_quantum then return false, "drr_quantum must be an integer from 1 to 32" end
+		if policy.max_item_cost < 1 or policy.max_item_cost > 256 or math.floor(policy.max_item_cost) ~= policy.max_item_cost then return false, "max_item_cost must be an integer from 1 to 256" end
+		if policy.urgent_deadline_burst < 1 or policy.urgent_deadline_burst > 64 or math.floor(policy.urgent_deadline_burst) ~= policy.urgent_deadline_burst then return false, "invalid urgent_deadline_burst" end
+		if policy.priority_inheritance_max_ms < 10 or policy.priority_inheritance_max_ms > 60000 or math.floor(policy.priority_inheritance_max_ms) ~= policy.priority_inheritance_max_ms then return false, "invalid priority_inheritance_max_ms" end
+		if policy.retry_jitter_percent < 0 or policy.retry_jitter_percent > 50 then return false, "retry_jitter_percent must be 0..50" end
+		if policy.shadow_sample_rate < 0 or policy.shadow_sample_rate > 1 then return false, "shadow_sample_rate must be in 0..1" end
 		return true, nil
 	end
 	function governor:SetPolicy(patch)
@@ -554,6 +575,10 @@ local function new_governor(options)
 			max_batch = true, batch_window_ms = true, batch_latency_ceiling_ms = true, high_burst = true,
 			retry_token_capacity = true, retry_tokens_per_second = true, minimum_budget = true,
 			circuit_threshold = true, circuit_cooldown_ms = true,
+			max_scheduled_in_flight = true, scheduler_critical_reserve = true, max_per_owner_in_flight = true,
+			drr_quantum = true, max_item_cost = true, urgent_deadline_burst = true,
+			priority_inheritance_max_ms = true, retry_jitter_percent = true,
+			algorithm = true, shadow_algorithm = true, shadow_enabled = true, shadow_sample_rate = true,
 		}
 		for key in pairs(patch) do
 			if not allowed[key] then return false, "unsupported scheduler policy field: " .. tostring(key) end
@@ -656,23 +681,200 @@ local function new_governor(options)
 		if latency_ms >= self.policy.batch_latency_ceiling_ms * 0.75 then return math.max(1, math.floor(maximum / 2)) end
 		return maximum
 	end
+	local function heap_less(left, right)
+		if left.due_at_ms ~= right.due_at_ms then return left.due_at_ms < right.due_at_ms end
+		if left.id ~= right.id then return left.id < right.id end
+		return (left.sequence or 0) < (right.sequence or 0)
+	end
+	local function heap_push(heap, value)
+		local index = #heap + 1
+		heap[index] = value
+		while index > 1 do
+			local parent = math.floor(index / 2)
+			if not heap_less(heap[index], heap[parent]) then break end
+			heap[index], heap[parent] = heap[parent], heap[index]
+			index = parent
+		end
+	end
+	local function heap_pop(heap)
+		if #heap == 0 then return nil end
+		local first, last = heap[1], table.remove(heap)
+		if #heap > 0 then
+			heap[1] = last
+			local index = 1
+			while true do
+				local left, right, smallest = index * 2, index * 2 + 1, index
+				if left <= #heap and heap_less(heap[left], heap[smallest]) then smallest = left end
+				if right <= #heap and heap_less(heap[right], heap[smallest]) then smallest = right end
+				if smallest == index then break end
+				heap[index], heap[smallest] = heap[smallest], heap[index]
+				index = smallest
+			end
+		end
+		return first
+	end
+	local function rebuild_due_heap()
+		local rebuilt = {}
+		for _, item in pairs(governor.due) do heap_push(rebuilt, item) end
+		governor.due_heap = rebuilt
+	end
 	function governor:ScheduleDue(id, due_at_ms, value)
 		if not valid_text(id, 128) or not finite(due_at_ms) then return false, "invalid due item" end
-		self.due[id] = { id = id, due_at_ms = due_at_ms, value = copy(value) }
-		return true
+		if self.due[id] == nil and key_count(self.due) >= self.policy.queue_capacity then return false, "due queue full" end
+		self.due_sequence = (self.due_sequence or 0) + 1
+		local item = { id = id, due_at_ms = due_at_ms, value = copy(value), sequence = self.due_sequence }
+		self.due[id] = item
+		heap_push(self.due_heap, item)
+		if #self.due_heap > self.policy.queue_capacity * 2 then rebuild_due_heap() end
+		return true, nil
 	end
 	function governor:PopDue(limit)
 		limit = bounded_integer(limit, 32, 1, 256)
-		local ids = {}
-		for id, item in pairs(self.due) do if item.due_at_ms <= now_ms() then table.insert(ids, id) end end
-		table.sort(ids, function(a, b)
-			local x, y = self.due[a], self.due[b]
-			if x.due_at_ms ~= y.due_at_ms then return x.due_at_ms < y.due_at_ms end
-			return a < b
-		end)
-		local result = {}
-		for i = 1, math.min(limit, #ids) do local id = ids[i]; table.insert(result, self.due[id]); self.due[id] = nil end
+		local result, now = {}, now_ms()
+		while #result < limit do
+			local item = self.due_heap[1]
+			if item == nil then break end
+			if self.due[item.id] ~= item then
+				heap_pop(self.due_heap)
+			elseif item.due_at_ms > now then
+				break
+			else
+				heap_pop(self.due_heap)
+				self.due[item.id] = nil
+				result[#result + 1] = item
+			end
+		end
 		return result
+	end
+	function governor:NextDueAt()
+		while true do
+			local item = self.due_heap[1]
+			if item == nil then return nil end
+			if self.due[item.id] ~= item then heap_pop(self.due_heap)
+			else return item.due_at_ms end
+		end
+	end
+	local function dependencies_ready(self, item)
+		for _, dependency in ipairs(item.dependencies or {}) do
+			if not self.completed[dependency] then return false end
+		end
+		return true
+	end
+	local function item_priority(item)
+		return if item.service_class == "critical" then 0 elseif item.service_class == "interactive" then 1
+			elseif item.service_class == "normal" then 2 elseif item.service_class == "bulk" then 3 else 4
+	end
+	local function item_precedes(left, right, now)
+		local left_service, right_service = item_priority(left), item_priority(right)
+		if left_service ~= right_service then return left_service < right_service end
+		local left_slack = if finite(left.deadline_ms) then left.deadline_ms - now else math.huge
+		local right_slack = if finite(right.deadline_ms) then right.deadline_ms - now else math.huge
+		local left_age = math.min(60000, math.max(0, now - (left.enqueued_at_ms or now)))
+		local right_age = math.min(60000, math.max(0, now - (right.enqueued_at_ms or now)))
+		left_slack -= left_age * 0.25
+		right_slack -= right_age * 0.25
+		if left_slack ~= right_slack then return left_slack < right_slack end
+		return (left.enqueued_at_ms or 0) < (right.enqueued_at_ms or 0)
+	end
+	local function effective_cost(item)
+		local operation_cost = {
+			default = 3, read = 2, update_async = 4, mailbox_claim = 4,
+			lease_renewal = 4, outbox_dispatch = 4, maintenance = 3,
+			migration = 4, projection = 3, tracing = 1, batch = 4,
+		}
+		local estimated = operation_cost[item.operation_class or "default"] or operation_cost.default
+		if finite(item.read_units) then estimated = math.max(estimated, item.read_units) end
+		if finite(item.write_units) then estimated = math.max(estimated, item.write_units) end
+		if finite(item.read_units) and finite(item.write_units) then estimated = math.max(estimated, item.read_units + item.write_units) end
+		if finite(item.estimated_bytes) then estimated = math.max(estimated, math.ceil(item.estimated_bytes / 16384)) end
+		if finite(item.handler_slots) then estimated = math.max(estimated, item.handler_slots * 4) end
+		if item.operation_class == nil and finite(item.cost) then estimated = math.max(1, math.floor(item.cost)) end
+		return math.clamp(math.ceil(estimated), 1, 256)
+	end
+	local function lane_key(item)
+		return digest(item.owner_id .. "\0" .. tostring(item.work_class or "default") .. "\0" .. tostring(item.lane))
+	end
+	local function choose_index(self, algorithm, renewal_mode)
+		local now, eligible = now_ms(), {}
+		for index, item in ipairs(self.queue) do
+			local ready = (item.due_at_ms or 0) <= now and dependencies_ready(self, item)
+			if renewal_mode == true and item.lane ~= "lease_renewal" then ready = false end
+			if renewal_mode == false and item.lane == "lease_renewal" then ready = false end
+			if ready and (not item.expires_at_ms or item.expires_at_ms > now) then
+				local owner_active = self.active_owner[item.owner_id] or 0
+				if item.lane == "lease_renewal" or owner_active < self.policy.max_per_owner_in_flight then
+					eligible[#eligible + 1] = { index = index, item = item }
+				end
+			end
+		end
+		if #eligible == 0 then return nil end
+		if self.high_streak >= self.policy.high_burst then
+			local has_non_high = false
+			for _, row in ipairs(eligible) do
+				if row.item.lane ~= "high" and row.item.lane ~= "lease_renewal" then has_non_high = true break end
+			end
+			if has_non_high then
+				local filtered = {}
+				for _, row in ipairs(eligible) do if row.item.lane ~= "high" then filtered[#filtered + 1] = row end end
+				eligible = filtered
+			end
+		end
+		if algorithm == "fifo" then
+			local best
+			for _, row in ipairs(eligible) do
+				if best == nil or row.item.enqueued_at_ms < best.item.enqueued_at_ms then best = row end
+			end
+			return best and best.index or nil
+		elseif algorithm == "weighted" or algorithm == "deadline" then
+			local best, best_score
+			for _, row in ipairs(eligible) do
+				local item = row.item
+				local age = math.min(60000, math.max(0, now - item.enqueued_at_ms))
+				local slack = if finite(item.deadline_ms) then item.deadline_ms - now else 60000
+				local lane_weight = if item.lane == "lease_renewal" then 8 elseif item.lane == "high" then 4 elseif item.lane == "normal" then 2 else 1
+				local service_rank = if item.service_class == "critical" then 4 elseif item.service_class == "interactive" then 3 elseif item.service_class == "normal" then 2 elseif item.service_class == "bulk" then 1 else 0
+				local score = -lane_weight * 1000 - service_rank * 500 - age * 0.25 + slack * 0.01
+				if best_score == nil or score < best_score then best, best_score = row, score end
+			end
+			return best and best.index or nil
+		end
+		local lane_rows, lane_keys = {}, {}
+		for _, row in ipairs(eligible) do
+			local key = lane_key(row.item)
+			if lane_rows[key] == nil then
+				lane_rows[key] = {}
+				lane_keys[#lane_keys + 1] = key
+			end
+			lane_rows[key][#lane_rows[key] + 1] = row
+		end
+		table.sort(lane_keys)
+		local lane_count = #lane_keys
+		local start_index = 1
+		if self.drr_cursor_key ~= nil then
+			for i, key in ipairs(lane_keys) do
+				if key == self.drr_cursor_key then start_index = (i % lane_count) + 1 break end
+			end
+		end
+		local rounds = math.ceil(self.policy.max_item_cost / self.policy.drr_quantum) + 2
+		for _ = 1, rounds do
+			for offset = 0, lane_count - 1 do
+				local lane_index = ((start_index + offset - 1) % lane_count) + 1
+				local key = lane_keys[lane_index]
+				local rows = lane_rows[key]
+				local lane = rows[1].item.lane
+				local weight = if lane == "lease_renewal" then 4 elseif lane == "high" then 4 elseif lane == "normal" then 2 else 1
+				self.drr_deficit[key] = math.min(self.policy.max_item_cost * 2, (self.drr_deficit[key] or 0) + self.policy.drr_quantum * weight)
+				local best = rows[1]
+				for _, row in ipairs(rows) do if item_precedes(row.item, best.item, now) then best = row end end
+				local cost = effective_cost(best.item)
+				if cost <= self.drr_deficit[key] then
+					self.drr_deficit[key] -= cost
+					self.drr_cursor_key = key
+					return best.index
+				end
+			end
+		end
+		return nil
 	end
 	function governor:Enqueue(item)
 		if type(item) ~= "table" or not valid_text(item.id, 128) or not valid_text(item.owner_id, 128) then return { code = "invalid" } end
@@ -681,82 +883,193 @@ local function new_governor(options)
 		local lane = item.lane or "normal"
 		if lane ~= "high" and lane ~= "normal" and lane ~= "background" and lane ~= "lease_renewal" then return { code = "invalid", message = "unsupported lane" } end
 		local value = copy(item)
-		value.lane, value.original_lane = lane, lane
-		value.cost = value.cost or 1
-		value.enqueued_at_ms = now_ms()
-		value.due_at_ms = value.due_at_ms or value.enqueued_at_ms
-		value.dependencies = value.dependencies or {}
-		self.known[value.id] = value
-		table.insert(self.queue, value)
-		for _, dependent in ipairs(self.queue) do
-			if dependent.lane == "high" then
-				for _, prerequisite_id in ipairs(dependent.dependencies) do
-					local prerequisite = self.known[prerequisite_id]
-					if prerequisite and prerequisite.lane == "background" then prerequisite.lane = "normal"; prerequisite.inherited_priority = true end
-				end
+		if value.due_at_ms ~= nil and not finite(value.due_at_ms) then return { code = "invalid", message = "due_at_ms must be finite" } end
+		if value.deadline_ms ~= nil and not finite(value.deadline_ms) then return { code = "invalid", message = "deadline_ms must be finite" } end
+		if value.expires_at_ms ~= nil and not finite(value.expires_at_ms) then return { code = "invalid", message = "expires_at_ms must be finite" } end
+		local valid_service_classes = { critical = true, interactive = true, normal = true, bulk = true, best_effort = true }
+		if value.service_class ~= nil and not valid_service_classes[value.service_class] then return { code = "invalid", message = "unsupported service_class" } end
+		local dependencies = value.dependencies or {}
+		if type(dependencies) ~= "table" or #dependencies > 32 then return { code = "invalid", message = "dependencies must be an array of at most 32 IDs" } end
+		local dependency_count, seen_dependencies = 0, {}
+		for key in pairs(dependencies) do
+			dependency_count += 1
+			if type(key) ~= "number" or key < 1 or key > #dependencies or math.floor(key) ~= key then return { code = "invalid", message = "dependencies must be a dense array" } end
+		end
+		if dependency_count ~= #dependencies then return { code = "invalid", message = "dependencies must be a dense array" } end
+		for _, dependency in ipairs(dependencies) do
+			if not valid_text(dependency, 128) or dependency == value.id or seen_dependencies[dependency] then return { code = "invalid", message = "dependency IDs must be unique, valid and not self-referential" } end
+			seen_dependencies[dependency] = true
+			if not self.completed[dependency] and not self.known[dependency] then
+				return { code = "invalid", message = "dependency is missing; enqueue its prerequisite before the dependent item" }
 			end
 		end
+		local dimensions = { "read_units", "write_units", "handler_slots" }
+		for _, field in ipairs(dimensions) do
+			if value[field] ~= nil and (not finite(value[field]) or value[field] < 0 or value[field] > 64 or math.floor(value[field]) ~= value[field]) then
+				return { code = "invalid", message = field .. " must be an integer in 0..64" }
+			end
+		end
+		if value.estimated_bytes ~= nil and (not finite(value.estimated_bytes) or value.estimated_bytes < 0 or value.estimated_bytes > 16777216) then
+			return { code = "invalid", message = "estimated_bytes must be in 0..16777216" }
+		end
+		value.lane, value.original_lane = lane, lane
+		value.work_class = value.work_class or value.operation_class or "default"
+		value.enqueued_at_ms = now_ms()
+		value.due_at_ms = value.due_at_ms or value.available_at_ms or value.enqueued_at_ms
+		value.dependencies = dependencies
+		value.cost = effective_cost(value)
+		if value.cost > self.policy.max_item_cost then return { code = "invalid", message = "estimated scheduler cost exceeds max_item_cost" } end
+		value.queued = true
+		self.known[value.id] = value
+		table.insert(self.queue, value)
+		heap_push(self.queued_due_heap, { id = value.id, due_at_ms = value.due_at_ms, item = value })
 		return { code = "accepted", count = #self.queue }
 	end
-	local function choose_index(self)
-		local now, eligible = now_ms(), {}
-		for index, item in ipairs(self.queue) do
-			local ready = (item.due_at_ms or 0) <= now
-			for _, dependency in ipairs(item.dependencies or {}) do if not self.completed[dependency] then ready = false break end end
-			if ready and (not item.expires_at_ms or item.expires_at_ms > now) then table.insert(eligible, { index = index, item = item }) end
-		end
-		for _, row in ipairs(eligible) do
-			local item = row.item
-			if item.lane == "lease_renewal" and item.deadline_ms and item.deadline_ms - now <= 5000 then return row.index end
-		end
-		local high, regular, background = {}, {}, {}
-		for _, row in ipairs(eligible) do
-			if row.item.lane == "high" then table.insert(high, row)
-			elseif row.item.lane == "background" then table.insert(background, row)
-			else table.insert(regular, row) end
-		end
-		local candidates
-		if #high > 0 and self.high_streak < self.policy.high_burst then candidates = high
-		elseif #regular > 0 then
-			candidates = regular
-			for _, row in ipairs(background) do if now - row.item.enqueued_at_ms >= 10000 then candidates = background break end end
-		elseif #background > 0 then candidates = background else candidates = high end
-		local best, best_score
-		for _, row in ipairs(candidates or {}) do
-			local item = row.item
-			local weight = if item.lane == "high" then 4 elseif item.lane == "background" then 1 else 2
-			local finish = self.owner_finish[item.owner_id] or 0
-			local age_bonus = math.min(60000, math.max(0, now - item.enqueued_at_ms)) / 100
-			local deadline_bonus = if item.deadline_ms then math.max(0, 5000 - (item.deadline_ms - now)) / 50 else 0
-			local score = finish - weight * 1000 - age_bonus - deadline_bonus
-			if best_score == nil or score < best_score then best, best_score = row.index, score end
-		end
-		return best
-	end
-	function governor:TakeNext()
+	local remember_terminal
+	function governor:TakeNext(renewal_mode)
 		local now = now_ms()
 		for index = #self.queue, 1, -1 do
 			local item = self.queue[index]
-			if item.expires_at_ms and item.expires_at_ms <= now then self.known[item.id] = nil; table.remove(self.queue, index) end
+			local failed_dependency
+			for _, dependency in ipairs(item.dependencies or {}) do if self.failed[dependency] ~= nil then failed_dependency = dependency break end end
+			if failed_dependency ~= nil then
+				table.remove(self.queue, index)
+				item.queued = false
+				self.known[item.id] = nil
+				item.terminal_result = {
+					code = "dependency_failed", message = "prerequisite reached a non-success terminal outcome",
+					dependency_id = failed_dependency, dependency_code = self.failed[failed_dependency],
+				}
+				remember_terminal(self, item.id, "dependency_failed")
+				return item, "dependency_failed"
+			elseif item.expires_at_ms and item.expires_at_ms <= now then
+				table.remove(self.queue, index)
+				item.queued = false
+				self.known[item.id] = nil
+				self.stats.scheduled_expired += 1
+				item.terminal_result = { code = "expired", message = "scheduled work expired before it could start" }
+				remember_terminal(self, item.id, "expired")
+				return item, "expired"
+			end
 		end
-		local index = choose_index(self)
+		if self.policy.shadow_enabled and self.policy.shadow_sample_rate > 0 then
+			local interval = math.max(1, math.floor(1 / self.policy.shadow_sample_rate))
+			if self.stats.scheduled_selected % interval == 0 then self:ShadowDecision() end
+		end
+		local index = choose_index(self, self.policy.algorithm or "drr", renewal_mode)
 		if not index then return nil, "empty" end
 		local item = table.remove(self.queue, index)
+		item.queued = false
+		local age = math.max(0, now - (item.enqueued_at_ms or now))
+		self.scheduler_metrics.wait_ms[#self.scheduler_metrics.wait_ms + 1] = age
+		if #self.scheduler_metrics.wait_ms > 256 then table.remove(self.scheduler_metrics.wait_ms, 1) end
+		local lane_stats = self.scheduler_metrics.by_lane[item.lane] or { selected = 0, total_wait_ms = 0, max_wait_ms = 0 }
+		lane_stats.selected += 1
+		lane_stats.total_wait_ms += age
+		lane_stats.max_wait_ms = math.max(lane_stats.max_wait_ms, age)
+		self.scheduler_metrics.by_lane[item.lane] = lane_stats
+		self.stats.scheduled_selected += 1
+		item.overdue = item.deadline_ms ~= nil and item.deadline_ms < now
+		if item.overdue then self.stats.scheduled_overdue += 1 end
 		if item.lane == "high" then self.high_streak += 1 else self.high_streak = 0 end
-		local weight = if item.lane == "high" then 4 elseif item.lane == "background" then 1 else 2
-		self.owner_finish[item.owner_id] = (self.owner_finish[item.owner_id] or 0) + (item.cost or 1) / weight
+		self.active_owner[item.owner_id] = (self.active_owner[item.owner_id] or 0) + 1
+		if item.lane == "lease_renewal" then self.active_renewals_by_owner[item.owner_id] = (self.active_renewals_by_owner[item.owner_id] or 0) + 1 end
 		item.selected_at_ms = now
+		item.dispatch_state = "in_flight"
 		return item, "success"
 	end
-	function governor:MarkCompleted(id)
+	function governor:NextQueuedDueAt()
+		while true do
+			local entry = self.queued_due_heap[1]
+			if entry == nil then return nil end
+			if entry.item.queued ~= true or self.known[entry.id] ~= entry.item then heap_pop(self.queued_due_heap)
+			else return entry.due_at_ms end
+		end
+	end
+	remember_terminal = function(self, id, code)
+		self.failed[id] = code
+		self.failed_order[#self.failed_order + 1] = id
+		local limit = self.policy.queue_capacity * 2
+		while #self.failed_order > limit do
+			local oldest = table.remove(self.failed_order, 1)
+			local still_required = false
+			for _, queued in ipairs(self.queue) do
+				for _, dependency in ipairs(queued.dependencies or {}) do
+					if dependency == oldest then still_required = true break end
+				end
+				if still_required then break end
+			end
+			if not still_required then self.failed[oldest] = nil end
+		end
+	end
+	local function make_shadow_state(self)
+		return {
+			queue = copy(self.queue), completed = copy(self.completed), known = copy(self.known),
+			active_owner = copy(self.active_owner), drr_deficit = copy(self.drr_deficit),
+			drr_cursor_key = self.drr_cursor_key, high_streak = self.high_streak,
+			policy = copy(self.policy),
+		}
+	end
+	function governor:MarkCompleted(id, outcome)
 		if not valid_text(id, 128) then return false, "invalid id" end
-		self.completed[id] = true; self.known[id] = nil
+		local item = self.known[id]
+		if item ~= nil and item.dispatch_state == "in_flight" then
+			self.active_owner[item.owner_id] = math.max(0, (self.active_owner[item.owner_id] or 1) - 1)
+			if item.lane == "lease_renewal" then self.active_renewals_by_owner[item.owner_id] = math.max(0, (self.active_renewals_by_owner[item.owner_id] or 1) - 1) end
+		end
+		self.known[id] = nil
+		local code = if type(outcome) == "table" then outcome.code else outcome
+		if code == nil or code == true or code == "success" or code == "committed"
+			or code == "acknowledged" or code == "processed" or code == "completed" or code == "duplicate"
+		then
+			self.completed[id] = true
+			self.failed[id] = nil
+			self.completed_order[#self.completed_order + 1] = id
+			while #self.completed_order > self.policy.queue_capacity * 2 do
+				local oldest = table.remove(self.completed_order, 1)
+				local still_required = false
+				for _, queued in ipairs(self.queue) do
+					for _, dependency in ipairs(queued.dependencies or {}) do if dependency == oldest then still_required = true break end end
+					if still_required then break end
+				end
+				if not still_required then self.completed[oldest] = nil end
+			end
+		else
+			self.completed[id] = nil
+			remember_terminal(self, id, tostring(code or "unknown"))
+		end
+		self.stats.completed += 1
 		return true
 	end
-	function governor:ShadowNext()
-		local shadow = { queue = copy(self.queue), completed = copy(self.completed), known = copy(self.known), owner_finish = copy(self.owner_finish), high_streak = self.high_streak, policy = self.policy }
-		local index = choose_index(shadow)
-		return if index then copy(self.queue[index]) else nil
+	function governor:ShadowNext(algorithm)
+		local shadow = make_shadow_state(self)
+		local index = choose_index(shadow, algorithm or shadow.policy.shadow_algorithm)
+		return if index then copy(shadow.queue[index]) else nil
+	end
+	function governor:ShadowDecision()
+		local real_state, shadow_state = make_shadow_state(self), make_shadow_state(self)
+		local real_index = choose_index(real_state, self.policy.algorithm)
+		local shadow_index = choose_index(shadow_state, self.policy.shadow_algorithm)
+		local real = if real_index then self.queue[real_index] else nil
+		local shadow = if shadow_index then self.queue[shadow_index] else nil
+		local now = now_ms()
+		local summary = {
+			observed_at_ms = now, real_algorithm = self.policy.algorithm, shadow_algorithm = self.policy.shadow_algorithm,
+			real_lane = if real then real.lane else nil, shadow_lane = if shadow then shadow.lane else nil,
+			real_cost = if real then effective_cost(real) else nil, shadow_cost = if shadow then effective_cost(shadow) else nil,
+			real_age_ms = if real then math.max(0, now - real.enqueued_at_ms) else nil,
+			shadow_age_ms = if shadow then math.max(0, now - shadow.enqueued_at_ms) else nil,
+			real_slack_ms = if real and finite(real.deadline_ms) then real.deadline_ms - now else nil,
+			shadow_slack_ms = if shadow and finite(shadow.deadline_ms) then shadow.deadline_ms - now else nil,
+			candidate_count = #self.queue,
+			same_choice = real ~= nil and shadow ~= nil and real.id == shadow.id,
+			reason = if real == nil and shadow == nil then "no_eligible_candidates"
+				elseif real ~= nil and shadow ~= nil and real.id == shadow.id then "algorithms_agree"
+				else "alternate_policy_differs",
+		}
+		self.scheduler_metrics.last_shadow = summary
+		self.stats.shadow_samples += 1
+		return copy(summary)
 	end
 	function governor:Replay(log)
 		local result = {}
@@ -799,8 +1112,32 @@ local function new_governor(options)
 	end
 	function governor:Stats()
 		local lanes = { high = 0, normal = 0, background = 0, lease_renewal = 0 }
-		for _, item in ipairs(self.queue) do lanes[item.lane] = (lanes[item.lane] or 0) + 1 end
-		return { policy = copy(self.policy), in_flight = self.in_flight, queue_items = #self.queue, lanes = lanes, classes = copy(self.by_class), stats = copy(self.stats), latency_ewma = copy(self.latency_ewma), circuits = copy(self.circuits), last_budget_by_kind = copy(self.last_budget_by_kind), retry_tokens = self.retry_tokens }
+		local oldest_eligible_age_ms, now = 0, now_ms()
+		for _, item in ipairs(self.queue) do
+			lanes[item.lane] = (lanes[item.lane] or 0) + 1
+			if (item.due_at_ms or 0) <= now and dependencies_ready(self, item)
+				and (item.expires_at_ms == nil or item.expires_at_ms > now)
+			then oldest_eligible_age_ms = math.max(oldest_eligible_age_ms, now - item.enqueued_at_ms) end
+		end
+		local waits = copy(self.scheduler_metrics.wait_ms)
+		table.sort(waits)
+		local function percentile(p)
+			if #waits == 0 then return 0 end
+			return waits[math.clamp(math.ceil(#waits * p), 1, #waits)]
+		end
+		return {
+			policy = copy(self.policy), in_flight = self.in_flight, queue_items = #self.queue,
+			lanes = lanes, classes = copy(self.by_class), stats = copy(self.stats),
+			latency_ewma = copy(self.latency_ewma), circuits = copy(self.circuits),
+			last_budget_by_kind = copy(self.last_budget_by_kind), retry_tokens = self.retry_tokens,
+			scheduler = {
+				by_lane = copy(self.scheduler_metrics.by_lane), oldest_eligible_age_ms = oldest_eligible_age_ms,
+				queue_wait_p50_ms = percentile(0.50), queue_wait_p95_ms = percentile(0.95), queue_wait_p99_ms = percentile(0.99),
+				next_due_at_ms = self:NextQueuedDueAt(), due_heap_items = #self.due_heap,
+				queued_due_heap_items = #self.queued_due_heap, active_by_owner = copy(self.active_owner),
+				last_shadow = copy(self.scheduler_metrics.last_shadow),
+			},
+		}
 	end
 	return governor
 end
