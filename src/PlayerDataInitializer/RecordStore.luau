@@ -6670,7 +6670,7 @@ local function enqueue_state_work(
 	lane: string,
 	work_class: string,
 	operation_class: string,
-	callback: (batch_size: number?) -> any,
+	callback: (...any) -> any,
 	schedule_options: any?
 ): any
 	local slot = scheduled_state_slot(state)
@@ -6740,7 +6740,7 @@ end
 function RecordStore.schedule_work(
 	owner_id: string,
 	work_id: string,
-	callback: (batch_size: number?) -> any,
+	callback: (...any) -> any,
 	schedule_options: { [string]: unknown }?
 ): { [string]: any }
 	if closing then return { code = "closed", message = "RecordStore is shutting down" } end
