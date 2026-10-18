@@ -814,6 +814,7 @@ local function new_governor(options)
 			high_streak = self.high_streak, urgent_streak = self.urgent_streak,
 			policy = copy(self.policy), in_flight = self.in_flight, by_class = copy(self.by_class),
 			last_budget_by_kind = copy(self.last_budget_by_kind), circuits = copy(self.circuits),
+			stats = copy(self.stats),
 		}
 	end
 	function governor:MarkCompleted(id, outcome)
