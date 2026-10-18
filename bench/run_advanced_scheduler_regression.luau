@@ -65,6 +65,36 @@ enqueue(weighted_cost, { id = "small", owner_id = "small-owner", lane = "normal"
 take(weighted_cost, "small")
 take(weighted_cost, "large")
 
+-- Queue wait and operation latency percentiles are exposed per bounded dimensions.
+local latency_metrics = new_scheduler()
+enqueue(latency_metrics, {
+	id = "metrics-save",
+	owner_id = "metrics-owner",
+	lane = "normal",
+	work_class = "profile_save",
+	operation_class = "update_async",
+	service_class = "critical",
+})
+now_ms += 25
+take(latency_metrics, "metrics-save")
+latency_metrics:Observe("update_async", true, 4)
+latency_metrics:Observe("update_async", true, 100)
+local latency_snapshot = latency_metrics:Stats()
+local save_wait_bucket = nil
+for _, bucket in pairs(latency_snapshot.scheduler.by_lane_class) do
+	if bucket.lane == "normal" and bucket.work_class == "profile_save" and bucket.service_class == "critical" then
+		save_wait_bucket = bucket
+		break
+	end
+end
+assert(save_wait_bucket ~= nil and save_wait_bucket.count == nil and save_wait_bucket.selected == 1,
+	"per-lane/work-class wait histogram was not populated")
+assert(save_wait_bucket.p50_ms == 25 and save_wait_bucket.p95_ms == 25 and save_wait_bucket.p99_ms == 25,
+	"queue wait percentiles did not reflect the observed critical save delay")
+assert(latency_snapshot.latency_percentiles_by_operation.update_async.p50_ms == 4
+	and latency_snapshot.latency_percentiles_by_operation.update_async.p95_ms == 100,
+	"operation latency tail percentiles were not recorded")
+
 -- Deadline slack affects selection but does not turn an SLO into an expiry.
 local deadline = new_scheduler()
 enqueue(deadline, { id = "no-deadline", owner_id = "same-owner", lane = "normal" })
