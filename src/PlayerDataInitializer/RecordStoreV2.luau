@@ -983,6 +983,11 @@ local function new_migrations()
 		local data, message = record_data(record)
 		if type(data) ~= "table" then return { code = "unknown", message = message or "table profile required" } end
 		local field = options.schema_field or (RESERVED .. "application_schema_version")
+		if not valid_text(field, 128)
+			or (string.sub(field, 1, #RESERVED) == RESERVED and field ~= (RESERVED .. "application_schema_version"))
+		then
+			return { code = "invalid", message = "schema_field must be public or the dedicated RecordStore application-schema marker" }
+		end
 		local version = data[field] or 0
 		local steps, plan_error = self:Plan(store_name, version, target_version)
 		if not steps then return { code = "unsupported_schema", message = plan_error } end
@@ -1014,6 +1019,11 @@ local function new_migrations()
 	function registry:MigrateAsync(record, store_name, target_version, options)
 		options = options or {}
 		local field = options.schema_field or (RESERVED .. "application_schema_version")
+		if not valid_text(field, 128)
+			or (string.sub(field, 1, #RESERVED) == RESERVED and field ~= (RESERVED .. "application_schema_version"))
+		then
+			return { code = "invalid", message = "schema_field must be public or the dedicated RecordStore application-schema marker" }
+		end
 		local schema_reserved_fields = if string.sub(field, 1, #RESERVED) == RESERVED then { field } else {}
 		local data, read_error = record_data(record)
 		if type(data) ~= "table" then return { code = "fenced", message = read_error } end
