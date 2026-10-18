@@ -6714,9 +6714,14 @@ end
 function RecordStore.set_scheduler_enabled(enabled: boolean): (boolean, string?)
 	if type(enabled) ~= "boolean" then return false, "enabled must be a boolean" end
 	scheduler_enabled = enabled
-	-- Drain due but not-yet-started core jobs through the cancellation guard when
-	-- disabling so the legacy path can immediately resume their responsibility.
-	scheduler_dispatcher:Kick()
+	if enabled then
+		scheduler_dispatcher:Kick()
+	else
+		-- Cancel queued work immediately so a future-due callback cannot retain
+		-- capacity or its closure until a timer fires. In-flight callbacks are not
+		-- preempted; the wrapper still cancels work that has not started yet.
+		scheduler_dispatcher:CancelQueued("advanced scheduler disabled before work started")
+	end
 	return true, nil
 end
 
