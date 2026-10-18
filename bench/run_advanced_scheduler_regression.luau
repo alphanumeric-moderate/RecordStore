@@ -511,6 +511,53 @@ assert(batched_calls == 1, "due batch callback did not execute")
 dispatcher:Close()
 batch_dispatcher:Close()
 
+-- Operation admission must cap estimated request work, not just callback count.
+local admission_governor = new_scheduler()
+local admission_policy = admission_governor:Stats().policy
+assert(admission_governor:SetPolicy({
+	revision = admission_policy.revision + 1,
+	max_in_flight = 1,
+	critical_reserve = 0,
+	max_scheduled_in_flight = 2,
+	scheduler_critical_reserve = 0,
+	max_per_owner_in_flight = 2,
+}), "request admission policy was rejected")
+local admission_dispatcher = Scheduler.new_dispatcher(admission_governor, {
+	now_ms = function() return now_ms end,
+})
+local first_admission_finished = false
+local second_admission_started = false
+local admission_overlapped = false
+local first_admission_job = admission_dispatcher:Schedule(
+	"admission-owner", "first-cost-unit", function()
+		task.wait(0.03)
+		first_admission_finished = true
+		return { code = "committed" }
+	end,
+	{ operation_class = "tracing", work_class = "interactive" }
+)
+assert(first_admission_job.code == "accepted", "first request-admission job was rejected")
+local second_admission_job = admission_dispatcher:Schedule(
+	"admission-owner", "second-cost-unit", function()
+		second_admission_started = true
+		admission_overlapped = not first_admission_finished
+		return { code = "committed" }
+	end,
+	{ operation_class = "tracing", work_class = "maintenance" }
+)
+assert(second_admission_job.code == "accepted", "second request-admission job was rejected")
+for _ = 1, 200 do
+	if second_admission_started then break end
+	task.wait(0.002)
+end
+assert(second_admission_started and first_admission_finished,
+	"request admission left eligible work stuck after capacity was released")
+assert(not admission_overlapped,
+	"estimated request concurrency exceeded the governor's max_in_flight budget")
+assert(admission_governor:Stats().in_flight == 0,
+	"request admission leaked its in-flight reservation")
+admission_dispatcher:Close()
+
 -- The main RecordStore module resolves the same scheduler through its
 -- ModuleScript parent. Runtime scheduling remains opt-in.
 local RecordStore = Shim.load()
