@@ -2584,6 +2584,38 @@ local function new_projections(store, options)
 	options = options or {}
 	local service = { store = store, projections = {} }
 	local function key_for(name, entity_id) return "rv2p-" .. digest(name .. ":" .. entity_id) end
+	local function verify_subjects(subject_user_ids)
+		if subject_user_ids == nil then return true, nil end
+		if type(subject_user_ids) ~= "table" then
+			return false, { code = "invalid", message = "subject_user_ids must be a bounded dense array" }
+		end
+		local subject_count = key_count(subject_user_ids)
+		if subject_count > 100 then return false, { code = "capacity", message = "projection subject list exceeds the supported bound" } end
+		for index in pairs(subject_user_ids) do
+			if type(index) ~= "number" or not finite(index) or math.floor(index) ~= index or index < 1 or index > subject_count then
+				return false, { code = "invalid", message = "subject_user_ids must be a dense array" }
+			end
+		end
+		local seen_subjects = {}
+		for index = 1, subject_count do
+			local user_id = subject_user_ids[index]
+			if not finite(user_id) or user_id < 1 or math.floor(user_id) ~= user_id or seen_subjects[user_id] then
+				return false, { code = "invalid", message = "subject_user_ids must contain unique positive integer UserIds" }
+			end
+			seen_subjects[user_id] = true
+		end
+		if subject_count > 0 and type(options.is_erased) ~= "function" then
+			return false, { code = "unsupported", message = "subject-bound projection operations require an authoritative erasure-status adapter" }
+		end
+		if type(options.is_erased) == "function" then
+			for index = 1, subject_count do
+				local erased, error_value = io_call(options.is_erased, subject_user_ids[index])
+				if erased == true then return false, { code = "erased" } end
+				if erased == nil then return false, { code = "unknown", message = error_value or "erasure state unresolved" } end
+			end
+		end
+		return true, nil
+	end
 	function service:Register(name, version, projector, definition)
 		if not valid_text(name, 40) or not finite(version) or version < 1 or math.floor(version) ~= version or type(projector) ~= "function" then return false, "projection requires name, positive version, and pure projector" end
 		if self.projections[name] and self.projections[name].version ~= version then return false, "use a versioned projection name and explicit cutover" end
@@ -2595,33 +2627,8 @@ local function new_projections(store, options)
 		if not def then return { code = "not_found" } end
 		if type(event) ~= "table" or not valid_text(event.event_id, 128) or not valid_text(event.entity_id, 128)
 			or not finite(event.source_revision) or event.source_revision < 0 or math.floor(event.source_revision) ~= event.source_revision then return { code = "invalid" } end
-		if event.subject_user_ids ~= nil then
-			if type(event.subject_user_ids) ~= "table" then return { code = "invalid", message = "subject_user_ids must be a bounded dense array" } end
-			local subject_count = key_count(event.subject_user_ids)
-			if subject_count > 100 then return { code = "capacity", message = "projection subject list exceeds the supported bound" } end
-			for index in pairs(event.subject_user_ids) do
-				if type(index) ~= "number" or not finite(index) or math.floor(index) ~= index or index < 1 or index > subject_count then
-					return { code = "invalid", message = "subject_user_ids must be a dense array" }
-				end
-			end
-			local seen_subjects = {}
-			for index = 1, subject_count do
-				local user_id = event.subject_user_ids[index]
-				if not finite(user_id) or user_id < 1 or math.floor(user_id) ~= user_id or seen_subjects[user_id] then
-					return { code = "invalid", message = "subject_user_ids must contain unique positive integer UserIds" }
-				end
-				seen_subjects[user_id] = true
-			end
-			if subject_count > 0 and type(options.is_erased) ~= "function" then
-				return { code = "unsupported", message = "projection events with subject UserIds require an authoritative erasure-status adapter" }
-			end
-		end
-		if type(options.is_erased) == "function" then
-			for _, user_id in ipairs(event.subject_user_ids or {}) do
-				local erased, error_value = io_call(options.is_erased, user_id)
-				if erased == true then return { code = "erased" } elseif erased == nil then return { code = "unknown", message = error_value or "erasure state unresolved" } end
-			end
-		end
+		local subjects_ok, subject_error = verify_subjects(event.subject_user_ids)
+		if not subjects_ok then return subject_error end
 		local key = key_for(name, event.entity_id)
 		local attempt_id = digest(event.event_id .. ":" .. tostring(os.clock()) .. ":" .. tostring(math.random()))
 		local updated_at = os.time()
@@ -2736,8 +2743,11 @@ local function new_projections(store, options)
 		end
 		return { code = "incomplete", processed = processed, cursor = cursor, complete = false }
 	end
-	function service:ReserveUnique(namespace, unique_value, entity_id, operation_id)
+	function service:ReserveUnique(namespace, unique_value, entity_id, operation_id, subject_user_ids)
 		if not valid_text(namespace, 32) or not valid_text(unique_value, 128) or not valid_text(entity_id, 128) or not valid_text(operation_id, 128) then return { code = "invalid" } end
+		local subjects_ok, subject_error = verify_subjects(subject_user_ids)
+		if not subjects_ok then return subject_error end
+		local normalized_subjects = copy(subject_user_ids or {})
 		local key = "rv2u-" .. digest(namespace .. ":" .. unique_value)
 		local attempt_id = digest(operation_id .. ":" .. tostring(os.clock()) .. ":" .. tostring(math.random()))
 		local created_at = os.time()
@@ -2748,6 +2758,7 @@ local function new_projections(store, options)
 				unique_value = unique_value,
 				entity_id = entity_id,
 				operation_id = operation_id,
+				subject_user_ids = normalized_subjects,
 				last_attempt_id = attempt_id,
 				created_at = created_at,
 			}
@@ -2765,6 +2776,12 @@ local function new_projections(store, options)
 			end
 			if observed.entity_id ~= entity_id then
 				return { code = "conflict", reservation = observed }
+			end
+			local observed_subjects = if observed.subject_user_ids == nil then {} else observed.subject_user_ids
+			local expected_subjects_ok, expected_subjects_material = pcall(canonical, normalized_subjects)
+			local observed_subjects_ok, observed_subjects_material = pcall(canonical, observed_subjects)
+			if not expected_subjects_ok or not observed_subjects_ok or expected_subjects_material ~= observed_subjects_material then
+				return { code = "conflict", reservation = observed, message = "unique reservation subject association differs" }
 			end
 			if observed.last_attempt_id == attempt_id and observed.operation_id == operation_id then
 				return { code = "committed", reservation = observed, reconciled = ambiguous or nil }
