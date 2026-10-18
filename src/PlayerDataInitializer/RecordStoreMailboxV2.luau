@@ -1560,6 +1560,9 @@ function MailboxV2.GetQueueAsync(self: Mailbox): ({ Dict }, Result)
 			return {}, ok("unknown", nil, nil, "queue canonical read failed: " .. record_error)
 		end
 		local record = as_dict(record_value)
+		if record_value ~= nil and record == nil then
+			return {}, ok("corrupt", nil, nil, "queue index points to a malformed canonical record")
+		end
 		local locator = as_dict(row.locator)
 		local record_locator = if record ~= nil then as_dict(record.locator) else nil
 		if record ~= nil and same_owner(record.owner, self.owner) and record.state == "ready"
@@ -2174,6 +2177,9 @@ function MailboxV2.GetDeadLettersAsync(self: Mailbox, cursor: string?, page_size
 				return {}, nil, ok("unknown", nil, nil, "dead-letter canonical read failed: " .. record_error)
 			end
 			local record = as_dict(record_value)
+			if record_value ~= nil and record == nil then
+				return {}, nil, ok("corrupt", nil, nil, "dead-letter index points to a malformed canonical record")
+			end
 			if record ~= nil and same_owner(record.owner, self.owner) and record.state == "dead_lettered" then
 				seen[route] = true
 				table.insert(messages, self:_record_snapshot(record))
@@ -2298,7 +2304,7 @@ function MailboxV2.GetStatsAsync(self: Mailbox): (Dict, Result)
 	if queue_result.code ~= "success" then
 		return {}, queue_result
 	end
-	local dlq, _, dlq_result = self:GetDeadLettersAsync(nil, 100)
+	local dlq, dlq_cursor, dlq_result = self:GetDeadLettersAsync(nil, 100)
 	if dlq_result.code ~= "success" then
 		return {}, dlq_result
 	end
@@ -2308,21 +2314,61 @@ function MailboxV2.GetStatsAsync(self: Mailbox): (Dict, Result)
 		if read_error ~= nil then
 			return {}, ok("unknown", nil, nil, "preparation registry stats read failed: " .. read_error)
 		end
-		local registry = as_dict(value)
-		local entries = if registry ~= nil then as_dict(registry.entries) else nil
-		if entries ~= nil then
-			for _ in entries do
+		if value ~= nil then
+			local registry = as_dict(value)
+			if registry == nil or registry.version ~= VERSION or registry.shard ~= shard
+				or not same_owner(registry.owner, self.owner)
+			then
+				return {}, ok("corrupt", nil, nil, "preparation registry stats row is malformed or belongs to another owner")
+			end
+			local entries = as_dict(registry.entries)
+			if entries == nil then
+				return {}, ok("corrupt", nil, nil, "preparation registry entries are malformed")
+			end
+			for route, raw_entry in entries do
+				local entry = as_dict(raw_entry)
+				if type(route) ~= "string" or entry == nil or entry.route ~= route
+					or not valid_text(entry.token, 128) or not valid_text(entry.phase, 32)
+				then
+					return {}, ok("corrupt", nil, nil, "preparation registry contains a malformed entry")
+				end
 				preparing += 1
 			end
 		end
 	end
+	local active_capacity = (self.options.max_segments :: number) * (self.options.segment_max_messages :: number)
+	local dlq_capacity = (self.options.dlq_max_segments :: number) * (self.options.dlq_segment_max_messages :: number)
+	local preparation_capacity = (self.options.preparation_shard_count :: number) * (self.options.preparation_max_entries_per_shard :: number)
 	return {
+		observed_at = self:_now(),
+		consistency = "bounded_non_linearizable",
+		completeness = {
+			active_index = "complete_for_observed_manifest",
+			dead_letter_index = if dlq_cursor == nil then "first_page_complete" else "page_only",
+			preparation_registry = "all_configured_shards_read",
+			global_snapshot = false,
+		},
+		exactness = {
+			ready = "exact_over_observed_active_index",
+			dead_lettered_page = "page_count_not_total",
+			preparing_reservations = "observed_registry_entry_count",
+			wakeups_published = "process_local",
+			wakeup_publish_errors = "process_local",
+		},
+		scan = {
+			active_index_capacity = active_capacity,
+			dead_letter_index_capacity = dlq_capacity,
+			dead_letter_page_size = 100,
+			preparation_shard_count = self.options.preparation_shard_count,
+		},
 		ready = #queue,
 		dead_lettered_page = #dlq,
+		dead_letter_page_cursor = dlq_cursor,
+		dead_lettered_page_has_more = dlq_cursor ~= nil,
 		preparing_reservations = preparing,
-		active_capacity = (self.options.max_segments :: number) * (self.options.segment_max_messages :: number),
-		dlq_index_capacity = (self.options.dlq_max_segments :: number) * (self.options.dlq_segment_max_messages :: number),
-		preparation_capacity = (self.options.preparation_shard_count :: number) * (self.options.preparation_max_entries_per_shard :: number),
+		active_capacity = active_capacity,
+		dlq_index_capacity = dlq_capacity,
+		preparation_capacity = preparation_capacity,
 		wakeups_enabled = self.options.wakeups ~= nil,
 		wakeups_published = self.wakeup_published,
 		wakeup_publish_errors = self.wakeup_publish_errors,
