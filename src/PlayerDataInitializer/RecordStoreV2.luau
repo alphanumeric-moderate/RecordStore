@@ -441,7 +441,11 @@ local function new_outbox()
 	function service.DispatchBatches(record, dispatcher, batch_size, max_batches)
 		batch_size = bounded_integer(batch_size, 8, 1, 16)
 		max_batches = bounded_integer(max_batches, 4, 1, 32)
-		if type(record) ~= "table" or (type(record.DispatchOutboxBatchAsync) ~= "function" and type(record.DispatchOutboxAsync) ~= "function") then return { code = "invalid", dispatched = 0 } end
+		if type(record) ~= "table" or type(dispatcher) ~= "function"
+			or (type(record.DispatchOutboxBatchAsync) ~= "function" and type(record.DispatchOutboxAsync) ~= "function")
+		then
+			return { code = "invalid", dispatched = 0, message = "record dispatcher and supported dispatch method are required" }
+		end
 		local total = 0
 		for batch = 1, max_batches do
 			local method = if type(record.DispatchOutboxBatchAsync) == "function" then record.DispatchOutboxBatchAsync else record.DispatchOutboxAsync
@@ -457,6 +461,9 @@ local function new_outbox()
 	function service.PruneBatches(record, cutoff_ms, batch_size, max_batches)
 		batch_size = bounded_integer(batch_size, 16, 1, 32)
 		max_batches = bounded_integer(max_batches, 4, 1, 32)
+		if type(record) ~= "table" or type(record.PruneOutboxAsync) ~= "function" or not finite(cutoff_ms) then
+			return { code = "invalid", pruned = 0, message = "record and finite cutoff are required" }
+		end
 		local total = 0
 		for batch = 1, max_batches do
 			local count, code, message = record:PruneOutboxAsync(cutoff_ms, batch_size)
@@ -470,6 +477,9 @@ local function new_outbox()
 	function service.PruneTransactionReceiptsBatches(record, cutoff_ms, batch_size, max_batches)
 		batch_size = bounded_integer(batch_size, 16, 1, 32)
 		max_batches = bounded_integer(max_batches, 4, 1, 32)
+		if type(record) ~= "table" or type(record.PruneTransactionReceiptsAsync) ~= "function" or not finite(cutoff_ms) then
+			return { code = "invalid", pruned = 0, message = "record and finite cutoff are required" }
+		end
 		local total = 0
 		for batch = 1, max_batches do
 			local count, code, message = record:PruneTransactionReceiptsAsync(cutoff_ms, batch_size)
