@@ -2684,11 +2684,15 @@ local function new_projections(store, options)
 						or index < 1 or index > existing_subject_count
 					then return old end
 				end
+				local seen_existing_subjects = {}
 				for index = 1, existing_subject_count do
 					local user_id = old.subject_user_ids[index]
-					if not finite(user_id) or user_id < 1 or math.floor(user_id) ~= user_id or not event_subject_set[user_id] then
+					if not finite(user_id) or user_id < 1 or math.floor(user_id) ~= user_id
+						or seen_existing_subjects[user_id] or not event_subject_set[user_id]
+					then
 						return old
 					end
+					seen_existing_subjects[user_id] = true
 				end
 			end
 			local current = if type(old) == "table" then old else {
@@ -2746,11 +2750,13 @@ local function new_projections(store, options)
 					return { code = "corrupt", message = "projection subject association is not a dense array" }
 				end
 			end
+			local seen_observed_subjects = {}
 			for index = 1, observed_subject_count do
 				local user_id = observed.subject_user_ids[index]
-				if not finite(user_id) or user_id < 1 or math.floor(user_id) ~= user_id then
-					return { code = "corrupt", message = "projection subject association contains an invalid UserId" }
+				if not finite(user_id) or user_id < 1 or math.floor(user_id) ~= user_id or seen_observed_subjects[user_id] then
+					return { code = "corrupt", message = "projection subject association contains an invalid or duplicate UserId" }
 				end
+				seen_observed_subjects[user_id] = true
 				if not event_subject_set[user_id] then
 					return { code = "conflict", message = "projection update omitted a previously associated subject UserId" }
 				end
