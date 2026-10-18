@@ -1555,7 +1555,10 @@ function MailboxV2.GetQueueAsync(self: Mailbox): ({ Dict }, Result)
 	local seen: { [string]: boolean } = {}
 	for _, row in rows do
 		local route = tostring(row.route)
-		local record_value = self:_get(route)
+		local record_value, record_error = self:_get(route)
+		if record_error ~= nil then
+			return {}, ok("unknown", nil, nil, "queue canonical read failed: " .. record_error)
+		end
 		local record = as_dict(record_value)
 		local locator = as_dict(row.locator)
 		local record_locator = if record ~= nil then as_dict(record.locator) else nil
@@ -2166,7 +2169,10 @@ function MailboxV2.GetDeadLettersAsync(self: Mailbox, cursor: string?, page_size
 	for _, row in rows do
 		local route = tostring(row.route)
 		if not seen[route] then
-			local record_value = self:_get(route)
+			local record_value, record_error = self:_get(route)
+			if record_error ~= nil then
+				return {}, nil, ok("unknown", nil, nil, "dead-letter canonical read failed: " .. record_error)
+			end
 			local record = as_dict(record_value)
 			if record ~= nil and same_owner(record.owner, self.owner) and record.state == "dead_lettered" then
 				seen[route] = true
@@ -2298,7 +2304,10 @@ function MailboxV2.GetStatsAsync(self: Mailbox): (Dict, Result)
 	end
 	local preparing = 0
 	for shard = 1, (self.options.preparation_shard_count :: number) do
-		local value = self:_get(self:_registry_key(shard))
+		local value, read_error = self:_get(self:_registry_key(shard))
+		if read_error ~= nil then
+			return {}, ok("unknown", nil, nil, "preparation registry stats read failed: " .. read_error)
+		end
 		local registry = as_dict(value)
 		local entries = if registry ~= nil then as_dict(registry.entries) else nil
 		if entries ~= nil then
