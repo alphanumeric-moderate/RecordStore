@@ -31,6 +31,7 @@ local function run_workload()
 	}
 	local mailbox = MailboxV2.new(store, owner, {
 		active_record = active_record_for(owner),
+		allow_unattested_activation = true,
 		now_ms = function()
 			return now
 		end,
