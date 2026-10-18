@@ -46,6 +46,45 @@ for _, path in {
 	assert(type(chunk) == "function", ("failed to compile %s"):format(path))
 end
 
+-- Compile every Lua/Luau fenced example in README.md. This catches documentation
+-- snippets that accidentally contain placeholders or drift from valid Luau syntax.
+local function compile_readme_examples()
+	local readme = fs.readFile("README.md")
+	local active_language: string? = nil
+	local snippet_lines: { string } = {}
+	local snippet_count = 0
+
+	for line in (readme .. "\n"):gmatch("(.-)\n") do
+		if active_language ~= nil then
+			if line:match("^%```%s*$") then
+				snippet_count += 1
+				local source = table.concat(snippet_lines, "\n")
+				local debug_name = ("README %s example #%d"):format(active_language, snippet_count)
+				local compiled, result = pcall(function()
+					return luau.load(source, { debugName = debug_name })
+				end)
+				assert(compiled and type(result) == "function", ("failed to compile %s: %s"):format(debug_name, tostring(result)))
+				active_language = nil
+				table.clear(snippet_lines)
+			else
+				table.insert(snippet_lines, line)
+			end
+		else
+			local language = line:match("^%```([%w_-]+)")
+			if language == "lua" or language == "luau" then
+				active_language = language
+				table.clear(snippet_lines)
+			end
+		end
+	end
+
+	assert(active_language == nil, "README contains an unclosed Lua/Luau fenced block")
+	assert(snippet_count > 0, "README contains no Lua/Luau fenced examples to compile")
+	print(("Compiled %d Lua/Luau README examples"):format(snippet_count))
+end
+
+compile_readme_examples()
+
 -- Exercise the same normalizer used by PlayerDataCore, without relying on
 -- Roblox Instance behavior. The separate Studio Script covers NumberValue.
 local integer_infinity_chunk = luau.load(fs.readFile("src/PlayerDataInitializer/IntegerInfinityValue.luau"), {
