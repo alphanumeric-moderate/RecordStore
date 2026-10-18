@@ -344,6 +344,7 @@ local function new_governor(options)
 			local prerequisite = self.known[prerequisite_id]
 			if prerequisite ~= nil and prerequisite.queued == true and prerequisite.lane == "background"
 				and (prerequisite.due_at_ms or 0) <= now
+				and (prerequisite.available_at_ms == nil or prerequisite.available_at_ms <= now)
 				and (prerequisite.expires_at_ms == nil or prerequisite.expires_at_ms > now)
 				and dependencies_ready(self, prerequisite)
 			then
@@ -395,7 +396,9 @@ local function new_governor(options)
 	local function choose_index(self, algorithm, renewal_mode)
 		local now, eligible = now_ms(), {}
 		for index, item in ipairs(self.queue) do
-			local ready = (item.due_at_ms or 0) <= now and dependencies_ready(self, item)
+			local ready = (item.due_at_ms or 0) <= now
+				and (item.available_at_ms == nil or item.available_at_ms <= now)
+				and dependencies_ready(self, item)
 			if renewal_mode == true and item.lane ~= "lease_renewal" then ready = false end
 			if renewal_mode == false and item.lane == "lease_renewal" then ready = false end
 			if ready and (not item.expires_at_ms or item.expires_at_ms > now) then
@@ -540,7 +543,12 @@ local function new_governor(options)
 		value.lane, value.original_lane = lane, lane
 		value.work_class = value.work_class or value.operation_class or "default"
 		value.enqueued_at_ms = now_ms()
-		value.due_at_ms = value.due_at_ms or value.available_at_ms or value.enqueued_at_ms
+		local requested_due = value.due_at_ms or value.available_at_ms or value.enqueued_at_ms
+		value.due_at_ms = math.max(requested_due, value.available_at_ms or -math.huge)
+		-- Expiry is a terminal wake boundary; unlike availability, it may precede the no-start boundary.
+		if value.expires_at_ms ~= nil and value.expires_at_ms < value.due_at_ms then
+			value.due_at_ms = value.expires_at_ms
+		end
 		value.dependencies = dependencies
 		value.cost = effective_cost(value)
 		if value.cost > self.policy.max_item_cost then return { code = "invalid", message = "estimated scheduler cost exceeds max_item_cost" } end
@@ -839,7 +847,9 @@ local function new_governor(options)
 		local oldest_eligible_age_ms, now = 0, now_ms()
 		for _, item in ipairs(self.queue) do
 			lanes[item.lane] = (lanes[item.lane] or 0) + 1
-			if (item.due_at_ms or 0) <= now and dependencies_ready(self, item)
+			if (item.due_at_ms or 0) <= now
+				and (item.available_at_ms == nil or item.available_at_ms <= now)
+				and dependencies_ready(self, item)
 				and (item.expires_at_ms == nil or item.expires_at_ms > now)
 			then oldest_eligible_age_ms = math.max(oldest_eligible_age_ms, now - item.enqueued_at_ms) end
 		end
@@ -1172,7 +1182,8 @@ local function new_dispatcher(governor, options)
 			elseif latency >= policy.batch_latency_ceiling_ms * 0.75 then batch_window = math.floor(batch_window / 2) end
 		end
 		due = math.max(due, now + batch_window)
-		if finite(schedule_options.deadline_ms) and due > schedule_options.deadline_ms then due = now end
+		if finite(schedule_options.available_at_ms) then due = math.max(due, schedule_options.available_at_ms) end
+		-- Deadlines influence selection priority; they never override availability.
 		if finite(schedule_options.expires_at_ms) and due >= schedule_options.expires_at_ms then due = schedule_options.expires_at_ms end
 		local item = {
 			id = id, owner_id = owner_id, lane = lane, due_at_ms = due,
