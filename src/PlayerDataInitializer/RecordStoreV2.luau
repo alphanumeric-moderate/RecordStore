@@ -2652,6 +2652,7 @@ local function new_projections(store, options)
 		local subjects_ok, subject_error = verify_subjects(event.subject_user_ids)
 		if not subjects_ok then return subject_error end
 		local event_subjects = copy(event.subject_user_ids or {})
+		table.sort(event_subjects)
 		local event_subject_set = {}
 		for _, user_id in ipairs(event_subjects) do event_subject_set[user_id] = true end
 		local key = key_for(name, event.entity_id)
@@ -2833,6 +2834,7 @@ local function new_projections(store, options)
 		local subjects_ok, subject_error = verify_subjects(subject_snapshot)
 		if not subjects_ok then return subject_error end
 		local normalized_subjects = if subject_snapshot == nil then {} else subject_snapshot
+		table.sort(normalized_subjects)
 		local key = "rv2u-" .. digest(canonical({ namespace = namespace, unique_value = unique_value }))
 		local attempt_id = digest(operation_id .. ":" .. tostring(os.clock()) .. ":" .. tostring(math.random()))
 		local created_at = os.time()
