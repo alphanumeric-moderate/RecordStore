@@ -134,7 +134,7 @@ assert(delivery ~= nil and delivery.State == "acknowledged",
 assert(handler_calls == 1, "recovery re-executed an already acknowledged handler")
 
 local profile_snapshot = RecordStore.read_async(PROFILE_STORE, SCOPE, owner.profile_key)
-assert(profile_snapshot ~= nil and profile_snapshot.data.processed_coins == 60,
+assert(profile_snapshot ~= nil and profile_snapshot.Data.processed_coins == 60,
 	"mailbox handler profile effects did not persist exactly once per test message")
 local stats = Fake:Stats()
 assert(stats.calls.update > 0 and stats.calls.get > 0, "mailbox path bypassed the deterministic DataStore backend")
