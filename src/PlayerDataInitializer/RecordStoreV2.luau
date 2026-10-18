@@ -2618,7 +2618,11 @@ local function new_projections(store, options)
 	end
 	function service:Register(name, version, projector, definition)
 		if not valid_text(name, 40) or not finite(version) or version < 1 or math.floor(version) ~= version or type(projector) ~= "function" then return false, "projection requires name, positive version, and pure projector" end
-		local normalized_definition = copy(definition or {})
+		if definition ~= nil and type(definition) ~= "table" then return false, "projection definition must be a table" end
+		local definition_ok, normalized_definition = pcall(copy, definition or {})
+		if not definition_ok then return false, "projection definition must be an acyclic bounded table" end
+		local canonical_ok = pcall(canonical, normalized_definition)
+		if not canonical_ok then return false, "projection definition must use canonical data types and keys" end
 		local prior = self.projections[name]
 		if prior ~= nil then
 			if prior.version ~= version then return false, "use a versioned projection name and explicit cutover" end
