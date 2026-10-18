@@ -3405,8 +3405,14 @@ function V2.new(record_store, mailbox_module, options)
 
 	local function wake_dispatcher_after(delay_ms)
 		if not has_delay_scheduler() then return false end
+		local target_due_ms = current_schedule_time_ms() + math.max(0, delay_ms)
 		local function wake()
-			if dispatcher_running then
+			-- Roblox timers and injected test clocks need not advance in lockstep.
+			-- Re-arm until the scheduler's clock reaches the durable job's due time.
+			local remaining_ms = target_due_ms - current_schedule_time_ms()
+			if remaining_ms > 0 then
+				if not delay_scheduled(math.max(0.001, remaining_ms / 1000), wake) then return end
+			elseif dispatcher_running then
 				if not delay_scheduled(0.01, wake) then return end
 			else
 				kick_dispatcher()
