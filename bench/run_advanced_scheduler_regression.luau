@@ -26,6 +26,7 @@ local function take(scheduler, expected_id)
 end
 
 -- Revisioned policy changes must reject stale and malformed revisions.
+do
 local policy = new_scheduler()
 local policy_stats = policy:Stats()
 assert(not policy:SetPolicy({ revision = policy_stats.policy.revision }), "stale policy revision was accepted")
@@ -439,7 +440,10 @@ assert(unsafe_retry_dispatcher:Stats().outcome_classes.permanent >= 1,
 	"permanent outcome class was not measured")
 unsafe_retry_dispatcher:Close()
 
+end
+
 -- A high-priority workflow may temporarily raise a ready prerequisite's urgency,
+do
 -- but cannot change the prerequisite's original lane or business identity.
 local inheritance = new_scheduler()
 enqueue(inheritance, { id = "ready-prerequisite", owner_id = "workflow-owner", work_class = "saga", lane = "background" })
@@ -763,7 +767,10 @@ assert(adaptive_batch_snapshot.batch_utilization.samples == 1
 	"batch utilization percentiles did not represent the completed backlog-limited batch")
 adaptive_batch_dispatcher:Close()
 
+end
+
 -- Operation admission must cap estimated request work, not just callback count.
+do
 local admission_governor = new_scheduler()
 local admission_policy = admission_governor:Stats().policy
 assert(admission_governor:SetPolicy({
@@ -908,7 +915,10 @@ assert(dimension_snapshot.estimated_bytes_in_flight == 0 and dimension_snapshot.
 	"byte/handler reservations leaked after callbacks completed")
 dimensions_dispatcher:Close()
 
+end
+
 -- The scheduler's degraded modes must apply to real callbacks, not only direct governor calls.
+do
 local read_only_governor = new_scheduler()
 local read_only_policy = read_only_governor:Stats().policy
 assert(read_only_governor:SetPolicy({
@@ -1071,7 +1081,10 @@ assert(type(schedule_during_close) == "table" and schedule_during_close.code == 
 assert(closing_governor:Stats().queue_items == 0, "closing dispatcher retained queued work")
 assert(closing_dispatcher:Stats().closed, "dispatcher close state was not published")
 
+end
+
 -- The main RecordStore module resolves the same scheduler through its
+do
 -- ModuleScript parent. Runtime scheduling remains opt-in.
 local RecordStore = Shim.load()
 local initial_snapshot = RecordStore.get_scheduler_snapshot()
@@ -1186,6 +1199,8 @@ local disabled_after_kill = RecordStore.schedule_work("integration-owner", "must
 	error("scheduled callback ran after the scheduler kill switch")
 end, { lane = "normal" })
 assert(disabled_after_kill.code == "disabled", "public scheduler API ignored the kill switch")
+
+end
 
 print("[PASS] RecordStore advanced scheduling unit and core integration regressions.")
 Shim.close()
