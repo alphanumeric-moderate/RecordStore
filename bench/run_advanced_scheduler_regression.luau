@@ -703,7 +703,7 @@ local backlog_limited_size = nil
 local backlog_limited_job = adaptive_batch_dispatcher:Schedule(
 	"adaptive-batch-owner", "backlog-limited-batch", function(batch_size)
 		backlog_limited_size = batch_size
-		return { code = "committed" }
+		return { code = "processed", processed_count = batch_size }
 	end,
 	{
 		batchable = true,
@@ -723,8 +723,15 @@ for _ = 1, 100 do if backlog_limited_size ~= nil then break end; task.wait(0.001
 assert(backlog_limited_size == 3, "batch selector exceeded the declared eligible backlog")
 assert(adaptive_batch_dispatcher:Stats().batch_calls == 2,
 	"adaptive batch metrics omitted the backlog-limited callback")
-assert(adaptive_batch_dispatcher:Stats().batch_items_requested == 4,
+local adaptive_batch_snapshot = adaptive_batch_dispatcher:Stats()
+assert(adaptive_batch_snapshot.batch_items_requested == 4,
 	"adaptive batch metrics reported the wrong selected item total")
+assert(adaptive_batch_snapshot.batch_items_processed == 3,
+	"adaptive batch metrics did not account for the actual processed item count")
+assert(adaptive_batch_snapshot.batch_utilization.samples == 1
+	and adaptive_batch_snapshot.batch_utilization.average == 1
+	and adaptive_batch_snapshot.batch_utilization.p95 == 1,
+	"batch utilization percentiles did not represent the completed backlog-limited batch")
 adaptive_batch_dispatcher:Close()
 
 -- Operation admission must cap estimated request work, not just callback count.
