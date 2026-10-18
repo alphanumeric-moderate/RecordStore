@@ -1023,6 +1023,7 @@ local function new_dispatcher(governor, options)
 		normal_in_flight = 0,
 		running = false,
 		closed = false,
+		closing = false,
 		wake_generation = 0,
 		wake_due_ms = nil,
 		wake_thread = nil,
@@ -1177,7 +1178,7 @@ local function new_dispatcher(governor, options)
 		cancel_scheduled(self.wake_thread)
 		self.wake_thread = nil
 		self.wake_due_ms = nil
-		if not was_running and not self.closed then self:Kick() end
+		if not was_running and not self.closed and not self.closing then self:Kick() end
 		return cancelled_count
 	end
 
@@ -1407,7 +1408,11 @@ local function new_dispatcher(governor, options)
 		return snapshot
 	end
 	function dispatcher:Close()
+		if self.closed or self.closing then return end
+		self.closing = true
+		self:CancelQueued("scheduler dispatcher closed before work started")
 		self.closed = true
+		self.closing = false
 		self.wake_generation += 1
 		cancel_scheduled(self.wake_thread)
 		self.wake_thread = nil
