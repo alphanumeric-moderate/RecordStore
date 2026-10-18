@@ -776,9 +776,31 @@ local function new_governor(options)
 		end
 		return true
 	end
+	local function scheduled_lane(item, now)
+		if item.inherited_lane ~= nil and finite(item.inherited_until_ms) and item.inherited_until_ms > now then
+			return item.inherited_lane
+		end
+		return item.lane
+	end
 	local function item_priority(item)
 		return if item.service_class == "critical" then 0 elseif item.service_class == "interactive" then 1
 			elseif item.service_class == "normal" then 2 elseif item.service_class == "bulk" then 3 else 4
+	end
+	local function inherit_ready_prerequisites(self, dependent)
+		if dependent.lane ~= "high" then return end
+		local now = now_ms()
+		for _, prerequisite_id in ipairs(dependent.dependencies or {}) do
+			local prerequisite = self.known[prerequisite_id]
+			if prerequisite ~= nil and prerequisite.queued == true and prerequisite.lane == "background"
+				and (prerequisite.due_at_ms or 0) <= now
+				and (prerequisite.expires_at_ms == nil or prerequisite.expires_at_ms > now)
+				and dependencies_ready(self, prerequisite)
+			then
+				prerequisite.inherited_lane = "normal"
+				prerequisite.inherited_until_ms = now + self.policy.priority_inheritance_max_ms
+				prerequisite.inherited_from = dependent.id
+			end
+		end
 	end
 	local function item_precedes(left, right, now)
 		local left_service, right_service = item_priority(left), item_priority(right)
@@ -818,8 +840,11 @@ local function new_governor(options)
 			if renewal_mode == false and item.lane == "lease_renewal" then ready = false end
 			if ready and (not item.expires_at_ms or item.expires_at_ms > now) then
 				local owner_active = self.active_owner[item.owner_id] or 0
-				if item.lane == "lease_renewal" or owner_active < self.policy.max_per_owner_in_flight then
-					eligible[#eligible + 1] = { index = index, item = item }
+				local effective_lane = scheduled_lane(item, now)
+				local renewal_count = self.active_renewals_by_owner[item.owner_id] or 0
+				local owner_can_renew = effective_lane ~= "lease_renewal" or renewal_count < self.policy.max_per_owner_in_flight
+				if owner_can_renew and (effective_lane == "lease_renewal" or owner_active < self.policy.max_per_owner_in_flight) then
+					eligible[#eligible + 1] = { index = index, item = item, effective_lane = effective_lane }
 				end
 			end
 		end
@@ -827,11 +852,11 @@ local function new_governor(options)
 		if self.high_streak >= self.policy.high_burst then
 			local has_non_high = false
 			for _, row in ipairs(eligible) do
-				if row.item.lane ~= "high" and row.item.lane ~= "lease_renewal" then has_non_high = true break end
+				if row.effective_lane ~= "high" and row.effective_lane ~= "lease_renewal" then has_non_high = true break end
 			end
 			if has_non_high then
 				local filtered = {}
-				for _, row in ipairs(eligible) do if row.item.lane ~= "high" then filtered[#filtered + 1] = row end end
+				for _, row in ipairs(eligible) do if row.effective_lane ~= "high" then filtered[#filtered + 1] = row end end
 				eligible = filtered
 			end
 		end
@@ -847,9 +872,12 @@ local function new_governor(options)
 				local item = row.item
 				local age = math.min(60000, math.max(0, now - item.enqueued_at_ms))
 				local slack = if finite(item.deadline_ms) then item.deadline_ms - now else 60000
-				local lane_weight = if item.lane == "lease_renewal" then 8 elseif item.lane == "high" then 4 elseif item.lane == "normal" then 2 else 1
+				local lane = row.effective_lane
+				local lane_weight = if lane == "lease_renewal" then 8 elseif lane == "high" then 4 elseif lane == "normal" then 2 else 1
 				local service_rank = if item.service_class == "critical" then 4 elseif item.service_class == "interactive" then 3 elseif item.service_class == "normal" then 2 elseif item.service_class == "bulk" then 1 else 0
-				local score = -lane_weight * 1000 - service_rank * 500 - age * 0.25 + slack * 0.01
+				local score = if algorithm == "deadline"
+					then -service_rank * 10000 - lane_weight * 1000 + slack - age * 0.25
+					else -lane_weight * 1000 - service_rank * 500 - age * 0.25 + slack * 0.01
 				if best_score == nil or score < best_score then best, best_score = row, score end
 			end
 			return best and best.index or nil
@@ -877,11 +905,21 @@ local function new_governor(options)
 				local lane_index = ((start_index + offset - 1) % lane_count) + 1
 				local key = lane_keys[lane_index]
 				local rows = lane_rows[key]
-				local lane = rows[1].item.lane
+				local lane = rows[1].effective_lane
 				local weight = if lane == "lease_renewal" then 4 elseif lane == "high" then 4 elseif lane == "normal" then 2 else 1
 				self.drr_deficit[key] = math.min(self.policy.max_item_cost * 2, (self.drr_deficit[key] or 0) + self.policy.drr_quantum * weight)
 				local best = rows[1]
-				for _, row in ipairs(rows) do if item_precedes(row.item, best.item, now) then best = row end end
+				local has_urgent = false
+				for _, row in ipairs(rows) do
+					if finite(row.item.deadline_ms) and row.item.deadline_ms - now <= 5000 then has_urgent = true end
+				end
+				if has_urgent and self.urgent_streak < self.policy.urgent_deadline_burst then
+					for _, row in ipairs(rows) do if item_precedes(row.item, best.item, now) then best = row end end
+				else
+					for _, row in ipairs(rows) do
+						if row.item.enqueued_at_ms < best.item.enqueued_at_ms then best = row end
+					end
+				end
 				local cost = effective_cost(best.item)
 				if cost <= self.drr_deficit[key] then
 					self.drr_deficit[key] -= cost
@@ -939,6 +977,12 @@ local function new_governor(options)
 		self.known[value.id] = value
 		table.insert(self.queue, value)
 		heap_push(self.queued_due_heap, { id = value.id, due_at_ms = value.due_at_ms, item = value })
+		inherit_ready_prerequisites(self, value)
+		if #self.queued_due_heap > self.policy.queue_capacity * 2 then
+			local rebuilt = {}
+			for _, queued in ipairs(self.queue) do heap_push(rebuilt, { id = queued.id, due_at_ms = queued.due_at_ms, item = queued }) end
+			self.queued_due_heap = rebuilt
+		end
 		return { code = "accepted", count = #self.queue }
 	end
 	local remember_terminal
@@ -987,7 +1031,9 @@ local function new_governor(options)
 		self.stats.scheduled_selected += 1
 		item.overdue = item.deadline_ms ~= nil and item.deadline_ms < now
 		if item.overdue then self.stats.scheduled_overdue += 1 end
-		if item.lane == "high" then self.high_streak += 1 else self.high_streak = 0 end
+		local effective_lane = scheduled_lane(item, now)
+		if effective_lane == "high" then self.high_streak += 1 else self.high_streak = 0 end
+		if finite(item.deadline_ms) and item.deadline_ms - now <= 5000 then self.urgent_streak += 1 else self.urgent_streak = 0 end
 		self.active_owner[item.owner_id] = (self.active_owner[item.owner_id] or 0) + 1
 		if item.lane == "lease_renewal" then self.active_renewals_by_owner[item.owner_id] = (self.active_renewals_by_owner[item.owner_id] or 0) + 1 end
 		item.selected_at_ms = now
@@ -1087,6 +1133,14 @@ local function new_governor(options)
 			if item.lane == "lease_renewal" then self.active_renewals_by_owner[item.owner_id] = math.max(0, (self.active_renewals_by_owner[item.owner_id] or 1) - 1) end
 		end
 		self.known[id] = nil
+		if item ~= nil then self.retry_cooldown_until[item.owner_id] = nil end
+		for _, queued in ipairs(self.queue) do
+			if queued.inherited_from == id then
+				queued.inherited_lane = nil
+				queued.inherited_until_ms = nil
+				queued.inherited_from = nil
+			end
+		end
 		local code = if type(outcome) == "table" then outcome.code else outcome
 		if code == nil or code == true or code == "success" or code == "committed"
 			or code == "acknowledged" or code == "processed" or code == "completed" or code == "duplicate"
