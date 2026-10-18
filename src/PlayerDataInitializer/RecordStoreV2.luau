@@ -2292,6 +2292,7 @@ local function new_erasure(store, families, options)
 					cursor = index - 1, message = history_error or state_error or "history cleanup did not confirm completion" }
 			end
 			completed += 1
+			local checkpoint_at = os.time()
 			local updated, progress_error = adapter_call(store, "UpdateAsync", key, function(old)
 				if type(old) ~= "table" or old.erasure_id ~= erasure_id then return old end
 				local old_cursor = old.cursor or 0
@@ -2303,7 +2304,7 @@ local function new_erasure(store, families, options)
 				value.cursor = index
 				value.completed_count = (old.completed_count or 0) + 1
 				value.status = "in_progress"
-				value.updated_at = os.time()
+				value.updated_at = checkpoint_at
 				value.last_error = nil
 				value.progress_material = progress_material_for(value)
 				return value
@@ -2327,13 +2328,14 @@ local function new_erasure(store, families, options)
 					message = "another worker advanced the immutable erasure checkpoint" }
 			end
 		end
+		local finalized_at = os.time()
 		local final, final_error = adapter_call(store, "UpdateAsync", key, function(old)
 			if type(old) ~= "table" or old.erasure_id ~= erasure_id then return old end
 			local value = copy(old)
 			value.completed_count = math.max(old.completed_count or 0, completed)
 			value.status = if value.cursor >= #value.entries then "completed" else "in_progress"
-			value.completed_at = if value.status == "completed" then (old.completed_at or os.time()) else nil
-			value.updated_at = os.time()
+			value.completed_at = if value.status == "completed" then (old.completed_at or finalized_at) else nil
+			value.updated_at = finalized_at
 			value.progress_material = progress_material_for(value)
 			return value
 		end)
