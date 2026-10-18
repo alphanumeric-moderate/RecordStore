@@ -4,7 +4,7 @@ This gate is a durable protocol boundary, not proof by itself that a deployment 
 
 ## Required deployment evidence
 
-Construct `V2.Rollout` with a durable DataStore-shaped adapter whose `GetAsync` and `UpdateAsync` methods use the same rollout store, name and scope on every server.
+Construct `V2.Rollout` with a durable DataStore-shaped adapter whose `GetAsync` and `UpdateAsync` methods use the same rollout store, name and scope on every server. Pin `expected_matrix_digest` to the exact immutable release/compatibility matrix digest. An unpinned coordinator or a runtime whose digest differs from the persisted rollout fails closed for non-read operations; changing the digest requires a new compatible rollout rather than reusing the old ID.
 
 Each required verifier must return exactly `true, evidence_id`, where `evidence_id` is a stable reference to durable review/deployment evidence:
 
@@ -27,7 +27,9 @@ local V2Module = require(path.to.RecordStoreV2)
 local rollout_id = "recordstore-v2-release-2026-10"
 local matrix_digest = "release-matrix-v2-sha-or-review-id"
 
+-- Must match the exact immutable digest used for PrepareAsync and this release build.
 local rollout = V2Module.Rollout.new(rolloutStoreAdapter, {
+    expected_matrix_digest = matrix_digest,
     verify_compatibility = verify_compatibility,
     verify_writers_drained = verify_old_writers_drained,
     verify_activation_frozen = verify_activation_freeze,
