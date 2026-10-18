@@ -1920,7 +1920,7 @@ local function new_erasure(store, families, options)
 		local template_contract_digest, contract_error = contract_digest_for(user_id, rendered)
 		if template_contract_digest == nil then return { code = "invalid", message = contract_error or "RTBF template contract could not be canonicalized" } end
 		local template_ok = if type(options.verify_templates) == "function"
-			then io_call(options.verify_templates, user_id, rendered) else false
+			then io_call(options.verify_templates, user_id, copy(rendered)) else false
 
 		local expected_by_family = {}
 		local seen_expected = {}
