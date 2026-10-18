@@ -95,10 +95,11 @@ local function new_governor(options)
 		failed = {}, failed_order = {}, retry_cooldown_until = {}, retry_tokens_by_class = {},
 		due_sequence = 0,
 		retry_tokens = 32, last_token_time = now_ms(),
-		last_budget = nil, last_budget_by_kind = {}, latency_ewma = {}, consecutive_errors = {}, circuits = {},
+		last_budget = nil, last_budget_by_kind = {}, latency_ewma = {}, latency_samples_by_operation = {},
+		consecutive_errors = {}, circuits = {},
 		stats = { admitted = 0, rejected = 0, completed = 0, released = 0, throttled = 0, errors = 0,
 			scheduled_selected = 0, scheduled_expired = 0, scheduled_overdue = 0, shadow_samples = 0 },
-		scheduler_metrics = { by_lane = {}, wait_ms = {}, last_shadow = nil },
+		scheduler_metrics = { by_lane = {}, wait_ms = {}, wait_by_lane_class = {}, last_shadow = nil },
 	}
 	local limits = { critical = 32, profile_save = 32, profile_release = 32, interactive = 24, messaging = 20, migration = 4, maintenance = 8, tracing = 1 }
 	local function policy_valid(policy)
@@ -206,6 +207,15 @@ local function new_governor(options)
 		if finite(latency_ms) and latency_ms >= 0 then
 			local prior = self.latency_ewma[kind]
 			self.latency_ewma[kind] = prior and prior * 0.8 + latency_ms * 0.2 or latency_ms
+			local sample_key = if self.latency_samples_by_operation[kind] ~= nil
+				or key_count(self.latency_samples_by_operation) < 32 then kind else "__other__"
+			local samples = self.latency_samples_by_operation[sample_key]
+			if samples == nil then
+				samples = {}
+				self.latency_samples_by_operation[sample_key] = samples
+			end
+			samples[#samples + 1] = latency_ms
+			if #samples > 256 then table.remove(samples, 1) end
 		end
 		if finite(budget) then
 			self.last_budget = budget
@@ -567,6 +577,37 @@ local function new_governor(options)
 		return if item.service_class == "critical" then 0 elseif item.service_class == "interactive" then 1
 			elseif item.service_class == "normal" then 2 elseif item.service_class == "bulk" then 3 else 4
 	end
+	local function record_wait_sample(self, item, age_ms)
+		local lane = item.lane or "normal"
+		local work_class = item.work_class or "default"
+		local service_class = item.service_class or "best_effort"
+		local key = tostring(#lane) .. ":" .. lane
+			.. tostring(#work_class) .. ":" .. work_class
+			.. tostring(#service_class) .. ":" .. service_class
+		local buckets = self.scheduler_metrics.wait_by_lane_class
+		local bucket = buckets[key]
+		if bucket == nil then
+			local bucket_count = key_count(buckets)
+			if bucket_count >= 64 then
+				key = "__other__"
+				bucket = buckets[key]
+				if bucket == nil then
+					bucket = { lane = "other", work_class = "other", service_class = "other",
+						selected = 0, total_wait_ms = 0, max_wait_ms = 0, samples = {} }
+					buckets[key] = bucket
+				end
+			else
+				bucket = { lane = lane, work_class = work_class, service_class = service_class,
+					selected = 0, total_wait_ms = 0, max_wait_ms = 0, samples = {} }
+				buckets[key] = bucket
+			end
+		end
+		bucket.selected += 1
+		bucket.total_wait_ms += age_ms
+		bucket.max_wait_ms = math.max(bucket.max_wait_ms, age_ms)
+		bucket.samples[#bucket.samples + 1] = age_ms
+		if #bucket.samples > 256 then table.remove(bucket.samples, 1) end
+	end
 	local function inherit_ready_prerequisites(self, dependent)
 		if dependent.lane ~= "high" then return end
 		local now = now_ms()
@@ -915,6 +956,7 @@ local function new_governor(options)
 		lane_stats.total_wait_ms += age
 		lane_stats.max_wait_ms = math.max(lane_stats.max_wait_ms, age)
 		self.scheduler_metrics.by_lane[item.lane] = lane_stats
+		record_wait_sample(self, item, age)
 		self.stats.scheduled_selected += 1
 		item.overdue = item.deadline_ms ~= nil and item.deadline_ms < now
 		if item.overdue then self.stats.scheduled_overdue += 1 end
@@ -1176,9 +1218,28 @@ local function new_governor(options)
 		end
 		local waits = copy(self.scheduler_metrics.wait_ms)
 		table.sort(waits)
-		local function percentile(p)
-			if #waits == 0 then return 0 end
-			return waits[math.clamp(math.ceil(#waits * p), 1, #waits)]
+		local function percentile(values, p)
+			if #values == 0 then return 0 end
+			return values[math.clamp(math.ceil(#values * p), 1, #values)]
+		end
+		local wait_by_lane_class = {}
+		for key, bucket in pairs(self.scheduler_metrics.wait_by_lane_class) do
+			local samples = copy(bucket.samples)
+			table.sort(samples)
+			wait_by_lane_class[key] = {
+				lane = bucket.lane, work_class = bucket.work_class, service_class = bucket.service_class,
+				selected = bucket.selected, total_wait_ms = bucket.total_wait_ms, max_wait_ms = bucket.max_wait_ms,
+				p50_ms = percentile(samples, 0.50), p95_ms = percentile(samples, 0.95), p99_ms = percentile(samples, 0.99),
+			}
+		end
+		local latency_percentiles_by_operation = {}
+		for operation, samples_source in pairs(self.latency_samples_by_operation) do
+			local samples = copy(samples_source)
+			table.sort(samples)
+			latency_percentiles_by_operation[operation] = {
+				count = #samples, p50_ms = percentile(samples, 0.50),
+				p95_ms = percentile(samples, 0.95), p99_ms = percentile(samples, 0.99),
+			}
 		end
 		return {
 			policy = copy(self.policy), in_flight = self.in_flight, queue_items = #self.queue,
@@ -1187,11 +1248,14 @@ local function new_governor(options)
 			handler_slots_in_flight = self.handler_slots_in_flight,
 			request_budgets = copy(self.request_budgets),
 			lanes = lanes, classes = copy(self.by_class), stats = copy(self.stats),
-			latency_ewma = copy(self.latency_ewma), circuits = copy(self.circuits),
+			latency_ewma = copy(self.latency_ewma), latency_percentiles_by_operation = latency_percentiles_by_operation,
+			circuits = copy(self.circuits),
 			last_budget_by_kind = copy(self.last_budget_by_kind), retry_tokens = self.retry_tokens,
 			scheduler = {
-				by_lane = copy(self.scheduler_metrics.by_lane), oldest_eligible_age_ms = oldest_eligible_age_ms,
-				queue_wait_p50_ms = percentile(0.50), queue_wait_p95_ms = percentile(0.95), queue_wait_p99_ms = percentile(0.99),
+				by_lane = copy(self.scheduler_metrics.by_lane), by_lane_class = wait_by_lane_class,
+				oldest_eligible_age_ms = oldest_eligible_age_ms,
+				queue_wait_p50_ms = percentile(waits, 0.50), queue_wait_p95_ms = percentile(waits, 0.95),
+				queue_wait_p99_ms = percentile(waits, 0.99),
 				next_due_at_ms = self:NextQueuedDueAt(), due_heap_items = #self.due_heap,
 				queued_due_heap_items = #self.queued_due_heap, active_by_owner = copy(self.active_owner),
 				last_shadow = copy(self.scheduler_metrics.last_shadow),
