@@ -8,6 +8,7 @@ local HttpService = Shim.environment.game:GetService("HttpService")
 local RecordStore = Shim.load_isolated("live-mailbox-server")
 local MailboxV2 = require("../src/PlayerDataInitializer/RecordStoreMailboxV2")
 local Adapter = require("../src/PlayerDataInitializer/RecordStoreV2DataStoreAdapter")
+local V2Module = require("../src/PlayerDataInitializer/RecordStoreV2")
 
 local now_ms = 1_800_000_000_000
 local guid_counter = 0
@@ -180,6 +181,36 @@ local yielding_mailbox = MailboxV2.new(adapter, owner, {
 	retry_max_ms = 100,
 	allow_unattested_activation = true,
 })
+-- Bind the yielding mailbox's heartbeat renewal callback to the actual V2
+-- scheduler facade. The wakeup stub stores notifications without processing
+-- them; this test exercises scheduler-based claim renewal, not wakeup delivery.
+local SchedulerV2 = V2Module.new(RecordStore, MailboxV2, {
+	runtime = {
+		now_ms = function() return os.clock() * 1000 end,
+		now_unix = function() return os.time() end,
+	},
+	allow_unattested_activation = true,
+})
+local test_accelerator = {
+	Publish = function(_self, _owner_identity, _reason)
+		return { code = "scheduled", durable = false }
+	end,
+	Register = function(self, owner_identity, callback)
+		self.owner_identity = owner_identity
+		self.callback = callback
+		return true, nil
+	end,
+}
+local bound_mailbox, bound_mailbox_error = SchedulerV2.BindMailboxWakeups(
+	test_accelerator,
+	owner,
+	yielding_mailbox,
+	function() return true end,
+	2
+)
+assert(bound_mailbox, "failed to bind mailbox to the V2 scheduler: " .. tostring(bound_mailbox_error))
+assert(type(test_accelerator.callback) == "function", "wakeup callback was not registered")
+
 local yielding_message = yielding_mailbox:EnqueueAsync("yielding-handler", { coins = 0 }, {
 	idempotency_key = "mailbox-yielding-handler",
 })
@@ -203,6 +234,15 @@ assert(yielding_result.code == "processed",
 local yielded_delivery, yielded_status = yielding_mailbox:GetDeliveryAsync(yielding_message.message_id)
 assert(yielded_status.code == "success" and yielded_delivery ~= nil and yielded_delivery.State == "acknowledged",
 	"yielding handler's renewed claim did not reach terminal acknowledgement")
+local scheduler_dispatch_stats = SchedulerV2.GetSchedulerDispatchStats()
+local shared_scheduler_stats = SchedulerV2.RuntimeGovernor.get_shared():Stats()
+local renewal_lane_stats = shared_scheduler_stats.scheduler.by_lane.lease_renewal
+assert(scheduler_dispatch_stats.dispatched >= 2,
+	"mailbox heartbeat and explicit renewal did not dispatch through the shared scheduler")
+assert(renewal_lane_stats ~= nil and renewal_lane_stats.selected >= 2,
+	"lease renewals did not use the scheduler's reserved deadline lane")
+assert(scheduler_dispatch_stats.max_in_flight >= 1,
+	"shared scheduler did not report dispatch activity")
 
 -- A failed canonical read must not be turned into a successful but incomplete queue view.
 local read_failure_message = yielding_mailbox:EnqueueAsync("read-failure-probe", { coins = 1 }, {
