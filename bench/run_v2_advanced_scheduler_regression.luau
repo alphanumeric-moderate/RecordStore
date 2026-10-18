@@ -1,6 +1,7 @@
 --!nocheck
 -- Deterministic public-surface coverage for V2 advanced scheduler behavior.
 local Shim = require("./RobloxShim")
+local task = require("@lune/task")
 local RecordStore = Shim.load_isolated("v2-advanced-scheduler")
 local MailboxV2 = require("../src/PlayerDataInitializer/RecordStoreMailboxV2")
 local V2Module = require("../src/PlayerDataInitializer/RecordStoreV2")
