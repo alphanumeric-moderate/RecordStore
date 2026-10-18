@@ -209,6 +209,14 @@ local read_failure_message = yielding_mailbox:EnqueueAsync("read-failure-probe",
 	idempotency_key = "mailbox-canonical-read-failure",
 })
 assert(read_failure_message.code == "accepted", tostring(read_failure_message.error))
+local observed_stats, observed_stats_result = yielding_mailbox:GetStatsAsync()
+assert(observed_stats_result.code == "success", tostring(observed_stats_result.error))
+assert(type(observed_stats.observed_at) == "number"
+	and observed_stats.consistency == "bounded_non_linearizable"
+	and observed_stats.completeness.active_index == "complete_for_observed_manifest"
+	and observed_stats.exactness.dead_lettered_page == "page_count_not_total"
+	and type(observed_stats.dead_lettered_page_has_more) == "boolean",
+	"mailbox stats omitted observation time, completeness, or count-exactness metadata")
 local active_rows, active_rows_error = yielding_mailbox:_rows("active")
 assert(active_rows_error == nil and #active_rows > 0, "read-failure fixture did not retain an active index row")
 local read_failure_route = tostring(active_rows[1].route)
