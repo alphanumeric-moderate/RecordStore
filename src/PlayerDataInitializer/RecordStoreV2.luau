@@ -4228,6 +4228,35 @@ function V2.new(record_store, mailbox_module, options)
 		end, schedule_options.due_at_ms, schedule_options, on_complete)
 	end
 
+	-- Generic scheduled work lets callers opt any bounded operation into the same
+	-- selector without changing the semantics of the existing synchronous APIs.
+	api.ScheduleWork = function(owner, work_id, callback, schedule_options)
+		if type(schedule_options) ~= "table" then
+			if schedule_options == nil then schedule_options = {} else return { code = "invalid", message = "schedule_options must be a table" } end
+		end
+		if not valid_text(work_id, 96) then return { code = "invalid", message = "work_id must be 1..96 bytes" } end
+		if type(callback) ~= "function" then return { code = "invalid", message = "scheduled work callback is required" } end
+		local operation = schedule_options.activation_operation or "maintenance"
+		local known_operations = {
+			read = true, enqueue = true, process = true, recover = true, renew_claim = true,
+			acknowledge = true, reconcile = true, replay = true, discard = true, maintenance = true,
+			dispatch = true, transact = true, inbox = true, purchase = true, saga = true,
+			erase_plan = true, erase_execute = true, projection = true, migrate = true, restore = true,
+			policy = true, trace_flush = true, configure = true,
+		}
+		if not valid_text(operation, 32) or not known_operations[operation] then
+			return { code = "invalid", message = "activation_operation is invalid or unsupported" }
+		end
+		local queued_options = copy(schedule_options)
+		queued_options.activation_operation = nil
+		local lane = queued_options.lane or "normal"
+		return enqueue_scheduled_callback(owner, lane, "work:" .. work_id, function()
+			local blocked = activation_block(operation)
+			if blocked ~= nil then return blocked end
+			return callback(work_id)
+		end, queued_options.due_at_ms, queued_options, queued_options.on_complete)
+	end
+
 	-- Maintenance is one bounded chunk; a caller persists and resumes its cursor.
 	api.ScheduleMaintenance = function(owner, maintenance_id, callback, schedule_options)
 		schedule_options = schedule_options or {}
