@@ -256,10 +256,7 @@ with existing direct APIs; callers must deliberately route work through the sele
 they require scheduler ordering. Strict `ordering_key` semantics and global/server-instance
 priority are not provided.
 
-This implementation follows the scheduler requirements in [design #33, section 29](docs/superpowers/specs/2026-10-17-recordstore-durable-messaging-v2-design.md#29-advanced-scheduling-designs-with-correctness-and-performance-gates). The focused scheduler regression suite runs under Lune and the CodSpeed configuration
-includes a fixed synthetic owner/work-class selection workload. These establish local
-algorithm behavior and cost only; they do not prove Roblox DataStore latency, quota,
-cross-server behavior or production rollout safety.
+This implementation follows the scheduler requirements in [design #33, section 29](docs/superpowers/specs/2026-10-17-recordstore-durable-messaging-v2-design.md#29-advanced-scheduling-designs-with-correctness-and-performance-gates). The focused scheduler regression suite runs under Lune. CodSpeed measures FIFO, weighted, deadline and DRR against the same synthetic multi-owner/work-class input in separate benchmark entries. These establish local algorithm behavior and relative cost only; they do not prove Roblox DataStore latency, quota, cross-server behavior or production rollout safety.
 
 ## Benchmarks
 
