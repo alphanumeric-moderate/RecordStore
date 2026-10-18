@@ -3,6 +3,9 @@ $schema: https://raw.githubusercontent.com/CodSpeedHQ/codspeed/refs/heads/main/s
 # RecordStore benchmarks, executed with Lune (standalone Luau runtime) through
 # bench/RobloxShim.luau, which provides the Roblox APIs used by RecordStore.Mock.
 benchmarks:
+  - name: "advanced scheduler mixed owner/work-class selection"
+    exec: lune run bench/advanced_scheduler.bench.luau
+
   - name: "session lifecycle (create/update/save/close/reopen)"
     exec: lune run bench/session_lifecycle.bench.luau
 
