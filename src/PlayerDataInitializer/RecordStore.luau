@@ -1129,6 +1129,8 @@ local function consume_runtime_queue_token(): boolean
 	return true
 end
 
+local runtime_breaker_complete: (kind: string, success: boolean) -> ()
+
 local function observe_runtime_request(kind: string, success: boolean, message: string?, duration_ms: number)
 	if kind == "read" then
 		runtime_metrics.reads += 1
@@ -2274,7 +2276,7 @@ local function runtime_breaker_cancel_probe(kind: string)
 	end
 end
 
-local function runtime_breaker_complete(kind: string, success: boolean)
+runtime_breaker_complete = function(kind: string, success: boolean)
 	local breaker = runtime_breakers[kind]
 	if breaker == nil then return end
 	if success then
