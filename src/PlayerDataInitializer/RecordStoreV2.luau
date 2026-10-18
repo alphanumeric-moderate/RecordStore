@@ -2730,10 +2730,13 @@ local function new_projections(store, options)
 			if observed.version ~= def.version then
 				return { code = "unsupported_schema", message = "projection schema revision changed" }
 			end
+			if type(observed.subject_user_ids) ~= "table" then
+				return { code = "unsupported_schema", message = "projection row predates subject tracking; use a new versioned projection name and rebuild" }
+			end
 			if type(observed.value) ~= "table" or not finite(observed.source_revision)
 				or math.floor(observed.source_revision) ~= observed.source_revision or observed.source_revision < -1
-				or not valid_recent_events(observed.recent_events) or type(observed.subject_user_ids) ~= "table" then
-				return { code = "corrupt", message = "projection row has malformed value, revision, event ledger or subject association" }
+				or not valid_recent_events(observed.recent_events) then
+				return { code = "corrupt", message = "projection row has malformed value, revision or event ledger" }
 			end
 			local observed_subject_count = key_count(observed.subject_user_ids)
 			if observed_subject_count > 100 then return { code = "corrupt", message = "projection subject association exceeds its bound" } end
