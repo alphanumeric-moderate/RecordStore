@@ -62,7 +62,7 @@ local function new_governor(options)
 		due_sequence = 0,
 		retry_tokens = 32, last_token_time = now_ms(),
 		last_budget = nil, last_budget_by_kind = {}, latency_ewma = {}, consecutive_errors = {}, circuits = {},
-		stats = { admitted = 0, rejected = 0, completed = 0, throttled = 0, errors = 0,
+		stats = { admitted = 0, rejected = 0, completed = 0, released = 0, throttled = 0, errors = 0,
 			scheduled_selected = 0, scheduled_expired = 0, scheduled_overdue = 0, shadow_samples = 0 },
 		scheduler_metrics = { by_lane = {}, wait_ms = {}, last_shadow = nil },
 	}
@@ -186,7 +186,7 @@ local function new_governor(options)
 		end
 		local observed_budget = self.last_budget_by_kind[request_kind]
 		if finite(observed_budget) and observed_budget < self.policy.minimum_budget and not critical then
-			return { code = "backpressure", transient = true, retry_after_ms = 250,
+			return { code = "backpressure", transient = true, budget_limited = true, retry_after_ms = 250,
 				message = "request budget is below configured minimum" }, false, true
 		end
 		if self.in_flight + cost > self.policy.max_in_flight then
@@ -241,7 +241,7 @@ local function new_governor(options)
 			-- If no outcome was observed, release the probe reservation for the next attempt.
 			circuit.probe = false
 		end
-		self.stats.completed += 1
+		self.stats.released += 1
 		return true
 	end
 	function governor:AcquireRetryToken(work_class)
@@ -455,6 +455,10 @@ local function new_governor(options)
 					if admission.code == "admitted" then
 						eligible[#eligible + 1] = { index = index, item = item, effective_lane = effective_lane }
 					elseif finite(admission.retry_after_ms) then
+						if admission.budget_limited then
+							self.stats.rejected += 1
+							self.stats.throttled += 1
+						end
 						item.admission_blocked_until_ms = now + math.max(1, admission.retry_after_ms)
 					end
 				end
@@ -670,6 +674,7 @@ local function new_governor(options)
 					item.service_class == "critical" or item.lane == "lease_renewal"
 				)
 				if admission.terminal then
+					self.stats.rejected += 1
 					table.remove(self.queue, index)
 					item.queued = false
 					item.terminal_result = admission
