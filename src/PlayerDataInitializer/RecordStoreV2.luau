@@ -291,7 +291,9 @@ local function new_inbox()
 		options = options or {}
 		if not valid_text(batch_id, 96) then return { code = "invalid", message = "batch_id must be 1..96 bytes" } end
 		if type(reducer) ~= "function" then return { code = "invalid", message = "reducer required" } end
-		local valid, array_message = dense_array(items, math.clamp(math.floor(options.max_batch_items or MAX_BATCH_ITEMS), 1, MAX_BATCH_ITEMS))
+		local requested_batch_items = if finite(options.max_batch_items) then math.floor(options.max_batch_items) else MAX_BATCH_ITEMS
+		local max_batch_items = math.clamp(requested_batch_items, 1, MAX_BATCH_ITEMS)
+		local valid, array_message = dense_array(items, max_batch_items)
 		if not valid then return { code = "invalid", message = array_message } end
 		local normalized, seen, total_bytes = {}, {}, 0
 		for index, item in ipairs(items) do
