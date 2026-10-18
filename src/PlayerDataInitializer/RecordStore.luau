@@ -6670,7 +6670,7 @@ local function enqueue_state_work(
 	lane: string,
 	work_class: string,
 	operation_class: string,
-	callback: () -> any,
+	callback: (batch_size: number?) -> any,
 	schedule_options: any?
 ): any
 	local slot = scheduled_state_slot(state)
@@ -6696,14 +6696,14 @@ local function enqueue_state_work(
 	local result = scheduler_dispatcher:Schedule(
 		scheduler_owner_id(state),
 		kind .. ":" .. tostring(state.generation),
-		function()
+		function(batch_size: number?)
 			if not scheduler_enabled then
 				return { code = "cancelled", message = "advanced scheduler was disabled before work started" }
 			end
 			if closing or state.retired or state.state ~= "active" then
 				return { code = "cancelled", message = "record is no longer active" }
 			end
-			return callback()
+			return callback(batch_size)
 		end,
 		options
 	)
@@ -6740,16 +6740,16 @@ end
 function RecordStore.schedule_work(
 	owner_id: string,
 	work_id: string,
-	callback: () -> any,
+	callback: (batch_size: number?) -> any,
 	schedule_options: { [string]: unknown }?
 ): { [string]: any }
 	if closing then return { code = "closed", message = "RecordStore is shutting down" } end
 	if not scheduler_enabled then return { code = "disabled", message = "advanced scheduling is disabled" } end
-	return scheduler_dispatcher:Schedule(owner_id, work_id, function()
+	return scheduler_dispatcher:Schedule(owner_id, work_id, function(batch_size: number?)
 		if not scheduler_enabled then
 			return { code = "cancelled", message = "advanced scheduling was disabled before work started" }
 		end
-		return callback()
+		return callback(batch_size)
 	end, schedule_options)
 end
 
@@ -6861,16 +6861,18 @@ local function run_scheduled_record_work(record: Record, state: InternalState, n
 		and (state.queue_hint or now >= state.next_queue_poll)
 	then
 		local result = enqueue_state_work(record, state, "queue_poll", "background", "mailbox_poll", "read",
-			function()
+			function(batch_size: number?)
 				if state.queue_busy then
 					return { code = "retryable", message = "queue poll became busy before processing started" }
 				end
 				state.queue_hint = false
-				local code, message = process_queue_internal(state, 4)
+				local bounded_batch_size = if type(batch_size) == "number" then math.clamp(math.floor(batch_size), 1, 4) else 4
+				local code, message = process_queue_internal(state, bounded_batch_size)
 				sync_public(record)
 				return { code = code, message = message }
 			end,
 			{ service_class = "normal", read_units = 1, write_units = 1, handler_slots = 1,
+				batchable = true, batch_size = 4, batch_backlog = 4, batch_window_ms = 0,
 				max_retries = 4, retry_delay_ms = 50, retry_jitter_percent = 10 })
 		if type(result) == "table" and result.code == "accepted" then
 			state.next_queue_poll = now + (state.options.queue_poll_interval or DEFAULT_QUEUE_POLL_INTERVAL)
