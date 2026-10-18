@@ -2586,6 +2586,33 @@ local function new_projections(store, options)
 	options = options or {}
 	local service = { store = store, projections = {} }
 	local function key_for(name, entity_id) return "rv2p-" .. digest(canonical({ name = name, entity_id = entity_id })) end
+	local function valid_recent_events(events)
+		if type(events) ~= "table" then return false end
+		local count = key_count(events)
+		if count > 64 then return false end
+		for index in pairs(events) do
+			if type(index) ~= "number" or not finite(index) or math.floor(index) ~= index or index < 1 or index > count then return false end
+		end
+		local seen = {}
+		for index = 1, count do
+			local event_id = events[index]
+			if not valid_text(event_id, 128) or seen[event_id] then return false end
+			seen[event_id] = true
+		end
+		return true, seen
+	end
+	local function valid_latest_event_receipt(row)
+		if not finite(row.source_revision) or math.floor(row.source_revision) ~= row.source_revision or row.source_revision < -1 then return false end
+		local valid_events, seen_events = valid_recent_events(row.recent_events)
+		if not valid_events then return false end
+		if row.source_revision == -1 then
+			return next(seen_events) == nil and row.last_event_id == nil and row.last_event_revision == nil and row.last_attempt_id == nil
+		end
+		return valid_text(row.last_event_id, 128)
+			and row.last_event_revision == row.source_revision
+			and valid_text(row.last_attempt_id, 128)
+			and seen_events[row.last_event_id] == true
+	end
 	local function verify_subjects(subject_user_ids)
 		if subject_user_ids == nil then return true, nil end
 		if type(subject_user_ids) ~= "table" then
@@ -2660,23 +2687,12 @@ local function new_projections(store, options)
 		local key = key_for(name, event.entity_id)
 		local attempt_id = digest(event.event_id .. ":" .. tostring(os.clock()) .. ":" .. tostring(math.random()))
 		local updated_at = os.time()
-		local function valid_recent_events(events)
-			if type(events) ~= "table" then return false end
-			local count = key_count(events)
-			if count > 64 then return false end
-			for index in pairs(events) do
-				if type(index) ~= "number" or not finite(index) or math.floor(index) ~= index or index < 1 or index > count then return false end
-			end
-			for index = 1, count do if not valid_text(events[index], 128) then return false end end
-			return true
-		end
 		local value, write_error = adapter_call(store, "UpdateAsync", key, function(old)
 			if old ~= nil and type(old) ~= "table" then return old end
 			if type(old) == "table" and (old.entity_id ~= event.entity_id or old.projection_name ~= name) then return old end
 			if type(old) == "table" and old.version ~= def.version then return old end
-			if type(old) == "table" and (type(old.value) ~= "table" or not finite(old.source_revision)
-				or math.floor(old.source_revision) ~= old.source_revision or old.source_revision < -1
-				or not valid_recent_events(old.recent_events) or type(old.subject_user_ids) ~= "table"
+			if type(old) == "table" and (type(old.value) ~= "table"
+				or not valid_latest_event_receipt(old) or type(old.subject_user_ids) ~= "table"
 			) then return old end
 			if type(old) == "table" then
 				local existing_subject_count = key_count(old.subject_user_ids)
@@ -2740,10 +2756,8 @@ local function new_projections(store, options)
 			if type(observed.subject_user_ids) ~= "table" then
 				return { code = "unsupported_schema", message = "projection row predates subject tracking; use a new versioned projection name and rebuild" }
 			end
-			if type(observed.value) ~= "table" or not finite(observed.source_revision)
-				or math.floor(observed.source_revision) ~= observed.source_revision or observed.source_revision < -1
-				or not valid_recent_events(observed.recent_events) then
-				return { code = "corrupt", message = "projection row has malformed value, revision or event ledger" }
+			if type(observed.value) ~= "table" or not valid_latest_event_receipt(observed) then
+				return { code = "corrupt", message = "projection row has malformed value, revision or event receipt ledger" }
 			end
 			local observed_subject_count = key_count(observed.subject_user_ids)
 			if observed_subject_count > 100 then return { code = "corrupt", message = "projection subject association exceeds its bound" } end
@@ -2801,38 +2815,11 @@ local function new_projections(store, options)
 		if type(value) ~= "table" then return { code = "corrupt", message = "projection row is not a table" } end
 		if value.entity_id ~= entity_id or value.projection_name ~= name then return { code = "conflict", message = "projection key collision" } end
 		if value.version ~= def.version then return { code = "unsupported_schema", message = "projection schema revision changed" } end
-		if type(value.value) ~= "table" or not finite(value.source_revision)
-			or math.floor(value.source_revision) ~= value.source_revision or value.source_revision < -1
-		then
-			return { code = "corrupt", message = "projection row has a malformed value or source revision" }
-		end
-		if type(value.recent_events) ~= "table" then return { code = "corrupt", message = "projection event ledger is missing" } end
-		local event_count = key_count(value.recent_events)
-		if event_count > 64 then return { code = "corrupt", message = "projection event ledger exceeds its bound" } end
-		for index in pairs(value.recent_events) do
-			if type(index) ~= "number" or not finite(index) or math.floor(index) ~= index or index < 1 or index > event_count then
-				return { code = "corrupt", message = "projection event ledger is not a dense array" }
-			end
-		end
-		local seen_events = {}
-		for index = 1, event_count do
-			local event_id = value.recent_events[index]
-			if not valid_text(event_id, 128) or seen_events[event_id] then
-				return { code = "corrupt", message = "projection event ledger contains an invalid or duplicate event ID" }
-			end
-			seen_events[event_id] = true
+		if type(value.value) ~= "table" or not valid_latest_event_receipt(value) then
+			return { code = "corrupt", message = "projection row has a malformed value, revision or event receipt ledger" }
 		end
 		if type(value.subject_user_ids) ~= "table" then
 			return { code = "unsupported_schema", message = "projection row lacks subject-erasure metadata" }
-		end
-		if value.source_revision >= 0 then
-			if not valid_text(value.last_event_id, 128) or value.last_event_revision ~= value.source_revision
-				or not valid_text(value.last_attempt_id, 128) or not seen_events[value.last_event_id]
-			then
-				return { code = "corrupt", message = "projection row's latest-event receipt is inconsistent with its source revision" }
-			end
-		elseif event_count > 0 or value.last_event_id ~= nil or value.last_event_revision ~= nil or value.last_attempt_id ~= nil then
-			return { code = "corrupt", message = "empty projection row contains event receipt state" }
 		end
 		local subjects_ok, subject_error = verify_subjects(value.subject_user_ids)
 		if not subjects_ok then return subject_error end
