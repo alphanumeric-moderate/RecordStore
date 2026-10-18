@@ -833,7 +833,7 @@ local function new_governor(options)
 		if finite(item.read_units) and finite(item.write_units) then estimated = math.max(estimated, item.read_units + item.write_units) end
 		if finite(item.estimated_bytes) then estimated = math.max(estimated, math.ceil(item.estimated_bytes / 16384)) end
 		if finite(item.handler_slots) then estimated = math.max(estimated, item.handler_slots * 4) end
-		if item.operation_class == nil and finite(item.cost) then estimated = math.max(1, math.floor(item.cost)) end
+		if finite(item.cost) then estimated = math.max(estimated, math.floor(item.cost)) end
 		return math.clamp(math.ceil(estimated), 1, 256)
 	end
 	local function lane_key(item, now)
@@ -4217,7 +4217,14 @@ function V2.new(record_store, mailbox_module, options)
 		if type(dispatcher) ~= "function" then return { code = "invalid", message = "outbox dispatcher is required" } end
 		if on_complete ~= nil and type(on_complete) ~= "function" then return { code = "invalid", message = "on_complete must be a function" } end
 		return enqueue_scheduled_callback(owner, schedule_options.lane or "background", "outbox_dispatch", function()
-			return api.Outbox.DispatchBatches(record, dispatcher, batch_size, max_batches)
+			local observed_latency = math.max(
+				runtime_governor.latency_ewma.outbox_dispatch or 0,
+				runtime_governor.latency_ewma.write or 0,
+				runtime_governor.latency_ewma.update_async or 0,
+				runtime_governor.latency_ewma.service or 0
+			)
+			local effective_batch_size = runtime_governor:ChooseBatchSize(batch_size, observed_latency)
+			return api.Outbox.DispatchBatches(record, dispatcher, effective_batch_size, max_batches)
 		end, schedule_options.due_at_ms, schedule_options, on_complete)
 	end
 
