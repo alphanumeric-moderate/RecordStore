@@ -2030,7 +2030,16 @@ local function new_erasure(store, families, options)
 		local key = manifest_key(user_id)
 		local manifest, message = adapter_call(store, "GetAsync", key)
 		if message then return { code = "unknown", message = message } end
-		if type(manifest) ~= "table" or manifest.user_id ~= user_id or manifest.erasure_id ~= erasure_id then return { code = "not_found" } end
+		if manifest == nil then return { code = "not_found" } end
+		if type(manifest) ~= "table" or manifest.user_id ~= user_id or manifest.erasure_id ~= erasure_id then
+			return { code = "conflict", message = "erasure manifest identity does not match the requested subject and operation" }
+		end
+		local valid_status = { planned = true, in_progress = true, unknown = true, completed = true }
+		if manifest.version ~= 1 or not valid_text(manifest.status, 32) or not valid_status[manifest.status]
+			or type(manifest.coverage) ~= "table" or type(manifest.rtbf_coverage_verified) ~= "boolean"
+		then
+			return { code = "unsupported_schema", message = "erasure manifest has an unsupported version or malformed state" }
+		end
 		if manifest.rtbf_coverage_verified ~= true then
 			return { code = "blocked", cursor = manifest.cursor or 0, completed_count = manifest.completed_count or 0,
 				message = "RTBF coverage is not verified for every declared family, template and authoritative inventory; no erasure actions were run" }
