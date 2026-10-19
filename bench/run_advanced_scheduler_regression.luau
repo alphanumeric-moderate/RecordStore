@@ -32,6 +32,11 @@ local policy_stats = policy:Stats()
 assert(not policy:SetPolicy({ revision = policy_stats.policy.revision }), "stale policy revision was accepted")
 assert(not policy:SetPolicy({ revision = policy_stats.policy.revision + 1, algorithm = "not-a-policy" }),
 	"unknown scheduler algorithm was accepted")
+local bounded_buffer_ok = policy:SetPolicy({
+	revision = policy_stats.policy.revision + 1,
+	mode = "bounded_buffer",
+})
+assert(not bounded_buffer_ok, "unsupported bounded_buffer mode was accepted")
 local good_policy, policy_error = policy:SetPolicy({
 	revision = policy_stats.policy.revision + 1,
 	max_scheduled_in_flight = 4,
@@ -65,6 +70,41 @@ enqueue(weighted_cost, { id = "large", owner_id = "large-owner", lane = "normal"
 enqueue(weighted_cost, { id = "small", owner_id = "small-owner", lane = "normal", operation_class = "read" })
 take(weighted_cost, "small")
 take(weighted_cost, "large")
+
+-- DRR cost must match the actual adaptive batch size admitted for execution.
+local adaptive_drr = new_scheduler()
+local adaptive_drr_policy = adaptive_drr:Stats().policy
+adaptive_drr:Observe("outbox_dispatch", true, adaptive_drr_policy.batch_latency_ceiling_ms)
+enqueue(adaptive_drr, {
+	id = "adaptive-batch",
+	owner_id = "owner-a",
+	lane = "normal",
+	work_class = "shared",
+	operation_class = "outbox_dispatch",
+	batchable = true,
+	batch_size = 8,
+	batch_backlog = 8,
+	read_units = 1,
+	write_units = 1,
+	estimated_bytes = 16384,
+})
+enqueue(adaptive_drr, {
+	id = "single-item",
+	owner_id = "owner-b",
+	lane = "normal",
+	work_class = "shared",
+	operation_class = "read",
+	read_units = 1,
+	write_units = 0,
+	estimated_bytes = 16384,
+})
+local adaptive_first, adaptive_status = adaptive_drr:TakeNext()
+assert(adaptive_first ~= nil and adaptive_status == "success" and adaptive_first.id == "adaptive-batch",
+	"DRR charged the requested batch size instead of the latency-capped batch size")
+assert(adaptive_first.admission_batch_size == 1,
+	"adaptive DRR fixture did not actually select a one-item batch")
+assert(adaptive_drr:MarkCompleted(adaptive_first.id, "committed"),
+	"adaptive DRR selected work could not complete")
 
 -- Governor reservation tickets are single-use and cannot be forged by mutating ticket data.
 local ticket_governor = new_scheduler()
@@ -460,6 +500,34 @@ assert(inherited.inherited_until_ms <= now_ms + inheritance_policy.priority_inhe
 	"priority inheritance exceeded its configured lifetime")
 assert(inheritance:MarkCompleted(inherited.id, "committed"))
 take(inheritance, "urgent-dependent")
+
+-- Priority inheritance must be reevaluated when a prerequisite becomes ready later.
+local delayed_inheritance = new_scheduler()
+local prerequisite_ready_at = now_ms + 100
+enqueue(delayed_inheritance, {
+	id = "delayed-prerequisite",
+	owner_id = "delayed-workflow-owner",
+	work_class = "saga",
+	lane = "background",
+	available_at_ms = prerequisite_ready_at,
+})
+enqueue(delayed_inheritance, {
+	id = "delayed-urgent-dependent",
+	owner_id = "delayed-workflow-owner",
+	work_class = "saga",
+	lane = "high",
+	dependencies = { "delayed-prerequisite" },
+})
+assert(delayed_inheritance:TakeNext() == nil,
+	"delayed prerequisite started before its availability time")
+now_ms = prerequisite_ready_at
+local delayed_prerequisite, delayed_status = delayed_inheritance:TakeNext()
+assert(delayed_prerequisite ~= nil and delayed_status == "success"
+	and delayed_prerequisite.id == "delayed-prerequisite"
+	and delayed_prerequisite.inherited_lane == "normal",
+	"priority inheritance was not applied when the prerequisite became ready")
+assert(delayed_inheritance:MarkCompleted(delayed_prerequisite.id, "committed"))
+take(delayed_inheritance, "delayed-urgent-dependent")
 
 -- Urgent-deadline selection is bounded so deadlines do not starve older lane work.
 local urgent = new_scheduler()
@@ -1105,6 +1173,21 @@ local configured, configure_message = RecordStore.configure_scheduler_policy({
 assert(configured == "success", "core scheduler rejected policy: " .. tostring(configure_message))
 local enabled, enable_message = RecordStore.set_scheduler_enabled(true)
 assert(enabled, "core scheduler did not enable: " .. tostring(enable_message))
+
+local reserved_lane_callback_ran = false
+local reserved_lane_job = RecordStore.schedule_work(
+	"integration-owner",
+	"public-reserved-renewal-lane",
+	function()
+		reserved_lane_callback_ran = true
+		return { code = "renewed" }
+	end,
+	{ lane = "lease_renewal", service_class = "critical" }
+)
+assert(reserved_lane_job.code == "invalid",
+	"public schedule_work API allowed application callbacks into the reserved renewal lane")
+assert(not reserved_lane_callback_ran,
+	"public reserved renewal callback ran despite being rejected")
 
 local public_callback_ran = false
 local public_job = RecordStore.schedule_work("integration-owner", "public-scheduler-api", function()
