@@ -800,7 +800,7 @@ local function new_governor(options)
 						if row.item.enqueued_at_ms < best.item.enqueued_at_ms then best = row end
 					end
 				end
-				local cost = effective_cost(best.item)
+				local cost = effective_cost(best.item, best.batch_count)
 				if cost <= self.drr_deficit[key] then
 					self.drr_deficit[key] -= cost
 					self.drr_cursor_key = key
