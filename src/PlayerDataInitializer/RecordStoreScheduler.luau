@@ -1159,8 +1159,15 @@ local function new_governor(options)
 	end
 	function governor:MarkCompleted(id, outcome)
 		if not valid_text(id, 128) then return false, "invalid id" end
+		local code = if type(outcome) == "table" then outcome.code else outcome
 		local item = self.known[id]
-		if item == nil then return false, "scheduled item is not known" end
+		if item == nil then
+			-- Expiry and dependency failures are recorded in TakeNext before the
+			-- dispatcher reconciles their terminal result. Accept only that exact
+			-- recorded failure as an idempotent no-op; never create ghost completion.
+			if self.failed[id] ~= nil and tostring(code or "unknown") == self.failed[id] then return true end
+			return false, "scheduled item is not known"
+		end
 		if item.queued == true and item.terminal_result == nil then
 			return false, "scheduled item is still queued"
 		end
@@ -1185,7 +1192,6 @@ local function new_governor(options)
 				queued.inherited_from = nil
 			end
 		end
-		local code = if type(outcome) == "table" then outcome.code else outcome
 		if code == nil or code == true or code == "success" or code == "committed"
 			or code == "acknowledged" or code == "processed" or code == "empty" or code == "completed" or code == "duplicate" or code == "renewed"
 			or code == "saved" or code == "closed" or code == "created" or code == "loaded"
