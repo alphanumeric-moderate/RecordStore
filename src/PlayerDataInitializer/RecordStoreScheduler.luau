@@ -67,10 +67,25 @@ local function estimate_dimensions(item, batch_count)
 	}
 end
 
+local MAX_OPERATION_KIND_KEYS = 30
+local OTHER_OPERATION_KIND = "__other__"
+
 local function new_governor(options)
 	options = options or {}
 	local function now_ms()
 		return if type(options.now_ms) == "function" then options.now_ms() else os.clock() * 1000
+	end
+	local function operation_metric_key(self, kind)
+		if type(kind) ~= "string" or kind == "" then kind = "default" end
+		-- Reserve two stable buckets: overflow telemetry and dispatch-service latency.
+		if kind == OTHER_OPERATION_KIND or kind == "service" then return kind end
+		local existing = self.operation_kind_keys[kind]
+		if existing ~= nil then return existing end
+		if key_count(self.operation_kind_keys) < MAX_OPERATION_KIND_KEYS then
+			self.operation_kind_keys[kind] = kind
+			return kind
+		end
+		return OTHER_OPERATION_KIND
 	end
 	local governor = {
 		policy = {
@@ -96,7 +111,7 @@ local function new_governor(options)
 		due_sequence = 0,
 		retry_tokens = 32, last_token_time = now_ms(),
 		last_budget = nil, last_budget_by_kind = {}, latency_ewma = {}, latency_samples_by_operation = {},
-		consecutive_errors = {}, circuits = {},
+		operation_kind_keys = {}, consecutive_errors = {}, circuits = {},
 		stats = { admitted = 0, rejected = 0, completed = 0, released = 0, throttled = 0, errors = 0,
 			scheduled_selected = 0, scheduled_expired = 0, scheduled_overdue = 0, shadow_samples = 0 },
 		scheduler_metrics = { by_lane = {}, wait_ms = {}, wait_by_lane_class = {}, last_shadow = nil },
@@ -204,36 +219,43 @@ local function new_governor(options)
 	end
 	function governor:Observe(kind, ok, latency_ms, error_class, budget)
 		if type(kind) ~= "string" or kind == "" then return false end
+		local metric_kind = operation_metric_key(self, kind)
 		if finite(latency_ms) and latency_ms >= 0 then
-			local prior = self.latency_ewma[kind]
-			self.latency_ewma[kind] = prior and prior * 0.8 + latency_ms * 0.2 or latency_ms
-			local sample_key = if self.latency_samples_by_operation[kind] ~= nil
-				or key_count(self.latency_samples_by_operation) < 32 then kind else "__other__"
-			local samples = self.latency_samples_by_operation[sample_key]
+			local prior = self.latency_ewma[metric_kind]
+			self.latency_ewma[metric_kind] = prior and prior * 0.8 + latency_ms * 0.2 or latency_ms
+			local samples = self.latency_samples_by_operation[metric_kind]
 			if samples == nil then
 				samples = {}
-				self.latency_samples_by_operation[sample_key] = samples
+				self.latency_samples_by_operation[metric_kind] = samples
 			end
 			samples[#samples + 1] = latency_ms
 			if #samples > 256 then table.remove(samples, 1) end
 		end
 		if finite(budget) then
 			self.last_budget = budget
-			self.last_budget_by_kind[kind] = budget
+			self.last_budget_by_kind[metric_kind] = budget
 		end
 		if ok then
-			self.consecutive_errors[kind] = 0
-			if self.circuits[kind] and self.circuits[kind].state == "half_open" then self.circuits[kind] = { state = "closed" } end
+			self.consecutive_errors[metric_kind] = 0
+			if self.circuits[metric_kind] and self.circuits[metric_kind].state == "half_open" then
+				self.circuits[metric_kind] = { state = "closed" }
+			end
 		else
 			self.stats.errors += 1
-			self.consecutive_errors[kind] = (self.consecutive_errors[kind] or 0) + 1
+			self.consecutive_errors[metric_kind] = (self.consecutive_errors[metric_kind] or 0) + 1
 			if error_class == "throttled" or error_class == "budget" then self.stats.throttled += 1 end
-			if self.consecutive_errors[kind] >= self.policy.circuit_threshold then self.circuits[kind] = { state = "open", until_ms = now_ms() + self.policy.circuit_cooldown_ms, reason = error_class or "repeated_failure" } end
+			if self.consecutive_errors[metric_kind] >= self.policy.circuit_threshold then
+				self.circuits[metric_kind] = {
+					state = "open", until_ms = now_ms() + self.policy.circuit_cooldown_ms,
+					reason = error_class or "repeated_failure",
+				}
+			end
 		end
 		return true
 	end
 	local function admission_decision(self, work_class, request_kind, cost, mutating, critical_override, dimensions)
 		work_class, request_kind, cost = work_class or "interactive", request_kind or "default", cost or 1
+		request_kind = operation_metric_key(self, request_kind)
 		if not finite(cost) or math.floor(cost) ~= cost or cost < 1 then
 			return { code = "invalid", terminal = true }, false, false
 		end
@@ -467,8 +489,9 @@ local function new_governor(options)
 	local function selected_batch_size(self, item)
 		if item.batchable ~= true then return nil end
 		local now = now_ms()
+		local operation_kind = operation_metric_key(self, item.operation_class or "default")
 		local latency = math.max(
-			self.latency_ewma[item.operation_class or "default"] or 0,
+			self.latency_ewma[operation_kind] or 0,
 			self.latency_ewma.service or 0
 		)
 		local budgets = self.request_budgets
@@ -1108,6 +1131,7 @@ local function new_governor(options)
 		return {
 			queue = copy(self.queue), completed = copy(self.completed), known = copy(self.known),
 			failed = copy(self.failed), active_owner = copy(self.active_owner),
+			operation_kind_keys = copy(self.operation_kind_keys),
 			active_renewals_by_owner = copy(self.active_renewals_by_owner),
 			drr_deficit = copy(self.drr_deficit), drr_cursor_key = self.drr_cursor_key,
 			high_streak = self.high_streak, urgent_streak = self.urgent_streak,
