@@ -1296,6 +1296,21 @@ assert(reserved_operation_job.code == "invalid",
 assert(not reserved_operation_callback_ran,
 	"generic reserved renewal operation callback ran despite being rejected")
 
+local reserved_release_callback_ran = false
+local reserved_release_job = RecordStore.schedule_work(
+	"integration-owner",
+	"public-reserved-profile-release-operation",
+	function()
+		reserved_release_callback_ran = true
+		return { code = "released" }
+	end,
+	{ lane = "normal", operation_class = "profile_release" }
+)
+assert(reserved_release_job.code == "invalid",
+	"generic scheduled work was allowed to share the internal profile-release circuit")
+assert(not reserved_release_callback_ran,
+	"generic reserved profile-release callback ran despite being rejected")
+
 local public_callback_ran = false
 local public_job = RecordStore.schedule_work("integration-owner", "public-scheduler-api", function()
 	public_callback_ran = true
