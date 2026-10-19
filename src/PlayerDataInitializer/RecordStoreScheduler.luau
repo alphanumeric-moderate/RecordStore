@@ -67,8 +67,13 @@ local function estimate_dimensions(item, batch_count)
 	}
 end
 
-local MAX_OPERATION_KIND_KEYS = 30
+local MAX_CUSTOM_OPERATION_KIND_KEYS = 19
 local OTHER_OPERATION_KIND = "__other__"
+local CORE_OPERATION_KINDS = {
+	default = true, read = true, update_async = true, mailbox_claim = true,
+	lease_renewal = true, outbox_dispatch = true, maintenance = true,
+	migration = true, projection = true, tracing = true, batch = true,
+}
 
 local function new_governor(options)
 	options = options or {}
@@ -77,11 +82,13 @@ local function new_governor(options)
 	end
 	local function operation_metric_key(self, kind)
 		if type(kind) ~= "string" or kind == "" then kind = "default" end
-		-- Reserve two stable buckets: overflow telemetry and dispatch-service latency.
-		if kind == OTHER_OPERATION_KIND or kind == "service" then return kind end
+		-- Keep built-in persistence operations isolated; only custom labels overflow.
+		if CORE_OPERATION_KINDS[kind] or kind == OTHER_OPERATION_KIND or kind == "service" then
+			return kind
+		end
 		local existing = self.operation_kind_keys[kind]
 		if existing ~= nil then return existing end
-		if key_count(self.operation_kind_keys) < MAX_OPERATION_KIND_KEYS then
+		if key_count(self.operation_kind_keys) < MAX_CUSTOM_OPERATION_KIND_KEYS then
 			self.operation_kind_keys[kind] = kind
 			return kind
 		end
