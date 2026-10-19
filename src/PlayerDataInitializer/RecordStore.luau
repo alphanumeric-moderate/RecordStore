@@ -6745,8 +6745,10 @@ function RecordStore.schedule_work(
 ): { [string]: any }
 	if closing then return { code = "closed", message = "RecordStore is shutting down" } end
 	if not scheduler_enabled then return { code = "disabled", message = "advanced scheduling is disabled" } end
-	if type(schedule_options) == "table" and schedule_options.lane == "lease_renewal" then
-		return { code = "invalid", message = "lease_renewal is reserved for internal session renewal" }
+	if type(schedule_options) == "table"
+		and (schedule_options.lane == "lease_renewal" or schedule_options.operation_class == "lease_renewal")
+	then
+		return { code = "invalid", message = "lease_renewal lane and operation class are reserved for internal session renewal" }
 	end
 	return scheduler_dispatcher:Schedule(owner_id, work_id, function(batch_size: number?)
 		if not scheduler_enabled then
