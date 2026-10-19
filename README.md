@@ -275,6 +275,12 @@ critical admission reserves remain local controls, not guarantees against other 
 servers or Open Cloud traffic. See the [official DataStore request budget and limits
 documentation](https://create.roblox.com/docs/cloud-services/data-stores/error-codes-and-limits).
 
+Scheduler telemetry cardinality is bounded. Built-in operation classes retain independent
+latency, budget and circuit-breaker observations; after the bounded custom operation-label
+allowance is consumed, additional custom labels are aggregated under `__other__`.
+Work-class governor counters represent active reservations only and are removed when their
+last reservation is released. Snapshot percentiles cover retained samples, not lifetime totals.
+
 Generic callbacks can return a numeric budget field to publish an additional
 operation-class-specific budget observation. Work remains queued during temporary
 capacity, circuit, or budget backpressure. Under read_only, mutations are terminally
