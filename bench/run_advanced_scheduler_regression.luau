@@ -173,6 +173,8 @@ for index = 1, 128 do
 		bounded_operation_metrics:Observe(operation_kind, false, index, "transient", index)
 	end
 end
+-- Built-in persistence classes retain their own circuit/budget observations even after custom labels overflow.
+bounded_operation_metrics:Observe("lease_renewal", true, 7, nil, 7)
 local bounded_metrics_snapshot = bounded_operation_metrics:Stats()
 local function metric_key_count(values)
 	local count = 0
