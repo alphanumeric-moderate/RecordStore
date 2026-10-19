@@ -859,7 +859,9 @@ local function new_governor(options)
 	end
 	function governor:Enqueue(item)
 		if type(item) ~= "table" or not valid_text(item.id, 128) or not valid_text(item.owner_id, 512) then return { code = "invalid" } end
-		if self.known[item.id] then return { code = "duplicate" } end
+		if self.known[item.id] or self.completed[item.id] == true or self.failed[item.id] ~= nil then
+			return { code = "duplicate", message = "work ID is active or has retained terminal history" }
+		end
 		if #self.queue >= self.policy.queue_capacity then self.stats.rejected += 1; return { code = "capacity", message = "local queue full; no accepted durable work is evicted" } end
 		local lane = item.lane or "normal"
 		if lane ~= "high" and lane ~= "normal" and lane ~= "background" and lane ~= "lease_renewal" then return { code = "invalid", message = "unsupported lane" } end
