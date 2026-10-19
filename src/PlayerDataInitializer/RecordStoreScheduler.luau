@@ -1160,7 +1160,14 @@ local function new_governor(options)
 	function governor:MarkCompleted(id, outcome)
 		if not valid_text(id, 128) then return false, "invalid id" end
 		local item = self.known[id]
-		if item ~= nil and item.dispatch_state == "in_flight" then
+		if item == nil then return false, "scheduled item is not known" end
+		if item.queued == true and item.terminal_result == nil then
+			return false, "scheduled item is still queued"
+		end
+		if item.dispatch_state ~= "in_flight" and item.terminal_result == nil then
+			return false, "scheduled item is not in flight"
+		end
+		if item.dispatch_state == "in_flight" then
 			local owner_count = math.max(0, (self.active_owner[item.owner_id] or 1) - 1)
 			if owner_count == 0 then self.active_owner[item.owner_id] = nil else self.active_owner[item.owner_id] = owner_count end
 			if item.lane == "lease_renewal" then
