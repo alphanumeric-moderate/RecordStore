@@ -631,16 +631,20 @@ local function new_governor(options)
 		bucket.samples[#bucket.samples + 1] = age_ms
 		if #bucket.samples > 256 then table.remove(bucket.samples, 1) end
 	end
-	local function inherit_ready_prerequisites(self, dependent)
+	local function inherit_ready_prerequisites(self, dependent, instant)
 		if dependent.lane ~= "high" then return end
-		local now = now_ms()
+		local now = instant or now_ms()
 		for _, prerequisite_id in ipairs(dependent.dependencies or {}) do
 			local prerequisite = self.known[prerequisite_id]
+			local inherited_by_same_dependent = prerequisite ~= nil and prerequisite.inherited_from == dependent.id
+			local inheritance_active = prerequisite ~= nil and prerequisite.inherited_lane ~= nil
+				and finite(prerequisite.inherited_until_ms) and prerequisite.inherited_until_ms > now
 			if prerequisite ~= nil and prerequisite.queued == true and prerequisite.lane == "background"
 				and (prerequisite.due_at_ms or 0) <= now
 				and (prerequisite.available_at_ms == nil or prerequisite.available_at_ms <= now)
 				and (prerequisite.expires_at_ms == nil or prerequisite.expires_at_ms > now)
 				and dependencies_ready(self, prerequisite)
+				and not inherited_by_same_dependent and not inheritance_active
 			then
 				prerequisite.inherited_lane = "normal"
 				prerequisite.inherited_until_ms = now + self.policy.priority_inheritance_max_ms
@@ -687,6 +691,14 @@ local function new_governor(options)
 	local function choose_index(self, algorithm, renewal_mode)
 		local now, eligible = now_ms(), {}
 		local urgent_fallback = self.urgent_streak >= self.policy.urgent_deadline_burst
+		-- A dependent may be queued before its prerequisite becomes due/available.
+		-- Re-evaluate only high-lane items with dependencies so inheritance begins
+		-- when the prerequisite is actually ready, not only at dependent enqueue.
+		for _, dependent in ipairs(self.queue) do
+			if dependent.lane == "high" and #(dependent.dependencies or {}) > 0 then
+				inherit_ready_prerequisites(self, dependent, now)
+			end
+		end
 		for index, item in ipairs(self.queue) do
 			local ready = (item.due_at_ms or 0) <= now
 				and (item.available_at_ms == nil or item.available_at_ms <= now)
