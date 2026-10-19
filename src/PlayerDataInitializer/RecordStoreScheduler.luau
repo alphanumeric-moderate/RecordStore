@@ -71,7 +71,7 @@ local MAX_CUSTOM_OPERATION_KIND_KEYS = 19
 local OTHER_OPERATION_KIND = "__other__"
 local CORE_OPERATION_KINDS = {
 	default = true, read = true, update_async = true, mailbox_claim = true,
-	lease_renewal = true, outbox_dispatch = true, maintenance = true,
+	lease_renewal = true, profile_release = true, outbox_dispatch = true, maintenance = true,
 	migration = true, projection = true, tracing = true, batch = true,
 }
 
