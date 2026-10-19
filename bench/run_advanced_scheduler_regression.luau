@@ -1306,6 +1306,14 @@ local reserved_release_job = RecordStore.schedule_work(
 	end,
 	{ lane = "normal", operation_class = "profile_release" }
 )
+-- If this guard regresses, drain the mistakenly accepted callback before asserting so
+-- the regression fails immediately rather than leaving background scheduler work alive.
+RecordStore.set_scheduler_enabled(false)
+for _ = 1, 200 do
+	if RecordStore.get_scheduler_snapshot().dispatcher.in_flight == 0 then break end
+	task.wait(0.001)
+end
+RecordStore.set_scheduler_enabled(true)
 assert(reserved_release_job.code == "invalid",
 	"generic scheduled work was allowed to share the internal profile-release circuit")
 assert(not reserved_release_callback_ran,
