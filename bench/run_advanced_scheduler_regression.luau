@@ -302,6 +302,24 @@ local capacity_rejected = capacity:Enqueue({ id = "capacity-3", owner_id = "owne
 assert(capacity_rejected.code == "capacity", "full scheduler queue did not apply explicit backpressure")
 assert(capacity:Stats().queue_items == 2, "queue capacity overflow evicted or silently accepted work")
 
+-- A completion must refer to known dispatched/terminal work; it cannot forge or orphan dependencies.
+local completion_guard = new_scheduler()
+assert(not completion_guard:MarkCompleted("ghost-completion", "committed"),
+	"unknown work ID was allowed to manufacture a completed prerequisite")
+local phantom_dependent = completion_guard:Enqueue({
+	id = "dependent-on-ghost", owner_id = "ghost-owner", dependencies = { "ghost-completion" },
+})
+assert(phantom_dependent.code == "invalid",
+	"dependency was accepted after completion of an unknown work ID")
+enqueue(completion_guard, { id = "still-queued", owner_id = "queued-owner" })
+assert(not completion_guard:MarkCompleted("still-queued", "committed"),
+	"queued work was allowed to complete before it was selected")
+local guarded_item, guarded_status = completion_guard:TakeNext()
+assert(guarded_item ~= nil and guarded_item.id == "still-queued" and guarded_status == "success",
+	"rejecting premature completion orphaned the queued item")
+assert(completion_guard:MarkCompleted(guarded_item.id, "committed"),
+	"selected work could not complete after the premature completion was rejected")
+
 -- Dependencies cannot bypass a missing, failed or unknown prerequisite.
 local dependencies = new_scheduler()
 assert(dependencies:Enqueue({ id = "missing-dependent", owner_id = "x", dependencies = { "missing" } }).code == "invalid",
