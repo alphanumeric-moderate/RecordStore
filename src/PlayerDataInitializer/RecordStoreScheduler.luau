@@ -82,10 +82,10 @@ local function new_governor(options)
 	end
 	local function operation_metric_key(self, kind)
 		if type(kind) ~= "string" or kind == "" then kind = "default" end
-		-- Keep built-in persistence operations isolated; only custom labels overflow.
-		if CORE_OPERATION_KINDS[kind] or kind == OTHER_OPERATION_KIND or kind == "service" then
-			return kind
-		end
+		-- Keep built-in persistence operations isolated. Internal-only labels cannot be
+		-- claimed by custom work, because "service" tracks global latency and "__other__" aggregates overflow.
+		if CORE_OPERATION_KINDS[kind] then return kind end
+		if kind == OTHER_OPERATION_KIND or kind == "service" then return OTHER_OPERATION_KIND end
 		local existing = self.operation_kind_keys[kind]
 		if existing ~= nil then return existing end
 		if key_count(self.operation_kind_keys) < MAX_CUSTOM_OPERATION_KIND_KEYS then
