@@ -135,6 +135,23 @@ assert(ticket_governor:Release(reservation_b) and ticket_governor:Release(reserv
 assert(ticket_governor:Stats().in_flight == 0 and ticket_governor:Stats().active_reservation_tickets == 0,
 	"reservation capacity remained allocated after all live tickets were released")
 
+-- Releasing the last ticket for a caller-defined work class must not retain a dead class key.
+local bounded_work_classes = new_scheduler()
+for index = 1, 128 do
+	local class_name = "custom-work-class-" .. tostring(index)
+	local reservation = bounded_work_classes:Admit(
+		class_name, "tracing", 1, false, false,
+		{ read_units = 0, write_units = 0, estimated_bytes = 1024, handler_slots = 1 }
+	)
+	assert(reservation.code == "admitted", "unique work-class reservation was rejected")
+	assert(bounded_work_classes:Release(reservation), "unique work-class reservation was not released")
+end
+local work_class_snapshot = bounded_work_classes:Stats()
+local retained_work_class_count = 0
+for _ in pairs(work_class_snapshot.classes) do retained_work_class_count += 1 end
+assert(retained_work_class_count == 0,
+	"released custom work classes remained in the governor accounting map")
+
 -- Queue wait and operation latency percentiles are exposed per bounded dimensions.
 local latency_metrics = new_scheduler()
 enqueue(latency_metrics, {
