@@ -320,6 +320,27 @@ assert(guarded_item ~= nil and guarded_item.id == "still-queued" and guarded_sta
 assert(completion_guard:MarkCompleted(guarded_item.id, "committed"),
 	"selected work could not complete after the premature completion was rejected")
 
+-- Terminal IDs remain reserved while dependency history retains their outcome.
+local completed_identity = new_scheduler()
+enqueue(completed_identity, { id = "reused-completed-id", owner_id = "identity-owner" })
+take(completed_identity, "reused-completed-id")
+local duplicate_completed_id = completed_identity:Enqueue({
+	id = "reused-completed-id", owner_id = "identity-owner",
+})
+assert(duplicate_completed_id.code == "duplicate",
+	"completed work ID was reused while its dependency result was still retained")
+
+local failed_identity = new_scheduler()
+enqueue(failed_identity, { id = "reused-failed-id", owner_id = "identity-owner" })
+local failed_identity_item, failed_identity_status = failed_identity:TakeNext()
+assert(failed_identity_item ~= nil and failed_identity_status == "success")
+assert(failed_identity:MarkCompleted(failed_identity_item.id, "unknown"))
+local duplicate_failed_id = failed_identity:Enqueue({
+	id = "reused-failed-id", owner_id = "identity-owner",
+})
+assert(duplicate_failed_id.code == "duplicate",
+	"failed work ID was reused while its dependency result was still retained")
+
 -- Dependencies cannot bypass a missing, failed or unknown prerequisite.
 local dependencies = new_scheduler()
 assert(dependencies:Enqueue({ id = "missing-dependent", owner_id = "x", dependencies = { "missing" } }).code == "invalid",
