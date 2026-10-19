@@ -192,10 +192,14 @@ for index = 1, 128 do
 end
 -- Built-in persistence classes retain their own circuit/budget observations even after custom labels overflow.
 bounded_operation_metrics:Observe("lease_renewal", true, 7, nil, 7)
+bounded_operation_metrics:Observe("service", false, 99999, "transient", 1)
 local bounded_metrics_snapshot = bounded_operation_metrics:Stats()
 assert(bounded_metrics_snapshot.latency_ewma.lease_renewal == 7
 	and bounded_metrics_snapshot.last_budget_by_kind.lease_renewal == 7,
 	"core lease-renewal telemetry was collapsed into the overflow bucket")
+assert(bounded_metrics_snapshot.latency_ewma.service == nil
+	and bounded_metrics_snapshot.last_budget_by_kind.service == nil,
+	"custom operation label collided with internal service-latency telemetry")
 local function metric_key_count(values)
 	local count = 0
 	for _ in pairs(values) do count += 1 end
