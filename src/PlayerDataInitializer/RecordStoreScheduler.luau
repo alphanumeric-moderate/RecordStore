@@ -115,7 +115,7 @@ local function new_governor(options)
 			"retry_jitter_percent", "shadow_sample_rate"
 		}
 		for _, field in ipairs(fields) do if not finite(policy[field]) then return false, "policy." .. field .. " must be finite" end end
-		if policy.mode ~= "normal" and policy.mode ~= "reject_noncritical" and policy.mode ~= "bounded_buffer" and policy.mode ~= "read_only" then return false, "invalid degraded mode" end
+		if policy.mode ~= "normal" and policy.mode ~= "reject_noncritical" and policy.mode ~= "read_only" then return false, "invalid degraded mode" end
 		if policy.algorithm ~= "drr" and policy.algorithm ~= "weighted" and policy.algorithm ~= "fifo" and policy.algorithm ~= "deadline" then return false, "invalid scheduler algorithm" end
 		if policy.shadow_algorithm ~= "drr" and policy.shadow_algorithm ~= "weighted" and policy.shadow_algorithm ~= "fifo" and policy.shadow_algorithm ~= "deadline" then return false, "invalid shadow scheduler algorithm" end
 		if type(policy.shadow_enabled) ~= "boolean" then return false, "shadow_enabled must be boolean" end
