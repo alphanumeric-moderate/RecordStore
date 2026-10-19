@@ -1277,6 +1277,21 @@ assert(reserved_lane_job.code == "invalid",
 assert(not reserved_lane_callback_ran,
 	"public reserved renewal callback ran despite being rejected")
 
+local reserved_operation_callback_ran = false
+local reserved_operation_job = RecordStore.schedule_work(
+	"integration-owner",
+	"public-reserved-renewal-operation",
+	function()
+		reserved_operation_callback_ran = true
+		return { code = "renewed" }
+	end,
+	{ lane = "normal", operation_class = "lease_renewal" }
+)
+assert(reserved_operation_job.code == "invalid",
+	"generic scheduled work was allowed to share the internal lease-renewal circuit")
+assert(not reserved_operation_callback_ran,
+	"generic reserved renewal operation callback ran despite being rejected")
+
 local public_callback_ran = false
 local public_job = RecordStore.schedule_work("integration-owner", "public-scheduler-api", function()
 	public_callback_ran = true
