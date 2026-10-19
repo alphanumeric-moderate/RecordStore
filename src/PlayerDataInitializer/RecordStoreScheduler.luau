@@ -417,7 +417,12 @@ local function new_governor(options)
 		if reservation == nil then return false end
 		self.active_tickets[ticket.ticket] = nil
 		self.in_flight = math.max(0, self.in_flight - reservation.cost)
-		self.by_class[reservation.work_class] = math.max(0, (self.by_class[reservation.work_class] or 0) - reservation.cost)
+		local remaining_class_cost = math.max(0, (self.by_class[reservation.work_class] or 0) - reservation.cost)
+		if remaining_class_cost == 0 then
+			self.by_class[reservation.work_class] = nil
+		else
+			self.by_class[reservation.work_class] = remaining_class_cost
+		end
 		self.read_units_in_flight = math.max(0, self.read_units_in_flight - reservation.read_units)
 		self.write_units_in_flight = math.max(0, self.write_units_in_flight - reservation.write_units)
 		self.estimated_bytes_in_flight = math.max(0, self.estimated_bytes_in_flight - reservation.estimated_bytes)
