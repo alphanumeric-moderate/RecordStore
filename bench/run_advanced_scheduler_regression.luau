@@ -165,6 +165,29 @@ assert(latency_snapshot.latency_percentiles_by_operation.update_async.p50_ms == 
 	and latency_snapshot.latency_percentiles_by_operation.update_async.p95_ms == 100,
 	"operation latency tail percentiles were not recorded")
 
+-- Caller-controlled operation labels must not create unbounded long-lived telemetry state.
+local bounded_operation_metrics = new_scheduler()
+for index = 1, 128 do
+	local operation_kind = "unique-operation-" .. tostring(index)
+	for _ = 1, 5 do
+		bounded_operation_metrics:Observe(operation_kind, false, index, "transient", index)
+	end
+end
+local bounded_metrics_snapshot = bounded_operation_metrics:Stats()
+local function metric_key_count(values)
+	local count = 0
+	for _ in pairs(values) do count += 1 end
+	return count
+end
+assert(metric_key_count(bounded_metrics_snapshot.latency_ewma) <= 32,
+	"operation EWMA retained an unbounded number of caller-controlled labels")
+assert(metric_key_count(bounded_metrics_snapshot.last_budget_by_kind) <= 32,
+	"operation budget observations retained an unbounded number of caller-controlled labels")
+assert(metric_key_count(bounded_metrics_snapshot.circuits) <= 32,
+	"circuit-breaker state retained an unbounded number of caller-controlled labels")
+assert(metric_key_count(bounded_metrics_snapshot.latency_percentiles_by_operation) <= 32,
+	"operation latency percentile state exceeded its cardinality bound")
+
 -- Deadline slack affects selection but does not turn an SLO into an expiry.
 local deadline = new_scheduler()
 enqueue(deadline, { id = "no-deadline", owner_id = "same-owner", lane = "normal" })
