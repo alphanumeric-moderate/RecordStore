@@ -1241,11 +1241,14 @@ local function new_governor(options)
 		release_dependencies(self, item)
 		self.known[id] = nil
 		if item ~= nil then self.retry_cooldown_until[item.owner_id] = nil end
-		for _, queued in ipairs(self.queue) do
-			if queued.inherited_from == id then
-				queued.inherited_lane = nil
-				queued.inherited_until_ms = nil
-				queued.inherited_from = nil
+		for _, dependent_item in pairs(self.known) do
+			-- A blocking prerequisite may already be in flight when its dependent
+			-- finishes or is cancelled. Clear inheritance on all active work so a
+			-- later retry cannot keep urgency inherited from a terminal dependency.
+			if dependent_item.inherited_from == id then
+				dependent_item.inherited_lane = nil
+				dependent_item.inherited_until_ms = nil
+				dependent_item.inherited_from = nil
 			end
 		end
 		if code == nil or code == true or code == "success" or code == "committed"
