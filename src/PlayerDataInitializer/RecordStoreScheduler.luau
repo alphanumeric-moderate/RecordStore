@@ -109,6 +109,7 @@ local function new_governor(options)
 			algorithm = "drr", shadow_algorithm = "weighted", shadow_enabled = false, shadow_sample_rate = 0,
 		},
 		in_flight = 0, by_class = {}, active_tickets = {}, queue = {}, due = {}, due_heap = {}, queued_due_heap = {},
+		wake_heap = {}, wake_sequence = 0,
 		read_units_in_flight = 0, write_units_in_flight = 0,
 		estimated_bytes_in_flight = 0, handler_slots_in_flight = 0,
 		request_budgets = { read = nil, write = nil, sampled_at_ms = nil },
@@ -579,6 +580,46 @@ local function new_governor(options)
 		end
 		return first
 	end
+	local rebuild_queue_wake_heap
+	local function push_wake_event(self, item, kind, due_at_ms)
+		self.wake_sequence += 1
+		item.wake_tokens = item.wake_tokens or {}
+		item.wake_tokens[kind] = self.wake_sequence
+		heap_push(self.wake_heap, {
+			id = item.id, item = item, kind = kind,
+			due_at_ms = due_at_ms, sequence = self.wake_sequence,
+		})
+		if #self.wake_heap > self.policy.queue_capacity * 4 and rebuild_queue_wake_heap ~= nil then
+			rebuild_queue_wake_heap(self)
+		end
+	end
+	rebuild_queue_wake_heap = function(self)
+		self.wake_heap = {}
+		local now = now_ms()
+		for _, item in ipairs(self.queue) do
+			if finite(item.due_at_ms) and item.due_at_ms > now then
+				push_wake_event(self, item, "due", item.due_at_ms)
+			end
+			if finite(item.expires_at_ms) and item.expires_at_ms > now then
+				push_wake_event(self, item, "expiry", item.expires_at_ms)
+			end
+			if finite(item.admission_blocked_until_ms) and item.admission_blocked_until_ms > now then
+				push_wake_event(self, item, "admission", item.admission_blocked_until_ms)
+			end
+		end
+	end
+	local function index_item_wake_events(self, item)
+		local now = now_ms()
+		if finite(item.due_at_ms) and item.due_at_ms > now then
+			push_wake_event(self, item, "due", item.due_at_ms)
+		end
+		if finite(item.expires_at_ms) and item.expires_at_ms > now then
+			push_wake_event(self, item, "expiry", item.expires_at_ms)
+		end
+		if finite(item.admission_blocked_until_ms) and item.admission_blocked_until_ms > now then
+			push_wake_event(self, item, "admission", item.admission_blocked_until_ms)
+		end
+	end
 	local function rebuild_due_heap()
 		local rebuilt = {}
 		for _, item in pairs(governor.due) do heap_push(rebuilt, item) end
@@ -791,6 +832,7 @@ local function new_governor(options)
 							self.stats.throttled += 1
 						end
 						item.admission_blocked_until_ms = now + math.max(1, admission.retry_after_ms)
+						push_wake_event(self, item, "admission", item.admission_blocked_until_ms)
 					end
 				end
 			end
@@ -976,6 +1018,7 @@ local function new_governor(options)
 		retain_dependencies(self, value)
 		table.insert(self.queue, value)
 		heap_push(self.queued_due_heap, { id = value.id, due_at_ms = value.due_at_ms, item = value })
+		index_item_wake_events(self, value)
 		inherit_ready_prerequisites(self, value)
 		if #self.queued_due_heap > self.policy.queue_capacity * 2 then
 			local rebuilt = {}
@@ -1108,31 +1151,26 @@ local function new_governor(options)
 		end
 	end
 	function governor:NextWakeAt()
-		local now, next_wake = now_ms(), nil
-		for _, item in ipairs(self.queue) do
-			local owner_at_cap = (self.active_owner[item.owner_id] or 0) >= self.policy.max_per_owner_in_flight
-			local renewal_can_run = item.lane == "lease_renewal" and
-				(self.active_renewals_by_owner[item.owner_id] or 0) < self.policy.max_per_owner_in_flight
-			if dependencies_ready(self, item) and (renewal_can_run or not owner_at_cap) then
-				local candidate
-				if item.admission_blocked_until_ms ~= nil and item.admission_blocked_until_ms > now then
-					candidate = item.admission_blocked_until_ms
-				end
-				if (item.due_at_ms or 0) > now and (candidate == nil or item.due_at_ms < candidate) then candidate = item.due_at_ms end
-				-- Expiry must wake the dispatcher even when it precedes available_at.
-				if item.expires_at_ms ~= nil and item.expires_at_ms > now
-					and (candidate == nil or item.expires_at_ms < candidate)
-				then candidate = item.expires_at_ms end
-				if candidate ~= nil and (next_wake == nil or candidate < next_wake) then next_wake = candidate end
-			elseif item.expires_at_ms ~= nil and item.expires_at_ms > now
-				and (next_wake == nil or item.expires_at_ms < next_wake)
-			then
-				-- Even an owner-saturated item must eventually report expiry. Its
-				-- callback still cannot start until a dispatch slot is available.
-				next_wake = item.expires_at_ms
+		local now = now_ms()
+		while true do
+			local event = self.wake_heap[1]
+			if event == nil then return nil end
+			local item = event.item
+			local tokens = item.wake_tokens
+			local current_at = if event.kind == "due" then item.due_at_ms
+				elseif event.kind == "expiry" then item.expires_at_ms
+				else item.admission_blocked_until_ms
+			local valid = item.queued == true and self.known[event.id] == item
+				and tokens ~= nil and tokens[event.kind] == event.sequence
+				and current_at == event.due_at_ms
+			if not valid or event.due_at_ms <= now then
+				-- Lazy deletion is safe because each item retains only its latest
+				-- per-kind token. Due, expiry and admission can be replaced independently.
+				heap_pop(self.wake_heap)
+			else
+				return event.due_at_ms
 			end
 		end
-		return next_wake
 	end
 	function governor:Reschedule(id, due_at_ms)
 		if not valid_text(id, 128) or not finite(due_at_ms) then return false, "invalid retry schedule" end
@@ -1156,6 +1194,7 @@ local function new_governor(options)
 		end
 		table.insert(self.queue, item)
 		heap_push(self.queued_due_heap, { id = item.id, due_at_ms = item.due_at_ms, item = item })
+		index_item_wake_events(self, item)
 		if #self.queued_due_heap > self.policy.queue_capacity * 2 then
 			local rebuilt = {}
 			for _, queued in ipairs(self.queue) do heap_push(rebuilt, { id = queued.id, due_at_ms = queued.due_at_ms, item = queued }) end
@@ -1217,6 +1256,7 @@ local function new_governor(options)
 			high_streak = self.high_streak, urgent_streak = self.urgent_streak,
 			policy = copy(self.policy), in_flight = self.in_flight, by_class = copy(self.by_class),
 			active_tickets = copy(self.active_tickets),
+			wake_heap = copy(self.wake_heap), wake_sequence = self.wake_sequence,
 			read_units_in_flight = self.read_units_in_flight, write_units_in_flight = self.write_units_in_flight,
 			estimated_bytes_in_flight = self.estimated_bytes_in_flight, handler_slots_in_flight = self.handler_slots_in_flight,
 			request_budgets = copy(self.request_budgets), last_budget_by_kind = copy(self.last_budget_by_kind),
@@ -1415,7 +1455,8 @@ local function new_governor(options)
 				queue_wait_p50_ms = percentile(waits, 0.50), queue_wait_p95_ms = percentile(waits, 0.95),
 				queue_wait_p99_ms = percentile(waits, 0.99),
 				next_due_at_ms = self:NextQueuedDueAt(), due_heap_items = #self.due_heap,
-				queued_due_heap_items = #self.queued_due_heap, active_by_owner = copy(self.active_owner),
+				queued_due_heap_items = #self.queued_due_heap, wake_heap_items = #self.wake_heap,
+				active_by_owner = copy(self.active_owner),
 				last_shadow = copy(self.scheduler_metrics.last_shadow),
 			},
 		}
