@@ -1143,6 +1143,41 @@ for _ = 1, 100 do if second_normal_started and first_normal_finished then break 
 assert(second_normal_started and first_normal_finished and overlapped, "permitted normal concurrency did not overlap")
 assert(parallel_dispatcher:Stats().max_in_flight >= 2, "dispatcher did not report bounded concurrency")
 parallel_dispatcher:Close()
+
+do
+-- An advisory deadline miss is observable by the completion callback, without suppressing the work.
+local overdue_governor = new_scheduler()
+local overdue_dispatcher = Scheduler.new_dispatcher(overdue_governor, {
+	now_ms = function() return now_ms end,
+})
+local overdue_deadline = now_ms - 10
+local overdue_completion = nil
+local overdue_job = overdue_dispatcher:Schedule(
+	"overdue-owner",
+	"overdue-work",
+	function() return { code = "committed" } end,
+	{
+		lane = "normal",
+		deadline_ms = overdue_deadline,
+		on_complete = function(result) overdue_completion = result end,
+	}
+)
+assert(overdue_job.code == "accepted", "advisory-overdue work was rejected")
+for _ = 1, 100 do
+	if overdue_completion ~= nil then break end
+	task.wait(0.001)
+end
+assert(type(overdue_completion) == "table" and overdue_completion.code == "committed",
+	"advisory-overdue work did not complete normally")
+assert(overdue_completion.scheduler_overdue == true,
+	"completion callback did not receive per-job overdue metadata")
+assert(overdue_completion.scheduler_deadline_ms == overdue_deadline,
+	"overdue completion lost its advisory deadline")
+assert(finite(overdue_completion.scheduler_selected_at_ms),
+	"overdue completion did not report the scheduler selection time")
+overdue_dispatcher:Close()
+end
+
 local callback_attempts = 0
 local retry_done = false
 local retry_job = dispatcher:Schedule("retry-owner", "retryable-callback", function()
