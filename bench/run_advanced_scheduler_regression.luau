@@ -815,6 +815,30 @@ unsafe_retry_dispatcher:Close()
 end
 
 do
+-- A high lane alone does not prove a workflow step is time-sensitive.
+local untimed_inheritance = new_scheduler()
+enqueue(untimed_inheritance, {
+	id = "untimed-prerequisite",
+	owner_id = "untimed-workflow-owner",
+	work_class = "saga",
+	lane = "background",
+})
+enqueue(untimed_inheritance, {
+	id = "untimed-high-dependent",
+	owner_id = "untimed-workflow-owner",
+	work_class = "saga",
+	lane = "high",
+	dependencies = { "untimed-prerequisite" },
+})
+local untimed_prerequisite, untimed_status = untimed_inheritance:TakeNext()
+assert(untimed_prerequisite ~= nil and untimed_status == "success",
+	"untimed prerequisite was not selectable")
+assert(untimed_prerequisite.inherited_lane == nil,
+	"a high-lane dependent without a deadline or interactive service class inherited urgency")
+
+end
+
+do
 -- A high-priority workflow may temporarily raise a ready prerequisite's urgency,
 -- but cannot change the prerequisite's original lane or business identity.
 local inheritance = new_scheduler()
