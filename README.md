@@ -242,6 +242,10 @@ budget observations, opt-in batch windows for callbacks that already represent a
 application-defined batch, shadow comparisons, deterministic trace replay, and
 queue/latency metrics. Governor reservations are released on completion and before a
 retry is queued. It never combines separate callbacks into a new business transaction.
+The public `schedule_work` API cannot claim `service_class = "critical"`; that service
+class grants access to protected admission capacity and is reserved for library-managed
+persistence callbacks. The `lease_renewal` lane and `lease_renewal`/`profile_release`
+work and operation classes are likewise internal-only.
 Owner IDs are bounded to 512 bytes, work IDs to 96 bytes, and work classes to 64 bytes.
 
 An explicitly batchable callback can accept one optional `batch_size` argument:
