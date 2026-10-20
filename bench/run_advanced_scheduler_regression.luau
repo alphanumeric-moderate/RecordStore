@@ -522,6 +522,54 @@ local next_renewal = renewal_cap:TakeNext(true)
 assert(next_renewal ~= nil and next_renewal.id == "renewal-b", "second renewal did not proceed after the first completed")
 assert(renewal_cap:MarkCompleted(next_renewal.id, "renewed"))
 
+-- Deadline selection must not indefinitely starve aging best-effort work
+-- while newer critical work is continuously admitted.
+local deadline_fairness = new_scheduler()
+local deadline_fairness_policy = deadline_fairness:Stats().policy
+assert(deadline_fairness:SetPolicy({
+	revision = deadline_fairness_policy.revision + 1,
+	algorithm = "deadline",
+	urgent_deadline_burst = 2,
+}), "deadline fairness policy was rejected")
+enqueue(deadline_fairness, {
+	id = "aging-best-effort",
+	owner_id = "aging-owner",
+	lane = "normal",
+	work_class = "maintenance",
+	service_class = "best_effort",
+})
+for index = 1, 4 do
+	enqueue(deadline_fairness, {
+		id = "critical-stream-" .. tostring(index),
+		owner_id = "critical-owner",
+		lane = "normal",
+		work_class = "profile",
+		service_class = "critical",
+	})
+end
+local best_effort_selected_at = nil
+for index = 1, 100 do
+	local selected = deadline_fairness:TakeNext()
+	assert(selected ~= nil, "deadline fairness workload ran out of ready work")
+	if selected.id == "aging-best-effort" then
+		best_effort_selected_at = index
+		assert(deadline_fairness:MarkCompleted(selected.id, "committed"))
+		break
+	end
+	assert(selected.service_class == "critical", "unexpected class selected before best-effort service")
+	assert(deadline_fairness:MarkCompleted(selected.id, "committed"))
+	now_ms += 1000
+	enqueue(deadline_fairness, {
+		id = "critical-stream-refill-" .. tostring(index),
+		owner_id = "critical-owner",
+		lane = "normal",
+		work_class = "profile",
+		service_class = "critical",
+	})
+end
+assert(best_effort_selected_at ~= nil and best_effort_selected_at <= 24,
+	"deadline selection starved old best-effort work under a continuous critical stream")
+
 -- Shadow comparison is read-only; real selection remains authoritative.
 local shadow = new_scheduler()
 local shadow_policy = shadow:Stats().policy
