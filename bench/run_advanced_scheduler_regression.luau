@@ -1471,6 +1471,37 @@ local disabled_job = RecordStore.schedule_work("integration-owner", "must-stay-d
 	error("scheduled callback ran while advanced scheduling was disabled")
 end, { lane = "normal" })
 assert(disabled_job.code == "disabled", "public scheduled work bypassed the opt-in gate")
+
+-- Rollout is revisioned per server: requested opt-in must not activate a server
+-- outside the canary cohort, and increasing the cohort must activate it immediately.
+local initial_rollout = initial_snapshot.rollout
+assert(type(initial_rollout) == "table", "scheduler snapshot omitted the rollout cohort")
+assert(initial_rollout.percent == 100 and initial_rollout.revision >= 1,
+	"default rollout must preserve explicit opt-in behavior")
+local excluded_code, excluded_message = RecordStore.configure_scheduler_rollout({
+	revision = initial_rollout.revision + 1,
+	percent = 0,
+	salt = "rollout-regression-wave",
+})
+assert(excluded_code == "success", "scheduler rejected a valid zero-percent rollout: " .. tostring(excluded_message))
+assert(RecordStore.set_scheduler_enabled(true), "scheduler enable request was rejected")
+local excluded_snapshot = RecordStore.get_scheduler_snapshot()
+assert(excluded_snapshot.rollout.cohort_bucket >= 0 and excluded_snapshot.rollout.cohort_bucket < 100,
+	"server cohort bucket was outside the [0, 100) range")
+assert(excluded_snapshot.rollout.cohort_included == false and excluded_snapshot.enabled == false,
+	"zero-percent canary activated the new scheduler")
+assert(RecordStore.set_scheduler_enabled(false), "kill switch failed for an excluded cohort")
+local stable_bucket = excluded_snapshot.rollout.cohort_bucket
+assert(RecordStore.get_scheduler_snapshot().rollout.cohort_bucket == stable_bucket,
+	"server cohort bucket was not stable across snapshot reads")
+local restored_code, restored_message = RecordStore.configure_scheduler_rollout({
+	revision = excluded_snapshot.rollout.revision + 1,
+	percent = 100,
+	salt = "rollout-regression-wave",
+})
+assert(restored_code == "success", "scheduler rejected a valid full rollout: " .. tostring(restored_message))
+local full_rollout = RecordStore.get_scheduler_snapshot()
+assert(full_rollout.rollout.cohort_included == true, "100-percent rollout excluded a server")
 local configured, configure_message = RecordStore.configure_scheduler_policy({
 	revision = initial_snapshot.policy.revision + 1,
 	shadow_enabled = true,
