@@ -370,6 +370,8 @@ do
 	end
 	assert(queued_history.completed["queued-history-prerequisite"] == true,
 		"queued dependency lost its prerequisite outcome during history pruning")
+	assert(#queued_history.completed_order <= queued_history:Stats().policy.queue_capacity * 2,
+		"completed-history order grew beyond its configured bound while outcomes were referenced")
 	now_ms += 60000
 	take(queued_history, "queued-history-dependent")
 	for index = 1, 8 do
@@ -406,6 +408,8 @@ do
 	end
 	assert(inflight_history.completed["inflight-history-prerequisite"] == true,
 		"in-flight dependency lost its prerequisite result before a retry")
+	assert(#inflight_history.completed_order <= inflight_history:Stats().policy.queue_capacity * 2,
+		"in-flight dependencies caused completed-history order to grow beyond its configured bound")
 	local rescheduled, reschedule_error = inflight_history:Reschedule(dependent_item.id, now_ms)
 	assert(rescheduled, "dependent work could not be rescheduled: " .. tostring(reschedule_error))
 	local retried_item, retry_status = inflight_history:TakeNext()
@@ -413,6 +417,8 @@ do
 		"retry became permanently ineligible after its prerequisite aged out")
 	assert(inflight_history:MarkCompleted(retried_item.id, "committed"),
 		"retried dependent could not complete")
+	assert(inflight_history.completed["inflight-history-prerequisite"] == nil,
+		"pending completed history was not reclaimed when its final dependent completed")
 end
 
 -- Dependencies cannot bypass a missing, failed or unknown prerequisite.
