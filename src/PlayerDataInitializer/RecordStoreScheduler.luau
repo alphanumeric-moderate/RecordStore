@@ -807,6 +807,16 @@ local function new_governor(options)
 				eligible = filtered
 			end
 		end
+		if renewal_mode == true then
+			-- Lease renewal is a safety lane: order it globally by remaining deadline
+			-- slack across owners, rather than allowing DRR's lane cursor to delay the
+			-- claim closest to lease expiry. item_precedes also ages older work.
+			local best
+			for _, row in ipairs(eligible) do
+				if best == nil or item_precedes(row.item, best.item, now) then best = row end
+			end
+			return best and best.index or nil, urgent_fallback
+		end
 		if algorithm == "fifo" then
 			local best
 			for _, row in ipairs(eligible) do
