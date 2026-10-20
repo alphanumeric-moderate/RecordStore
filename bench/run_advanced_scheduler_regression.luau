@@ -1484,6 +1484,24 @@ local excluded_code, excluded_message = RecordStore.configure_scheduler_rollout(
 	salt = "rollout-regression-wave",
 })
 assert(excluded_code == "success", "scheduler rejected a valid zero-percent rollout: " .. tostring(excluded_message))
+local stale_rollout_code = RecordStore.configure_scheduler_rollout({
+	revision = initial_rollout.revision,
+	percent = 50,
+	salt = "rollout-regression-wave",
+})
+assert(stale_rollout_code == "invalid", "stale rollout revision was accepted")
+local invalid_percent_code = RecordStore.configure_scheduler_rollout({
+	revision = initial_rollout.revision + 2,
+	percent = 101,
+	salt = "rollout-regression-wave",
+})
+assert(invalid_percent_code == "invalid", "out-of-range rollout percentage was accepted")
+local invalid_salt_code = RecordStore.configure_scheduler_rollout({
+	revision = initial_rollout.revision + 2,
+	percent = 50,
+	salt = string.rep("x", 129),
+})
+assert(invalid_salt_code == "invalid", "oversized rollout salt was accepted")
 assert(RecordStore.set_scheduler_enabled(true), "scheduler enable request was rejected")
 local excluded_snapshot = RecordStore.get_scheduler_snapshot()
 assert(excluded_snapshot.rollout.cohort_bucket >= 0 and excluded_snapshot.rollout.cohort_bucket < 100,

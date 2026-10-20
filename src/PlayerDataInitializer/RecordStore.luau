@@ -6759,13 +6759,15 @@ end
 function RecordStore.configure_scheduler_rollout(rollout: { [string]: unknown }): (string, string?)
 	if type(rollout) ~= "table" then return "invalid", "scheduler rollout must be a table" end
 	local revision = rollout.revision
-	if not finite(revision) or math.floor(revision) ~= revision
-		or revision ~= scheduler_activation.revision + 1
+	if type(revision) ~= "number" or not math.isfinite(revision)
+		or math.floor(revision) ~= revision or revision ~= scheduler_activation.revision + 1
 	then
 		return "invalid", "rollout revision must be the next positive integer"
 	end
 	local percent = rollout.percent
-	if not finite(percent) or math.floor(percent) ~= percent or percent < 0 or percent > 100 then
+	if type(percent) ~= "number" or not math.isfinite(percent)
+		or math.floor(percent) ~= percent or percent < 0 or percent > 100
+	then
 		return "invalid", "rollout percent must be an integer from 0 to 100"
 	end
 	local salt = if rollout.salt == nil then scheduler_activation.salt else rollout.salt
