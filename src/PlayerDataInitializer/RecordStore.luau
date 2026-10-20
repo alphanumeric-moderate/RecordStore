@@ -6797,6 +6797,9 @@ function RecordStore.schedule_work(
 ): { [string]: any }
 	if closing then return { code = "closed", message = "RecordStore is shutting down" } end
 	if not scheduler_enabled then return { code = "disabled", message = "advanced scheduling is disabled" } end
+	if type(callback) ~= "function" then
+		return { code = "invalid", message = "callback must be a function" }
+	end
 	if type(schedule_options) == "table"
 		and (
 			schedule_options.lane == "lease_renewal"
@@ -6812,11 +6815,11 @@ function RecordStore.schedule_work(
 			message = "critical service-class admission, lease_renewal and profile_release are reserved for internal session work",
 		}
 	end
-	return scheduler_dispatcher:Schedule(owner_id, work_id, function(batch_size: number?)
+	return scheduler_dispatcher:Schedule(owner_id, work_id, function(...: any)
 		if not scheduler_enabled then
 			return { code = "cancelled", message = "advanced scheduling was disabled before work started" }
 		end
-		return callback(batch_size)
+		return callback(...)
 	end, schedule_options)
 end
 
