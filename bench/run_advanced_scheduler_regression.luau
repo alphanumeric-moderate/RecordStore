@@ -455,6 +455,39 @@ local popped = due:PopDue(1)
 assert(#popped == 1 and popped[1].id == "early", "due heap returned the wrong item")
 assert(due:NextDueAt() == now_ms + 90, "due heap exposed a stale replaced timer")
 
+-- Queue wake scheduling uses a bounded event heap and ignores cancelled/stale entries.
+local wake_events = new_scheduler()
+enqueue(wake_events, {
+	id = "wake-later",
+	owner_id = "wake-owner-later",
+	lane = "normal",
+	due_at_ms = now_ms + 100,
+	expires_at_ms = now_ms + 300,
+})
+enqueue(wake_events, {
+	id = "wake-early",
+	owner_id = "wake-owner-early",
+	lane = "background",
+	due_at_ms = now_ms + 20,
+	expires_at_ms = now_ms + 40,
+})
+assert(wake_events:NextWakeAt() == now_ms + 20,
+	"wake event heap did not select the earliest eligible due boundary")
+assert(wake_events:Stats().scheduler.wake_heap_items >= 4,
+	"queue due and expiry boundaries were not indexed in the local wake heap")
+local cancelled_wake, cancelled_wake_error = wake_events:CancelQueued("wake-early")
+assert(cancelled_wake ~= nil and cancelled_wake_error == nil,
+	"future queued work could not be cancelled")
+assert(wake_events:MarkCompleted(cancelled_wake.id, "cancelled"),
+	"cancelled wake entry did not terminalize")
+assert(wake_events:NextWakeAt() == now_ms + 100,
+	"cancelled/stale wake event hid the next live queue boundary")
+now_ms += 101
+assert(wake_events:NextWakeAt() == now_ms + 199,
+	"expiry boundary disappeared after its due event had passed")
+assert(wake_events:Stats().scheduler.wake_heap_items <= wake_events:Stats().policy.queue_capacity * 4,
+	"wake event heap exceeded its bounded compaction threshold")
+
 -- Per-owner in-flight caps cannot prevent a different owner from making progress.
 local per_owner = new_scheduler()
 local owner_policy = per_owner:Stats().policy
