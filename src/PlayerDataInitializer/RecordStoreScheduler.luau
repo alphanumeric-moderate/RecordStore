@@ -1545,7 +1545,16 @@ local function new_dispatcher(governor, options)
 	end
 	local function schedule_next_wake()
 		local due = governor:NextWakeAt()
-		if due ~= nil then schedule_wake_at(due) end
+		if due ~= nil then
+			schedule_wake_at(due)
+		elseif dispatcher.wake_due_ms ~= nil or dispatcher.wake_thread ~= nil then
+			-- Cancellation, completion, or rescheduling can invalidate the final
+			-- heap event. Drop its timer instead of waking the dispatcher pointlessly.
+			dispatcher.wake_generation += 1
+			cancel_scheduled(dispatcher.wake_thread)
+			dispatcher.wake_thread = nil
+			dispatcher.wake_due_ms = nil
+		end
 	end
 	local function invoke_completion(entry, result)
 		if type(entry) ~= "table" or type(entry.on_complete) ~= "function" then return end
