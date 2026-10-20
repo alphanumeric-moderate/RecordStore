@@ -1495,6 +1495,31 @@ assert(closing_dispatcher:Stats().closed, "dispatcher close state was not publis
 end
 
 do
+-- Cancelling the final delayed item removes the dispatcher's obsolete timer.
+local stale_timer_governor = new_scheduler()
+local stale_timer_dispatcher = Scheduler.new_dispatcher(stale_timer_governor, {
+	now_ms = function() return now_ms end,
+})
+local stale_timer_done = false
+local stale_timer_job = stale_timer_dispatcher:Schedule(
+	"stale-timer-owner", "stale-timer-future-work", function()
+		error("cancelled future work must not start")
+	end,
+	{
+		lane = "background",
+		due_at_ms = now_ms + 60000,
+		on_complete = function(result) stale_timer_done = result.code == "cancelled" end,
+	}
+)
+assert(stale_timer_job.code == "accepted", "delayed timer fixture was rejected")
+assert(stale_timer_dispatcher:Stats().next_wake_due_ms == now_ms + 60000,
+	"dispatcher did not arm its future queue timer")
+stale_timer_dispatcher:CancelQueued("remove final future item")
+assert(stale_timer_done, "cancelling the final delayed item did not notify completion")
+assert(stale_timer_dispatcher:Stats().next_wake_due_ms == nil,
+	"dispatcher retained a stale timer after the final valid wake event disappeared")
+stale_timer_dispatcher:Close()
+
 -- The main RecordStore module resolves the same scheduler through its
 -- ModuleScript parent. Runtime scheduling remains opt-in.
 local RecordStore = Shim.load()
