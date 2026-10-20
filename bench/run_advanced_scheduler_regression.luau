@@ -64,6 +64,28 @@ for index = 2, #owner_order do
 	assert(owner_order[index] ~= owner_order[index - 1], "DRR did not rotate equally weighted owners")
 end
 
+-- DRR state must not retain one deficit entry for every owner ever seen.
+local stale_drr = new_scheduler()
+for index = 1, 64 do
+	local id = "short-lived-drr-" .. index
+	enqueue(stale_drr, {
+		id = id,
+		owner_id = "short-lived-owner-" .. index,
+		lane = "normal",
+		work_class = "transient",
+	})
+	local selected, selected_status = stale_drr:TakeNext()
+	assert(selected ~= nil and selected_status == "success" and selected.id == id,
+		"short-lived DRR work was not selectable")
+	assert(stale_drr:MarkCompleted(id, "committed"),
+		"short-lived DRR work did not complete")
+end
+local stale_drr_count = 0
+for _ in pairs(stale_drr.drr_deficit) do stale_drr_count += 1 end
+assert(stale_drr_count == 0,
+	"DRR retained deficit state after every corresponding queue lane drained")
+
+
 -- Multi-dimensional cost prevents a large UpdateAsync estimate from winning by item count.
 local weighted_cost = new_scheduler()
 enqueue(weighted_cost, { id = "large", owner_id = "large-owner", lane = "normal", operation_class = "update_async", read_units = 8, write_units = 8 })
