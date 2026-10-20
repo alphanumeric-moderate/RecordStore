@@ -1424,6 +1424,30 @@ end
 assert_reserved_work_class_rejected("lease_renewal")
 assert_reserved_work_class_rejected("profile_release")
 
+-- The public API must not let generic work claim the governor's critical reserve.
+local privileged_service_class_callback_ran = false
+local privileged_service_class_job = RecordStore.schedule_work(
+	"integration-owner",
+	"public-critical-service-class",
+	function()
+		privileged_service_class_callback_ran = true
+		return { code = "success" }
+	end,
+	{ lane = "normal", work_class = "ordinary-work", service_class = "critical" }
+)
+if privileged_service_class_job.code ~= "invalid" then
+	RecordStore.set_scheduler_enabled(false)
+	for _ = 1, 200 do
+		if RecordStore.get_scheduler_snapshot().dispatcher.in_flight == 0 then break end
+		task.wait(0.001)
+	end
+	RecordStore.set_scheduler_enabled(true)
+end
+assert(privileged_service_class_job.code == "invalid",
+	"public schedule_work allowed arbitrary work to claim critical service-class admission")
+assert(not privileged_service_class_callback_ran,
+	"public critical service-class callback ran despite being rejected")
+
 local public_callback_ran = false
 local public_job = RecordStore.schedule_work("integration-owner", "public-scheduler-api", function()
 	public_callback_ran = true
