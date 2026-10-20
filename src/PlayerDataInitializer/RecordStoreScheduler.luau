@@ -628,8 +628,12 @@ local function new_governor(options)
 	function governor:ScheduleDue(id, due_at_ms, value)
 		if not valid_text(id, 128) or not finite(due_at_ms) then return false, "invalid due item" end
 		if self.due[id] == nil and key_count(self.due) >= self.policy.queue_capacity then return false, "due queue full" end
+		local copy_ok, copied_value = pcall(copy, value)
+		if not copy_ok then
+			return false, "due item value must be acyclic and within the maximum nesting depth"
+		end
 		self.due_sequence = (self.due_sequence or 0) + 1
-		local item = { id = id, due_at_ms = due_at_ms, value = copy(value), sequence = self.due_sequence }
+		local item = { id = id, due_at_ms = due_at_ms, value = copied_value, sequence = self.due_sequence }
 		self.due[id] = item
 		heap_push(self.due_heap, item)
 		if #self.due_heap > self.policy.queue_capacity * 2 then rebuild_due_heap() end
