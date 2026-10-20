@@ -1173,7 +1173,7 @@ assert(overdue_completion.scheduler_overdue == true,
 	"completion callback did not receive per-job overdue metadata")
 assert(overdue_completion.scheduler_deadline_ms == overdue_deadline,
 	"overdue completion lost its advisory deadline")
-assert(finite(overdue_completion.scheduler_selected_at_ms),
+assert(type(overdue_completion.scheduler_selected_at_ms) == "number",
 	"overdue completion did not report the scheduler selection time")
 overdue_dispatcher:Close()
 end
