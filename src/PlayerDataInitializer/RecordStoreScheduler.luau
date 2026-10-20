@@ -1740,8 +1740,17 @@ local function new_dispatcher(governor, options)
 		if not retry_scheduled then
 			if status == "success" and callback_ok then dispatcher.metrics.completed += 1 end
 			dispatcher.callbacks[item.id] = nil
-			invoke_completion(entry, type(callback_result) == "table" and callback_result
-				or { code = if callback_result == true or callback_result == nil then "success" else tostring(callback_result) })
+			local completion_result = if type(callback_result) == "table"
+				then table.clone(callback_result)
+				else { code = if callback_result == true or callback_result == nil then "success" else tostring(callback_result) }
+			if item.overdue == true then
+				-- Reserve these field names for scheduler metadata. Advisory deadlines
+				-- never suppress work, but every terminal callback can observe lateness.
+				completion_result.scheduler_overdue = true
+				completion_result.scheduler_deadline_ms = item.deadline_ms
+				completion_result.scheduler_selected_at_ms = item.selected_at_ms
+			end
+			invoke_completion(entry, completion_result)
 			local outcome = if type(callback_result) == "table" then callback_result.code
 				elseif callback_ok and (callback_result == true or callback_result == nil) then "success"
 				elseif not callback_ok then "unknown" else tostring(callback_result)
