@@ -835,8 +835,11 @@ local function new_governor(options)
 				local lane = row.effective_lane
 				local lane_weight = if lane == "lease_renewal" then 8 elseif lane == "high" then 4 elseif lane == "normal" then 2 else 1
 				local service_rank = if item.service_class == "critical" then 4 elseif item.service_class == "interactive" then 3 elseif item.service_class == "normal" then 2 elseif item.service_class == "bulk" then 1 else 0
+				-- Keep class preference inside the bounded aging envelope. A class
+				-- may run ahead, but it must not hold a permanent 40k-point lead over
+				-- old eligible work while new high-class items continue to arrive.
 				local score = if algorithm == "deadline"
-					then -service_rank * 10000 - lane_weight * 1000 + urgency_score - age * 0.25
+					then -service_rank * 1000 - lane_weight * 1000 + urgency_score - age * 0.25
 					else -lane_weight * 1000 - service_rank * 500 - age * 0.25 + urgency_score * 0.01
 				if best_score == nil or score < best_score then best, best_score = row, score end
 			end
