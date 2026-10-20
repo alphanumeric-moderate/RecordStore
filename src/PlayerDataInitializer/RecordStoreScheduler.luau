@@ -113,6 +113,7 @@ local function new_governor(options)
 		estimated_bytes_in_flight = 0, handler_slots_in_flight = 0,
 		request_budgets = { read = nil, write = nil, sampled_at_ms = nil },
 		completed = {}, completed_order = {}, known = {}, active_owner = {}, active_renewals_by_owner = {},
+		dependency_ref_counts = {}, pending_completed_prune = {}, pending_failed_prune = {},
 		drr_deficit = {}, drr_cursor_key = nil, high_streak = 0, urgent_streak = 0,
 		failed = {}, failed_order = {}, retry_cooldown_until = {}, retry_tokens_by_class = {},
 		due_sequence = 0,
@@ -625,6 +626,32 @@ local function new_governor(options)
 		end
 		return true
 	end
+	local function retain_dependencies(self, item)
+		for _, dependency in ipairs(item.dependencies or {}) do
+			self.dependency_ref_counts[dependency] = (self.dependency_ref_counts[dependency] or 0) + 1
+		end
+	end
+	local function release_dependencies(self, item)
+		for _, dependency in ipairs(item.dependencies or {}) do
+			local count = self.dependency_ref_counts[dependency]
+			if count ~= nil then
+				count -= 1
+				if count <= 0 then
+					self.dependency_ref_counts[dependency] = nil
+					if self.pending_completed_prune[dependency] then
+						self.pending_completed_prune[dependency] = nil
+						self.completed[dependency] = nil
+					end
+					if self.pending_failed_prune[dependency] then
+						self.pending_failed_prune[dependency] = nil
+						self.failed[dependency] = nil
+					end
+				else
+					self.dependency_ref_counts[dependency] = count
+				end
+			end
+		end
+	end
 	local function scheduled_lane(item, now)
 		if item.inherited_lane ~= nil and finite(item.inherited_until_ms) and item.inherited_until_ms > now then
 			return item.inherited_lane
@@ -933,6 +960,7 @@ local function new_governor(options)
 		if value.cost > self.policy.max_item_cost then return { code = "invalid", message = "estimated scheduler cost exceeds max_item_cost" } end
 		value.queued = true
 		self.known[value.id] = value
+		retain_dependencies(self, value)
 		table.insert(self.queue, value)
 		heap_push(self.queued_due_heap, { id = value.id, due_at_ms = value.due_at_ms, item = value })
 		inherit_ready_prerequisites(self, value)
@@ -974,21 +1002,24 @@ local function new_governor(options)
 			if failed_dependency ~= nil then
 				table.remove(self.queue, index)
 				item.queued = false
-				self.known[item.id] = nil
-				self.retry_cooldown_until[item.owner_id] = nil
+				local dependency_code = self.failed[failed_dependency]
 				item.terminal_result = {
 					code = "dependency_failed", message = "prerequisite reached a non-success terminal outcome",
-					dependency_id = failed_dependency, dependency_code = self.failed[failed_dependency],
+					dependency_id = failed_dependency, dependency_code = dependency_code,
 				}
+				release_dependencies(self, item)
+				self.known[item.id] = nil
+				self.retry_cooldown_until[item.owner_id] = nil
 				remember_terminal(self, item.id, "dependency_failed")
 				return item, "dependency_failed"
 			elseif item.expires_at_ms and item.expires_at_ms <= now then
 				table.remove(self.queue, index)
 				item.queued = false
-				self.known[item.id] = nil
-				self.retry_cooldown_until[item.owner_id] = nil
 				self.stats.scheduled_expired += 1
 				item.terminal_result = { code = "expired", message = "scheduled work expired before it could start" }
+				release_dependencies(self, item)
+				self.known[item.id] = nil
+				self.retry_cooldown_until[item.owner_id] = nil
 				remember_terminal(self, item.id, "expired")
 				return item, "expired"
 			else
@@ -1126,40 +1157,25 @@ local function new_governor(options)
 		self.queued_due_heap = rebuilt
 	end
 	local function terminal_dependency_referenced(self, id)
-		for _, queued in ipairs(self.queue) do
-			for _, dependency in ipairs(queued.dependencies or {}) do
-				if dependency == id then return true end
-			end
-		end
-		for known_id, item in pairs(self.known) do
-			if known_id ~= id then
-				for _, dependency in ipairs(item.dependencies or {}) do
-					if dependency == id then return true end
-				end
-			end
-		end
-		return false
+		return (self.dependency_ref_counts[id] or 0) > 0
 	end
 	local function prune_terminal_history(self)
 		local limit = self.policy.queue_capacity * 2
-		local function prune(order, outcomes)
-			-- Rotate referenced outcomes instead of dropping their order entry. A
-			-- dependent can be in flight and later retry, so known items matter too.
-			-- One pass is bounded; referenced history is bounded by active dependents.
-			local scan_budget = #order
-			local scanned = 0
-			while #order > limit and scanned < scan_budget do
+		local function prune(order, outcomes, pending)
+			while #order > limit do
 				local oldest = table.remove(order, 1)
 				if terminal_dependency_referenced(self, oldest) then
-					table.insert(order, oldest)
+					-- Retain live dependency outcomes without retaining their FIFO slots.
+					-- release_dependencies reclaims them when the last dependent ends.
+					pending[oldest] = true
 				else
 					outcomes[oldest] = nil
+					pending[oldest] = nil
 				end
-				scanned += 1
 			end
 		end
-		prune(self.completed_order, self.completed)
-		prune(self.failed_order, self.failed)
+		prune(self.completed_order, self.completed, self.pending_completed_prune)
+		prune(self.failed_order, self.failed, self.pending_failed_prune)
 	end
 	remember_terminal = function(self, id, code)
 		self.failed[id] = code
@@ -1210,6 +1226,7 @@ local function new_governor(options)
 				else self.active_renewals_by_owner[item.owner_id] = renewal_count end
 			end
 		end
+		release_dependencies(self, item)
 		self.known[id] = nil
 		if item ~= nil then self.retry_cooldown_until[item.owner_id] = nil end
 		for _, queued in ipairs(self.queue) do
