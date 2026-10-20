@@ -979,7 +979,10 @@ local function new_governor(options)
 		if #self.queue >= self.policy.queue_capacity then self.stats.rejected += 1; return { code = "capacity", message = "local queue full; no accepted durable work is evicted" } end
 		local lane = item.lane or "normal"
 		if lane ~= "high" and lane ~= "normal" and lane ~= "background" and lane ~= "lease_renewal" then return { code = "invalid", message = "unsupported lane" } end
-		local value = copy(item)
+		local copy_ok, value = pcall(copy, item)
+		if not copy_ok or type(value) ~= "table" then
+			return { code = "invalid", message = "scheduled item must be acyclic and within the maximum nesting depth" }
+		end
 		if value.work_class ~= nil and not valid_text(value.work_class, 64) then return { code = "invalid", message = "work_class must be 1..64 bytes" } end
 		if value.operation_class ~= nil and not valid_text(value.operation_class, 64) then return { code = "invalid", message = "operation_class must be 1..64 bytes" } end
 		if value.available_at_ms ~= nil and not finite(value.available_at_ms) then return { code = "invalid", message = "available_at_ms must be finite" } end
