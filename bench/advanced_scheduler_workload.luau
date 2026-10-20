@@ -3,7 +3,7 @@
 -- This measures local selection cost only, not Roblox DataStore request latency.
 local Scheduler = require("../src/PlayerDataInitializer/RecordStoreScheduler")
 
-local ITEM_COUNT = 512
+local ITEM_COUNT = 256
 local OWNER_COUNT = 16
 local now_ms = 1_800_000_000_000
 
