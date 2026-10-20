@@ -514,6 +514,44 @@ do
 		"pending completed history was not reclaimed when its final dependent completed")
 end
 
+-- Malformed cyclic input must be rejected as data, not escape as a scheduler exception.
+do
+	local cyclic_dependencies = {}
+	cyclic_dependencies[1] = cyclic_dependencies
+
+	local direct_scheduler = new_scheduler()
+	local direct_call_ok, direct_result = pcall(function()
+		return direct_scheduler:Enqueue({
+			id = "cyclic-direct-dependencies",
+			owner_id = "invalid-input-owner",
+			dependencies = cyclic_dependencies,
+		})
+	end)
+	assert(direct_call_ok and type(direct_result) == "table" and direct_result.code == "invalid",
+		"direct scheduler enqueue threw on cyclic dependency input instead of returning invalid")
+
+	local dispatch_scheduler = new_scheduler()
+	local invalid_dispatcher = Scheduler.new_dispatcher(dispatch_scheduler, {
+		now_ms = function() return now_ms end,
+	})
+	local dispatch_call_ok, dispatch_result = pcall(function()
+		return invalid_dispatcher:Schedule(
+			"invalid-input-owner",
+			"cyclic-public-dependencies",
+			function() return { code = "committed" } end,
+			{ dependencies = cyclic_dependencies }
+		)
+	end)
+	assert(dispatch_call_ok and type(dispatch_result) == "table" and dispatch_result.code == "invalid",
+		"dispatcher schedule threw on cyclic dependency input instead of returning invalid")
+	local recovered_job = invalid_dispatcher:Schedule("valid-owner", "valid-after-invalid", function()
+		return { code = "committed" }
+	end)
+	assert(recovered_job.code == "accepted",
+		"scheduler did not remain usable after rejecting malformed dependency input")
+	invalid_dispatcher:Close()
+end
+
 -- Dependencies cannot bypass a missing, failed or unknown prerequisite.
 local dependencies = new_scheduler()
 assert(dependencies:Enqueue({ id = "missing-dependent", owner_id = "x", dependencies = { "missing" } }).code == "invalid",
