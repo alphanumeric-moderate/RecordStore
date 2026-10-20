@@ -700,6 +700,37 @@ assert(inherited.inherited_until_ms <= now_ms + inheritance_policy.priority_inhe
 assert(inheritance:MarkCompleted(inherited.id, "committed"))
 take(inheritance, "urgent-dependent")
 
+-- Cancelling a dependent must clear inheritance even if its prerequisite is in flight.
+local cancelled_inheritance = new_scheduler()
+enqueue(cancelled_inheritance, {
+	id = "inflight-inherited-prerequisite",
+	owner_id = "cancelled-workflow-owner",
+	work_class = "saga",
+	lane = "background",
+})
+enqueue(cancelled_inheritance, {
+	id = "cancelled-high-dependent",
+	owner_id = "cancelled-workflow-owner",
+	work_class = "saga",
+	lane = "high",
+	dependencies = { "inflight-inherited-prerequisite" },
+})
+local running_prerequisite, running_status = cancelled_inheritance:TakeNext()
+assert(running_prerequisite ~= nil and running_status == "success"
+	and running_prerequisite.id == "inflight-inherited-prerequisite"
+	and running_prerequisite.inherited_lane == "normal",
+	"inherited prerequisite was not dispatched before dependent cancellation")
+local cancelled_dependent, cancel_error = cancelled_inheritance:CancelQueued("cancelled-high-dependent")
+assert(cancelled_dependent ~= nil and cancel_error == nil, "queued dependent could not be cancelled")
+assert(cancelled_inheritance:MarkCompleted("cancelled-high-dependent", "cancelled"),
+	"cancelled dependent did not terminalize")
+assert(cancelled_inheritance.known["inflight-inherited-prerequisite"].inherited_lane == nil,
+	"cancelling a dependent left inherited urgency on its in-flight prerequisite")
+assert(cancelled_inheritance.known["inflight-inherited-prerequisite"].inherited_from == nil,
+	"cancelling a dependent left a stale inheritance source on its prerequisite")
+assert(cancelled_inheritance:MarkCompleted("inflight-inherited-prerequisite", "retryable"),
+	"in-flight prerequisite could not release after dependent cancellation")
+
 -- Priority inheritance must be reevaluated when a prerequisite becomes ready later.
 local delayed_inheritance = new_scheduler()
 local prerequisite_ready_at = now_ms + 100
