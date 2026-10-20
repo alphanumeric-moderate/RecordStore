@@ -1183,8 +1183,20 @@ local function new_governor(options)
 		prune_terminal_history(self)
 	end
 	local function make_shadow_state(self)
+		local queue = copy(self.queue)
+		local queued_by_id = {}
+		for _, item in ipairs(queue) do
+			queued_by_id[item.id] = item
+		end
+		local known = {}
+		for id, item in pairs(self.known) do
+			-- Queue selection can promote a queued prerequisite through known[id].
+			-- Keep both views pointed at the same shadow clone; copying them separately
+			-- loses the object relationship and makes shadow inheritance inaccurate.
+			known[id] = queued_by_id[id] or copy(item)
+		end
 		return {
-			queue = copy(self.queue), completed = copy(self.completed), known = copy(self.known),
+			queue = queue, completed = copy(self.completed), known = known,
 			failed = copy(self.failed), active_owner = copy(self.active_owner),
 			operation_kind_keys = copy(self.operation_kind_keys),
 			active_renewals_by_owner = copy(self.active_renewals_by_owner),
