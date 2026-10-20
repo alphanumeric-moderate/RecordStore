@@ -775,6 +775,24 @@ local function new_governor(options)
 		if left_slack ~= right_slack then return left_slack < right_slack end
 		return (left.enqueued_at_ms or 0) < (right.enqueued_at_ms or 0)
 	end
+	local function estimated_service_time_ms(self, item, cache)
+		local operation_kind = if type(item.operation_class) == "string" then item.operation_class
+			elseif type(item.work_class) == "string" then item.work_class else "default"
+		local metric_kind = operation_metric_key(self, operation_kind)
+		local cached = cache[metric_kind]
+		if cached ~= nil then return cached end
+		local estimate = self.latency_ewma[metric_kind] or 0
+		local samples = self.latency_samples_by_operation[metric_kind]
+		if samples ~= nil and #samples > 0 then
+			-- P95 is deliberately conservative; EWMA protects against a recent
+			-- latency spike that a short sample window has not fully reflected.
+			local ordered = copy(samples)
+			table.sort(ordered)
+			estimate = math.max(estimate, ordered[math.ceil(#ordered * 0.95)] or 0)
+		end
+		cache[metric_kind] = estimate
+		return estimate
+	end
 	local function effective_cost(item, batch_count)
 		local default_batch_count = if item.batchable == true
 			then math.min(item.batch_size or 1, item.batch_backlog or item.batch_size or 1) else nil
@@ -875,10 +893,13 @@ local function new_governor(options)
 			return best and best.index or nil, urgent_fallback
 		elseif algorithm == "weighted" or algorithm == "deadline" then
 			local best, best_score
+			local service_time_estimates = {}
 			for _, row in ipairs(eligible) do
 				local item = row.item
 				local age = math.min(60000, math.max(0, now - item.enqueued_at_ms))
-				local slack = if finite(item.deadline_ms) then item.deadline_ms - now else 60000
+				local slack = if finite(item.deadline_ms)
+					then item.deadline_ms - now - estimated_service_time_ms(self, item, service_time_estimates)
+					else 60000
 				-- After a bounded urgent burst, preserve lane/service priority but age
 				-- rather than deadline slack decides the next candidate.
 				local urgency_score = if self.urgent_streak >= self.policy.urgent_deadline_burst then 0 else slack
