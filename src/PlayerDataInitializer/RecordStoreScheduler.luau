@@ -888,9 +888,13 @@ local function new_governor(options)
 				-- Keep class preference inside the bounded aging envelope. A class
 				-- may run ahead, but it must not hold a permanent 40k-point lead over
 				-- old eligible work while new high-class items continue to arrive.
+				-- Deadline slack is a bounded tie-breaker, not a replacement for
+				-- lane/service priority. Aging remains a separate bounded promotion.
+				local deadline_bonus = math.clamp(urgency_score, -499, 499)
+				local weighted_deadline_bonus = math.clamp(urgency_score * 0.01, -249, 249)
 				local score = if algorithm == "deadline"
-					then -service_rank * 1000 - lane_weight * 1000 + urgency_score - age * 0.25
-					else -lane_weight * 1000 - service_rank * 500 - age * 0.25 + urgency_score * 0.01
+					then -service_rank * 1000 - lane_weight * 1000 + deadline_bonus - age * 0.25
+					else -lane_weight * 1000 - service_rank * 500 - age * 0.25 + weighted_deadline_bonus
 				if best_score == nil or score < best_score then best, best_score = row, score end
 			end
 			return best and best.index or nil, urgent_fallback
