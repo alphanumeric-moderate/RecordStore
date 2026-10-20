@@ -1708,6 +1708,44 @@ assert(public_callback_ran, "public scheduled callback did not run")
 assert(RecordStore.get_scheduler_snapshot().dispatcher.completed >= 1,
 	"public scheduler API did not publish completion metrics")
 
+-- Public callback validation must apply to the caller's callback, not a wrapper.
+local nil_callback_job = RecordStore.schedule_work(
+	"integration-owner",
+	"nil-public-callback",
+	nil,
+	{ lane = "normal", work_class = "integration-test" }
+)
+assert(nil_callback_job.code == "invalid",
+	"public schedule_work accepted a nil callback by validating its wrapper instead")
+
+local non_function_callback_job = RecordStore.schedule_work(
+	"integration-owner",
+	"non-function-public-callback",
+	"not-a-function",
+	{ lane = "normal", work_class = "integration-test" }
+)
+assert(non_function_callback_job.code == "invalid",
+	"public schedule_work accepted a non-function callback")
+
+-- Non-batchable work preserves a zero-argument callback invocation.
+local public_callback_argument_count = -1
+local zero_argument_job = RecordStore.schedule_work(
+	"integration-owner",
+	"zero-argument-public-callback",
+	function(...)
+		public_callback_argument_count = select("#", ...)
+		return { code = "success" }
+	end,
+	{ lane = "normal", work_class = "integration-test" }
+)
+assert(zero_argument_job.code == "accepted", "zero-argument callback was rejected")
+for _ = 1, 200 do
+	if public_callback_argument_count >= 0 then break end
+	task.wait(0.001)
+end
+assert(public_callback_argument_count == 0,
+	"non-batchable public callback received an unexpected argument")
+
 -- Public trace replay is isolated: it cannot mutate the live server queue.
 local delayed_callback_ran = false
 local delayed_job = RecordStore.schedule_work("integration-owner", "delayed-replay-safety", function()
