@@ -6750,6 +6750,8 @@ function RecordStore.schedule_work(
 			schedule_options.lane == "lease_renewal"
 			or schedule_options.operation_class == "lease_renewal"
 			or schedule_options.operation_class == "profile_release"
+			or schedule_options.work_class == "lease_renewal"
+			or schedule_options.work_class == "profile_release"
 		)
 	then
 		return {

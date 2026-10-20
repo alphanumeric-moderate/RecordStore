@@ -1125,21 +1125,46 @@ local function new_governor(options)
 		for _, item in ipairs(self.queue) do heap_push(rebuilt, { id = item.id, due_at_ms = item.due_at_ms, item = item }) end
 		self.queued_due_heap = rebuilt
 	end
+	local function terminal_dependency_referenced(self, id)
+		for _, queued in ipairs(self.queue) do
+			for _, dependency in ipairs(queued.dependencies or {}) do
+				if dependency == id then return true end
+			end
+		end
+		for known_id, item in pairs(self.known) do
+			if known_id ~= id then
+				for _, dependency in ipairs(item.dependencies or {}) do
+					if dependency == id then return true end
+				end
+			end
+		end
+		return false
+	end
+	local function prune_terminal_history(self)
+		local limit = self.policy.queue_capacity * 2
+		local function prune(order, outcomes)
+			-- Rotate referenced outcomes instead of dropping their order entry. A
+			-- dependent can be in flight and later retry, so known items matter too.
+			-- One pass is bounded; referenced history is bounded by active dependents.
+			local scan_budget = #order
+			local scanned = 0
+			while #order > limit and scanned < scan_budget do
+				local oldest = table.remove(order, 1)
+				if terminal_dependency_referenced(self, oldest) then
+					table.insert(order, oldest)
+				else
+					outcomes[oldest] = nil
+				end
+				scanned += 1
+			end
+		end
+		prune(self.completed_order, self.completed)
+		prune(self.failed_order, self.failed)
+	end
 	remember_terminal = function(self, id, code)
 		self.failed[id] = code
 		self.failed_order[#self.failed_order + 1] = id
-		local limit = self.policy.queue_capacity * 2
-		while #self.failed_order > limit do
-			local oldest = table.remove(self.failed_order, 1)
-			local still_required = false
-			for _, queued in ipairs(self.queue) do
-				for _, dependency in ipairs(queued.dependencies or {}) do
-					if dependency == oldest then still_required = true break end
-				end
-				if still_required then break end
-			end
-			if not still_required then self.failed[oldest] = nil end
-		end
+		prune_terminal_history(self)
 	end
 	local function make_shadow_state(self)
 		return {
@@ -1202,15 +1227,6 @@ local function new_governor(options)
 			self.completed[id] = true
 			self.failed[id] = nil
 			self.completed_order[#self.completed_order + 1] = id
-			while #self.completed_order > self.policy.queue_capacity * 2 do
-				local oldest = table.remove(self.completed_order, 1)
-				local still_required = false
-				for _, queued in ipairs(self.queue) do
-					for _, dependency in ipairs(queued.dependencies or {}) do if dependency == oldest then still_required = true break end end
-					if still_required then break end
-				end
-				if not still_required then self.completed[oldest] = nil end
-			end
 		else
 			self.completed[id] = nil
 			remember_terminal(self, id, tostring(code or "unknown"))
@@ -1223,6 +1239,7 @@ local function new_governor(options)
 		end
 		for key in pairs(self.drr_deficit) do if not active_lane_keys[key] then self.drr_deficit[key] = nil end end
 		self.stats.completed += 1
+		prune_terminal_history(self)
 		return true
 	end
 	function governor:ShadowNext(algorithm)
