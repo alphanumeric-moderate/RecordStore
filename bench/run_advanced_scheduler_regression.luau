@@ -262,7 +262,7 @@ for _, algorithm in ipairs({ "deadline", "weighted" }) do
 		owner_id = "higher-lane-owner",
 		lane = "high",
 		service_class = "normal",
-		deadline_ms = now_ms + 120000,
+		deadline_ms = now_ms + 1_200_000,
 	})
 	enqueue(lane_deadline, {
 		id = "background-tight-deadline",
