@@ -6645,6 +6645,39 @@ local scheduler_dispatcher: any = RecordStoreScheduler.new_dispatcher(scheduler_
 	now_ms = function() return now_local() * 1000 end,
 })
 local scheduler_enabled = false
+local scheduler_activation = {
+	requested = false,
+	revision = 1,
+	percent = 100,
+	salt = "recordstore-scheduler-v1",
+	cohort_bucket = 0,
+}
+local function scheduler_rollout_bucket(salt: string): number
+	-- Stable per server and rollout wave. Keep arithmetic below 2^53 so every
+	-- intermediate integer is exact without depending on bit32 availability.
+	local identity = tostring(game.PlaceId) .. ":" .. tostring(server_id) .. ":" .. salt
+	local hash = 0
+	for index = 1, #identity do
+		hash = (hash * 131 + string.byte(identity, index)) % 2147483647
+	end
+	return hash % 100
+end
+scheduler_activation.cohort_bucket = scheduler_rollout_bucket(scheduler_activation.salt)
+
+local function apply_scheduler_activation()
+	local cohort_included = scheduler_activation.cohort_bucket < scheduler_activation.percent
+	local should_enable = scheduler_activation.requested and cohort_included
+	if scheduler_enabled == should_enable then return end
+	scheduler_enabled = should_enable
+	if should_enable then
+		scheduler_dispatcher:Kick()
+	else
+		-- A rollout reduction is a kill-switch for queued, not-yet-started work.
+		-- In-flight callbacks are not preempted; durable session fences remain authoritative.
+		scheduler_dispatcher:CancelQueued("advanced scheduler disabled or excluded by rollout")
+	end
+end
+
 local scheduler_state: { [InternalState]: any } = setmetatable({}, { __mode = "k" })
 
 local function scheduler_owner_id(state: InternalState): string
@@ -6723,17 +6756,34 @@ function RecordStore.configure_scheduler_policy(policy: { [string]: unknown }): 
 	return scheduler_dispatcher:SetPolicy(policy)
 end
 
+function RecordStore.configure_scheduler_rollout(rollout: { [string]: unknown }): (string, string?)
+	if type(rollout) ~= "table" then return "invalid", "scheduler rollout must be a table" end
+	local revision = rollout.revision
+	if not finite(revision) or math.floor(revision) ~= revision
+		or revision ~= scheduler_activation.revision + 1
+	then
+		return "invalid", "rollout revision must be the next positive integer"
+	end
+	local percent = rollout.percent
+	if not finite(percent) or math.floor(percent) ~= percent or percent < 0 or percent > 100 then
+		return "invalid", "rollout percent must be an integer from 0 to 100"
+	end
+	local salt = if rollout.salt == nil then scheduler_activation.salt else rollout.salt
+	if type(salt) ~= "string" or #salt < 1 or #salt > 128 then
+		return "invalid", "rollout salt must be 1..128 bytes"
+	end
+	scheduler_activation.revision = revision
+	scheduler_activation.percent = percent
+	scheduler_activation.salt = salt
+	scheduler_activation.cohort_bucket = scheduler_rollout_bucket(salt)
+	apply_scheduler_activation()
+	return "success", nil
+end
+
 function RecordStore.set_scheduler_enabled(enabled: boolean): (boolean, string?)
 	if type(enabled) ~= "boolean" then return false, "enabled must be a boolean" end
-	scheduler_enabled = enabled
-	if enabled then
-		scheduler_dispatcher:Kick()
-	else
-		-- Cancel queued work immediately so a future-due callback cannot retain
-		-- capacity or its closure until a timer fires. In-flight callbacks are not
-		-- preempted; the wrapper still cancels work that has not started yet.
-		scheduler_dispatcher:CancelQueued("advanced scheduler disabled before work started")
-	end
+	scheduler_activation.requested = enabled
+	apply_scheduler_activation()
 	return true, nil
 end
 
@@ -6770,9 +6820,18 @@ end
 
 function RecordStore.get_scheduler_snapshot(): { [string]: any }
 	local governor = scheduler_governor:Stats()
+	local cohort_included = scheduler_activation.cohort_bucket < scheduler_activation.percent
 	return {
 		enabled = scheduler_enabled,
 		policy = governor.policy,
+		rollout = {
+			revision = scheduler_activation.revision,
+			percent = scheduler_activation.percent,
+			salt = scheduler_activation.salt,
+			cohort_bucket = scheduler_activation.cohort_bucket,
+			cohort_included = cohort_included,
+			requested_enabled = scheduler_activation.requested,
+		},
 		governor = governor,
 		dispatcher = scheduler_dispatcher:Stats(),
 	}

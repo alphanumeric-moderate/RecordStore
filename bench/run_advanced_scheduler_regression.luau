@@ -1490,7 +1490,6 @@ assert(excluded_snapshot.rollout.cohort_bucket >= 0 and excluded_snapshot.rollou
 	"server cohort bucket was outside the [0, 100) range")
 assert(excluded_snapshot.rollout.cohort_included == false and excluded_snapshot.enabled == false,
 	"zero-percent canary activated the new scheduler")
-assert(RecordStore.set_scheduler_enabled(false), "kill switch failed for an excluded cohort")
 local stable_bucket = excluded_snapshot.rollout.cohort_bucket
 assert(RecordStore.get_scheduler_snapshot().rollout.cohort_bucket == stable_bucket,
 	"server cohort bucket was not stable across snapshot reads")
@@ -1502,6 +1501,8 @@ local restored_code, restored_message = RecordStore.configure_scheduler_rollout(
 assert(restored_code == "success", "scheduler rejected a valid full rollout: " .. tostring(restored_message))
 local full_rollout = RecordStore.get_scheduler_snapshot()
 assert(full_rollout.rollout.cohort_included == true, "100-percent rollout excluded a server")
+assert(full_rollout.enabled == true,
+	"raising rollout percentage did not activate the already-opted-in cohort")
 local configured, configure_message = RecordStore.configure_scheduler_policy({
 	revision = initial_snapshot.policy.revision + 1,
 	shadow_enabled = true,

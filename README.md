@@ -246,6 +246,27 @@ The public `schedule_work` API cannot claim `service_class = "critical"`; that s
 class grants access to protected admission capacity and is reserved for library-managed
 persistence callbacks. The `lease_renewal` lane and `lease_renewal`/`profile_release`
 work and operation classes are likewise internal-only.
+
+Rollout is also per-server and revisioned. Before enabling the selector, read
+`get_scheduler_snapshot().rollout` and increase the percentage in controlled steps:
+
+```lua
+local rollout = RecordStore.get_scheduler_snapshot().rollout
+local code, message = RecordStore.configure_scheduler_rollout({
+    revision = rollout.revision + 1,
+    percent = 5, -- 0 excludes every server; 100 includes every server.
+    salt = "scheduler-canary-wave-1",
+})
+assert(code == "success", message)
+assert(RecordStore.set_scheduler_enabled(true))
+```
+
+The cohort bucket is deterministic for the server identity and salt, in the range
+`[0, 100)`. Changing the salt starts a new cohort assignment. Rollout percentage only
+gates activation; the selector is still explicitly opt-in, and
+`set_scheduler_enabled(false)` remains the immediate kill switch. Reducing a rollout
+cancels queued, not-yet-started scheduler work; in-flight operations are not preempted
+and remain protected by the normal session-token/generation fencing.
 Owner IDs are bounded to 512 bytes, work IDs to 96 bytes, and work classes to 64 bytes.
 
 An explicitly batchable callback can accept one optional `batch_size` argument:
