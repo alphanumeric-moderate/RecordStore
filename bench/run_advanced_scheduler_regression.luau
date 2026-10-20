@@ -247,6 +247,41 @@ enqueue(deadline, { id = "tight-deadline", owner_id = "same-owner", lane = "norm
 local picked = deadline:TakeNext()
 assert(picked ~= nil and picked.id == "tight-deadline", "lower deadline slack was not preferred within a lane")
 assert(deadline:MarkCompleted(picked.id, "committed"), "deadline selection did not complete")
+
+do
+-- Deadline slack may order work inside a priority lane, not override lane priority.
+for _, algorithm in ipairs({ "deadline", "weighted" }) do
+	local lane_deadline = new_scheduler()
+	local lane_policy = lane_deadline:Stats().policy
+	assert(lane_deadline:SetPolicy({
+		revision = lane_policy.revision + 1,
+		algorithm = algorithm,
+	}), "lane deadline policy was rejected")
+	enqueue(lane_deadline, {
+		id = "higher-lane-long-deadline",
+		owner_id = "higher-lane-owner",
+		lane = "high",
+		service_class = "normal",
+		deadline_ms = now_ms + 120000,
+	})
+	enqueue(lane_deadline, {
+		id = "background-tight-deadline",
+		owner_id = "background-owner",
+		lane = "background",
+		service_class = "normal",
+		deadline_ms = now_ms + 1,
+	})
+	local lane_pick = lane_deadline:TakeNext()
+	assert(lane_pick ~= nil and lane_pick.id == "higher-lane-long-deadline",
+		algorithm .. " selection let deadline slack bypass the higher-priority lane")
+	assert(lane_deadline:MarkCompleted(lane_pick.id, "committed"))
+	local background_pick = lane_deadline:TakeNext()
+	assert(background_pick ~= nil and background_pick.id == "background-tight-deadline",
+		algorithm .. " selection lost eligible lower-lane work")
+	assert(lane_deadline:MarkCompleted(background_pick.id, "committed"))
+end
+end
+
 now_ms += 20
 local overdue = deadline:TakeNext()
 assert(overdue ~= nil and overdue.id == "no-deadline", "eligible work was lost after a deadline passed")
