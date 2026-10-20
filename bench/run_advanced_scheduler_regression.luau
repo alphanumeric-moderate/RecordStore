@@ -345,6 +345,76 @@ local duplicate_failed_id = failed_identity:Enqueue({
 assert(duplicate_failed_id.code == "duplicate",
 	"failed work ID was reused while its dependency result was still retained")
 
+
+-- Dependency terminal history must survive pruning while referenced by queued or in-flight work.
+do
+	local queued_history = new_scheduler()
+	local policy = queued_history:Stats().policy
+	local configured, policy_error = queued_history:SetPolicy({
+		revision = policy.revision + 1,
+		queue_capacity = 2,
+	})
+	assert(configured, "small bounded history policy was rejected: " .. tostring(policy_error))
+	enqueue(queued_history, { id = "queued-history-prerequisite", owner_id = "history-owner" })
+	take(queued_history, "queued-history-prerequisite")
+	enqueue(queued_history, {
+		id = "queued-history-dependent",
+		owner_id = "history-owner",
+		available_at_ms = now_ms + 60000,
+		dependencies = { "queued-history-prerequisite" },
+	})
+	for index = 1, 8 do
+		local id = "queued-history-noise-" .. index
+		enqueue(queued_history, { id = id, owner_id = "noise-" .. index })
+		take(queued_history, id)
+	end
+	assert(queued_history.completed["queued-history-prerequisite"] == true,
+		"queued dependency lost its prerequisite outcome during history pruning")
+	now_ms += 60000
+	take(queued_history, "queued-history-dependent")
+	for index = 1, 8 do
+		local id = "reclaim-history-noise-" .. index
+		enqueue(queued_history, { id = id, owner_id = "reclaim-" .. index })
+		take(queued_history, id)
+	end
+	assert(queued_history.completed["queued-history-prerequisite"] == nil,
+		"completed history outlived its retention order after its last dependent ended")
+end
+
+do
+	local inflight_history = new_scheduler()
+	local policy = inflight_history:Stats().policy
+	local configured, policy_error = inflight_history:SetPolicy({
+		revision = policy.revision + 1,
+		queue_capacity = 2,
+	})
+	assert(configured, "small in-flight history policy was rejected: " .. tostring(policy_error))
+	enqueue(inflight_history, { id = "inflight-history-prerequisite", owner_id = "history-owner" })
+	take(inflight_history, "inflight-history-prerequisite")
+	enqueue(inflight_history, {
+		id = "inflight-history-dependent",
+		owner_id = "history-owner",
+		dependencies = { "inflight-history-prerequisite" },
+	})
+	local dependent_item, dependent_status = inflight_history:TakeNext()
+	assert(dependent_item ~= nil and dependent_item.id == "inflight-history-dependent"
+		and dependent_status == "success", "dependent work did not become in-flight")
+	for index = 1, 8 do
+		local id = "inflight-history-noise-" .. index
+		enqueue(inflight_history, { id = id, owner_id = "inflight-noise-" .. index })
+		take(inflight_history, id)
+	end
+	assert(inflight_history.completed["inflight-history-prerequisite"] == true,
+		"in-flight dependency lost its prerequisite result before a retry")
+	local rescheduled, reschedule_error = inflight_history:Reschedule(dependent_item.id, now_ms)
+	assert(rescheduled, "dependent work could not be rescheduled: " .. tostring(reschedule_error))
+	local retried_item, retry_status = inflight_history:TakeNext()
+	assert(retried_item ~= nil and retried_item.id == dependent_item.id and retry_status == "success",
+		"retry became permanently ineligible after its prerequisite aged out")
+	assert(inflight_history:MarkCompleted(retried_item.id, "committed"),
+		"retried dependent could not complete")
+end
+
 -- Dependencies cannot bypass a missing, failed or unknown prerequisite.
 local dependencies = new_scheduler()
 assert(dependencies:Enqueue({ id = "missing-dependent", owner_id = "x", dependencies = { "missing" } }).code == "invalid",
@@ -1318,6 +1388,35 @@ assert(reserved_release_job.code == "invalid",
 	"generic scheduled work was allowed to share the internal profile-release circuit")
 assert(not reserved_release_callback_ran,
 	"generic reserved profile-release callback ran despite being rejected")
+
+
+local function assert_reserved_work_class_rejected(work_class)
+	local callback_ran = false
+	local job = RecordStore.schedule_work(
+		"integration-owner",
+		"public-reserved-work-class-" .. work_class,
+		function()
+			callback_ran = true
+			return { code = "success" }
+		end,
+		{ lane = "normal", work_class = work_class }
+	)
+	if job.code ~= "invalid" then
+		RecordStore.set_scheduler_enabled(false)
+		for _ = 1, 200 do
+			if RecordStore.get_scheduler_snapshot().dispatcher.in_flight == 0 then break end
+			task.wait(0.001)
+		end
+		RecordStore.set_scheduler_enabled(true)
+	end
+	assert(job.code == "invalid",
+		"public schedule_work API accepted reserved work_class " .. work_class)
+	assert(not callback_ran,
+		"public scheduled callback ran with reserved work_class " .. work_class)
+end
+
+assert_reserved_work_class_rejected("lease_renewal")
+assert_reserved_work_class_rejected("profile_release")
 
 local public_callback_ran = false
 local public_job = RecordStore.schedule_work("integration-owner", "public-scheduler-api", function()
