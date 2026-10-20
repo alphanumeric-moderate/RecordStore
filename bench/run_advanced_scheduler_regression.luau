@@ -544,6 +544,37 @@ assert(shadow_batch:Stats().queue_items == shadow_batch_queue_before,
 	"batch shadow sampling mutated the actual queue")
 take(shadow_batch, "shadow-batch-candidate")
 
+-- Shadow priority inheritance must operate on the same cloned objects in queue and known.
+local shadow_inheritance = new_scheduler()
+local shadow_prerequisite_due = now_ms + 50
+enqueue(shadow_inheritance, {
+	id = "shadow-delayed-prerequisite",
+	owner_id = "shadow-inheritance-owner",
+	lane = "background",
+	due_at_ms = shadow_prerequisite_due,
+})
+enqueue(shadow_inheritance, {
+	id = "shadow-ready-ordinary",
+	owner_id = "shadow-ordinary-owner",
+	lane = "normal",
+})
+enqueue(shadow_inheritance, {
+	id = "shadow-high-dependent",
+	owner_id = "shadow-dependent-owner",
+	lane = "high",
+	dependencies = { "shadow-delayed-prerequisite" },
+})
+assert(shadow_inheritance.known["shadow-delayed-prerequisite"].inherited_lane == nil,
+	"future prerequisite was promoted before it became eligible")
+now_ms = shadow_prerequisite_due
+local inherited_recommendation = shadow_inheritance:ShadowNext("deadline")
+assert(inherited_recommendation ~= nil and inherited_recommendation.id == "shadow-delayed-prerequisite",
+	"shadow selector failed to apply priority inheritance when a delayed prerequisite became ready")
+assert(shadow_inheritance.known["shadow-delayed-prerequisite"].inherited_lane == nil,
+	"shadow priority inheritance mutated the live prerequisite state")
+assert(shadow_inheritance:Stats().queue_items == 3,
+	"shadow priority inheritance altered the live queue")
+
 -- Retry rescheduling preserves the logical ID and cannot run before its due time.
 local retry_queue = new_scheduler()
 enqueue(retry_queue, { id = "stable-retry-id", owner_id = "retry-owner", lane = "normal", work_class = "outbox" })
