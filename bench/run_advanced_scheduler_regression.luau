@@ -530,6 +530,12 @@ do
 	assert(direct_call_ok and type(direct_result) == "table" and direct_result.code == "invalid",
 		"direct scheduler enqueue threw on cyclic dependency input instead of returning invalid")
 
+	local due_call_ok, due_accepted, due_error = pcall(function()
+		return direct_scheduler:ScheduleDue("cyclic-due-payload", now_ms + 1, cyclic_dependencies)
+	end)
+	assert(due_call_ok and due_accepted == false and type(due_error) == "string",
+		"ScheduleDue threw on cyclic payload input instead of returning false and an error")
+
 	local dispatch_scheduler = new_scheduler()
 	local invalid_dispatcher = Scheduler.new_dispatcher(dispatch_scheduler, {
 		now_ms = function() return now_ms end,
