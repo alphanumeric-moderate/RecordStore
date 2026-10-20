@@ -476,6 +476,34 @@ assert(per_owner:MarkCompleted(first.id, "committed"))
 assert(per_owner:MarkCompleted(second.id, "committed"))
 take(per_owner, "owner-one-b")
 
+-- Across owners, renewal selection must prefer the least remaining lease slack
+-- even while both renewals are outside the generic five-second urgent window.
+local renewal_deadlines = new_scheduler()
+enqueue(renewal_deadlines, {
+	id = "renewal-later-slack",
+	owner_id = "a-later",
+	lane = "lease_renewal",
+	work_class = "lease_renewal",
+	service_class = "critical",
+	deadline_ms = now_ms + 30000,
+})
+enqueue(renewal_deadlines, {
+	id = "renewal-lower-slack",
+	owner_id = "z-sooner",
+	lane = "lease_renewal",
+	work_class = "lease_renewal",
+	service_class = "critical",
+	deadline_ms = now_ms + 8000,
+})
+local safest_renewal = renewal_deadlines:TakeNext(true)
+assert(safest_renewal ~= nil and safest_renewal.id == "renewal-lower-slack",
+	"DRR chose by owner lane instead of remaining lease slack across renewals")
+assert(renewal_deadlines:MarkCompleted(safest_renewal.id, "renewed"))
+local second_safest_renewal = renewal_deadlines:TakeNext(true)
+assert(second_safest_renewal ~= nil and second_safest_renewal.id == "renewal-later-slack",
+	"remaining lease renewal became unreachable after the most urgent renewal completed")
+assert(renewal_deadlines:MarkCompleted(second_safest_renewal.id, "renewed"))
+
 -- One owner/claim cannot hold more than one active renewal, even if its
 -- general work concurrency limit is larger.
 local renewal_cap = new_scheduler()
