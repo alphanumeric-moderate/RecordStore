@@ -247,6 +247,12 @@ class grants access to protected admission capacity and is reserved for library-
 persistence callbacks. The `lease_renewal` lane and `lease_renewal`/`profile_release`
 work and operation classes are likewise internal-only.
 
+Priority inheritance is deliberately narrow: a `high`-lane dependent must declare a finite
+`deadline_ms` or an `interactive` service class before a ready background prerequisite can
+inherit temporary `normal`-lane urgency. The public API cannot request `critical` service
+class. Inheritance affects scheduling only; it never changes the prerequisite's stored lane,
+identity, dependency outcome, or persistence/session fencing.
+
 Rollout is also per-server and revisioned. Before enabling the selector, read
 `get_scheduler_snapshot().rollout` and increase the percentage in controlled steps:
 
@@ -315,7 +321,16 @@ reject_noncritical mode gives queued noncritical work a typed backpressure compl
 
 `available_at`, an advisory scheduling deadline, `expires_at`, and the durable
 session/claim lease are distinct concepts. A deadline is not a completion guarantee.
-An expired item is returned with a typed terminal outcome rather than silently dropped.
+The weighted/deadline selectors estimate remaining slack as deadline minus current time
+and the conservative operation-class service-time estimate (the greater of retained P95
+and EWMA when measurements exist). Deadline influence is bounded so it cannot erase static
+lane/service preference; age promotion is separate.
+
+When an advisory deadline has already passed at selection, the `on_complete` result keeps
+the callback's `code` and includes the reserved scheduler fields `scheduler_overdue = true`,
+`scheduler_deadline_ms`, and `scheduler_selected_at_ms`. This reports lateness without
+suppressing or automatically expiring the callback. An item whose separate `expires_at`
+boundary has passed is returned with a typed terminal outcome rather than silently dropped.
 The dispatcher retries only an explicit `{ code = "retryable" }` result and only
 within configured limits and retry-token admission. A thrown callback is converted to
 `unknown` and is not automatically replayed because its side effect may have committed.
