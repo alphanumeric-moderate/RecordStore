@@ -282,6 +282,42 @@ for _, algorithm in ipairs({ "deadline", "weighted" }) do
 end
 end
 
+do
+-- Deadline slack includes a conservative service-time estimate per operation class.
+local service_slack = new_scheduler()
+local service_slack_policy = service_slack:Stats().policy
+assert(service_slack:SetPolicy({
+	revision = service_slack_policy.revision + 1,
+	algorithm = "deadline",
+}), "service-time deadline policy was rejected")
+service_slack:Observe("slow-operation", true, 500)
+service_slack:Observe("fast-operation", true, 1)
+enqueue(service_slack, {
+	id = "later-but-unachievable-deadline",
+	owner_id = "slow-owner",
+	lane = "normal",
+	service_class = "normal",
+	operation_class = "slow-operation",
+	deadline_ms = now_ms + 300,
+})
+enqueue(service_slack, {
+	id = "earlier-achievable-deadline",
+	owner_id = "fast-owner",
+	lane = "normal",
+	service_class = "normal",
+	operation_class = "fast-operation",
+	deadline_ms = now_ms + 100,
+})
+local predicted_slack_pick = service_slack:TakeNext()
+assert(predicted_slack_pick ~= nil and predicted_slack_pick.id == "later-but-unachievable-deadline",
+	"deadline selection ignored the operation's conservative service-time estimate")
+assert(service_slack:MarkCompleted(predicted_slack_pick.id, "committed"))
+local remaining_slack_pick = service_slack:TakeNext()
+assert(remaining_slack_pick ~= nil and remaining_slack_pick.id == "earlier-achievable-deadline",
+	"service-time slack selection lost the other eligible operation")
+assert(service_slack:MarkCompleted(remaining_slack_pick.id, "committed"))
+end
+
 now_ms += 20
 local overdue = deadline:TakeNext()
 assert(overdue ~= nil and overdue.id == "no-deadline", "eligible work was lost after a deadline passed")
