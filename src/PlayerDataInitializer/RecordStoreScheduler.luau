@@ -736,6 +736,14 @@ local function new_governor(options)
 	end
 	local function inherit_ready_prerequisites(self, dependent, instant)
 		if dependent.lane ~= "high" then return end
+		-- High priority alone is not an SLO. Boost a predecessor only when the
+		-- dependent declares a deadline or an explicitly time-sensitive service class.
+		if not finite(dependent.deadline_ms)
+			and dependent.service_class ~= "interactive"
+			and dependent.service_class ~= "critical"
+		then
+			return
+		end
 		local now = instant or now_ms()
 		for _, prerequisite_id in ipairs(dependent.dependencies or {}) do
 			local prerequisite = self.known[prerequisite_id]
