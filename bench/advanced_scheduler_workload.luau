@@ -3,7 +3,7 @@
 -- This measures local selection cost only, not Roblox DataStore request latency.
 local Scheduler = require("../src/PlayerDataInitializer/RecordStoreScheduler")
 
-local ITEM_COUNT = 256
+local ITEM_COUNT = 512
 local OWNER_COUNT = 16
 local now_ms = 1_800_000_000_000
 
@@ -44,12 +44,14 @@ local function run_algorithm(algorithm)
 		assert(accepted.code == "accepted", "scheduler refused benchmark work")
 	end
 	local selected = 0
+	local estimated_cost_units = 0
 	local selected_by_owner, last_selected_by_owner = {}, {}
 	local max_owner_gap_ms = 0
 	while true do
 		local item = governor:TakeNext(false)
 		if item == nil then break end
 		selected += 1
+		estimated_cost_units += item.admission_cost or item.cost or 1
 		local owner = item.owner_id
 		selected_by_owner[owner] = (selected_by_owner[owner] or 0) + 1
 		local previous_owner_selection = last_selected_by_owner[owner]
@@ -70,20 +72,40 @@ local function run_algorithm(algorithm)
 		assert(selected_by_owner[owner] == ITEM_COUNT / OWNER_COUNT,
 			algorithm .. " provided unequal completion counts for " .. owner)
 	end
-	local elapsed_ms = now_ms - start_ms
+	local virtual_elapsed_ms = now_ms - start_ms
+	assert(estimated_cost_units >= selected, algorithm .. " reported less than one cost unit per completion")
 	assert(stats.scheduler.queue_wait_p50_ms > 0, algorithm .. " did not measure virtual queue wait")
 	assert(stats.scheduler.queue_wait_p95_ms >= stats.scheduler.queue_wait_p50_ms
 		and stats.scheduler.queue_wait_p99_ms >= stats.scheduler.queue_wait_p95_ms,
 		algorithm .. " reported inconsistent queue wait percentiles")
-	assert(stats.scheduler.queue_wait_p99_ms < elapsed_ms,
+	assert(stats.scheduler.queue_wait_p99_ms < virtual_elapsed_ms,
 		algorithm .. " queue-wait p99 exceeded the total virtual workload duration")
-	assert(max_owner_gap_ms < elapsed_ms * 0.75,
+	assert(max_owner_gap_ms < virtual_elapsed_ms * 0.75,
 		algorithm .. " starved an owner for most of the virtual workload")
+	local distinct_lanes, lane_class_buckets = 0, 0
+	local max_lane_wait_ms, max_lane_class_p99_ms = 0, 0
+	for _, lane_stats in pairs(stats.scheduler.by_lane) do
+		if lane_stats.selected > 0 then
+			distinct_lanes += 1
+			assert(lane_stats.max_wait_ms >= 0, algorithm .. " reported a negative lane wait")
+			max_lane_wait_ms = math.max(max_lane_wait_ms, lane_stats.max_wait_ms)
+		end
+	end
+	for _, class_stats in pairs(stats.scheduler.by_lane_class) do
+		lane_class_buckets += 1
+		assert(class_stats.selected > 0, algorithm .. " retained an empty lane/class metric bucket")
+		assert(class_stats.p50_ms <= class_stats.p95_ms and class_stats.p95_ms <= class_stats.p99_ms,
+			algorithm .. " reported inconsistent lane/class wait percentiles")
+		max_lane_class_p99_ms = math.max(max_lane_class_p99_ms, class_stats.p99_ms)
+	end
+	assert(distinct_lanes >= 3, algorithm .. " did not exercise all priority lanes")
+	assert(lane_class_buckets >= 3, algorithm .. " did not produce lane/class wait metrics")
 	print(string.format(
-		"[scheduler-bench] algorithm=%s selected=%d elapsed_ms=%d wait_p50_ms=%d wait_p95_ms=%d wait_p99_ms=%d max_owner_gap_ms=%d",
-		algorithm, selected, elapsed_ms,
+		"[scheduler-bench] algorithm=%s selected=%d virtual_elapsed_ms=%d cost_units_per_completion=%.2f wait_p50_ms=%d wait_p95_ms=%d wait_p99_ms=%d max_lane_wait_ms=%d max_lane_class_p99_ms=%d lanes=%d lane_classes=%d max_owner_gap_ms=%d",
+		algorithm, selected, virtual_elapsed_ms, estimated_cost_units / selected,
 		stats.scheduler.queue_wait_p50_ms, stats.scheduler.queue_wait_p95_ms,
-		stats.scheduler.queue_wait_p99_ms, max_owner_gap_ms
+		stats.scheduler.queue_wait_p99_ms, max_lane_wait_ms, max_lane_class_p99_ms,
+		distinct_lanes, lane_class_buckets, max_owner_gap_ms
 	))
 	return stats
 end
