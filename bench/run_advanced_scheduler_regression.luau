@@ -693,6 +693,7 @@ enqueue(shadow_inheritance, {
 	id = "shadow-high-dependent",
 	owner_id = "shadow-dependent-owner",
 	lane = "high",
+	deadline_ms = shadow_prerequisite_due + 500,
 	dependencies = { "shadow-delayed-prerequisite" },
 })
 assert(shadow_inheritance.known["shadow-delayed-prerequisite"].inherited_lane == nil,
@@ -836,6 +837,24 @@ assert(untimed_prerequisite ~= nil and untimed_status == "success",
 assert(untimed_prerequisite.inherited_lane == nil,
 	"a high-lane dependent without a deadline or interactive service class inherited urgency")
 
+local interactive_inheritance = new_scheduler()
+enqueue(interactive_inheritance, {
+	id = "interactive-prerequisite",
+	owner_id = "interactive-workflow-owner",
+	lane = "background",
+})
+enqueue(interactive_inheritance, {
+	id = "interactive-dependent",
+	owner_id = "interactive-workflow-owner",
+	lane = "high",
+	service_class = "interactive",
+	dependencies = { "interactive-prerequisite" },
+})
+local interactive_prerequisite, interactive_status = interactive_inheritance:TakeNext()
+assert(interactive_prerequisite ~= nil and interactive_status == "success"
+	and interactive_prerequisite.inherited_lane == "normal",
+	"interactive service class did not qualify for bounded priority inheritance")
+
 end
 
 do
@@ -844,7 +863,7 @@ do
 local inheritance = new_scheduler()
 enqueue(inheritance, { id = "ready-prerequisite", owner_id = "workflow-owner", work_class = "saga", lane = "background" })
 local inheritance_policy = inheritance:Stats().policy
-enqueue(inheritance, { id = "urgent-dependent", owner_id = "workflow-owner", work_class = "saga", lane = "high", dependencies = { "ready-prerequisite" } })
+enqueue(inheritance, { id = "urgent-dependent", owner_id = "workflow-owner", work_class = "saga", lane = "high", deadline_ms = now_ms + 500, dependencies = { "ready-prerequisite" } })
 local inherited, inherited_status = inheritance:TakeNext()
 assert(inherited ~= nil and inherited_status == "success" and inherited.id == "ready-prerequisite",
 	"dependency inheritance selected downstream work before its prerequisite")
@@ -868,6 +887,7 @@ enqueue(cancelled_inheritance, {
 	owner_id = "cancelled-workflow-owner",
 	work_class = "saga",
 	lane = "high",
+	deadline_ms = now_ms + 500,
 	dependencies = { "inflight-inherited-prerequisite" },
 })
 local running_prerequisite, running_status = cancelled_inheritance:TakeNext()
@@ -901,6 +921,7 @@ enqueue(delayed_inheritance, {
 	owner_id = "delayed-workflow-owner",
 	work_class = "saga",
 	lane = "high",
+	deadline_ms = prerequisite_ready_at + 500,
 	dependencies = { "delayed-prerequisite" },
 })
 assert(delayed_inheritance:TakeNext() == nil,
