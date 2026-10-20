@@ -776,8 +776,7 @@ local function new_governor(options)
 		return (left.enqueued_at_ms or 0) < (right.enqueued_at_ms or 0)
 	end
 	local function estimated_service_time_ms(self, item, cache)
-		local operation_kind = if type(item.operation_class) == "string" then item.operation_class
-			elseif type(item.work_class) == "string" then item.work_class else "default"
+		local operation_kind = if type(item.operation_class) == "string" then item.operation_class else "default"
 		local metric_kind = operation_metric_key(self, operation_kind)
 		local cached = cache[metric_kind]
 		if cached ~= nil then return cached end
