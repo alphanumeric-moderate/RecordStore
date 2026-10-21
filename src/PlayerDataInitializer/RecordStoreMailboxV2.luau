@@ -2017,6 +2017,12 @@ function MailboxV2._claim(self: Mailbox, route: string): (Dict?, Result)
 		if current == nil or not same_owner(current.owner, self.owner) then
 			return current
 		end
+		if current_record.ordering_key ~= nil and (
+			current.ordering_key ~= current_record.ordering_key
+			or current.ordering_sequence ~= current_record.ordering_sequence
+		) then
+			return current
+		end
 		if current.state == "acknowledging" then
 			return current
 		end
