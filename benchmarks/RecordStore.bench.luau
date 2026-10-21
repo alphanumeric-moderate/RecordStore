@@ -44,14 +44,18 @@ local globals = getfenv(0)
 -- keeping this benchmark runnable under Lune's filesystem-based require.
 local original_require = require
 local scheduler_module_token = {}
+local mailbox_module_token = {}
 globals.script = {
 	Parent = {
 		RecordStoreScheduler = scheduler_module_token,
+		RecordStoreMailboxV2 = mailbox_module_token,
 	},
 }
 globals.require = function(target)
 	if target == scheduler_module_token then
 		return original_require("../src/PlayerDataInitializer/RecordStoreScheduler")
+	elseif target == mailbox_module_token then
+		return original_require("../src/PlayerDataInitializer/RecordStoreMailboxV2")
 	end
 	return original_require(target)
 end
