@@ -862,6 +862,9 @@ do
 	local invalid_advance = guarded_replay:Replay({ { kind = "advance", ms = -1 } })
 	assert(type(invalid_advance) == "table" and invalid_advance.code == "invalid",
 		"trace replay accepted a negative virtual-time advance")
+	local excessive_advance = guarded_replay:Replay({ { kind = "advance", ms = 1e100 } })
+	assert(type(excessive_advance) == "table" and excessive_advance.code == "invalid",
+		"trace replay accepted an unbounded virtual-time advance")
 	local sparse_trace = {
 		[1] = { kind = "take" },
 		[3] = { kind = "take" },
@@ -2121,6 +2124,15 @@ assert(deadline_comparison[1] == "deadline-earlier-deadline-sooner",
 	"isolated deadline replay did not select the lower-slack candidate")
 assert(RecordStore.get_scheduler_snapshot().policy.algorithm == live_algorithm_before_replay,
 	"replay policy override mutated the live scheduler policy")
+local invalid_replay_policy = RecordStore.replay_scheduler_trace(policy_comparison_trace, "not-a-policy")
+assert(type(invalid_replay_policy) == "table" and invalid_replay_policy.code == "invalid",
+	"public replay accepted a non-table policy override")
+local revision_replay_policy = RecordStore.replay_scheduler_trace(policy_comparison_trace, {
+	revision = 900,
+	algorithm = "fifo",
+})
+assert(type(revision_replay_policy) == "table" and revision_replay_policy.code == "invalid",
+	"public replay allowed the caller to override its isolated policy revision")
 
 -- A dirty mock Record is autosaved through the selector when explicitly enabled.
 local core_record = RecordStore.Mock.new("SchedulerRegression", "global", "scheduler-player", {
