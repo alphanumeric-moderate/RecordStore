@@ -5173,7 +5173,7 @@ process_queue_v2 = function(self: Record, state: InternalState, max_messages: nu
 	if state.takeover_requested then return "closing", "session takeover has been requested" end
 	if not scheduler_enabled then return "disabled", "V2 mailbox processing requires the advanced scheduler for claim renewal" end
 	if state.queue_busy or state.busy then return "busy", "record already has a durable operation in flight" end
-	if type(max_messages) ~= "number" or not finite(max_messages) or max_messages < 1 or math.floor(max_messages) ~= max_messages then
+	if type(max_messages) ~= "number" or not math.isfinite(max_messages) or max_messages < 1 or math.floor(max_messages) ~= max_messages then
 		return "invalid", "max_messages must be a positive integer"
 	end
 	local mailbox, bound_code, bound_message = mailbox_bound_for_state(state)
