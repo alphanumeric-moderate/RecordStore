@@ -847,6 +847,39 @@ do
 		"trace replay treated an unknown completion as successful")
 end
 
+-- Trace replay rejects malformed or oversized input before executing any events.
+do
+	local guarded_replay = new_scheduler()
+	local non_table_trace = guarded_replay:Replay("not-a-trace")
+	assert(type(non_table_trace) == "table" and non_table_trace.code == "invalid",
+		"trace replay did not reject a non-table trace")
+	local non_table_event = guarded_replay:Replay({ "not-an-event" })
+	assert(type(non_table_event) == "table" and non_table_event.code == "invalid",
+		"trace replay did not reject a non-table event")
+	local unknown_event = guarded_replay:Replay({ { kind = "unknown-event" } })
+	assert(type(unknown_event) == "table" and unknown_event.code == "invalid",
+		"trace replay silently ignored an unknown event kind")
+	local invalid_advance = guarded_replay:Replay({ { kind = "advance", ms = -1 } })
+	assert(type(invalid_advance) == "table" and invalid_advance.code == "invalid",
+		"trace replay accepted a negative virtual-time advance")
+	local sparse_trace = {
+		[1] = { kind = "take" },
+		[3] = { kind = "take" },
+	}
+	local sparse_result = guarded_replay:Replay(sparse_trace)
+	assert(type(sparse_result) == "table" and sparse_result.code == "invalid",
+		"trace replay accepted a sparse event array")
+	local oversized_trace = {}
+	for index = 1, 8193 do
+		oversized_trace[index] = { kind = "take" }
+	end
+	local oversized_result = guarded_replay:Replay(oversized_trace)
+	assert(type(oversized_result) == "table" and oversized_result.code == "invalid",
+		"trace replay accepted more events than the bounded trace limit")
+	assert(guarded_replay:Stats().queue_items == 0,
+		"invalid trace validation mutated the isolated governor")
+end
+
 -- Trace replay must reproduce the dispatcher's lease-renewal selection mode.
 do
 	local renewal_trace = new_scheduler()
