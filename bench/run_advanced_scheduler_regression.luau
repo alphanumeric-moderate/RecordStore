@@ -1918,7 +1918,7 @@ do
 	local ordinary_started, ordinary_completed = 0, 0
 	for index = 1, 3 do
 		local job = persistence_dispatcher:Schedule(
-			"ordinary-reserve-owner-" .. tostring(index),
+			"internal-critical-owner",
 			"ordinary-reserve-job-" .. tostring(index),
 			function()
 				ordinary_started += 1
