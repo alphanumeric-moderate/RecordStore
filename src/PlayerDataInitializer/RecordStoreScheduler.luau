@@ -2104,6 +2104,11 @@ local function new_dispatcher(governor, options)
 				batch_window = math.min(batch_window, 2)
 			end
 		end
+		if finite(schedule_options.deadline_ms) then
+			-- Batching may wait only within the remaining advisory deadline slack.
+			-- Explicit due/availability timestamps still remain authoritative below.
+			batch_window = math.min(batch_window, math.max(0, schedule_options.deadline_ms - now))
+		end
 		due = math.max(due, now + batch_window)
 		if finite(schedule_options.available_at_ms) then due = math.max(due, schedule_options.available_at_ms) end
 		-- Deadlines influence selection priority; they never override availability.
