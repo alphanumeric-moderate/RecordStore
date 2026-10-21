@@ -249,6 +249,13 @@ persistence callbacks. The `critical`/`profile_save` work and operation classes,
 `lease_renewal` lane, and the `lease_renewal`/`profile_release` work and operation
 classes are likewise internal-only.
 
+The dispatcher also reserves bounded queue headroom for internal critical work, not just
+in-flight execution slots. Generic and other noncritical work receives a `capacity`
+result before it can consume that reserve. The reserve scales with `queue_capacity`, is
+capped at 64 items, and never exceeds `queue_capacity - 1`; a queue capacity of one has
+no separate reserve. The total queue remains bounded, so critical admission can still
+return `capacity` if critical work itself fills the queue.
+
 `RecordStore.replay_scheduler_trace(trace, policy_override?)` replays synthetic events
 against an isolated governor and virtual clock. The trace must be a dense array of at most
 8,192 events. Supported event kinds are `enqueue`, `take`, `complete`, `advance`, `budget`,
