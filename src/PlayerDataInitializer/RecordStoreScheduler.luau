@@ -200,8 +200,10 @@ local function new_governor(options)
 		if policy.shadow_sample_rate < 0 or policy.shadow_sample_rate > 1 then return false, "shadow_sample_rate must be in 0..1" end
 		return true, nil
 	end
-	function governor:SetPolicy(patch)
-		if type(patch) ~= "table" or not finite(patch.revision) or patch.revision <= self.policy.revision then return false, "policy revision must increase" end
+	function governor:ValidatePolicy(patch)
+		if type(patch) ~= "table" or not finite(patch.revision) or patch.revision <= self.policy.revision then
+			return false, "policy revision must increase"
+		end
 		local allowed = {
 			revision = true, mode = true, max_in_flight = true, critical_reserve = true, queue_capacity = true,
 			max_batch = true, batch_window_ms = true, batch_latency_ceiling_ms = true, high_burst = true,
@@ -221,6 +223,11 @@ local function new_governor(options)
 		local next_policy = copy(self.policy)
 		for key, value in pairs(patch) do next_policy[key] = value end
 		local valid, message = policy_valid(next_policy)
+		if not valid then return false, message end
+		return true, nil, next_policy
+	end
+	function governor:SetPolicy(patch)
+		local valid, message, next_policy = self:ValidatePolicy(patch)
 		if not valid then return false, message end
 		self.policy = next_policy
 		self.retry_tokens = math.min(self.retry_tokens, self.policy.retry_token_capacity)
@@ -2059,6 +2066,10 @@ local function new_dispatcher(governor, options)
 	function dispatcher:Kick()
 		kick_dispatcher()
 		schedule_next_wake()
+	end
+	function dispatcher:ValidatePolicy(policy)
+		local ok, message = governor:ValidatePolicy(policy)
+		return if ok then "success" else "invalid", message
 	end
 	function dispatcher:SetPolicy(policy)
 		local ok, message = governor:SetPolicy(policy)
