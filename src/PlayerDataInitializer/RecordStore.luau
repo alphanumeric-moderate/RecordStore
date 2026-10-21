@@ -6716,6 +6716,20 @@ local function enqueue_state_work(
 		slot.pending[kind] = nil
 		slot.jobs[kind] = nil
 		slot.last_result[kind] = if type(result) == "table" then tostring(result.code or "unknown") else "unknown"
+		if type(result) == "table" and result.code == "cancelled"
+			and not scheduler_enabled and not closing and state.state == "active"
+		then
+			-- A kill-switch cancellation must return due work to the legacy selector
+			-- instead of leaving the next timer at a future time for work that never ran.
+			local retry_at = now_local()
+			if kind == "lease_renewal" then
+				state.next_renewal = math.min(state.next_renewal, retry_at)
+			elseif kind == "autosave" then
+				state.next_autosave = math.min(state.next_autosave, retry_at)
+			elseif kind == "queue_poll" then
+				state.next_queue_poll = math.min(state.next_queue_poll, retry_at)
+			end
+		end
 		if kind == "lease_renewal" and type(result) == "table" and result.code == "retry_exhausted" and state.state == "active" then
 			state.next_renewal = math.min(state.next_renewal, now_local())
 		elseif kind == "autosave" and type(result) == "table" and result.code == "retry_exhausted" and state.state == "active" then
