@@ -244,8 +244,9 @@ queue/latency metrics. Governor reservations are released on completion and befo
 retry is queued. It never combines separate callbacks into a new business transaction.
 The public `schedule_work` API cannot claim `service_class = "critical"`; that service
 class grants access to protected admission capacity and is reserved for library-managed
-persistence callbacks. The `lease_renewal` lane and `lease_renewal`/`profile_release`
-work and operation classes are likewise internal-only.
+persistence callbacks. The `critical`/`profile_save` work and operation classes, the
+`lease_renewal` lane, and the `lease_renewal`/`profile_release` work and operation
+classes are likewise internal-only.
 
 `RecordStore.replay_scheduler_trace(trace, policy_override?)` replays synthetic events
 against an isolated governor and virtual clock. The trace must be a dense array of at most
