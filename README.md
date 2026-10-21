@@ -373,8 +373,24 @@ The scheduler and its due-time heap are **server-local and non-durable**. A proc
 restart discards queued callbacks. Do not use generic scheduled callbacks as the durable
 mailbox or as an exactly-once transaction mechanism. Scheduled entry points may coexist
 with existing direct APIs; callers must deliberately route work through the selector when
-they require scheduler ordering. Strict `ordering_key` semantics and global/server-instance
-priority are not provided.
+they require scheduler ordering. The generic `schedule_work` API does not provide durable
+`ordering_key` semantics. Global or per-server-instance priority is intentionally not part of
+the protocol; priority may affect message selection and server-local work-class scheduling only.
+
+The separate `RecordStore.MailboxV2` API supports an opt-in strict per-key message order. Pass
+`strict_ordering_enabled = true` when constructing the mailbox before using a non-nil
+`ordering_key`; the default remains disabled and rejects those enqueues. When enabled, every
+earlier message on that key must reach a terminal state before a successor can be claimed, even
+when the successor has higher priority or the predecessor is delayed, claimed, or retrying.
+Dead-letter replay obtains a new durable sequence, so replay cannot jump ahead of older live
+messages. The mailbox adapter must provide `GetAsyncFresh(key)` for uncached authoritative reads;
+RecordStore's `CreateMailboxStoreAdapter()` does this with `DataStoreGetOptions.UseCache = false`.
+Strict mode fails closed rather than falling back to a potentially stale cached read. Per-key
+ordering can cause head-of-line blocking and should be enabled only for workflows that require it.
+Priority tiers are bounded to `high`, `normal`, and `background`; `high_priority_burst`
+sets the maximum consecutive high-priority claims before non-high work gets a selection turn
+(default `4`, maximum `32`). These are local scheduling preferences, not ownership or durability
+guarantees.
 
 Scheduler design is governed by [PR #39](https://github.com/alphanumeric-moderate/RecordStore/pull/39), the latest durable-messaging and durable-save-recovery specification. In particular, its sections 26.13, 27.4, 29 and P0 release blockers 9-10 in section 31 govern dirty-age-aware saves, bounded unknown-outcome reconciliation, mutation backpressure, and the critical persistence reserve. This PR implements only the scheduler side of that contract; the production-path unknown-save/renewal reconciler and its fault-injection acceptance gates remain unimplemented and must not be treated as satisfied. The focused scheduler regression suite runs under Lune. CodSpeed measures FIFO, weighted, deadline and DRR against the same synthetic multi-owner/work-class input in separate benchmark entries. These establish local algorithm behavior and relative cost only; they do not prove Roblox DataStore latency, quota, cross-server behavior or production rollout safety.
 
