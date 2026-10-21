@@ -297,7 +297,6 @@ end
 local function test_recordstore_installs_shared_scheduler_for_v2_claim_renewal()
 	RecordStore.Mock.reset()
 	local renewal_calls = 0
-	local HttpService = game:GetService("HttpService")
 	local record = RecordStore.Mock.new("MailboxV2SchedulerIntegration", "global", "profile-scheduler", {
 		schema_version = 1,
 		durable_queue_enabled = true,
@@ -324,7 +323,7 @@ local function test_recordstore_installs_shared_scheduler_for_v2_claim_renewal()
 		"core mailbox adapter creation failed: " .. tostring(adapter_message))
 	local mailbox = MailboxV2.new(adapter, record:GetMailboxOwner(), {
 		active_record = record,
-		encode = function(value) return HttpService:JSONEncode(value) end,
+		encode = function(value) return serde.encode("json", value) end,
 		activation_guard = function() return true end,
 		strict_ordering_enabled = true,
 		lease_ms = 10000,
