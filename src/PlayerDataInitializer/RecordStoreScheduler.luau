@@ -1074,6 +1074,16 @@ local function new_governor(options)
 		return { code = "accepted", count = #self.queue }
 	end
 	local remember_terminal
+	local function refresh_owner_retry_cooldown(self, owner_id)
+		local latest_due = nil
+		for _, queued in ipairs(self.queue) do
+			if queued.owner_id == owner_id and queued.is_retry == true then
+				local due = if finite(queued.due_at_ms) then queued.due_at_ms else now_ms()
+				latest_due = if latest_due == nil then due else math.max(latest_due, due)
+			end
+		end
+		self.retry_cooldown_until[owner_id] = latest_due
+	end
 	function governor:CancelQueued(id, message)
 		if not valid_text(id, 128) then return nil, "invalid id" end
 		local item = self.known[id]
@@ -1088,6 +1098,7 @@ local function new_governor(options)
 		if queue_index == nil then return nil, "queued item was not present in the queue" end
 		table.remove(self.queue, queue_index)
 		item.queued = false
+		refresh_owner_retry_cooldown(self, item.owner_id)
 		item.terminal_result = {
 			code = "cancelled",
 			message = if type(message) == "string" and message ~= "" then string.sub(message, 1, 200)
@@ -1111,7 +1122,7 @@ local function new_governor(options)
 				}
 				release_dependencies(self, item)
 				self.known[item.id] = nil
-				self.retry_cooldown_until[item.owner_id] = nil
+				refresh_owner_retry_cooldown(self, item.owner_id)
 				remember_terminal(self, item.id, "dependency_failed")
 				return item, "dependency_failed"
 			elseif item.expires_at_ms and item.expires_at_ms <= now then
@@ -1121,7 +1132,7 @@ local function new_governor(options)
 				item.terminal_result = { code = "expired", message = "scheduled work expired before it could start" }
 				release_dependencies(self, item)
 				self.known[item.id] = nil
-				self.retry_cooldown_until[item.owner_id] = nil
+				refresh_owner_retry_cooldown(self, item.owner_id)
 				remember_terminal(self, item.id, "expired")
 				return item, "expired"
 			else
@@ -1341,7 +1352,7 @@ local function new_governor(options)
 		end
 		release_dependencies(self, item)
 		self.known[id] = nil
-		if item ~= nil then self.retry_cooldown_until[item.owner_id] = nil end
+		if item ~= nil then refresh_owner_retry_cooldown(self, item.owner_id) end
 		for _, dependent_item in pairs(self.known) do
 			-- A blocking prerequisite may already be in flight when its dependent
 			-- finishes or is cancelled. Clear inheritance on all active work so a
