@@ -233,8 +233,8 @@ local current = RecordStore.get_scheduler_snapshot()
 ```
 
 The API supports revisioned policy updates, cost-aware DRR, bounded owner/work-class
-fairness, deadline and age-aware selection, a strictly reserved lease-renewal
-concurrency slot, delayed-work heaps, expiry/dependency outcomes, retry tokens with
+fairness, deadline and age-aware selection, a protected internal concurrency share for
+lease renewals and critical profile persistence, delayed-work heaps, expiry/dependency outcomes, retry tokens with
 backoff/jitter, bounded callback concurrency, cost-weighted governor admission with
 separate StandardRead and StandardWrite estimates, per-work-class caps, estimated-byte
 and handler-slot limits, critical read/write reserves, circuit cooldowns, live request
@@ -366,7 +366,7 @@ with existing direct APIs; callers must deliberately route work through the sele
 they require scheduler ordering. Strict `ordering_key` semantics and global/server-instance
 priority are not provided.
 
-This implementation follows the scheduler requirements in [design #33, section 29](docs/superpowers/specs/2026-10-17-recordstore-durable-messaging-v2-design.md#29-advanced-scheduling-designs-with-correctness-and-performance-gates). The focused scheduler regression suite runs under Lune. CodSpeed measures FIFO, weighted, deadline and DRR against the same synthetic multi-owner/work-class input in separate benchmark entries. These establish local algorithm behavior and relative cost only; they do not prove Roblox DataStore latency, quota, cross-server behavior or production rollout safety.
+Scheduler design is governed by [PR #39](https://github.com/alphanumeric-moderate/RecordStore/pull/39), the latest durable-messaging and durable-save-recovery specification. In particular, its sections 26.13, 27.4, 29 and P0 release blockers 9-10 in section 31 govern dirty-age-aware saves, bounded unknown-outcome reconciliation, mutation backpressure, and the critical persistence reserve. This PR implements only the scheduler side of that contract; the production-path unknown-save/renewal reconciler and its fault-injection acceptance gates remain unimplemented and must not be treated as satisfied. The focused scheduler regression suite runs under Lune. CodSpeed measures FIFO, weighted, deadline and DRR against the same synthetic multi-owner/work-class input in separate benchmark entries. These establish local algorithm behavior and relative cost only; they do not prove Roblox DataStore latency, quota, cross-server behavior or production rollout safety.
 
 ## Benchmarks
 
