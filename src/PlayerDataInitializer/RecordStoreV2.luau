@@ -1323,6 +1323,33 @@ local function shared_runtime_governor(record_store, options)
 	return governor
 end
 
+local scheduler_dispatch_states = setmetatable({}, { __mode = "k" })
+
+local function shared_scheduler_dispatch_state(governor, runtime_options)
+	local state = scheduler_dispatch_states[governor]
+	if state == nil then
+		local now_ms = if type(runtime_options) == "table" and type(runtime_options.now_ms) == "function"
+			then function() return runtime_options.now_ms() end
+			else function() return os.clock() * 1000 end
+		state = {
+			now_ms = now_ms,
+			dispatch_metrics = {
+				accepted = 0, rejected = 0, dispatched = 0, retries = 0, callback_errors = 0,
+				expired = 0, dependency_failed = 0, last_error = nil, max_in_flight = 0,
+			},
+			dispatch_callbacks = {},
+			dispatcher_running = false,
+			dispatcher_in_flight = 0,
+			central_dispatch_in_flight = 0,
+			central_dispatch_pending = 0,
+			scheduled_wake_due_ms = nil,
+			scheduled_wake_generation = 0,
+		}
+		scheduler_dispatch_states[governor] = state
+	end
+	return state
+end
+
 local function path_diff(left, right, options)
 	options = options or {}
 	local max_nodes = bounded_integer(options.max_nodes, 256, 1, 2048)
@@ -3805,6 +3832,7 @@ function V2.new(record_store, mailbox_module, options)
 		error("RecordStoreV2 requires the shared RecordStore runtime governor APIs", 2)
 	end
 	local runtime_governor = shared_runtime_governor(record_store, options.runtime)
+	local dispatch_state = shared_scheduler_dispatch_state(runtime_governor, options.runtime)
 	local registered, registration_error = record_store.register_runtime_governor_hooks({
 		admit = function(work_class, request_kind, mutating)
 			return runtime_governor:Admit(work_class, request_kind, 1, mutating)
@@ -3930,22 +3958,12 @@ function V2.new(record_store, mailbox_module, options)
 	api.RenderErasureTemplate = render_template
 	api.Acceleration = options.acceleration_module
 	local activation_block
-	local dispatch_metrics = {
-		accepted = 0, rejected = 0, dispatched = 0, retries = 0, callback_errors = 0,
-		expired = 0, dependency_failed = 0, last_error = nil, max_in_flight = 0,
-	}
-	local dispatch_callbacks = {}
-	local dispatcher_running = false
-	local dispatcher_in_flight = 0
-	local central_dispatch_in_flight = 0
-	local central_dispatch_pending = 0
-	local scheduled_wake_due_ms = nil
-	local scheduled_wake_generation = 0
+	local dispatch_metrics = dispatch_state.dispatch_metrics
+	local dispatch_callbacks = dispatch_state.dispatch_callbacks
 	local kick_dispatcher
 
 	local function current_schedule_time_ms()
-		return if options.runtime ~= nil and type(options.runtime.now_ms) == "function"
-			then options.runtime.now_ms() else os.clock() * 1000
+		return dispatch_state.now_ms()
 	end
 
 	local function has_delay_scheduler()
@@ -3955,27 +3973,27 @@ function V2.new(record_store, mailbox_module, options)
 
 	local function schedule_wake_at(target_due_ms)
 		if not finite(target_due_ms) or not has_delay_scheduler() then return false end
-		if scheduled_wake_due_ms ~= nil and scheduled_wake_due_ms <= target_due_ms then
+		if dispatch_state.scheduled_wake_due_ms ~= nil and dispatch_state.scheduled_wake_due_ms <= target_due_ms then
 			return true
 		end
-		scheduled_wake_generation += 1
-		local generation = scheduled_wake_generation
-		scheduled_wake_due_ms = target_due_ms
+		dispatch_state.scheduled_wake_generation += 1
+		local generation = dispatch_state.scheduled_wake_generation
+		dispatch_state.scheduled_wake_due_ms = target_due_ms
 		local function wake()
-			if generation ~= scheduled_wake_generation or scheduled_wake_due_ms ~= target_due_ms then return end
+			if generation ~= dispatch_state.scheduled_wake_generation or dispatch_state.scheduled_wake_due_ms ~= target_due_ms then return end
 			local remaining_ms = target_due_ms - current_schedule_time_ms()
 			if remaining_ms > 0 then
 				if not delay_scheduled(math.max(0.001, remaining_ms / 1000), wake) then
-					if scheduled_wake_generation == generation then scheduled_wake_due_ms = nil end
+					if dispatch_state.scheduled_wake_generation == generation then dispatch_state.scheduled_wake_due_ms = nil end
 				end
 				return
 			end
-			scheduled_wake_due_ms = nil
+			dispatch_state.scheduled_wake_due_ms = nil
 			kick_dispatcher()
 		end
 		local wait_ms = math.max(0, target_due_ms - current_schedule_time_ms())
 		if not delay_scheduled(wait_ms / 1000, wake) then
-			scheduled_wake_due_ms = nil
+			dispatch_state.scheduled_wake_due_ms = nil
 			return false
 		end
 		return true
@@ -4086,8 +4104,8 @@ function V2.new(record_store, mailbox_module, options)
 			finish_scheduled_item(item, status, callback_entry, true, nil)
 			return
 		end
-		dispatcher_in_flight += 1
-		dispatch_metrics.max_in_flight = math.max(dispatch_metrics.max_in_flight, dispatcher_in_flight)
+		dispatch_state.dispatcher_in_flight += 1
+		dispatch_metrics.max_in_flight = math.max(dispatch_metrics.max_in_flight, dispatch_state.dispatcher_in_flight)
 		spawn_scheduled(function()
 			local callback = if type(callback_entry) == "table" then callback_entry.callback else callback_entry
 			local callback_ok, callback_result = true, nil
@@ -4100,25 +4118,25 @@ function V2.new(record_store, mailbox_module, options)
 				callback_result = "scheduled job lost its callback"
 			end
 			finish_scheduled_item(item, "success", callback_entry, callback_ok, callback_result)
-			dispatcher_in_flight = math.max(0, dispatcher_in_flight - 1)
+			dispatch_state.dispatcher_in_flight = math.max(0, dispatch_state.dispatcher_in_flight - 1)
 			kick_dispatcher()
 		end)
 	end
 
 	kick_dispatcher = function()
-		if dispatcher_running then return end
-		dispatcher_running = true
+		if dispatch_state.dispatcher_running then return end
+		dispatch_state.dispatcher_running = true
 		spawn_scheduled(function()
 			local policy = runtime_governor.policy
 			local max_in_flight = policy.max_scheduled_in_flight
 			local normal_limit = math.max(0, max_in_flight - policy.scheduler_critical_reserve)
-			while dispatcher_in_flight < max_in_flight do
+			while dispatch_state.dispatcher_in_flight < max_in_flight do
 				local item, status
 				-- Always check renewals first. They use a real reserved dispatch lane.
 				item, status = runtime_governor:TakeNext(true)
-				if item == nil and dispatcher_in_flight < normal_limit then
+				if item == nil and dispatch_state.dispatcher_in_flight < normal_limit then
 					item, status = runtime_governor:TakeNext(false)
-				elseif item == nil and dispatcher_in_flight < max_in_flight then
+				elseif item == nil and dispatch_state.dispatcher_in_flight < max_in_flight then
 					local counts = runtime_governor:Stats().lanes
 					if (counts.lease_renewal or 0) == 0 then
 						item, status = runtime_governor:TakeNext(false)
@@ -4127,20 +4145,20 @@ function V2.new(record_store, mailbox_module, options)
 				if item == nil then break end
 				dispatch_one(item, status)
 			end
-			dispatcher_running = false
+			dispatch_state.dispatcher_running = false
 			-- Completion re-enters the pump; future eligibility uses one coalesced
 			-- timer based on the earliest disposable local queue deadline.
-			if dispatcher_in_flight < max_in_flight then schedule_next_wake() end
+			if dispatch_state.dispatcher_in_flight < max_in_flight then schedule_next_wake() end
 		end)
 	end
 
 	api.GetSchedulerDispatchStats = function()
 		local snapshot = copy(dispatch_metrics)
-		snapshot.local_dispatch_in_flight = dispatcher_in_flight
-		snapshot.central_dispatch_in_flight = central_dispatch_in_flight
-		snapshot.central_dispatch_pending = central_dispatch_pending
-		snapshot.in_flight = dispatcher_in_flight + central_dispatch_in_flight
-		snapshot.next_wake_due_ms = scheduled_wake_due_ms
+		snapshot.local_dispatch_in_flight = dispatch_state.dispatcher_in_flight
+		snapshot.dispatch_state.central_dispatch_in_flight = dispatch_state.central_dispatch_in_flight
+		snapshot.dispatch_state.central_dispatch_pending = dispatch_state.central_dispatch_pending
+		snapshot.in_flight = dispatch_state.dispatcher_in_flight + dispatch_state.central_dispatch_in_flight
+		snapshot.next_wake_due_ms = dispatch_state.scheduled_wake_due_ms
 		if type(record_store.get_scheduler_snapshot) == "function" then
 			local snapshot_ok, core_snapshot = pcall(record_store.get_scheduler_snapshot)
 			if snapshot_ok and type(core_snapshot) == "table" then
@@ -4255,7 +4273,7 @@ function V2.new(record_store, mailbox_module, options)
 		-- Pin each V2 facade to its current queue until all jobs on that path drain.
 		-- Otherwise dependencies could reference a job ID known to only one scheduler.
 		local local_route_active = next(dispatch_callbacks) ~= nil
-		local central_route_active = central_dispatch_pending > 0
+		local central_route_active = dispatch_state.central_dispatch_pending > 0
 		local use_core_selector = not local_route_active and (core_scheduler_enabled or central_route_active)
 		if use_core_selector then
 			local clock_ok, core_now_ms = pcall(record_store.get_scheduler_clock_ms)
@@ -4296,7 +4314,7 @@ function V2.new(record_store, mailbox_module, options)
 							dispatch_metrics.dispatched += 1
 						end
 						local completion_ok, completion_error = pcall(invoke_completion, { on_complete = completion }, result)
-						central_dispatch_pending = math.max(0, central_dispatch_pending - 1)
+						dispatch_state.central_dispatch_pending = math.max(0, dispatch_state.central_dispatch_pending - 1)
 						if not completion_ok then
 							dispatch_metrics.callback_errors += 1
 							dispatch_metrics.last_error = text_error(completion_error, 200)
@@ -4314,15 +4332,15 @@ function V2.new(record_store, mailbox_module, options)
 						central_owner_id = component(store_name) .. component(scope) .. component(profile_key)
 					end
 				end
-				central_dispatch_pending += 1
+				dispatch_state.central_dispatch_pending += 1
 				local accepted = record_store.schedule_internal_work(
 					central_owner_id,
 					job_id,
 					function()
-						central_dispatch_in_flight += 1
-						dispatch_metrics.max_in_flight = math.max(dispatch_metrics.max_in_flight, dispatcher_in_flight + central_dispatch_in_flight)
+						dispatch_state.central_dispatch_in_flight += 1
+						dispatch_metrics.max_in_flight = math.max(dispatch_metrics.max_in_flight, dispatch_state.dispatcher_in_flight + dispatch_state.central_dispatch_in_flight)
 						local callback_ok, callback_result = pcall(callback)
-						central_dispatch_in_flight = math.max(0, central_dispatch_in_flight - 1)
+						dispatch_state.central_dispatch_in_flight = math.max(0, dispatch_state.central_dispatch_in_flight - 1)
 						if not callback_ok then
 							dispatch_metrics.callback_errors += 1
 							dispatch_metrics.last_error = text_error(callback_result, 200)
@@ -4336,7 +4354,7 @@ function V2.new(record_store, mailbox_module, options)
 					dispatch_metrics.accepted += 1
 					return { code = "accepted", job_id = accepted.id or job_id, due_at_ms = due_now }
 				end
-				central_dispatch_pending = math.max(0, central_dispatch_pending - 1)
+				dispatch_state.central_dispatch_pending = math.max(0, dispatch_state.central_dispatch_pending - 1)
 				if central_route_active or type(accepted) ~= "table" or accepted.code ~= "disabled" then
 					dispatch_metrics.rejected += 1
 					return { code = if type(accepted) == "table" then accepted.code else "unknown",
