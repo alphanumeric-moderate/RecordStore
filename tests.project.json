@@ -7,6 +7,9 @@
       "RecordStore": {
         "$path": "src/PlayerDataInitializer/RecordStore.luau"
       },
+      "RecordStoreScheduler": {
+        "$path": "src/PlayerDataInitializer/RecordStoreScheduler.luau"
+      },
       "RecordStoreMailboxV2": {
         "$path": "src/PlayerDataInitializer/RecordStoreMailboxV2.luau"
       },
