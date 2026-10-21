@@ -1105,7 +1105,6 @@ local function valid_scheduling_record(record: Dict, route: string): (boolean, s
 	if record.state == "claimed" then
 		if type(record.claim_token) ~= "string" or record.claim_token == "" or #record.claim_token > 256
 			or not is_finite(record.claim_started_at) or not is_finite(record.locked_until)
-			or (record.claim_started_at :: number) <= 0
 			or (record.locked_until :: number) <= (record.claim_started_at :: number)
 		then
 			return false, "canonical claim lease metadata is malformed"
