@@ -4909,6 +4909,136 @@ end
 local install_mailbox_renewal_scheduler: any
 local process_queue_v2: any
 
+local function mailbox_store_adapter(self: Record): (any?, ResultCode, string?)
+	local state = private[self]
+	if state == nil then return nil, "invalid", "record does not exist" end
+	if state.state ~= "active" then return nil, "fenced", "mailbox adapter requires an active Record" end
+	if state.takeover_requested then return nil, "closing", "session takeover has been requested" end
+	local store_name = state.options.queue_store_name or DEFAULT_QUEUE_STORE_NAME
+	local real_store: any = nil
+	if not state.backend.mock then
+		local store_ok, store_value = pcall(function()
+			return DataStoreService:GetDataStore(store_name, state.scope)
+		end)
+		if not store_ok or store_value == nil then
+			return nil, "unknown", "could not create the V2 mailbox DataStore adapter: " .. tostring(store_value)
+		end
+		real_store = store_value
+	end
+	local adapter: any = {}
+	local function check_key(key: unknown)
+		if type(key) ~= "string" or key == "" or #key > 50 then
+			error("V2 mailbox DataStore key must be 1 to 50 bytes", 3)
+		end
+		if state.retired or state.state ~= "active" or state.takeover_requested then
+			error("V2 mailbox operation requires the same active, non-takeover Record session", 3)
+		end
+	end
+	function adapter:GetAsync(key: string): unknown
+		check_key(key)
+		local deadline, deadline_error = resolve_operation_deadline(state.options.operation_deadline)
+		if deadline == nil then error(deadline_error or "invalid operation deadline", 2) end
+		if state.backend.mock then
+			local entry = get_mock_store(store_name, state.scope)[key]
+			return if entry ~= nil then copy_value(entry.Value) else nil
+		end
+		if not acquire_request(state, deadline, false, Enum.DataStoreRequestType.StandardRead) then
+			error("V2 mailbox read request deadline exceeded", 2)
+		end
+		local call_ok, value = pcall(function() return real_store:GetAsync(key) end)
+		release_slot()
+		if not call_ok then error(tostring(value), 2) end
+		return value
+	end
+	function adapter:UpdateAsync(
+		key: string,
+		transform: (unknown, unknown?) -> (unknown, { number }?, { [string]: unknown }?)
+	): unknown
+		check_key(key)
+		if type(transform) ~= "function" then error("V2 mailbox UpdateAsync transform must be a function", 2) end
+		local deadline, deadline_error = resolve_operation_deadline(state.options.operation_deadline)
+		if deadline == nil then error(deadline_error or "invalid operation deadline", 2) end
+		if state.backend.mock then
+			if mock_update_failure_count > 0 then
+				mock_update_failure_count -= 1
+				error(mock_update_failure_message, 2)
+			end
+			local store = get_mock_store(store_name, state.scope)
+			local entry = store[key]
+			local raw = if entry ~= nil then copy_value(entry.Value) else nil
+			local info: any = if entry ~= nil then {
+				Version = entry.Version,
+				CreatedTime = entry.CreatedTime,
+				UpdatedTime = entry.UpdatedTime,
+				UserIds = clone_user_ids(entry.UserIds),
+				Metadata = clone_metadata(entry.Metadata),
+				RawMetadata = clone_metadata(entry.Metadata),
+			} else nil
+			local replay_count = mock_update_replay_retries
+			local replay_advance = mock_update_replay_advance_seconds
+			mock_update_replay_retries = 0
+			mock_update_replay_advance_seconds = 0
+			local next_value: unknown = nil
+			local user_ids: { number }? = nil
+			local metadata: { [string]: unknown }? = nil
+			for _ = 0, replay_count do
+				local transform_ok, value, ids, meta = pcall(transform, raw, info)
+				if not transform_ok then error(tostring(value), 2) end
+				next_value, user_ids, metadata = value, ids, meta
+				mock_test_clock_offset += replay_advance
+			end
+			if next_value == nil then return copy_value(raw :: JsonValue?) end
+			local normalized_ids, ids_error = normalize_user_ids(user_ids or (if entry ~= nil then entry.UserIds else {}))
+			if normalized_ids == nil then error(ids_error, 2) end
+			local normalized_metadata: Metadata = if metadata == nil
+				then (if entry ~= nil then clone_metadata(entry.Metadata) else {})
+				else metadata :: Metadata
+			local metadata_ok, metadata_error = validate_metadata(normalized_metadata, true)
+			if not metadata_ok then error(metadata_error, 2) end
+			if type(next_value) ~= "table" and type(next_value) ~= "string"
+				and type(next_value) ~= "number" and type(next_value) ~= "boolean"
+			then
+				error("V2 mailbox attempted to store a non-JSON value", 2)
+			end
+			local size_ok, size_error = validate_serialized_size(next_value :: JsonValue)
+			if not size_ok then error(size_error, 2) end
+			local written = mock_write_version(entry, copy_value(next_value :: JsonValue), normalized_ids, normalized_metadata, false)
+			store[key] = written
+			return copy_value(written.Value :: JsonValue?)
+		end
+		if not acquire_request(state, deadline, true, nil) then
+			error("V2 mailbox update request deadline exceeded", 2)
+		end
+		local call_ok, value = pcall(function()
+			return real_store:UpdateAsync(key, function(raw: unknown, key_info: any)
+				local next_value, user_ids, metadata = transform(raw, key_info)
+				if next_value == nil then return nil end
+				if key_info ~= nil then
+					if user_ids == nil then user_ids = key_info:GetUserIds() end
+					if metadata == nil then metadata = key_info:GetMetadata() end
+				end
+				return next_value, user_ids, metadata
+			end)
+		end)
+		release_slot()
+		if not call_ok then error(tostring(value), 2) end
+		return value
+	end
+	return adapter, "success", nil
+end
+
+local function get_mailbox_owner(self: Record): { [string]: unknown }
+	local state = private[self]
+	if state == nil then return {} end
+	local owner: { [string]: unknown } = {
+		store_name = state.name,
+		scope = state.scope,
+		profile_key = state.key,
+	}
+	if #state.user_ids > 0 then owner.user_id = state.user_ids[1] end
+	return owner
+end
+
 local function enqueue(self: Record, message_type: string, data: JsonValue?, enqueue_options: { [string]: unknown }?): (ResultCode, string?)
 	local state = private[self]
 	if state == nil then return "invalid", "record does not exist" end
@@ -4942,7 +5072,7 @@ end
 local function get_queue(self: Record): ({ QueueMessage }, ResultCode, string?)
 	local state = private[self]
 	if state == nil then return {}, "invalid", "record does not exist" end
-	if state.mailbox_v2_binding then return {}, "busy", "V2 mailbox binding is checking the legacy queue" end
+	if state.mailbox_v2_binding and state.mailbox_v2 ~= nil then return {}, "busy", "V2 mailbox binding is checking the legacy queue" end
 	if state.mailbox_v2 ~= nil then
 		local mailbox, bound_code, bound_message = mailbox_bound_for_state(state)
 		if mailbox == nil then return {}, bound_code or "fenced", bound_message end
@@ -5011,6 +5141,135 @@ local function get_queue(self: Record): ({ QueueMessage }, ResultCode, string?)
 		result[#result + 1] = queue_item_to_public(item)
 	end
 	return result, "success", nil
+end
+
+process_queue_v2 = function(self: Record, state: InternalState, max_messages: number): (ResultCode, string?)
+	if state.state ~= "active" then return "fenced", "record is not actively owned" end
+	if state.takeover_requested then return "closing", "session takeover has been requested" end
+	if not scheduler_enabled then return "disabled", "V2 mailbox processing requires the advanced scheduler for claim renewal" end
+	if state.queue_busy or state.busy then return "busy", "record already has a durable operation in flight" end
+	if type(max_messages) ~= "number" or not finite(max_messages) or max_messages < 1 or math.floor(max_messages) ~= max_messages then
+		return "invalid", "max_messages must be a positive integer"
+	end
+	local mailbox, bound_code, bound_message = mailbox_bound_for_state(state)
+	if mailbox == nil then return bound_code or "fenced", bound_message end
+	if state.options.on_queue_message_async == nil and state.options.on_queue_message == nil then
+		return "invalid", "on_queue_message_async or on_queue_message must be configured before processing a V2 mailbox"
+	end
+	if type(install_mailbox_renewal_scheduler) ~= "function" then
+		return "invalid", "internal mailbox renewal scheduler is not initialized"
+	end
+	local configured, configure_error = install_mailbox_renewal_scheduler(self, state, mailbox)
+	if not configured then return "invalid", configure_error or "failed to install V2 mailbox lease-renewal scheduling" end
+	local limit = math.min(math.floor(max_messages), state.options.queue_max_messages or DEFAULT_QUEUE_MAX_MESSAGES)
+	state.queue_busy = true
+	local call_ok, final_code, final_message = pcall(function()
+		local processed = 0
+		for _ = 1, limit do
+			local result = mailbox:ProcessNextAsync(function(payload: unknown, message_value: any, context: unknown)
+				if type(message_value) ~= "table" or type(message_value.Type) ~= "string"
+					or type(message_value.Id) ~= "string" or type(message_value.Attempts) ~= "number"
+					or type(message_value.CreatedAt) ~= "number"
+				then
+					return false, "V2 mailbox returned a malformed message snapshot"
+				end
+				if state.options.on_queue_message_async ~= nil then
+					return state.options.on_queue_message_async(
+						message_value.Type, payload :: JsonValue?, message_value.Attempts, message_value.Id,
+						if type(message_value.SenderJobId) == "string" then message_value.SenderJobId else "",
+						message_value.CreatedAt, context
+					)
+				end
+				local handler = state.options.on_queue_message
+				if handler == nil then return false, "on_queue_message is not configured" end
+				return handler(
+					message_value.Type, payload :: JsonValue?, message_value.Attempts, message_value.Id,
+					if type(message_value.SenderJobId) == "string" then message_value.SenderJobId else "",
+					message_value.CreatedAt
+				)
+			end)
+			if type(result) ~= "table" or type(result.code) ~= "string" then
+				return "unknown" :: ResultCode, "V2 mailbox returned no structured processing result"
+			end
+			if result.code == "empty" then break end
+			if result.code == "processed" or result.code == "duplicate" or result.code == "dead_lettered" then
+				processed += 1
+				continue
+			end
+			if result.code == "retry_scheduled" then
+				return "budget" :: ResultCode, if type(result.error) == "string" then result.error else "V2 handler failed and retry was scheduled"
+			end
+			if result.code == "expired" or result.code == "ordered" then continue end
+			return map_mailbox_v2_result(result.code), if type(result.error) == "string" then result.error else "V2 mailbox processing returned " .. result.code
+		end
+		if processed == 0 then return "empty" :: ResultCode, nil end
+		return "processed" :: ResultCode, tostring(processed)
+	end)
+	state.queue_busy = false
+	if not call_ok then return "unknown", tostring(final_code) end
+	sync_public(self)
+	return final_code :: ResultCode, final_message
+end
+
+local function bind_mailbox_v2_async(self: Record, mailbox: unknown): (ResultCode, string?)
+	local state = private[self]
+	if state == nil then return "invalid", "record does not exist" end
+	if state.state ~= "active" then return "fenced", "V2 mailbox binding requires an active Record" end
+	if state.takeover_requested then return "closing", "session takeover has been requested" end
+	if state.mailbox_v2 ~= nil then
+		if state.mailbox_v2 == mailbox then return "success", nil end
+		return "conflict", "this Record is already bound to a different V2 mailbox"
+	end
+	if state.queue_busy or state.busy or state.mailbox_v2_binding then
+		return "busy", "Record has another operation in flight; V2 mailbox binding was not attempted"
+	end
+	if state.options.durable_queue_enabled == false then
+		return "invalid", "safe V2 binding requires the legacy queue to be enabled so pending messages can be checked"
+	end
+	if type(mailbox) ~= "table" or type(mailbox.GetOwner) ~= "function"
+		or type(mailbox.GetActiveRecord) ~= "function" or type(mailbox.EnqueueAsync) ~= "function"
+		or type(mailbox.ProcessNextAsync) ~= "function" or type(mailbox.SetLeaseRenewalScheduler) ~= "function"
+	then
+		return "invalid", "mailbox must expose the V2 owner, enqueue, processing and lease-renewal APIs"
+	end
+	local owner_ok, owner = pcall(function() return mailbox:GetOwner() end)
+	local active_ok, active_record = pcall(function() return mailbox:GetActiveRecord() end)
+	if not owner_ok or type(owner) ~= "table" then return "invalid", "V2 mailbox owner identity could not be read" end
+	if not active_ok or active_record ~= self then
+		return "conflict", "V2 mailbox must be bound to this exact active Record instance"
+	end
+	if owner.store_name ~= state.name or owner.scope ~= state.scope or owner.profile_key ~= state.key then
+		return "conflict", "V2 mailbox owner does not match this Record identity"
+	end
+	if #state.user_ids > 0 and owner.user_id == nil then
+		return "invalid", "V2 mailbox owner must include a UserId for a UserId-associated Record"
+	end
+	if owner.user_id ~= nil then
+		if type(owner.user_id) ~= "number" or not finite(owner.user_id) or owner.user_id < 1
+			or math.floor(owner.user_id) ~= owner.user_id
+		then return "invalid", "V2 mailbox owner UserId must be a positive integer" end
+		local found = false
+		for _, user_id in ipairs(state.user_ids) do if user_id == owner.user_id then found = true; break end end
+		if not found then return "fenced", "V2 mailbox UserId does not match persisted Record UserIds" end
+	end
+	state.mailbox_v2_binding = true
+	state.queue_busy = true
+	local inspect_ok, legacy_queue, queue_code, queue_message = pcall(get_queue, self)
+	state.queue_busy = false
+	if not inspect_ok then state.mailbox_v2_binding = false; return "unknown", "could not inspect the legacy queue: " .. tostring(legacy_queue) end
+	if queue_code ~= "success" then state.mailbox_v2_binding = false; return queue_code or "unknown", queue_message or "could not verify the legacy queue" end
+	if type(legacy_queue) ~= "table" or #legacy_queue > 0 then
+		state.mailbox_v2_binding = false
+		return "busy", "legacy queue contains pending messages; drain it before binding the V2 mailbox"
+	end
+	state.mailbox_v2 = mailbox
+	state.mailbox_v2_binding = false
+	local configured, configure_error = install_mailbox_renewal_scheduler(self, state, mailbox)
+	if not configured then
+		state.mailbox_v2 = nil
+		return "invalid", configure_error or "failed to install V2 mailbox lease-renewal scheduling"
+	end
+	return "success", nil
 end
 
 local function get_dead_letters(self: Record): ({ DeadLetterMessage }, ResultCode, string?)
