@@ -934,6 +934,22 @@ do
 		"replay did not apply the injected latency/budget observation")
 end
 
+-- A fresh low operation-budget sample defers work, but must not wedge it after expiry.
+do
+	local stale_budget_governor = new_scheduler()
+	stale_budget_governor:Observe("read", true, 1, nil, 0)
+	enqueue(stale_budget_governor, {
+		id = "after-stale-operation-budget",
+		owner_id = "stale-budget-owner",
+		lane = "normal",
+		operation_class = "read",
+	})
+	assert(stale_budget_governor:TakeNext() == nil,
+		"fresh low operation-budget telemetry did not apply backpressure")
+	now_ms += 1001
+	take(stale_budget_governor, "after-stale-operation-budget")
+end
+
 -- Retry rescheduling preserves the logical ID and cannot run before its due time.
 local retry_queue = new_scheduler()
 enqueue(retry_queue, { id = "stable-retry-id", owner_id = "retry-owner", lane = "normal", work_class = "outbox" })
