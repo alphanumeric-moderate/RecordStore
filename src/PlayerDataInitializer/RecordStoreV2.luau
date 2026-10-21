@@ -3938,6 +3938,7 @@ function V2.new(record_store, mailbox_module, options)
 	local dispatcher_running = false
 	local dispatcher_in_flight = 0
 	local central_dispatch_in_flight = 0
+	local central_dispatch_pending = 0
 	local scheduled_wake_due_ms = nil
 	local scheduled_wake_generation = 0
 	local kick_dispatcher
@@ -4137,6 +4138,7 @@ function V2.new(record_store, mailbox_module, options)
 		local snapshot = copy(dispatch_metrics)
 		snapshot.local_dispatch_in_flight = dispatcher_in_flight
 		snapshot.central_dispatch_in_flight = central_dispatch_in_flight
+		snapshot.central_dispatch_pending = central_dispatch_pending
 		snapshot.in_flight = dispatcher_in_flight + central_dispatch_in_flight
 		snapshot.next_wake_due_ms = scheduled_wake_due_ms
 		if type(record_store.get_scheduler_snapshot) == "function" then
@@ -4276,7 +4278,7 @@ function V2.new(record_store, mailbox_module, options)
 					retry_delay_ms = retry_delay_ms,
 					retry_jitter_percent = retry_jitter_percent,
 					on_complete = function(result)
-						central_dispatch_in_flight = math.max(0, central_dispatch_in_flight - 1)
+						central_dispatch_pending = math.max(0, central_dispatch_pending - 1)
 						local result_code = if type(result) == "table" then result.code else nil
 						local selector_enabled = false
 						if type(record_store.is_scheduler_enabled) == "function" then
@@ -4313,13 +4315,15 @@ function V2.new(record_store, mailbox_module, options)
 						central_owner_id = component(store_name) .. component(scope) .. component(profile_key)
 					end
 				end
-				central_dispatch_in_flight += 1
-				dispatch_metrics.max_in_flight = math.max(dispatch_metrics.max_in_flight, dispatcher_in_flight + central_dispatch_in_flight)
+				central_dispatch_pending += 1
 				local accepted = record_store.schedule_internal_work(
 					central_owner_id,
 					job_id,
 					function()
+						central_dispatch_in_flight += 1
+						dispatch_metrics.max_in_flight = math.max(dispatch_metrics.max_in_flight, dispatcher_in_flight + central_dispatch_in_flight)
 						local callback_ok, callback_result = pcall(callback)
+						central_dispatch_in_flight = math.max(0, central_dispatch_in_flight - 1)
 						if not callback_ok then
 							dispatch_metrics.callback_errors += 1
 							dispatch_metrics.last_error = text_error(callback_result, 200)
@@ -4333,7 +4337,7 @@ function V2.new(record_store, mailbox_module, options)
 					dispatch_metrics.accepted += 1
 					return { code = "accepted", job_id = accepted.id or job_id, due_at_ms = due_now }
 				end
-				central_dispatch_in_flight = math.max(0, central_dispatch_in_flight - 1)
+				central_dispatch_pending = math.max(0, central_dispatch_pending - 1)
 				if type(accepted) ~= "table" or accepted.code ~= "disabled" then
 					dispatch_metrics.rejected += 1
 					return { code = if type(accepted) == "table" then accepted.code else "unknown",
