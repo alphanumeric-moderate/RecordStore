@@ -9406,7 +9406,9 @@ local function apply_scheduler_activation()
 	else
 		-- A rollout reduction is a kill-switch for queued, not-yet-started work.
 		-- In-flight callbacks are not preempted; durable session fences remain authoritative.
-		scheduler_dispatcher:CancelQueued("advanced scheduler disabled or excluded by rollout")
+		scheduler_dispatcher:CancelQueuedWhere(function(_, entry)
+			return type(entry) == "table" and entry.source == "core_record"
+		end, "advanced scheduler disabled or excluded by rollout")
 	end
 end
 
@@ -9472,7 +9474,8 @@ local function enqueue_state_work(
 			end
 			return callback(batch_size)
 		end,
-		options
+		options,
+		"core_record"
 	)
 	if type(result) ~= "table" or result.code ~= "accepted" then
 		slot.pending[kind] = nil
@@ -9555,9 +9558,6 @@ function RecordStore.schedule_work(
 		}
 	end
 	return scheduler_dispatcher:Schedule(owner_id, work_id, function(...: any)
-		if not scheduler_enabled then
-			return { code = "cancelled", message = "advanced scheduling was disabled before work started" }
-		end
 		return callback(...)
 	end, schedule_options)
 end
@@ -9582,11 +9582,8 @@ function RecordStore.schedule_internal_work(
 		return { code = "invalid", message = "schedule_options must be a table" }
 	end
 	return scheduler_dispatcher:Schedule(owner_id, work_id, function(...: any)
-		if not scheduler_enabled then
-			return { code = "cancelled", message = "advanced scheduler was disabled before work started" }
-		end
 		return callback(...)
-	end, schedule_options)
+	end, schedule_options, "v2_internal")
 end
 
 function RecordStore.get_scheduler_clock_ms(): number
