@@ -1312,6 +1312,7 @@ local function new_governor(options)
 end
 
 local runtime_governors_by_record_store = setmetatable({}, { __mode = "k" })
+local next_v2_job_sequence = 0
 
 local function shared_runtime_governor(record_store, options)
 	local governor = runtime_governors_by_record_store[record_store]
@@ -3934,7 +3935,6 @@ function V2.new(record_store, mailbox_module, options)
 		expired = 0, dependency_failed = 0, last_error = nil, max_in_flight = 0,
 	}
 	local dispatch_callbacks = {}
-	local dispatch_sequence = 0
 	local dispatcher_running = false
 	local dispatcher_in_flight = 0
 	local central_dispatch_in_flight = 0
@@ -4228,8 +4228,8 @@ function V2.new(record_store, mailbox_module, options)
 		if delay_ms > 0 and not has_delay_scheduler() then
 			return { code = "unsupported", message = "task.delay is required for future-due scheduled work" }
 		end
-		dispatch_sequence += 1
-		local job_id = "rv2job:" .. tostring(dispatch_sequence)
+		next_v2_job_sequence += 1
+		local job_id = "rv2job:" .. tostring(next_v2_job_sequence)
 		local work_class = schedule_options.work_class or schedule_options.operation_class
 			or (if reason == "outbox_dispatch" then "outbox_dispatch" else "maintenance")
 		local item = {
@@ -4252,11 +4252,20 @@ function V2.new(record_store, mailbox_module, options)
 			local enabled_ok, enabled = pcall(record_store.is_scheduler_enabled)
 			core_scheduler_enabled = enabled_ok and enabled == true
 		end
-		if core_scheduler_enabled then
+		-- Pin each V2 facade to its current queue until all jobs on that path drain.
+		-- Otherwise dependencies could reference a job ID known to only one scheduler.
+		local local_route_active = next(dispatch_callbacks) ~= nil
+		local central_route_active = central_dispatch_pending > 0
+		local use_core_selector = not local_route_active and (core_scheduler_enabled or central_route_active)
+		if use_core_selector then
 			local clock_ok, core_now_ms = pcall(record_store.get_scheduler_clock_ms)
+			if not clock_ok or not finite(core_now_ms) then
+				return { code = "unknown", message = "core scheduler clock unavailable while V2 work is pinned to the shared selector" }
+			end
 			if clock_ok and finite(core_now_ms) then
 				local clock_offset_ms = core_now_ms - now
 				local central_options = {
+					id = job_id,
 					lane = lane or "normal",
 					due_at_ms = due_now + clock_offset_ms,
 					available_at_ms = if finite(schedule_options.available_at_ms) then schedule_options.available_at_ms + clock_offset_ms else nil,
@@ -4324,7 +4333,7 @@ function V2.new(record_store, mailbox_module, options)
 					return { code = "accepted", job_id = accepted.id or job_id, due_at_ms = due_now }
 				end
 				central_dispatch_pending = math.max(0, central_dispatch_pending - 1)
-				if type(accepted) ~= "table" or accepted.code ~= "disabled" then
+				if central_route_active or type(accepted) ~= "table" or accepted.code ~= "disabled" then
 					dispatch_metrics.rejected += 1
 					return { code = if type(accepted) == "table" then accepted.code else "unknown",
 						message = if type(accepted) == "table" then accepted.message else "core scheduler returned no result" }
