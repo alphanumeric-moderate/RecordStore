@@ -2397,7 +2397,7 @@ assert(closed_code == "closed", "scheduler regression fixture failed to close")
 local rollback_policy_snapshot = RecordStore.get_scheduler_snapshot().policy
 local rollback_policy_code, rollback_policy_message = RecordStore.configure_scheduler_policy({
 	revision = rollback_policy_snapshot.revision + 1,
-	max_scheduled_in_flight = 2,
+	max_scheduled_in_flight = 1,
 	-- This regression specifically needs every slot occupied so autosave remains queued.
 	scheduler_critical_reserve = 0,
 })
