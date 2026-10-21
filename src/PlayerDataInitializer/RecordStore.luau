@@ -7577,7 +7577,10 @@ local function enqueue_state_work(
 			if not scheduler_enabled then
 				return { code = "cancelled", message = "advanced scheduler was disabled before work started" }
 			end
-			if closing or state.retired or state.state ~= "active" then
+			local recovering = kind == "reconciliation"
+				and state.state == "unknown"
+				and state.pending_operation ~= nil
+			if closing or state.retired or (state.state ~= "active" and not recovering) then
 				return { code = "cancelled", message = "record is no longer active" }
 			end
 			return callback(batch_size)
@@ -7917,6 +7920,41 @@ local function run_scheduled_record_work(record: Record, state: InternalState, n
 	end
 end
 
+local function run_scheduled_recovery(record: Record, state: InternalState, now: number)
+	if state.state ~= "unknown" or state.pending_operation == nil or now < state.next_reconciliation then
+		return
+	end
+	local slot = scheduled_state_slot(state)
+	if slot.pending.reconciliation == true then return end
+	local result = enqueue_state_work(
+		record,
+		state,
+		"reconciliation",
+		"high",
+		"profile_reconciliation",
+		"profile_save",
+		function()
+			local outcome, message = reconcile_unknown_internal(state)
+			sync_public(record)
+			return { code = "completed", operation_result = outcome, message = message }
+		end,
+		{
+			service_class = "critical",
+			read_units = 1,
+			write_units = 1,
+			handler_slots = 1,
+			max_retries = 1,
+			retry_delay_ms = 250,
+			retry_jitter_percent = 10,
+		}
+	)
+	if type(result) == "table" and result.code == "accepted" then
+		state.next_reconciliation = now + 0.5
+	elseif type(result) ~= "table" or result.code ~= "already_pending" then
+		state.next_reconciliation = now + 0.5
+	end
+end
+
 local function start_scheduler()
 	if scheduler_started then return end
 	scheduler_started = true
@@ -7974,6 +8012,23 @@ local function start_scheduler()
 					end
 				end
 			end
+			for record in recovery_records do
+				local state = private[record]
+				if state ~= nil and state.state == "unknown" and state.pending_operation ~= nil then
+					local now = now_local()
+					if scheduler_enabled then
+						run_scheduled_recovery(record, state, now)
+					elseif not recovery_in_flight and not state.busy and now >= state.next_reconciliation then
+						recovery_in_flight = true
+						state.next_reconciliation = now + 0.5
+						task.spawn(function()
+							reconcile_unknown_internal(state)
+							sync_public(record)
+							recovery_in_flight = false
+						end)
+					end
+				end
+			end
 			if scheduler_enabled then scheduler_dispatcher:Kick() end
 			task.wait(SCHEDULER_STEP)
 		end
@@ -8005,6 +8060,10 @@ local function shutdown()
 		task.spawn(function()
 			local state = private[record]
 			if state ~= nil then
+				if state.state == "unknown" and state.pending_operation ~= nil then
+					reconcile_unknown_internal(state)
+					sync_public(record)
+				end
 				close_internal(state, true)
 			end
 			remaining -= 1
@@ -8524,6 +8583,28 @@ RecordStore.Mock = (function()
 		mock_update_replay_advance_seconds = advance_seconds
 	end
 
+	local function mock_set_update_commit_then_failures(count: number, message: string?)
+		if type(count) ~= "number" or not math.isfinite(count) or math.floor(count) ~= count or count < 0 or count > 100 then
+			error("count must be an integer from 0 to 100", 2)
+		end
+		if message ~= nil and type(message) ~= "string" then
+			error("message must be a string or nil", 2)
+		end
+		mock_update_commit_then_failure_count = count
+		mock_update_commit_then_failure_message = message
+	end
+
+	local function mock_set_get_failures(count: number, message: string?)
+		if type(count) ~= "number" or not math.isfinite(count) or math.floor(count) ~= count or count < 0 or count > 100 then
+			error("count must be an integer from 0 to 100", 2)
+		end
+		if message ~= nil and type(message) ~= "string" then
+			error("message must be a string or nil", 2)
+		end
+		mock_get_failure_count = count
+		mock_get_failure_message = message
+	end
+
 	local function mock_set_update_failures(count: number, result: ResultCode?, message: string?)
 		if type(count) ~= "number"
 			or not math.isfinite(count)
@@ -8586,6 +8667,15 @@ RecordStore.Mock = (function()
 
 	local Mock = {
 		new = mock_new,
+		reconcile = function(record: Record): (ResultCode, string?)
+			local state = private[record]
+			if state == nil or not state.backend.mock then
+				return "invalid", "mock reconciliation requires a live mock record"
+			end
+			local result, message = reconcile_unknown_internal(state)
+			sync_public(record)
+			return result, message
+		end,
 		renew = function(record: Record): (ResultCode, string?)
 			local state = private[record]
 			if state == nil or not state.backend.mock then
@@ -8617,6 +8707,8 @@ RecordStore.Mock = (function()
 		set_test_clock = mock_set_test_clock,
 		set_update_replay = mock_set_update_replay,
 		set_update_failures = mock_set_update_failures,
+		set_update_commit_then_failures = mock_set_update_commit_then_failures,
+		set_get_failures = mock_set_get_failures,
 		reset = function()
 			local mock_records: { { id: string, record: Record } } = {}
 			for id, record in pairs(records) do
@@ -8635,6 +8727,7 @@ RecordStore.Mock = (function()
 					state.shutdown = true
 					state.state = "closed"
 					active_records[item.record] = nil
+					recovery_records[item.record] = nil
 					state.busy = false
 					state.queue_busy = false
 					state.takeover_requested = false
@@ -8655,6 +8748,10 @@ RecordStore.Mock = (function()
 			mock_update_failure_count = 0
 			mock_update_failure_code = "budget"
 			mock_update_failure_message = nil
+			mock_update_commit_then_failure_count = 0
+			mock_update_commit_then_failure_message = nil
+			mock_get_failure_count = 0
+			mock_get_failure_message = nil
 		end,
 	}
 
