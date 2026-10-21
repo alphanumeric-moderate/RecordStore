@@ -331,8 +331,14 @@ local function test_recordstore_installs_shared_scheduler_for_v2_claim_renewal()
 	})
 	local enabled, enable_message = RecordStore.set_scheduler_enabled(true)
 	assert(enabled, "shared scheduler could not be enabled: " .. tostring(enable_message))
+	local enabled_snapshot = RecordStore.get_scheduler_snapshot()
+	assert(enabled_snapshot.enabled == true,
+		"shared scheduler request was not activated: " .. serde.encode("json", enabled_snapshot.rollout))
 	local bind_result, bind_message = record:BindMailboxV2Async(mailbox)
 	assert(bind_result == "success", "core did not bind the V2 mailbox: " .. tostring(bind_message))
+	local bound_snapshot = RecordStore.get_scheduler_snapshot()
+	assert(bound_snapshot.enabled == true,
+		"mailbox binding unexpectedly disabled the shared scheduler: " .. serde.encode("json", bound_snapshot.rollout))
 
 	local enqueue_result, enqueue_message = record:EnqueueAsync("update", { value = 1 }, {
 		idempotency_key = "scheduler-renewal-integration",
