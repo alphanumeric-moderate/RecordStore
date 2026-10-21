@@ -9448,11 +9448,13 @@ local function enqueue_state_work(
 		slot.pending[kind] = nil
 		slot.jobs[kind] = nil
 		slot.last_result[kind] = if type(result) == "table" then tostring(result.code or "unknown") else "unknown"
-		if kind == "lease_renewal" and type(result) == "table" and result.code == "retry_exhausted" and state.state == "active" then
+		local result_code = if type(result) == "table" then result.code else nil
+		local legacy_fallback = result_code == "cancelled" and not scheduler_enabled and not closing
+		if kind == "lease_renewal" and (result_code == "retry_exhausted" or legacy_fallback) and state.state == "active" then
 			state.next_renewal = math.min(state.next_renewal, now_local())
-		elseif kind == "autosave" and type(result) == "table" and result.code == "retry_exhausted" and state.state == "active" then
+		elseif kind == "autosave" and (result_code == "retry_exhausted" or legacy_fallback) and state.state == "active" then
 			state.next_autosave = math.min(state.next_autosave, now_local())
-		elseif kind == "queue_poll" and type(result) == "table" and result.code == "retry_exhausted" and state.state == "active" then
+		elseif kind == "queue_poll" and (result_code == "retry_exhausted" or legacy_fallback) and state.state == "active" then
 			state.next_queue_poll = math.min(state.next_queue_poll, now_local())
 		end
 	end
