@@ -2398,7 +2398,8 @@ local rollback_policy_snapshot = RecordStore.get_scheduler_snapshot().policy
 local rollback_policy_code, rollback_policy_message = RecordStore.configure_scheduler_policy({
 	revision = rollback_policy_snapshot.revision + 1,
 	max_scheduled_in_flight = 2,
-	scheduler_critical_reserve = 1,
+	-- This regression specifically needs every slot occupied so autosave remains queued.
+	scheduler_critical_reserve = 0,
 })
 local release_rollback_blocker = false
 local rollback_blocker_started = false
