@@ -4287,7 +4287,6 @@ function V2.new(record_store, mailbox_module, options)
 					retry_delay_ms = retry_delay_ms,
 					retry_jitter_percent = retry_jitter_percent,
 					on_complete = function(result)
-						central_dispatch_pending = math.max(0, central_dispatch_pending - 1)
 						local result_code = if type(result) == "table" then result.code else nil
 						if result_code == "expired" then
 							dispatch_metrics.expired += 1
@@ -4296,7 +4295,12 @@ function V2.new(record_store, mailbox_module, options)
 						elseif result_code ~= "cancelled" then
 							dispatch_metrics.dispatched += 1
 						end
-						invoke_completion({ on_complete = completion }, result)
+						local completion_ok, completion_error = pcall(invoke_completion, { on_complete = completion }, result)
+						central_dispatch_pending = math.max(0, central_dispatch_pending - 1)
+						if not completion_ok then
+							dispatch_metrics.callback_errors += 1
+							dispatch_metrics.last_error = text_error(completion_error, 200)
+						end
 					end,
 				}
 				local central_owner_id = owner_id
