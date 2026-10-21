@@ -1583,7 +1583,7 @@ local function new_governor(options)
 				queue_wait_p99_ms = percentile(waits, 0.99),
 				next_due_at_ms = self:NextQueuedDueAt(), due_heap_items = #self.due_heap,
 				queued_due_heap_items = #self.queued_due_heap, wake_heap_items = #self.wake_heap,
-				active_by_owner = copy(self.active_owner),
+				active_owner_count = key_count(self.active_owner),
 				last_shadow = copy(self.scheduler_metrics.last_shadow),
 			},
 		}
