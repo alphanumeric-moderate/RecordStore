@@ -1397,12 +1397,17 @@ local function new_governor(options)
 		return copy(summary)
 	end
 	function governor:Replay(log)
-		local result = {}
+		local result = { statuses = {} }
 		for _, entry in ipairs(log or {}) do
 			if entry.kind == "enqueue" then self:Enqueue(entry.item)
-			elseif entry.kind == "complete" then self:MarkCompleted(entry.id)
-			elseif entry.kind == "take" then local item = self:TakeNext(); result[#result + 1] = if item then item.id else "<empty>"
-			elseif entry.kind == "advance" and finite(entry.ms) and type(options.advance_ms) == "function" then options.advance_ms(entry.ms) end
+			elseif entry.kind == "complete" then self:MarkCompleted(entry.id, entry.outcome)
+			elseif entry.kind == "take" then
+				local item, status = self:TakeNext()
+				result[#result + 1] = if item then item.id else "<empty>"
+				result.statuses[#result.statuses + 1] = status or "empty"
+			elseif entry.kind == "advance" and finite(entry.ms) and type(options.advance_ms) == "function" then
+				options.advance_ms(entry.ms)
+			end
 		end
 		return result
 	end
