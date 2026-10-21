@@ -4,6 +4,7 @@ local DataStoreService = game:GetService("DataStoreService")
 local HttpService = game:GetService("HttpService")
 local MessagingService = game:GetService("MessagingService")
 local RecordStoreScheduler: any = require(script.Parent.RecordStoreScheduler)
+local MailboxV2: any = require(script.Parent.RecordStoreMailboxV2)
 
 local RecordStore = {}
 
@@ -217,6 +218,11 @@ export type QueueMessage = {
 	ReplayCount: number,
 	SenderJobId: string,
 	CreatedAt: number,
+	Priority: string?,
+	OrderingKey: string?,
+	OrderingSequence: number?,
+	AvailableAt: number?,
+	ExpiresAt: number?,
 }
 
 export type DeadLetterMessage = QueueMessage & {
@@ -261,6 +267,7 @@ export type Options = {
 	on_event: Observer?,
 	on_message: MessageObserver?,
 	on_queue_message: QueueObserver?,
+	on_queue_message_async: ((string, JsonValue?, number, string, string, number, unknown) -> (boolean, string?))?,
 }
 
 
@@ -430,6 +437,8 @@ type InternalState = {
 	next_queue_poll: number,
 	busy: boolean,
 	queue_busy: boolean,
+	mailbox_v2_binding: boolean,
+	mailbox_v2: any?,
 	save_requested: boolean,
 	shutdown: boolean,
 	retired: boolean,
@@ -483,7 +492,10 @@ export type Record = {
 	Reconcile: (self: Record, template: JsonValue) -> (ResultCode, string?),
 	Save: (self: Record, reason: string?) -> (ResultCode, string?),
 	MessageAsync: (self: Record, message_type: string, data: JsonValue?) -> (ResultCode, string?),
-	EnqueueAsync: (self: Record, message_type: string, data: JsonValue?) -> (ResultCode, string?),
+	GetMailboxOwner: (self: Record) -> { [string]: unknown },
+	CreateMailboxStoreAdapter: (self: Record) -> (unknown?, ResultCode, string?),
+	BindMailboxV2Async: (self: Record, mailbox: unknown) -> (ResultCode, string?),
+	EnqueueAsync: (self: Record, message_type: string, data: JsonValue?, enqueue_options: { [string]: unknown }?) -> (ResultCode, string?),
 	ProcessQueueAsync: (self: Record, max_messages: number?) -> (ResultCode, string?),
 	GetQueueAsync: (self: Record) -> ({ QueueMessage }, ResultCode, string?),
 	GetDeadLettersAsync: (self: Record) -> ({ DeadLetterMessage }, ResultCode, string?),
@@ -4845,26 +4857,122 @@ local function message(self: Record, message_type: string, data: JsonValue?): (R
 	return "success", nil
 end
 
-local function enqueue(self: Record, message_type: string, data: JsonValue?): (ResultCode, string?)
-	local state = private[self]
-	if state == nil then
-		return "invalid", "record does not exist"
+local function mailbox_bound_for_state(state: InternalState): (any?, ResultCode?, string?)
+	local mailbox = state.mailbox_v2
+	if mailbox == nil then return nil, nil, nil end
+	if type(mailbox) ~= "table" or type(mailbox.GetOwner) ~= "function"
+		or type(mailbox.GetActiveRecord) ~= "function" or type(mailbox.EnqueueAsync) ~= "function"
+		or type(mailbox.ProcessNextAsync) ~= "function"
+	then
+		return nil, "fenced", "bound V2 mailbox no longer exposes its required API"
 	end
+	local owner_ok, owner = pcall(function() return mailbox:GetOwner() end)
+	if not owner_ok or type(owner) ~= "table" then return nil, "fenced", "bound V2 mailbox owner could not be verified" end
+	if owner.store_name ~= state.name or owner.scope ~= state.scope or owner.profile_key ~= state.key then
+		return nil, "fenced", "bound V2 mailbox identity changed after binding"
+	end
+	if #state.user_ids > 0 and owner.user_id == nil then return nil, "fenced", "bound mailbox lost the UserId required by this Record" end
+	if owner.user_id ~= nil then
+		if type(owner.user_id) ~= "number" or not finite(owner.user_id) or math.floor(owner.user_id) ~= owner.user_id then
+			return nil, "fenced", "bound V2 mailbox UserId is invalid"
+		end
+		local found = false
+		for _, user_id in ipairs(state.user_ids) do if user_id == owner.user_id then found = true; break end end
+		if not found then return nil, "fenced", "bound V2 mailbox UserId no longer matches the active Record" end
+	end
+	local active_ok, active_record = pcall(function() return mailbox:GetActiveRecord() end)
+	if not active_ok or active_record ~= state.public_record then
+		return nil, "fenced", "bound V2 mailbox is not attached to this exact Record instance"
+	end
+	return mailbox, nil, nil
+end
+
+local function map_mailbox_v2_result(code: unknown): ResultCode
+	if code == "success" then return "success" end
+	if code == "accepted" then return "enqueued" end
+	if code == "processed" or code == "dead_lettered" then return "processed" end
+	if code == "duplicate" then return "duplicate" end
+	if code == "capacity" then return "capacity" end
+	if code == "empty" then return "empty" end
+	if code == "busy" or code == "preparing" or code == "ordered" or code == "retry_scheduled" then return "busy" end
+	if code == "closing" then return "closing" end
+	if code == "fenced" or code == "lease_lost" then return "fenced" end
+	if code == "conflict" then return "conflict" end
+	if code == "corrupt" then return "corrupt" end
+	if code == "invalid" then return "invalid" end
+	if code == "not_found" then return "not_found" end
+	if code == "retryable" then return "budget" end
+	if code == "expired" or code == "discarded" then return "success" end
+	return "unknown"
+end
+
+local install_mailbox_renewal_scheduler: any
+local process_queue_v2: any
+
+local function enqueue(self: Record, message_type: string, data: JsonValue?, enqueue_options: { [string]: unknown }?): (ResultCode, string?)
+	local state = private[self]
+	if state == nil then return "invalid", "record does not exist" end
+	if state.mailbox_v2_binding then return "busy", "V2 mailbox binding is checking the legacy queue" end
+	if state.state ~= "active" then return "fenced", "record is not actively owned" end
+	if state.takeover_requested then return "closing", "session takeover has been requested" end
+	if state.mailbox_v2 ~= nil then
+		local mailbox, bound_code, bound_message = mailbox_bound_for_state(state)
+		if mailbox == nil then return bound_code or "fenced", bound_message end
+		local call_ok, result = pcall(function() return mailbox:EnqueueAsync(message_type, data, enqueue_options) end)
+		if not call_ok or type(result) ~= "table" or type(result.code) ~= "string" then
+			return "unknown", if call_ok then "V2 mailbox returned no structured enqueue result" else tostring(result)
+		end
+		if result.code == "accepted" then observe(state, "v2_enqueue", "success", message_type); return "enqueued", nil end
+		if result.code == "duplicate" then observe(state, "v2_enqueue", "duplicate", message_type); return "duplicate", nil end
+		local message = if type(result.error) == "string" then result.error else "V2 mailbox enqueue returned " .. result.code
+		return map_mailbox_v2_result(result.code), message
+	end
+	if enqueue_options ~= nil then return "invalid", "enqueue_options require a bound V2 mailbox" end
 	return enqueue_internal(state, message_type, data)
 end
 
 local function process_queue(self: Record, max_messages: number?): (ResultCode, string?)
 	local state = private[self]
-	if state == nil then
-		return "invalid", "record does not exist"
-	end
-	return process_queue_internal(state, max_messages or 1)
+	if state == nil then return "invalid", "record does not exist" end
+	if state.mailbox_v2_binding then return "busy", "V2 mailbox binding is checking the legacy queue" end
+	if state.mailbox_v2 == nil then return process_queue_internal(state, max_messages or 1) end
+	return process_queue_v2(self, state, max_messages or 1)
 end
 
 local function get_queue(self: Record): ({ QueueMessage }, ResultCode, string?)
 	local state = private[self]
-	if state == nil then
-		return {}, "invalid", "record does not exist"
+	if state == nil then return {}, "invalid", "record does not exist" end
+	if state.mailbox_v2_binding then return {}, "busy", "V2 mailbox binding is checking the legacy queue" end
+	if state.mailbox_v2 ~= nil then
+		local mailbox, bound_code, bound_message = mailbox_bound_for_state(state)
+		if mailbox == nil then return {}, bound_code or "fenced", bound_message end
+		local call_ok, rows, result = pcall(function() return mailbox:GetQueueAsync() end)
+		if not call_ok or type(rows) ~= "table" or type(result) ~= "table" or type(result.code) ~= "string" then
+			return {}, "unknown", if call_ok then "V2 mailbox returned no structured queue result" else tostring(rows)
+		end
+		if result.code ~= "success" then
+			local message = if type(result.error) == "string" then result.error else "V2 queue read returned " .. result.code
+			return {}, map_mailbox_v2_result(result.code), message
+		end
+		local projected: { QueueMessage } = {}
+		for _, row in ipairs(rows) do
+			if type(row) ~= "table" or type(row.Id) ~= "string" or type(row.Type) ~= "string"
+				or type(row.Attempts) ~= "number" or type(row.TotalAttempts) ~= "number"
+				or type(row.ReplayCount) ~= "number" or type(row.CreatedAt) ~= "number"
+			then return {}, "corrupt", "V2 queue contained a malformed message snapshot" end
+			projected[#projected + 1] = {
+				Id = row.Id, Type = row.Type, Data = copy_value(row.Data :: JsonValue?),
+				Attempts = row.Attempts, TotalAttempts = row.TotalAttempts, ReplayCount = row.ReplayCount,
+				SenderJobId = if type(row.SenderJobId) == "string" then row.SenderJobId else "",
+				CreatedAt = row.CreatedAt,
+				Priority = if type(row.Priority) == "string" then row.Priority else "normal",
+				OrderingKey = if type(row.OrderingKey) == "string" then row.OrderingKey else nil,
+				OrderingSequence = if type(row.OrderingSequence) == "number" then row.OrderingSequence else nil,
+				AvailableAt = if type(row.AvailableAt) == "number" then row.AvailableAt else nil,
+				ExpiresAt = if type(row.ExpiresAt) == "number" then row.ExpiresAt else nil,
+			}
+		end
+		return projected, "success", nil
 	end
 	if state.options.durable_queue_enabled == false then
 		return {}, "success", nil
@@ -6551,6 +6659,8 @@ local function make_record(name: string, scope: string, key: string, options: Op
 		next_queue_poll = math.huge,
 		busy = false,
 		queue_busy = false,
+		mailbox_v2_binding = false,
+		mailbox_v2 = nil,
 		save_requested = false,
 		shutdown = false,
 		retired = false,
@@ -6991,7 +7101,8 @@ local function run_scheduled_record_work(record: Record, state: InternalState, n
 
 	if state.state == "active"
 		and state.options.durable_queue_enabled ~= false
-		and state.options.on_queue_message ~= nil
+		and ((state.mailbox_v2 ~= nil and (state.options.on_queue_message_async ~= nil or state.options.on_queue_message ~= nil))
+			or (state.mailbox_v2 == nil and state.options.on_queue_message ~= nil))
 		and slot.pending.queue_poll ~= true
 		and (state.queue_hint or now >= state.next_queue_poll)
 	then
@@ -7002,7 +7113,7 @@ local function run_scheduled_record_work(record: Record, state: InternalState, n
 				end
 				state.queue_hint = false
 				local bounded_batch_size = if type(batch_size) == "number" then math.clamp(math.floor(batch_size), 1, 4) else 4
-				local code, message = process_queue_internal(state, bounded_batch_size)
+				local code, message = process_queue(record, bounded_batch_size)
 				sync_public(record)
 				local processed_count = if code == "processed" then tonumber(message) else 0
 				return {
