@@ -1444,6 +1444,44 @@ assert(batched_calls == 1, "due batch callback did not execute")
 dispatcher:Close()
 batch_dispatcher:Close()
 
+-- Batch formation must not add waiting time beyond the item's advisory deadline.
+local deadline_batch_governor = new_scheduler()
+local deadline_batch_policy = deadline_batch_governor:Stats().policy
+assert(deadline_batch_governor:SetPolicy({
+	revision = deadline_batch_policy.revision + 1,
+	batch_window_ms = 10,
+}), "deadline batch policy was rejected")
+local deadline_batch_dispatcher = Scheduler.new_dispatcher(deadline_batch_governor, {
+	now_ms = function() return now_ms end,
+})
+local deadline_batch_calls = 0
+local batch_deadline_ms = now_ms + 2
+local deadline_batch_job = deadline_batch_dispatcher:Schedule(
+	"deadline-batch-owner",
+	"deadline-batched-work",
+	function()
+		deadline_batch_calls += 1
+		return { code = "committed" }
+	end,
+	{
+		batchable = true,
+		batch_size = 4,
+		batch_backlog = 4,
+		batch_window_ms = 10,
+		deadline_ms = batch_deadline_ms,
+		work_class = "outbox_dispatch",
+	}
+)
+assert(deadline_batch_job.code == "accepted", "deadline batch callback was rejected")
+assert(deadline_batch_job.due_at_ms <= batch_deadline_ms,
+	"adaptive batch window deliberately held eligible work beyond its deadline")
+assert(deadline_batch_calls == 0, "deadline batch work started before it became due")
+now_ms = batch_deadline_ms
+deadline_batch_dispatcher:Kick()
+for _ = 1, 100 do if deadline_batch_calls == 1 then break end; task.wait(0.001) end
+assert(deadline_batch_calls == 1, "deadline-capped batch did not run when due")
+deadline_batch_dispatcher:Close()
+
 -- Batch sizing is applied to the explicitly batchable callback itself; it does not
 -- merge independent business callbacks. High service latency should collapse to one.
 local adaptive_batch_governor = new_scheduler()
