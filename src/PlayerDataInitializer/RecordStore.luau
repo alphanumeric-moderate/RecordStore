@@ -9570,7 +9570,9 @@ function RecordStore.schedule_internal_work(
 	schedule_options: { [string]: unknown }?
 ): { [string]: any }
 	if closing then return { code = "closed", message = "RecordStore is shutting down" } end
-	if not scheduler_enabled then return { code = "disabled", message = "advanced scheduling is disabled" } end
+	if not scheduler_enabled and not scheduler_dispatcher:HasActiveSource("v2_internal") then
+		return { code = "disabled", message = "advanced scheduling is disabled and no V2 work is draining" }
+	end
 	if type(owner_id) ~= "string" or owner_id == "" or #owner_id > 256 then
 		return { code = "invalid", message = "owner_id must be 1..256 bytes" }
 	end
