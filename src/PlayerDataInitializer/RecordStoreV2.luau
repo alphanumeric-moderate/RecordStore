@@ -4280,20 +4280,6 @@ function V2.new(record_store, mailbox_module, options)
 					on_complete = function(result)
 						central_dispatch_pending = math.max(0, central_dispatch_pending - 1)
 						local result_code = if type(result) == "table" then result.code else nil
-						local selector_enabled = false
-						if type(record_store.is_scheduler_enabled) == "function" then
-							local enabled_ok, enabled = pcall(record_store.is_scheduler_enabled)
-						selector_enabled = enabled_ok and enabled == true
-						end
-						if result_code == "cancelled" and not selector_enabled then
-							-- A rollout reduction cancels queued core work. Re-submit it to the
-							-- V2 fallback dispatcher so a selector switch does not drop accepted work.
-							dispatch_metrics.retries += 1
-							local fallback = enqueue_scheduled_callback(owner, lane, reason, callback, due_at_ms, schedule_options, completion)
-							if type(fallback) == "table" and fallback.code == "accepted" then return end
-							invoke_completion({ on_complete = completion }, fallback)
-							return
-						end
 						if result_code == "expired" then
 							dispatch_metrics.expired += 1
 						elseif result_code == "dependency_failed" then
