@@ -243,6 +243,39 @@ local function test_order_slot_mismatch_fails_closed()
 	assert(canonical.state == "ready", "ordering mismatch changed canonical message state")
 end
 
+local function test_corrupt_ordering_index_fails_closed()
+	local mailbox, store = new_mailbox({ strict_ordering_enabled = true })
+	local queued = enqueue(mailbox, "corrupt-index", "corrupt-index-id", "corrupt-index-account", "high")
+	local ordering_route = mailbox:_ordering_route("corrupt-index-account")
+	local ordering = store.values[ordering_route]
+	assert(type(ordering) == "table" and type(ordering.routes) == "table",
+		"corrupt-index fixture could not locate the ordering row")
+	ordering.routes["forged-duplicate-sequence"] = ordering.routes[queued.message_id]
+	local invoked = false
+	local result = process_one(mailbox, function()
+		invoked = true
+		return true
+	end)
+	assert(result.code == "empty" and not invoked,
+		"duplicate durable sequence in the ordering index did not fail closed")
+	assert(store.values[queued.message_id].state == "ready",
+		"corrupt order index mutated the canonical message before verification")
+
+	local second_mailbox, second_store = new_mailbox({ strict_ordering_enabled = true })
+	local second = enqueue(second_mailbox, "corrupt-counter", "corrupt-counter-id", "corrupt-counter-account", "high")
+	local second_order_route = second_mailbox:_ordering_route("corrupt-counter-account")
+	second_store.values[second_order_route].next_sequence = 0 / 0
+	local second_invoked = false
+	local second_result = process_one(second_mailbox, function()
+		second_invoked = true
+		return true
+	end)
+	assert(second_result.code == "empty" and not second_invoked,
+		"non-finite ordering counter did not fail closed")
+	assert(second_store.values[second.message_id].state == "ready",
+		"corrupt ordering counter mutated the canonical message")
+end
+
 local function test_high_priority_burst_does_not_starve_background_messages()
 	local mailbox = new_mailbox({ strict_ordering_enabled = true })
 	for index = 1, 7 do
@@ -461,6 +494,7 @@ test_retrying_predecessor_blocks_same_key_successor()
 test_claim_update_fails_closed_if_order_sequence_changes_after_arbitration()
 test_dead_letter_replay_gets_a_new_ordering_sequence_and_recovers_from_stale_reads()
 test_order_slot_mismatch_fails_closed()
+test_corrupt_ordering_index_fails_closed()
 test_high_priority_burst_does_not_starve_background_messages()
 test_clock_skew_cannot_break_ordering_under_adversarial_sort_keys()
 test_priority_burst_policy_is_bounded_and_configurable()
