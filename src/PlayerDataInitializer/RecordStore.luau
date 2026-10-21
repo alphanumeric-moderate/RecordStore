@@ -4908,6 +4908,7 @@ end
 
 local install_mailbox_renewal_scheduler: any
 local process_queue_v2: any
+local scheduler_enabled = false
 
 local function mailbox_store_adapter(self: Record): (any?, ResultCode, string?)
 	local state = private[self]
@@ -7040,7 +7041,6 @@ local scheduler_governor = RecordStoreScheduler.new({
 local scheduler_dispatcher: any = RecordStoreScheduler.new_dispatcher(scheduler_governor, {
 	now_ms = function() return now_local() * 1000 end,
 })
-local scheduler_enabled = false
 local scheduler_activation = {
 	requested = false,
 	revision = 1,
