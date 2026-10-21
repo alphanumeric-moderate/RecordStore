@@ -847,6 +847,34 @@ do
 		"trace replay treated an unknown completion as successful")
 end
 
+-- Trace replay must reproduce the dispatcher's lease-renewal selection mode.
+do
+	local renewal_trace = new_scheduler()
+	local renewal_result = renewal_trace:Replay({
+		{ kind = "enqueue", item = {
+			id = "replay-renewal-later-slack",
+			owner_id = "a-later-slack",
+			lane = "lease_renewal",
+			work_class = "lease_renewal",
+			service_class = "critical",
+			deadline_ms = now_ms + 30000,
+		} },
+		{ kind = "enqueue", item = {
+			id = "replay-renewal-lower-slack",
+			owner_id = "z-sooner-slack",
+			lane = "lease_renewal",
+			work_class = "lease_renewal",
+			service_class = "critical",
+			deadline_ms = now_ms + 8000,
+		} },
+		{ kind = "take", renewal_mode = true },
+	})
+	assert(renewal_result[1] == "replay-renewal-lower-slack",
+		"trace replay did not select renewal work with the lowest remaining lease slack")
+	assert(renewal_result.statuses[1] == "success",
+		"lease-renewal trace selection status was not preserved")
+end
+
 -- Retry rescheduling preserves the logical ID and cannot run before its due time.
 local retry_queue = new_scheduler()
 enqueue(retry_queue, { id = "stable-retry-id", owner_id = "retry-owner", lane = "normal", work_class = "outbox" })
