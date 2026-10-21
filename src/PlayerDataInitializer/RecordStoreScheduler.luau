@@ -704,6 +704,10 @@ local function new_governor(options)
 			end
 		end
 	end
+	local function uses_critical_reserve(item)
+		return item.lane == "lease_renewal" or item.service_class == "critical"
+	end
+
 	local function scheduled_lane(item, now)
 		if item.inherited_lane ~= nil and finite(item.inherited_until_ms) and item.inherited_until_ms > now then
 			return item.inherited_lane
@@ -848,6 +852,8 @@ local function new_governor(options)
 			end
 			if renewal_mode == true and item.lane ~= "lease_renewal" then ready = false end
 			if renewal_mode == false and item.lane == "lease_renewal" then ready = false end
+			if renewal_mode == "critical" and not uses_critical_reserve(item) then ready = false end
+			if renewal_mode == "regular" and uses_critical_reserve(item) then ready = false end
 			if ready and (not item.expires_at_ms or item.expires_at_ms > now) then
 				local owner_active = self.active_owner[item.owner_id] or 0
 				local effective_lane = scheduled_lane(item, now)
@@ -889,6 +895,15 @@ local function new_governor(options)
 			-- Lease renewal is a safety lane: order it globally by remaining deadline
 			-- slack across owners, rather than allowing DRR's lane cursor to delay the
 			-- claim closest to lease expiry. item_precedes also ages older work.
+			local best
+			for _, row in ipairs(eligible) do
+				if best == nil or item_precedes(row.item, best.item, now) then best = row end
+			end
+			return best and best.index or nil, urgent_fallback
+		elseif renewal_mode == "critical" then
+			-- The protected share is shared by internal renewals and critical
+			-- profile persistence. Order these by service class, deadline slack,
+			-- and age instead of excluding every critical non-renewal item.
 			local best
 			for _, row in ipairs(eligible) do
 				if best == nil or item_precedes(row.item, best.item, now) then best = row end
@@ -1457,6 +1472,12 @@ local function new_governor(options)
 				if entry.renewal_mode ~= nil and type(entry.renewal_mode) ~= "boolean" then
 					return invalid_trace("take event " .. tostring(index) .. " has an invalid renewal mode")
 				end
+				if entry.mode ~= nil and entry.mode ~= "critical" and entry.mode ~= "regular" then
+					return invalid_trace("take event " .. tostring(index) .. " has an invalid selector mode")
+				end
+				if entry.mode ~= nil and entry.renewal_mode ~= nil then
+					return invalid_trace("take event " .. tostring(index) .. " cannot combine mode and renewal_mode")
+				end
 			elseif entry.kind == "budget" then
 				if not finite(entry.read) or entry.read < 0 or not finite(entry.write) or entry.write < 0 then
 					return invalid_trace("budget event " .. tostring(index) .. " requires non-negative finite read and write budgets")
@@ -1490,7 +1511,7 @@ local function new_governor(options)
 			if entry.kind == "enqueue" then self:Enqueue(entry.item)
 			elseif entry.kind == "complete" then self:MarkCompleted(entry.id, entry.outcome)
 			elseif entry.kind == "take" then
-				local item, status = self:TakeNext(entry.renewal_mode)
+				local item, status = self:TakeNext(entry.mode or entry.renewal_mode)
 				result[#result + 1] = if item then item.id else "<empty>"
 				result.statuses[#result.statuses + 1] = status or "empty"
 			elseif entry.kind == "budget" then
@@ -1833,7 +1854,7 @@ local function new_dispatcher(governor, options)
 		end
 		if counted_in_flight then
 			dispatcher.in_flight = math.max(0, dispatcher.in_flight - 1)
-			if item.lane ~= "lease_renewal" then
+			if not uses_critical_reserve(item) then
 				dispatcher.normal_in_flight = math.max(0, dispatcher.normal_in_flight - 1)
 			end
 		end
@@ -1949,7 +1970,7 @@ local function new_dispatcher(governor, options)
 		item.admission_ticket = admission
 		if type(entry) == "table" then entry.admission_ticket = admission end
 		dispatcher.in_flight += 1
-		if item.lane ~= "lease_renewal" then dispatcher.normal_in_flight += 1 end
+		if not uses_critical_reserve(item) then dispatcher.normal_in_flight += 1 end
 		dispatcher.metrics.max_in_flight = math.max(dispatcher.metrics.max_in_flight, dispatcher.in_flight)
 		spawn_scheduled(function()
 			if dispatcher.closed or dispatcher.closing then
@@ -2005,9 +2026,9 @@ local function new_dispatcher(governor, options)
 			local maximum = policy.max_scheduled_in_flight
 			local normal_limit = math.max(0, maximum - policy.scheduler_critical_reserve)
 			while dispatcher.in_flight < maximum do
-				local item, status = governor:TakeNext(true)
+				local item, status = governor:TakeNext("critical")
 				if item == nil and dispatcher.normal_in_flight < normal_limit then
-					item, status = governor:TakeNext(false)
+					item, status = governor:TakeNext("regular")
 				end
 				if item == nil then break end
 				dispatch_one(item, status)
