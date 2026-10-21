@@ -244,11 +244,63 @@ local function test_high_priority_burst_does_not_starve_background_messages()
 		"sustained high-priority work starved a background message beyond the configured burst")
 end
 
+local function test_clock_skew_cannot_break_ordering_under_adversarial_sort_keys()
+	local mailbox, store = new_mailbox({ strict_ordering_enabled = true })
+	local first = enqueue(mailbox, "first", "skew-first", "skew-account", "normal")
+	local second = enqueue(mailbox, "second", "skew-second", "skew-account", "normal")
+	local unrelated = enqueue(mailbox, "unrelated", "skew-unrelated", nil, "normal")
+	local first_record = store.values[first.message_id]
+	local second_record = store.values[second.message_id]
+	local unrelated_record = store.values[unrelated.message_id]
+	assert(first_record and second_record and unrelated_record, "clock-skew fixture could not locate canonical rows")
+	first_record.created_at = now_ms - 1000
+	second_record.created_at = now_ms - 3000
+	unrelated_record.created_at = now_ms - 2000
+
+	local executed = {}
+	for _ = 1, 3 do
+		local result = process_one(mailbox, function(_, message)
+			executed[#executed + 1] = message.Type
+			return true
+		end)
+		assert(result.code == "processed", "clock-skew fixture did not process all rows")
+	end
+	local positions = {}
+	for index, message_type in ipairs(executed) do positions[message_type] = index end
+	assert(positions.first < positions.second,
+		"clock skew caused a later message to overtake its earlier ordering_key predecessor")
+end
+
+local function test_priority_burst_policy_is_bounded_and_configurable()
+	local invalid_policy_ok = pcall(function()
+		new_mailbox({ high_priority_burst = 33 })
+	end)
+	assert(not invalid_policy_ok, "high_priority_burst above its hard bound was accepted")
+
+	local mailbox = new_mailbox({ high_priority_burst = 2 })
+	for index = 1, 5 do
+		enqueue(mailbox, "custom-high-" .. index, "custom-high-" .. index, nil, "high")
+	end
+	enqueue(mailbox, "custom-background", "custom-background", nil, "background")
+	local executed = {}
+	for _ = 1, 3 do
+		local result = process_one(mailbox, function(_, message)
+			executed[#executed + 1] = message.Type
+			return true
+		end)
+		assert(result.code == "processed", "custom priority burst fixture failed to process")
+	end
+	assert(executed[3] == "custom-background",
+		"configurable burst failed to serve background work after two high-priority claims")
+end
+
 test_ordering_is_opt_in_and_input_validation_is_side_effect_free()
 test_priority_never_overtakes_an_earlier_ordered_message()
 test_delayed_predecessor_blocks_later_high_priority_work()
 test_dead_letter_replay_gets_a_new_ordering_sequence_and_recovers_from_stale_reads()
 test_order_slot_mismatch_fails_closed()
 test_high_priority_burst_does_not_starve_background_messages()
+test_clock_skew_cannot_break_ordering_under_adversarial_sort_keys()
+test_priority_burst_policy_is_bounded_and_configurable()
 
-print("[MailboxV2] ordering, replay recovery, stale-read resistance, priority validation, and starvation regressions passed.")
+print("[MailboxV2] ordering, replay recovery, stale-read resistance, deterministic priority fairness, and input validation regressions passed.")
