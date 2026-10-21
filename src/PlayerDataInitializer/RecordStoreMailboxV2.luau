@@ -49,6 +49,7 @@ type Options = {
 	retry_base_ms: number?,
 	retry_max_ms: number?,
 	priority_aging_ms: number?,
+	high_priority_burst: number?,
 	strict_ordering_enabled: boolean?,
 	lease_renewal_scheduler: ((string, number, number, () -> unknown, (unknown) -> ()) -> unknown)?,
 	activation_guard: ((string) -> (boolean, string?))?,
@@ -366,6 +367,7 @@ function MailboxV2.new(store: unknown, owner_value: Owner, options_value: Option
 	options.retry_base_ms = options.retry_base_ms or DEFAULT_RETRY_BASE_MS
 	options.retry_max_ms = options.retry_max_ms or DEFAULT_RETRY_MAX_MS
 	options.priority_aging_ms = options.priority_aging_ms or DEFAULT_PRIORITY_AGING_MS
+	options.high_priority_burst = options.high_priority_burst or DEFAULT_HIGH_PRIORITY_BURST
 	if options.strict_ordering_enabled ~= nil and type(options.strict_ordering_enabled) ~= "boolean" then
 		error("strict_ordering_enabled must be a boolean", 2)
 	end
@@ -377,7 +379,7 @@ function MailboxV2.new(store: unknown, owner_value: Owner, options_value: Option
 		"max_segments", "segment_max_messages", "max_payload_bytes", "max_request_bytes",
 		"preparation_shard_count", "preparation_max_entries_per_shard", "preparation_max_entry_bytes",
 		"dlq_max_segments", "dlq_segment_max_messages", "lease_ms", "lease_renewal_horizon_ms", "clock_skew_grace_ms",
-		"max_attempts", "retry_base_ms", "retry_max_ms", "priority_aging_ms",
+		"max_attempts", "retry_base_ms", "retry_max_ms", "priority_aging_ms", "high_priority_burst",
 	}
 	for _, key in numeric_options do
 		local value = (options :: Dict)[key]
@@ -393,6 +395,9 @@ function MailboxV2.new(store: unknown, owner_value: Owner, options_value: Option
 	end
 	if (options.lease_renewal_horizon_ms :: number) < (options.lease_ms :: number) then
 		error("lease_renewal_horizon_ms must be at least lease_ms", 2)
+	end
+	if (options.high_priority_burst :: number) > 32 then
+		error("high_priority_burst may not exceed 32", 2)
 	end
 	local sender_job_id = options.sender_job_id
 	if sender_job_id == nil then
@@ -2277,22 +2282,19 @@ local function process_next_internal(self: Mailbox, handler: (unknown, Dict, Han
 		local right_age = math.max(0, now - (right.CreatedAt :: number))
 		local left_rank = rank[tostring(left.Priority)] or 2
 		local right_rank = rank[tostring(right.Priority)] or 2
-		if left_age >= (self.options.priority_aging_ms :: number) * 2 then left_rank = 1 end
-		if right_age >= (self.options.priority_aging_ms :: number) * 2 then right_rank = 1 end
-		if left_age >= (self.options.priority_aging_ms :: number) then left_rank = math.min(left_rank, 2) end
-		if right_age >= (self.options.priority_aging_ms :: number) then right_rank = math.min(right_rank, 2) end
-		if self.high_priority_streak >= DEFAULT_HIGH_PRIORITY_BURST then
-			local left_high = tostring(left.Priority) == "high"
-			local right_high = tostring(right.Priority) == "high"
-			if left_high ~= right_high then return not left_high end
+		if left_age >= (self.options.priority_aging_ms :: number) * 2 then left_rank = 1
+		elseif left_age >= (self.options.priority_aging_ms :: number) then left_rank = math.min(left_rank, 2) end
+		if right_age >= (self.options.priority_aging_ms :: number) * 2 then right_rank = 1
+		elseif right_age >= (self.options.priority_aging_ms :: number) then right_rank = math.min(right_rank, 2) end
+		if self.high_priority_streak >= (self.options.high_priority_burst :: number) then
+			if tostring(left.Priority) == "high" then left_rank = 4 end
+			if tostring(right.Priority) == "high" then right_rank = 4 end
 		end
 		if left_rank ~= right_rank then return left_rank < right_rank end
-		if left.OrderingKey ~= nil and left.OrderingKey == right.OrderingKey
-			and is_finite(left.OrderingSequence) and is_finite(right.OrderingSequence)
-		then
-			return (left.OrderingSequence :: number) < (right.OrderingSequence :: number)
+		if left.CreatedAt ~= right.CreatedAt then
+			return (left.CreatedAt :: number) < (right.CreatedAt :: number)
 		end
-		return (left.CreatedAt :: number) < (right.CreatedAt :: number)
+		return tostring(left.Id) < tostring(right.Id)
 	end)
 	for _, candidate in queue do
 		local route = tostring(candidate.Id)
