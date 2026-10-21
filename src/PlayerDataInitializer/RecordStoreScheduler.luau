@@ -2,6 +2,7 @@
 -- Server-local advanced scheduler. Queue selection is advisory; durable state,
 -- session fencing and idempotency remain authoritative.
 local Scheduler = {}
+local MAX_REPLAY_TRACE_EVENTS = 8192
 
 local function finite(value)
 	return type(value) == "number" and math.isfinite(value)
@@ -1397,15 +1398,67 @@ local function new_governor(options)
 		return copy(summary)
 	end
 	function governor:Replay(log)
+		local function invalid_trace(message)
+			return { code = "invalid", message = message }
+		end
+		if type(log) ~= "table" then return invalid_trace("scheduler trace must be an array") end
+		local event_count = 0
+		for key in pairs(log) do
+			if not finite(key) or math.floor(key) ~= key or key < 1 or key > MAX_REPLAY_TRACE_EVENTS then
+				return invalid_trace("scheduler trace must be a dense array within the event limit")
+			end
+			event_count += 1
+			if event_count > MAX_REPLAY_TRACE_EVENTS then
+				return invalid_trace("scheduler trace exceeds the event limit")
+			end
+		end
+		if #log ~= event_count then
+			return invalid_trace("scheduler trace must be a dense array")
+		end
+		for index = 1, event_count do
+			local entry = rawget(log, index)
+			if type(entry) ~= "table" then
+				return invalid_trace("scheduler trace event " .. tostring(index) .. " must be a table")
+			end
+			if entry.kind == "enqueue" then
+				if type(entry.item) ~= "table" then
+					return invalid_trace("enqueue event " .. tostring(index) .. " must include an item table")
+				end
+			elseif entry.kind == "complete" then
+				if not valid_text(entry.id, 128) then
+					return invalid_trace("complete event " .. tostring(index) .. " must include a valid work ID")
+				end
+				local outcome_type = type(entry.outcome)
+				if entry.outcome ~= nil and outcome_type ~= "string" and outcome_type ~= "boolean"
+					and outcome_type ~= "number" and outcome_type ~= "table"
+				then
+					return invalid_trace("complete event " .. tostring(index) .. " has an unsupported outcome")
+				end
+			elseif entry.kind == "take" then
+				if entry.renewal_mode ~= nil and type(entry.renewal_mode) ~= "boolean" then
+					return invalid_trace("take event " .. tostring(index) .. " has an invalid renewal mode")
+				end
+			elseif entry.kind == "advance" then
+				if not finite(entry.ms) or entry.ms < 0 then
+					return invalid_trace("advance event " .. tostring(index) .. " must have a non-negative finite duration")
+				end
+				if type(options.advance_ms) ~= "function" then
+					return invalid_trace("scheduler trace requires a virtual-time advance function")
+				end
+			else
+				return invalid_trace("scheduler trace event " .. tostring(index) .. " has an unknown kind")
+			end
+		end
 		local result = { statuses = {} }
-		for _, entry in ipairs(log or {}) do
+		for index = 1, event_count do
+			local entry = rawget(log, index)
 			if entry.kind == "enqueue" then self:Enqueue(entry.item)
 			elseif entry.kind == "complete" then self:MarkCompleted(entry.id, entry.outcome)
 			elseif entry.kind == "take" then
 				local item, status = self:TakeNext(entry.renewal_mode)
 				result[#result + 1] = if item then item.id else "<empty>"
 				result.statuses[#result.statuses + 1] = status or "empty"
-			elseif entry.kind == "advance" and finite(entry.ms) and type(options.advance_ms) == "function" then
+			elseif entry.kind == "advance" then
 				options.advance_ms(entry.ms)
 			end
 		end
