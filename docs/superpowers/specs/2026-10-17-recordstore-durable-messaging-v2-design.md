@@ -718,6 +718,7 @@ Required test groups:
 68. **Preparation registry idempotency and contention**: concurrent same-route/same-request submission, same-route/different-request conflict, same registry shard contention, stale reads, retries across servers, duplicate reservation protection and canonical-receipt adoption.
 69. **Preparation registry saturation and crash recovery**: full shard, over-limit encoded identity, crash after reserve/locator/canonical/index/ready/clear, unknown registry UpdateAsync and delayed caller after tombstone; no keyspace scan, duplicate logical delivery or silent loss of the durable pending intent.
 70. **Unknown preparation lookup and capacity semantics**: reservation committed but caller gets an ambiguous response, canonical message not yet written/indexed, shard or active queue is full, and recovery restarts; status resolves through the route preparation shard, `capacity` is returned only when no reservation committed, and active durable intent is never reported as absent.
+71. **Profile save/renewal uncertainty recovery:** inject failure-before-commit and commit-then-error for save and renewal; hold read verification unavailable until the lease safety margin is crossed; race reconciliation against a new owner; interrupt the process before and after commit; verify stable operation IDs, exact revision/fence comparisons, no stale overwrite, bounded retry/backoff, dirty-watermark accuracy, explicit mutation backpressure, and that only confirmed durable snapshots are described as saved. If the process dies before commit, the test must explicitly demonstrate that volatile mutations are not falsely claimed to be recoverable.
 
 
 
@@ -1215,6 +1216,8 @@ Avoid pooling mutable user-data tables unless ownership and lifetime can be prov
 ### 26.11 Benchmark matrix and acceptance policy
 
 Add dedicated CodSpeed scenarios for:
+- profile save/renewal outcomes: confirmed success, failure-before-commit, commit-then-error, verification outage and competing-owner recovery; report extra reads/writes, dirty age, lease safety margin and critical-save/release p95/p99;
+- adaptive autosave by mutation rate and dirty age, including maximum dirty-age enforcement, degraded-mode admission and bounded-buffer saturation;
 
 - clean save/no-op save versus dirty save;
 - 1/10/100 concurrent Record sessions with jittered autosaves and mixed critical work;
@@ -1226,7 +1229,7 @@ Add dedicated CodSpeed scenarios for:
 - preparation-registry shard skew, active reservation caps, duplicate retry contention and recovery/cleanup request amplification;
 - inbox batch sizes 1/4/8/16 only for callers that explicitly opted into atomic batching;
 - outbox fan-out, grouped cleanup, migration, erasure and index rebuild under bounded concurrency;
-- peak memory/allocation and worst-case trace/diff truncation.
+- peak memory/allocation and worst-case trace/diff truncation;
 
 Track CPU simulation separately from wall-time. Simulation is useful for Luau compute but does not model real Roblox DataStore throttling or network latency. Use wall-time through CodSpeed for applicable measurements and consistent runners; then validate request budgets, payload sizes, throttling and cross-server behavior in Studio/live test namespaces. Report request count per logical operation, encoded bytes, CPU/allocation metrics, throughput, p50/p95 latency, oldest work age, budget headroom and failure recovery. Never translate mock service speed into a claim about real DataStore latency.
 
@@ -1236,6 +1239,61 @@ Adopt an optimization only when a comparable baseline and head run show a repeat
 
 Do not: reduce lease/fencing safety to save requests; skip canonical request comparison after a hash match; move a receipt to a second key without recovery protocol; batch distinct business transactions implicitly; let MemoryStore/MessagingService become truth; remove old-version support to speed up decode without a migration plan; run unbounded concurrent UpdateAsync calls; use an unlimited in-memory pending queue; scan the entire keyspace to recover one missing entry; or change correctness defaults based on a benchmark-only profile.
 
+
+### 26.13 Durable-save recovery, freshness budgets and mutation admission
+
+The current core has a dangerous liveness edge: an unconfirmed save or lease renewal can move a Record to \`unknown\`, while the periodic scheduler visits only \`active\` Records. The player-facing \`PlayerDataCore\` listeners also enqueue ordinary Value changes only while the Record is active. A process can therefore retain a visible in-memory value that is no longer being persisted or renewed. The design must resolve this state explicitly instead of treating \`unknown\` as either a normal active session or a permanent dead end.
+
+#### Separate ownership certainty from durability certainty
+
+Model these concerns independently:
+
+- **Ownership:** \`owned\`, \`uncertain\`, or \`lost\`.
+- **Durability:** \`clean\`, \`dirty\`, \`saving\`, \`reconciling\`, or \`degraded\`.
+- **Lifecycle:** open/acquiring, closing, closed, tombstoned, or retired.
+
+Keep existing public result/state compatibility where required, but derive legacy state from these dimensions instead of using one state string to answer every question. \`unknown\` must enqueue bounded reconciliation work. It must not be eligible for ordinary mutations, nor may it be silently excluded forever from all background recovery.
+
+#### Reconcile one logical save, not a newly invented retry
+
+Each logical snapshot save captures an immutable snapshot, its dirty-generation watermark, the expected base revision, the session token and fencing generation, the target revision, and one stable operation/write ID. Retry attempts and reconciliation for that logical save reuse the same snapshot and operation ID. A new operation ID is created only after the earlier logical operation is resolved and a new snapshot is intentionally captured.
+
+The reconciliation state machine must distinguish these cases inside the authoritative profile-key boundary:
+
+1. **Commit confirmed:** the current valid envelope matches the operation ID and target revision, and its session/fencing data matches the expected ownership. Confirm the durable watermark, advance the saved snapshot, and preserve any mutations made after the captured watermark as dirty.
+2. **Known not committed, ownership still valid:** the current envelope still matches the exact expected base revision, token and fencing generation, and the existing lease has sufficient safety margin. Retry the immutable snapshot with the same operation ID through a conditional \`UpdateAsync\`.
+3. **Newer revision or ambiguous competing write:** do not overwrite it with the stale snapshot. Re-read/reconcile the current envelope and apply only a formally defined rebase rule; otherwise fence the local Record and surface a conflict for recovery.
+4. **Ownership changed, schema is incompatible, or the record is corrupt/tombstoned:** stop the old writer. Use the corresponding existing recovery/diagnostic path; never substitute template data or assume a fresh profile is safe.
+5. **The storage service remains unavailable:** retain only bounded in-process recovery state, keep the result visibly unknown/degraded, and retry with bounded exponential backoff and jitter. Do not report durability, silently drop dirty state, spin in a hot loop, or promise that volatile changes survive process death.
+
+The compare-and-set decision must be repeated inside every authoritative \`UpdateAsync\` transform. A prior read, local session cache, MemoryStore hint, or scheduler decision does not grant write authority.
+
+#### Recover an uncertain lease without reviving a stale writer
+
+A lease-renewal timeout is not proof that renewal failed. First reconcile the durable token, generation, operation ID and persisted lease deadline. If the renewal is confirmed, restore the owned state. If the same session is still valid and has safe lease margin, retry the same logical renewal. Never assume a lease was extended solely because the request was sent.
+
+If the persisted lease expired, a same-process recovery may reclaim the profile only through a dedicated, bounded compare-and-set on the profile key. That transform must prove that the envelope still has the exact expected token/generation and base revision, that no newer owner or revision has won, and that the lease is expired. If it succeeds, increment the fencing generation, install a fresh token/lease, and commit the reconciled dirty snapshot atomically. If any precondition differs, the old session is fenced and must not write its cached snapshot. A stale token must never be revived. This recovery branch is optional until its race and crash tests pass; disabling it must leave a safe, observable fenced/degraded result.
+
+#### Keep progress and persistence status consistent
+
+Introduce a durability-status contract that reports the last confirmed durable revision/generation, dirty and durable mutation watermarks, oldest dirty age, last successful persistence time, pending operation ID, lease safety margin, current reconciliation category and whether the result is unknown. Expose a coalesced, edge-triggered risk signal rather than writing one metric or alert per mutation.
+
+The player-data integration must not silently ignore a changed leaderstat simply because the Record left \`active\`. It must either:
+- retain the change in a strictly bounded volatile buffer while reconciliation is in progress and commit it only after ownership is re-established safely; or
+- immediately enter the configured gameplay backpressure policy, mark progress as not durably protected, and stop accepting rewards/mutations until recovery.
+
+The application must choose its behavior explicitly. A bounded buffer is not durable across a process crash. When ownership is lost or the buffer/dirty-age limit is exceeded, the integration must pause progression or reject mutations visibly, rather than display unlimited new progress that is silently discarded.
+
+#### Pair correctness with useful save optimizations
+
+- Schedule saves by the oldest dirty mutation's deadline, not only a fixed interval. Trigger a save early enough to reserve operation/reconciliation time; bounded jitter may not push the save past the maximum dirty-age target.
+- Keep a reserved internal concurrency share for lease renewal, dirty profile save, reconciliation and final release. Mailbox scans, tracing, maintenance and optional transactions must not starve these operations.
+- Coalesce multiple same-profile changes into one immutable snapshot, but advance the durable watermark only through the snapshot actually confirmed. Mutations during an in-flight save remain dirty and schedule a follow-up save.
+- Skip a no-op save only when dirty tracking is provably complete. Direct mutable-table access or unobserved Value mutation means cleanliness is unknown, not clean.
+- Provide a policy-driven durability mode (\`balanced\`, \`durability_first\`, or \`read_only_on_risk\`) with validated thresholds for maximum dirty age and bounded pending work. Modes may change scheduling/admission, never weaken fencing or turn an unknown commit into a failure.
+- Provide a clear, queryable per-Record durability receipt/status with the operation ID and last confirmed revision. A request return must distinguish “accepted in memory” from “durably committed”; existing APIs retain compatibility only where their existing contract requires it.
+
+**Hard boundary:** no autosave strategy can preserve mutations that never reached a confirmed durable commit if the server process dies. To bound that risk, the system must save successfully or stop accepting more gameplay progress once the configured durability budget is exceeded. Do not claim zero data loss during a prolonged DataStore outage.
 
 ## 27. Priority design roadmap with paired performance work
 
@@ -1304,7 +1362,48 @@ Never silently fall back to an unbounded memory queue. Critical purchase receipt
 
 Pair with read/write budget admission, reserved critical concurrency, deadline-aware flush scheduling and per-owner fairness. Performance acceptance measures how gracefully the system sheds optional work while preserving critical persistence, not how many requests it can suppress by dropping data.
 
-#### D. Session contention and takeover diagnostics — P1
+#### D. Unknown profile-write and session-outcome recovery — P0
+
+Implement the state machine in Section 26.13 in the production save, renewal, scheduler and PlayerData integration paths. An ambiguous operation remains discoverable and eligible for bounded reconciliation; it must not turn into an inert \`unknown\` Record that permanently stops autosave and renewal.
+
+The operation protocol must retain the original logical write ID, immutable snapshot, base/target revisions, dirty watermark and expected fencing data until the outcome is resolved. Reconcile a commit by matching the durable envelope. Retry only when the exact base revision and current ownership are verified. On a competing revision or owner, do not write the stale snapshot. An expired lease can be reacquired only through the separately gated profile-key CAS protocol in Section 26.13; otherwise fence and stop the old session.
+
+**Acceptance gate:** commit-then-error is recognized as committed without duplicating a revision; failure-before-commit retries the same logical operation only while its exact ownership preconditions hold; a competing owner always wins or fences the old writer; service outages cause bounded backoff and visible degraded state, never a silent clean result or infinite hot loop.
+
+#### E. Durability-aware mutation admission and PlayerData integration — P0
+
+Expose durability health and a mutation-admission decision to game code. Integrate it with \`PlayerDataCore\` so the Value.Changed path cannot silently discard changes after the Record leaves \`active\`. A caller can explicitly choose bounded in-process buffering during reconciliation or freeze/reject gameplay rewards when the risk budget is exceeded. Reports and runtime state must distinguish displayed/in-memory progress from confirmed durable progress.
+
+The buffer must have hard item, byte and age limits. It is not durable across crashes and must never authorize a stale writer. On confirmed recovery, reconcile the buffered mutations under the current fencing token; if that cannot be proven safe, preserve diagnostic evidence, block further mutation and require an explicit recovery decision. Player-facing controls should be generic callbacks/status signals so the persistence library does not own game-specific reward, rollback, or kick policy.
+
+**Acceptance gate:** no player mutation is silently dropped while the system claims healthy; no mutation is reported durable before a matching write is confirmed; a takeover fences buffered mutations from the old owner; a full buffer or exceeded dirty-age budget produces explicit backpressure; normal healthy play keeps its configured save cadence.
+
+#### F. Session contention and takeover diagnostics — P1
+
+Provide a bounded \`RecordStore.get_session_status_async(...)\` or session-wait result that distinguishes: no known competing session, competing session observed, wait/retry scheduled, cancellation requested, ownership acquired, and ownership fenced/lost. Include observed time and known source data only; do not reveal secrets or claim a globally current owner from a stale read.
+
+For a waiting caller, report elapsed contention time and the next retry window/rationale when known. Provide cancellation and timeout without abandoning an ambiguous ownership write. Any takeover remains governed by the existing CAS/session-fencing rules, never by the diagnostic endpoint. Diagnostics cannot grant permission to force-steal a session.
+
+Pair with jittered load retries, a fair bounded waiter scheduler, read-only coalescing of compatible status reads and per-key retry suppression. Measure acquisition latency and DataStore request amplification under many concurrent servers. Do not add periodic high-rate polling for every waiting player; use bounded intervals and a maximum retry cadence.
+
+#### G. Resumable retention compactor and offline maintenance runner — P1
+
+Create a shared maintenance runner for safe retention, index cleanup, migration backfills, erasure, projection rebuild and other bounded jobs. Each task declares a version, stable operation ID, key-family scope, page cursor, expected revision/generation, request budget, concurrency class, retention/deletion rule and resumable checkpoint.
+
+The runner must:
+- use bounded pages/item/byte/time limits and persist progress only at a well-defined safe checkpoint;
+- revalidate canonical state, index references, live workflow/outbox dependencies and lease/fencing tokens before deletion;
+- treat \`RemoveAsync\` as unconditional, not as a compare-and-set: first persist a tombstone/retired generation and ensure every writer rejects that generation, then physically remove only after references, leases and dependencies are retired;
+- reconcile unknown delete/update results with an authoritative follow-up before advancing its cursor; never trust cached absence after an ambiguous delete;
+- stop or yield when critical profile save/release/reconciliation work needs the scheduler;
+- support dry-run counts, pause/resume, cancellation, per-family progress and an explicit incomplete result;
+- never make a whole-keyspace scan part of a request path;
+- never compact the only evidence that protects idempotency or future recovery;
+- preserve a recovery source until a migration/compaction's result has been verified.
+
+Pair with cursor-based incremental scans, sharded maintenance lanes, bounded cleanup batches, backpressure and a budget-aware scheduler. Track bytes/keys processed, request count per item, oldest maintenance age and impact on critical-save latency. Faster cleanup is unacceptable if it can delete an item still referenced by an active index or pending transfer.
+
+#### F. Session contention and takeover diagnostics — P1
 
 Provide a bounded `RecordStore.get_session_status_async(...)` or session-wait result that distinguishes: no known competing session, competing session observed, wait/retry scheduled, cancellation requested, ownership acquired, and ownership fenced/lost. Include observed time and known source data only; do not reveal secrets or claim a globally current owner from a stale read.
 
@@ -1312,7 +1411,7 @@ For a waiting caller, report elapsed contention time and the next retry window/r
 
 Pair with jittered load retries, a fair bounded waiter scheduler, read-only coalescing of compatible status reads and per-key retry suppression. Measure acquisition latency and DataStore request amplification under many concurrent servers. Do not add periodic high-rate polling for every waiting player; use bounded intervals and a maximum retry cadence.
 
-#### E. Resumable retention compactor and offline maintenance runner — P1
+#### G. Resumable retention compactor and offline maintenance runner — P1
 
 Create a shared maintenance runner for safe retention, index cleanup, migration backfills, erasure, projection rebuild and other bounded jobs. Each task declares a version, stable operation ID, key-family scope, page cursor, expected revision/generation, request budget, concurrency class, retention/deletion rule and resumable checkpoint.
 
@@ -1333,16 +1432,21 @@ Pair with cursor-based incremental scans, sharded maintenance lanes, bounded cle
 
 1. Lock down the state/outcome contracts and build the production-path deterministic fault simulator.
 2. Implement transaction receipts, dirty-generation durability tracking, and the degraded/backpressure policy with bounded scheduling.
-3. Prove migration, session fencing, Profile Doctor preview/restore and legacy compatibility.
-4. Build receipt handling and escrow transfers using the tested transaction/workflow primitives.
-5. Add session diagnostics, traces and the maintenance runner; then do RTBF coverage before claiming complete erasure support.
-6. Add projections and advanced codec/caching optimizations only for measured use cases.
+3. Implement the unknown-outcome reconciliation state machine, durability-aware mutation gate and dirty-age-aware autosave.
+4. Prove migration, session fencing, Profile Doctor preview/restore and legacy compatibility.
+5. Build receipt handling and escrow transfers using the tested transaction/workflow primitives.
+6. Add session diagnostics, traces and the maintenance runner; then do RTBF coverage before claiming complete erasure support.
+7. Add projections and advanced codec/caching optimizations only for measured use cases.
 
 This is a dependency order, not a promise to release everything as one monolithic subsystem. Keep each public feature independently gated wherever compatibility allows.
 
 ### 27.4 Priority-specific acceptance gates
 
 - Dirty age, last durable revision and uncertain writes are distinguishable; no-op-save elision never infers a clean Record from incomplete mutation tracking.
+- Ambiguous profile save and lease-renewal outcomes converge through the production-path reconciler; retry uses the same logical operation ID and immutable snapshot, and never crosses a changed revision/fence.
+- A Record in `unknown` remains eligible only for bounded reconciliation, not ordinary mutation. Confirmed ownership and confirmed durability are separate facts.
+- The player-data integration never silently discards changes while claiming healthy persistence; dirty buffer limits trigger visible backpressure, and crash tests do not promise recovery of uncommitted memory.
+- Under healthy budgets, deadline-aware autosave preserves the maximum dirty-age target and the renewal/save/release critical reserve is not starved by optional work.
 - Every API's retry classification distinguishes confirmed non-commit from unknown commit. Tests inject commit-then-error at each supported write boundary.
 - A full local dirty buffer or maintenance queue returns visible capacity/backpressure; no accepted durable intent is silently evicted.
 - The critical scheduler reserve prevents queue/maintenance saturation from indefinitely blocking final profile saves/releases under the tested workload.
@@ -1602,6 +1706,7 @@ This section is the final review checklist, not evidence that the future impleme
 | **Tracing can amplify writes or leak data** | Persisting every span as its own key increases hot-path request cost; raw identifiers/payloads may expose private data. | Use existing protocol writes or bounded local/external sinks, redact by default, limit retention and make trace completeness explicit. |
 | **No-op elision can miss untracked mutations** | Skipping a save based on a stale dirty flag can silently lose direct table mutations. | Track mutations at supported API seams; disable the optimization where mutation tracking cannot be proven complete and test nested/reverted edits. |
 | **Autosave jitter can exceed durability bounds** | Random delays may extend dirty data lifetime or overlap lease/release deadlines. | Bound jitter by configured maximum dirty age and deadlines; prioritize release/critical writes and test at worst-case scheduler load. |
+| **An uncertain profile save/renewal can strand a Record in `unknown`** | The scheduler visits only active Records, while game-facing change listeners may stop enqueuing updates; a player can keep seeing progress that no longer reaches durable storage. | Add an explicit reconciliation state machine, stable logical operation identity, exact token/generation/revision comparison, a lease-safe recovery CAS, durability-risk signaling and mutation backpressure. Unknown must never be marked clean or silently forgotten. |
 | **Read coalescing can accidentally share authority decisions** | Sharing a stale read/session attempt may bypass required ownership or freshness checks. | Limit singleflight to explicitly read-only, freshness-compatible calls; never coalesce leases, claims, mutations or session acquisition. |
 | **Compression/codec changes can break recoverability** | A faster or smaller encoding may make old versions unreadable or bypass validation. | Version codecs, bound decompression, preserve raw fallback and historical-read compatibility; keep the optimization disabled unless measured. |
 | **Local budget headroom can be misleading** | Other scripts/servers and Open Cloud requests share experience-level consumption. | Use local concurrency as a control, react to actual throttling, preserve critical internal capacity and make no universe-wide budget guarantee. |
@@ -1627,6 +1732,8 @@ This section supersedes any less precise statement elsewhere in the document. It
 6. **Preserve key metadata.** All profile-key mutations and recovery paths must preserve DataStore user IDs and user-defined metadata unless intentionally and explicitly changed. RTBF key templates remain separately required.
 7. **Claim leases are recovery hints, not exactly-once execution locks.** A slow or ambiguous UpdateAsync response can consume a material part of the lease. A worker must reconcile the exact precomputed claim token and sufficient lease margin before invoking a handler. Expired/old handlers may still be running; durable effect fencing/idempotency is the correctness boundary.
 8. **Mixed-version rollout must be real, not assumed.** A freeze marker only blocks binaries whose transform checks the marker/version. Deploy a bridge that rejects future formats, drain old binaries and verify the old writer population is gone before enabling sidecars or v2 queue writes. If this cannot be established, do not migrate in place.
+9. **Unknown save/renewal outcomes must converge.** The current `unknown` result is not a recovery policy. Add a bounded production-path reconciler, preserve stable operation identity and dirty watermarks, separate ownership certainty from durability status, and verify every retry at the authoritative profile-key CAS. The scheduler must continue bounded reconciliation for unknown Records without treating them as writable/active. Add a lease-safe recovery CAS or explicitly fence the session; never resurrect an old token.
+10. **No silent mutation loss during degraded persistence.** `PlayerDataCore` and supported mutation APIs must surface persistence risk and either hold strictly bounded volatile changes for safe recovery or stop accepting progress. A changed Value must not silently bypass persistence merely because the Record is not active. Define the crash limitation: buffered in-memory work is not durable until commit is confirmed.
 
 ### P1 — operational safety and liveness
 
@@ -1637,4 +1744,4 @@ This section supersedes any less precise statement elsewhere in the document. It
 
 ### Release decision
 
-The design is improved, but v2 is **not implementation-ready for production activation** until the P0 items above have concrete protocols and executable tests. Close each blocker with an implementation PR, failure-injection coverage and relevant Studio tests. Then rerun the full 70-group matrix against the real production-path code plus the fake-service harness. CodSpeed measurements establish local CPU/wall-time behavior only for their instrumented workload; they do not prove Roblox DataStore latency, delivery or quota behavior.
+The design is improved, but v2 is **not implementation-ready for production activation** until the P0 items above have concrete protocols and executable tests. The new profile-durability P0 gates are also design requirements only; they are not satisfied until implemented and tested against the core save/renewal and PlayerData paths. Close each blocker with an implementation PR, failure-injection coverage and relevant Studio tests. Then rerun the full 70-group matrix against the real production-path code plus the fake-service harness. CodSpeed measurements establish local CPU/wall-time behavior only for their instrumented workload; they do not prove Roblox DataStore latency, delivery or quota behavior.
