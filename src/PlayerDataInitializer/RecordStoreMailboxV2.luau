@@ -1056,6 +1056,63 @@ function MailboxV2._record_snapshot(self: Mailbox, record: Dict): Dict
 	}
 end
 
+local function valid_scheduling_record(record: Dict, route: string): (boolean, string?)
+	if type(record.route) ~= "string" or record.route ~= route then
+		return false, "canonical route does not match its index entry"
+	end
+	if type(record.message_type) ~= "string" or record.message_type == "" or #record.message_type > 100 then
+		return false, "canonical message type is malformed"
+	end
+	if record.priority ~= "high" and record.priority ~= "normal" and record.priority ~= "background" then
+		return false, "canonical priority is malformed"
+	end
+	local attempts = record.attempts
+	local total_attempts = record.total_attempts
+	local replay_count = record.replay_count
+	if not is_finite(attempts) or (attempts :: number) < 0 or math.floor(attempts :: number) ~= attempts
+		or not is_finite(total_attempts) or (total_attempts :: number) < (attempts :: number)
+		or math.floor(total_attempts :: number) ~= total_attempts
+		or not is_finite(replay_count) or (replay_count :: number) < 0
+		or math.floor(replay_count :: number) ~= replay_count
+	then
+		return false, "canonical retry counters are malformed"
+	end
+	local created_at = record.created_at
+	local updated_at = record.updated_at
+	local available_at = record.available_at
+	local expires_at = record.expires_at
+	if not is_finite(created_at) or not is_finite(updated_at) or not is_finite(available_at)
+		or (expires_at ~= nil and (not is_finite(expires_at) or (expires_at :: number) <= (available_at :: number)))
+	then
+		return false, "canonical scheduling times are malformed"
+	end
+	local placement = record.placement_generation
+	if not is_finite(placement) or (placement :: number) < 1 or math.floor(placement :: number) ~= placement then
+		return false, "canonical placement generation is malformed"
+	end
+	if record.ordering_key == nil then
+		if record.ordering_sequence ~= nil then
+			return false, "canonical ordering sequence exists without an ordering_key"
+		end
+	elseif type(record.ordering_key) ~= "string" or record.ordering_key == ""
+		or #record.ordering_key > MAX_ORDERING_KEY_LENGTH
+		or not is_finite(record.ordering_sequence) or (record.ordering_sequence :: number) < 1
+		or math.floor(record.ordering_sequence :: number) ~= record.ordering_sequence
+		or (record.ordering_sequence :: number) > 9_007_199_254_740_991
+	then
+		return false, "canonical ordering metadata is malformed"
+	end
+	if record.state == "claimed" then
+		if not valid_text(record.claim_token, 256) or not is_finite(record.claim_started_at)
+			or not is_finite(record.locked_until)
+			or (record.locked_until :: number) <= (record.claim_started_at :: number)
+		then
+			return false, "canonical claim lease metadata is malformed"
+		end
+	end
+	return true, nil
+end
+
 function MailboxV2._ordering_route(self: Mailbox, ordering_key: string): string
 	return result_route_key(self, "m2o-", "ordering:" .. ordering_key)
 end
@@ -2077,10 +2134,13 @@ function MailboxV2._claim(self: Mailbox, route: string): (Dict?, Result)
 		if current == nil or not same_owner(current.owner, self.owner) then
 			return current
 		end
-		if current_record.ordering_key ~= nil and (
-			current.ordering_key ~= current_record.ordering_key
+		if current.state == "ready" or current.state == "claimed" then
+			local valid = valid_scheduling_record(current, route)
+			if not valid then return current end
+		end
+		if current.ordering_key ~= current_record.ordering_key
 			or current.ordering_sequence ~= current_record.ordering_sequence
-		) then
+		then
 			return current
 		end
 		if current.state == "acknowledging" then
@@ -2141,6 +2201,12 @@ function MailboxV2._claim(self: Mailbox, route: string): (Dict?, Result)
 	end
 	if claimed == nil then
 		return nil, ok("not_found", route, nil, "message does not exist")
+	end
+	if claimed.state == "ready" or claimed.state == "claimed" then
+		local valid, validation_error = valid_scheduling_record(claimed, route)
+		if not valid then
+			return nil, ok("corrupt", route, nil, validation_error or "canonical scheduling metadata is malformed")
+		end
 	end
 	if claimed.state == "acknowledging" then
 		return nil, self:_finish_acknowledgement(route, tostring(claimed.claim_token))
