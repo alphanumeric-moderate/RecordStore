@@ -1780,11 +1780,13 @@ local function new_dispatcher(governor, options)
 			schedule_next_wake()
 		end
 	end
-	function dispatcher:CancelQueued(message)
-		if self.closed then return 0 end
+	function dispatcher:CancelQueuedWhere(predicate, message)
+		if self.closed or type(predicate) ~= "function" then return 0 end
 		local pending = {}
 		for _, item in ipairs(governor.queue) do
-			pending[#pending + 1] = item
+			local entry = self.callbacks[item.id]
+			local ok, matches = pcall(predicate, item, entry)
+			if ok and matches == true then pending[#pending + 1] = item end
 		end
 		local was_running = self.running
 		self.running = true
@@ -1802,8 +1804,14 @@ local function new_dispatcher(governor, options)
 		cancel_scheduled(self.wake_thread)
 		self.wake_thread = nil
 		self.wake_due_ms = nil
-		if not was_running and not self.closed and not self.closing then self:Kick() end
+		if not was_running and not self.closed and not self.closing then
+			self:Kick()
+			schedule_next_wake()
+		end
 		return cancelled_count
+	end
+	function dispatcher:CancelQueued(message)
+		return self:CancelQueuedWhere(function() return true end, message)
 	end
 
 	local function dispatch_one(item, status)
@@ -1936,7 +1944,7 @@ local function new_dispatcher(governor, options)
 		max_retries = true, retry_delay_ms = true, retry_jitter_percent = true, batch_window_ms = true,
 		batchable = true, batch_size = true, batch_backlog = true, on_complete = true, mutating = true,
 	}
-	function dispatcher:Schedule(owner_id, work_id, callback, schedule_options)
+	function dispatcher:Schedule(owner_id, work_id, callback, schedule_options, source)
 		if self.closed or self.closing then return { code = "closed", message = "scheduler dispatcher is closing or closed" } end
 		if not valid_text(owner_id, 512) or not valid_text(work_id, 96) or type(callback) ~= "function" then
 			return { code = "invalid", message = "owner_id, work_id and callback are required" }
@@ -2054,6 +2062,7 @@ local function new_dispatcher(governor, options)
 			callback = callback, on_complete = schedule_options.on_complete,
 			work_id = work_id, work_class = work_class,
 			operation_class = schedule_options.operation_class or work_class,
+			source = source,
 			batchable = schedule_options.batchable == true, batch_size = batch_size, batch_backlog = batch_backlog,
 			retry_attempt = 0, max_retries = retry_limit,
 			retry_delay_ms = retry_delay_ms, retry_jitter_percent = jitter,
