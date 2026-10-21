@@ -97,6 +97,7 @@ local Instance = table.freeze({
 
 local loaded_module: any = nil
 local loaded_scheduler_module: any = nil
+local loaded_mailbox_module: any = nil
 
 local function load_scheduler()
 	if loaded_scheduler_module ~= nil then return loaded_scheduler_module end
@@ -107,6 +108,17 @@ local function load_scheduler()
 	})
 	loaded_scheduler_module = chunk()
 	return loaded_scheduler_module
+end
+
+local function load_mailbox()
+	if loaded_mailbox_module ~= nil then return loaded_mailbox_module end
+	local source = fs.readFile(REPO_ROOT .. "/src/PlayerDataInitializer/RecordStoreMailboxV2.luau")
+	local chunk = luau.load(source, {
+		debugName = "RecordStoreMailboxV2",
+		environment = Shim.environment,
+	})
+	loaded_mailbox_module = chunk()
+	return loaded_mailbox_module
 end
 
 local function load_record_store(source_path: string?)
@@ -124,10 +136,12 @@ end
 
 local RecordStoreInstance = table.freeze({ Name = "RecordStore", ClassName = "ModuleScript" })
 local RecordStoreSchedulerInstance = table.freeze({ Name = "RecordStoreScheduler", ClassName = "ModuleScript" })
+local RecordStoreMailboxV2Instance = table.freeze({ Name = "RecordStoreMailboxV2", ClassName = "ModuleScript" })
 local script = {
 	Parent = {
 		RecordStore = RecordStoreInstance,
 		RecordStoreScheduler = RecordStoreSchedulerInstance,
+		RecordStoreMailboxV2 = RecordStoreMailboxV2Instance,
 	},
 }
 
@@ -169,6 +183,8 @@ local function shim_require(target: any)
 		return load_record_store()
 	elseif target == RecordStoreSchedulerInstance then
 		return load_scheduler()
+	elseif target == RecordStoreMailboxV2Instance then
+		return load_mailbox()
 	end
 	return require(target)
 end
