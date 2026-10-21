@@ -1402,7 +1402,7 @@ local function new_governor(options)
 			if entry.kind == "enqueue" then self:Enqueue(entry.item)
 			elseif entry.kind == "complete" then self:MarkCompleted(entry.id, entry.outcome)
 			elseif entry.kind == "take" then
-				local item, status = self:TakeNext()
+				local item, status = self:TakeNext(entry.renewal_mode)
 				result[#result + 1] = if item then item.id else "<empty>"
 				result.statuses[#result.statuses + 1] = status or "empty"
 			elseif entry.kind == "advance" and finite(entry.ms) and type(options.advance_ms) == "function" then
