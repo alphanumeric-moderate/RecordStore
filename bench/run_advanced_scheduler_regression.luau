@@ -2034,6 +2034,48 @@ do
 	reserved_queue_dispatcher:Close()
 end
 
+-- A retry must not consume queue capacity reserved for a later internal critical operation.
+do
+	local retry_reserve_governor = new_scheduler()
+	local retry_reserve_policy = retry_reserve_governor:Stats().policy
+	assert(retry_reserve_governor:SetPolicy({
+		revision = retry_reserve_policy.revision + 1,
+		queue_capacity = 4,
+	}), "retry queue-reserve policy was rejected")
+	local first = retry_reserve_governor:Enqueue({
+		id = "retry-reserve-inflight",
+		owner_id = "retry-reserve-inflight-owner",
+		lane = "background",
+	}, true)
+	assert(first.code == "accepted", "initial retryable item was rejected")
+	local in_flight, take_status = retry_reserve_governor:TakeNext()
+	assert(in_flight ~= nil and take_status == "success" and in_flight.id == "retry-reserve-inflight",
+		"retry reserve item did not enter flight")
+	for index = 1, 3 do
+		local queued = retry_reserve_governor:Enqueue({
+			id = "retry-reserve-queued-" .. tostring(index),
+			owner_id = "retry-reserve-queued-owner-" .. tostring(index),
+			lane = "background",
+		}, true)
+		assert(queued.code == "accepted", "noncritical queue did not reach its allowed capacity")
+	end
+	local retried, retry_error = retry_reserve_governor:Reschedule(in_flight.id, now_ms + 1000, true)
+	assert(not retried, "noncritical retry consumed queue capacity reserved for internal critical work")
+	assert(retry_reserve_governor:Stats().queue_items == 3,
+		"rejected noncritical retry changed the bounded queue")
+	local critical = retry_reserve_governor:Enqueue({
+		id = "retry-reserve-critical-renewal",
+		owner_id = "retry-reserve-critical-owner",
+		lane = "lease_renewal",
+		service_class = "critical",
+	}, true)
+	assert(critical.code == "accepted", "critical work could not use the slot protected from retry admission")
+	assert(retry_reserve_governor:Stats().queue_items == 4,
+		"critical work admission exceeded the configured total queue capacity")
+	assert(retry_reserve_governor:MarkCompleted(in_flight.id, "committed"),
+		"retry rejection did not leave the in-flight accounting recoverable")
+end
+
 -- Closing a dispatcher drains callbacks and cancels its outstanding wake timer.
 local closing_governor = new_scheduler()
 local closing_dispatcher = Scheduler.new_dispatcher(closing_governor, {
