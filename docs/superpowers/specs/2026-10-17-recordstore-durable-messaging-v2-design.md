@@ -1242,17 +1242,17 @@ Do not: reduce lease/fencing safety to save requests; skip canonical request com
 
 ### 26.13 Durable-save recovery, freshness budgets and mutation admission
 
-The current core has a dangerous liveness edge: an unconfirmed save or lease renewal can move a Record to \`unknown\`, while the periodic scheduler visits only \`active\` Records. The player-facing \`PlayerDataCore\` listeners also enqueue ordinary Value changes only while the Record is active. A process can therefore retain a visible in-memory value that is no longer being persisted or renewed. The design must resolve this state explicitly instead of treating \`unknown\` as either a normal active session or a permanent dead end.
+The current core has a dangerous liveness edge: an unconfirmed save or lease renewal can move a Record to `unknown`, while the periodic scheduler visits only `active` Records. The player-facing `PlayerDataCore` listeners also enqueue ordinary Value changes only while the Record is active. A process can therefore retain a visible in-memory value that is no longer being persisted or renewed. The design must resolve this state explicitly instead of treating `unknown` as either a normal active session or a permanent dead end.
 
 #### Separate ownership certainty from durability certainty
 
 Model these concerns independently:
 
-- **Ownership:** \`owned\`, \`uncertain\`, or \`lost\`.
-- **Durability:** \`clean\`, \`dirty\`, \`saving\`, \`reconciling\`, or \`degraded\`.
+- **Ownership:** `owned`, `uncertain`, or `lost`.
+- **Durability:** `clean`, `dirty`, `saving`, `reconciling`, or `degraded`.
 - **Lifecycle:** open/acquiring, closing, closed, tombstoned, or retired.
 
-Keep existing public result/state compatibility where required, but derive legacy state from these dimensions instead of using one state string to answer every question. \`unknown\` must enqueue bounded reconciliation work. It must not be eligible for ordinary mutations, nor may it be silently excluded forever from all background recovery.
+Keep existing public result/state compatibility where required, but derive legacy state from these dimensions instead of using one state string to answer every question. `unknown` must enqueue bounded reconciliation work. It must not be eligible for ordinary mutations, nor may it be silently excluded forever from all background recovery.
 
 #### Reconcile one logical save, not a newly invented retry
 
@@ -1261,12 +1261,12 @@ Each logical snapshot save captures an immutable snapshot, its dirty-generation 
 The reconciliation state machine must distinguish these cases inside the authoritative profile-key boundary:
 
 1. **Commit confirmed:** the current valid envelope matches the operation ID and target revision, and its session/fencing data matches the expected ownership. Confirm the durable watermark, advance the saved snapshot, and preserve any mutations made after the captured watermark as dirty.
-2. **Known not committed, ownership still valid:** the current envelope still matches the exact expected base revision, token and fencing generation, and the existing lease has sufficient safety margin. Retry the immutable snapshot with the same operation ID through a conditional \`UpdateAsync\`.
+2. **Known not committed, ownership still valid:** the current envelope still matches the exact expected base revision, token and fencing generation, and the existing lease has sufficient safety margin. Retry the immutable snapshot with the same operation ID through a conditional `UpdateAsync`.
 3. **Newer revision or ambiguous competing write:** do not overwrite it with the stale snapshot. Re-read/reconcile the current envelope and apply only a formally defined rebase rule; otherwise fence the local Record and surface a conflict for recovery.
 4. **Ownership changed, schema is incompatible, or the record is corrupt/tombstoned:** stop the old writer. Use the corresponding existing recovery/diagnostic path; never substitute template data or assume a fresh profile is safe.
 5. **The storage service remains unavailable:** retain only bounded in-process recovery state, keep the result visibly unknown/degraded, and retry with bounded exponential backoff and jitter. Do not report durability, silently drop dirty state, spin in a hot loop, or promise that volatile changes survive process death.
 
-The compare-and-set decision must be repeated inside every authoritative \`UpdateAsync\` transform. A prior read, local session cache, MemoryStore hint, or scheduler decision does not grant write authority.
+The compare-and-set decision must be repeated inside every authoritative `UpdateAsync` transform. A prior read, local session cache, MemoryStore hint, or scheduler decision does not grant write authority.
 
 #### Recover an uncertain lease without reviving a stale writer
 
@@ -1278,7 +1278,7 @@ If the persisted lease expired, a same-process recovery may reclaim the profile 
 
 Introduce a durability-status contract that reports the last confirmed durable revision/generation, dirty and durable mutation watermarks, oldest dirty age, last successful persistence time, pending operation ID, lease safety margin, current reconciliation category and whether the result is unknown. Expose a coalesced, edge-triggered risk signal rather than writing one metric or alert per mutation.
 
-The player-data integration must not silently ignore a changed leaderstat simply because the Record left \`active\`. It must either:
+The player-data integration must not silently ignore a changed leaderstat simply because the Record left `active`. It must either:
 - retain the change in a strictly bounded volatile buffer while reconciliation is in progress and commit it only after ownership is re-established safely; or
 - immediately enter the configured gameplay backpressure policy, mark progress as not durably protected, and stop accepting rewards/mutations until recovery.
 
@@ -1290,7 +1290,7 @@ The application must choose its behavior explicitly. A bounded buffer is not dur
 - Keep a reserved internal concurrency share for lease renewal, dirty profile save, reconciliation and final release. Mailbox scans, tracing, maintenance and optional transactions must not starve these operations.
 - Coalesce multiple same-profile changes into one immutable snapshot, but advance the durable watermark only through the snapshot actually confirmed. Mutations during an in-flight save remain dirty and schedule a follow-up save.
 - Skip a no-op save only when dirty tracking is provably complete. Direct mutable-table access or unobserved Value mutation means cleanliness is unknown, not clean.
-- Provide a policy-driven durability mode (\`balanced\`, \`durability_first\`, or \`read_only_on_risk\`) with validated thresholds for maximum dirty age and bounded pending work. Modes may change scheduling/admission, never weaken fencing or turn an unknown commit into a failure.
+- Provide a policy-driven durability mode (`balanced`, `durability_first`, or `read_only_on_risk`) with validated thresholds for maximum dirty age and bounded pending work. Modes may change scheduling/admission, never weaken fencing or turn an unknown commit into a failure.
 - Provide a clear, queryable per-Record durability receipt/status with the operation ID and last confirmed revision. A request return must distinguish “accepted in memory” from “durably committed”; existing APIs retain compatibility only where their existing contract requires it.
 
 **Hard boundary:** no autosave strategy can preserve mutations that never reached a confirmed durable commit if the server process dies. To bound that risk, the system must save successfully or stop accepting more gameplay progress once the configured durability budget is exceeded. Do not claim zero data loss during a prolonged DataStore outage.
@@ -1364,7 +1364,7 @@ Pair with read/write budget admission, reserved critical concurrency, deadline-a
 
 #### D. Unknown profile-write and session-outcome recovery — P0
 
-Implement the state machine in Section 26.13 in the production save, renewal, scheduler and PlayerData integration paths. An ambiguous operation remains discoverable and eligible for bounded reconciliation; it must not turn into an inert \`unknown\` Record that permanently stops autosave and renewal.
+Implement the state machine in Section 26.13 in the production save, renewal, scheduler and PlayerData integration paths. An ambiguous operation remains discoverable and eligible for bounded reconciliation; it must not turn into an inert `unknown` Record that permanently stops autosave and renewal.
 
 The operation protocol must retain the original logical write ID, immutable snapshot, base/target revisions, dirty watermark and expected fencing data until the outcome is resolved. Reconcile a commit by matching the durable envelope. Retry only when the exact base revision and current ownership are verified. On a competing revision or owner, do not write the stale snapshot. An expired lease can be reacquired only through the separately gated profile-key CAS protocol in Section 26.13; otherwise fence and stop the old session.
 
@@ -1372,7 +1372,7 @@ The operation protocol must retain the original logical write ID, immutable snap
 
 #### E. Durability-aware mutation admission and PlayerData integration — P0
 
-Expose durability health and a mutation-admission decision to game code. Integrate it with \`PlayerDataCore\` so the Value.Changed path cannot silently discard changes after the Record leaves \`active\`. A caller can explicitly choose bounded in-process buffering during reconciliation or freeze/reject gameplay rewards when the risk budget is exceeded. Reports and runtime state must distinguish displayed/in-memory progress from confirmed durable progress.
+Expose durability health and a mutation-admission decision to game code. Integrate it with `PlayerDataCore` so the Value.Changed path cannot silently discard changes after the Record leaves `active`. A caller can explicitly choose bounded in-process buffering during reconciliation or freeze/reject gameplay rewards when the risk budget is exceeded. Reports and runtime state must distinguish displayed/in-memory progress from confirmed durable progress.
 
 The buffer must have hard item, byte and age limits. It is not durable across crashes and must never authorize a stale writer. On confirmed recovery, reconcile the buffered mutations under the current fencing token; if that cannot be proven safe, preserve diagnostic evidence, block further mutation and require an explicit recovery decision. Player-facing controls should be generic callbacks/status signals so the persistence library does not own game-specific reward, rollback, or kick policy.
 
