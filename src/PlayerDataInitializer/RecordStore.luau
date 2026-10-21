@@ -9591,6 +9591,10 @@ function RecordStore.get_scheduler_clock_ms(): number
 	return now_local() * 1000
 end
 
+function RecordStore.is_scheduler_enabled(): boolean
+	return scheduler_enabled
+end
+
 function RecordStore.get_scheduler_snapshot(): { [string]: any }
 	local governor = scheduler_governor:Stats()
 	local cohort_included = scheduler_activation.cohort_bucket < scheduler_activation.percent
