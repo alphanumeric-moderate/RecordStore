@@ -6819,14 +6819,18 @@ function RecordStore.schedule_work(
 			schedule_options.lane == "lease_renewal"
 			or schedule_options.operation_class == "lease_renewal"
 			or schedule_options.operation_class == "profile_release"
+			or schedule_options.operation_class == "critical"
+			or schedule_options.operation_class == "profile_save"
 			or schedule_options.work_class == "lease_renewal"
 			or schedule_options.work_class == "profile_release"
+			or schedule_options.work_class == "critical"
+			or schedule_options.work_class == "profile_save"
 			or schedule_options.service_class == "critical"
 		)
 	then
 		return {
 			code = "invalid",
-			message = "critical service-class admission, lease_renewal and profile_release are reserved for internal session work",
+			message = "critical admission, critical/profile_save work classes, lease_renewal and profile_release are reserved for internal session work",
 		}
 	end
 	return scheduler_dispatcher:Schedule(owner_id, work_id, function(...: any)
