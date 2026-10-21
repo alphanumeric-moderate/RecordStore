@@ -1793,6 +1793,10 @@ local function new_dispatcher(governor, options)
 		end
 		return false
 	end
+	function dispatcher:HasKnownWork(id)
+		if not valid_text(id, 128) then return false end
+		return governor.known[id] ~= nil or governor.completed[id] ~= nil or governor.failed[id] ~= nil
+	end
 	function dispatcher:CancelQueuedWhere(predicate, message)
 		if self.closed or type(predicate) ~= "function" then return 0 end
 		local pending = {}
