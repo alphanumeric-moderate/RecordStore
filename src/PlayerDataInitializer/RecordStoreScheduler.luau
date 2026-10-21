@@ -1001,12 +1001,11 @@ local function new_governor(options)
 		end
 		return nil, false
 	end
-	function governor:Enqueue(item)
+	function governor:Enqueue(item, protect_critical_queue)
 		if type(item) ~= "table" or not valid_text(item.id, 128) or not valid_text(item.owner_id, 512) then return { code = "invalid" } end
 		if self.known[item.id] or self.completed[item.id] == true or self.failed[item.id] ~= nil then
 			return { code = "duplicate", message = "work ID is active or has retained terminal history" }
 		end
-		if #self.queue >= self.policy.queue_capacity then self.stats.rejected += 1; return { code = "capacity", message = "local queue full; no accepted durable work is evicted" } end
 		local lane = item.lane or "normal"
 		if lane ~= "high" and lane ~= "normal" and lane ~= "background" and lane ~= "lease_renewal" then return { code = "invalid", message = "unsupported lane" } end
 		local copy_ok, value = pcall(copy, item)
@@ -1066,6 +1065,23 @@ local function new_governor(options)
 			or math.floor(value.cost) ~= value.cost)
 		then return { code = "invalid", message = "cost must be an integer within max_item_cost" } end
 		value.lane, value.original_lane = lane, lane
+		local queue_capacity = self.policy.queue_capacity
+		if #self.queue >= queue_capacity then
+			self.stats.rejected += 1
+			return { code = "capacity", message = "local queue full; no accepted work is evicted" }
+		end
+		if protect_critical_queue == true and not uses_critical_reserve(value) then
+			local protected_slots = if queue_capacity <= 1 then 0
+				else math.min(64, math.max(1, math.floor(queue_capacity / 16)), queue_capacity - 1)
+			local noncritical_capacity = queue_capacity - protected_slots
+			if #self.queue >= noncritical_capacity then
+				self.stats.rejected += 1
+				return {
+					code = "capacity",
+					message = "local queue full; capacity is reserved for internal critical work",
+				}
+			end
+		end
 		value.work_class = value.work_class or value.operation_class or "default"
 		value.enqueued_at_ms = now_ms()
 		local requested_due = value.due_at_ms or value.available_at_ms or value.enqueued_at_ms
@@ -2180,7 +2196,7 @@ local function new_dispatcher(governor, options)
 			batch_size = if schedule_options.batchable == true then batch_size else nil,
 			batch_backlog = if schedule_options.batchable == true then batch_backlog else nil,
 		}
-		local accepted = governor:Enqueue(item)
+		local accepted = governor:Enqueue(item, true)
 		if type(accepted) ~= "table" or accepted.code ~= "accepted" then
 			self.metrics.rejected += 1
 			return { code = if type(accepted) == "table" then accepted.code else "unknown",
