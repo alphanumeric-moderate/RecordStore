@@ -1758,7 +1758,6 @@ local function new_dispatcher(governor, options)
 		end
 		if not retry_scheduled then
 			if status == "success" and callback_ok then dispatcher.metrics.completed += 1 end
-			dispatcher.callbacks[item.id] = nil
 			local completion_result = if type(callback_result) == "table"
 				then table.clone(callback_result)
 				else { code = if callback_result == true or callback_result == nil then "success" else tostring(callback_result) }
@@ -1769,11 +1768,18 @@ local function new_dispatcher(governor, options)
 				completion_result.scheduler_deadline_ms = item.deadline_ms
 				completion_result.scheduler_selected_at_ms = item.selected_at_ms
 			end
-			invoke_completion(entry, completion_result)
 			local outcome = if type(callback_result) == "table" then callback_result.code
 				elseif callback_ok and (callback_result == true or callback_result == nil) then "success"
 				elseif not callback_ok then "unknown" else tostring(callback_result)
+			-- Publish terminal dependency state before notifying consumers so a completion
+			-- callback can safely enqueue a dependent follow-up without a missing-edge race.
 			governor:MarkCompleted(item.id, outcome)
+			local completion_ok, completion_error = pcall(invoke_completion, entry, completion_result)
+			dispatcher.callbacks[item.id] = nil
+			if not completion_ok then
+				dispatcher.metrics.callback_errors += 1
+				dispatcher.metrics.last_error = string.sub(tostring(completion_error), 1, 200)
+			end
 		end
 		if not dispatcher.closed then
 			kick_dispatcher()
