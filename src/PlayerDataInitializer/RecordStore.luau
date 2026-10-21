@@ -492,6 +492,7 @@ export type Record = {
 	Reconcile: (self: Record, template: JsonValue) -> (ResultCode, string?),
 	Save: (self: Record, reason: string?) -> (ResultCode, string?),
 	MessageAsync: (self: Record, message_type: string, data: JsonValue?) -> (ResultCode, string?),
+	GetIdentity: (self: Record) -> { [string]: unknown },
 	GetMailboxOwner: (self: Record) -> { [string]: unknown },
 	CreateMailboxStoreAdapter: (self: Record) -> (unknown?, ResultCode, string?),
 	BindMailboxV2Async: (self: Record, mailbox: unknown) -> (ResultCode, string?),
@@ -5052,6 +5053,17 @@ local function mailbox_store_adapter(self: Record): (any?, ResultCode, string?)
 	return adapter, "success", nil
 end
 
+local function get_identity(self: Record): { [string]: unknown }
+	local state = private[self]
+	if state == nil then return {} end
+	return {
+		store_name = state.name,
+		scope = state.scope,
+		profile_key = state.key,
+		user_ids = clone_user_ids(state.user_ids),
+	}
+end
+
 local function get_mailbox_owner(self: Record): { [string]: unknown }
 	local state = private[self]
 	if state == nil then return {} end
@@ -6983,6 +6995,7 @@ local function make_record(name: string, scope: string, key: string, options: Op
 		IsDirty = is_dirty,
 		GetLastError = get_last_error_info,
 		GetHandoff = get_handoff,
+		GetIdentity = get_identity,
 		SubscribeChanges = subscribe_changes,
 		GetUserIds = get_user_ids,
 		SetUserIds = set_user_ids,
