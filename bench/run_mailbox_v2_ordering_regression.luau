@@ -276,6 +276,41 @@ local function test_corrupt_ordering_index_fails_closed()
 		"corrupt ordering counter mutated the canonical message")
 end
 
+local function test_corrupt_ready_message_metadata_fails_closed()
+	local mailbox, store = new_mailbox({ strict_ordering_enabled = true })
+	local malformed_priority = enqueue(mailbox, "malformed-priority", "malformed-priority-id", nil, "normal")
+	store.values[malformed_priority.message_id].priority = "critical"
+	local priority_handler_invoked = false
+	local priority_result = process_one(mailbox, function()
+		priority_handler_invoked = true
+		return true
+	end)
+	assert(priority_result.code == "corrupt" and not priority_handler_invoked,
+		"corrupt priority metadata reached a message handler")
+
+	local second_mailbox, second_store = new_mailbox({ strict_ordering_enabled = true })
+	local malformed_time = enqueue(second_mailbox, "malformed-time", "malformed-time-id", nil, "normal")
+	second_store.values[malformed_time.message_id].created_at = 0 / 0
+	local time_handler_invoked = false
+	local time_result = process_one(second_mailbox, function()
+		time_handler_invoked = true
+		return true
+	end)
+	assert(time_result.code == "corrupt" and not time_handler_invoked,
+		"non-finite creation time reached the priority comparator or handler")
+
+	local third_mailbox, third_store = new_mailbox({ strict_ordering_enabled = true })
+	local malformed_counter = enqueue(third_mailbox, "malformed-counter", "malformed-counter-id", nil, "normal")
+	third_store.values[malformed_counter.message_id].attempts = -1
+	local counter_handler_invoked = false
+	local counter_result = process_one(third_mailbox, function()
+		counter_handler_invoked = true
+		return true
+	end)
+	assert(counter_result.code == "corrupt" and not counter_handler_invoked,
+		"negative retry accounting reached a message handler")
+end
+
 local function test_high_priority_burst_does_not_starve_background_messages()
 	local mailbox = new_mailbox({ strict_ordering_enabled = true })
 	for index = 1, 7 do
@@ -495,6 +530,7 @@ test_claim_update_fails_closed_if_order_sequence_changes_after_arbitration()
 test_dead_letter_replay_gets_a_new_ordering_sequence_and_recovers_from_stale_reads()
 test_order_slot_mismatch_fails_closed()
 test_corrupt_ordering_index_fails_closed()
+test_corrupt_ready_message_metadata_fails_closed()
 test_high_priority_burst_does_not_starve_background_messages()
 test_clock_skew_cannot_break_ordering_under_adversarial_sort_keys()
 test_priority_burst_policy_is_bounded_and_configurable()
