@@ -4991,6 +4991,12 @@ local function mailbox_store_adapter(self: Record): (any?, ResultCode, string?)
 				UserIds = clone_user_ids(entry.UserIds),
 				Metadata = clone_metadata(entry.Metadata),
 				RawMetadata = clone_metadata(entry.Metadata),
+				GetUserIds = function()
+					return clone_user_ids(entry.UserIds)
+				end,
+				GetMetadata = function()
+					return clone_metadata(entry.Metadata)
+				end,
 			} else nil
 			local replay_count = mock_update_replay_retries
 			local replay_advance = mock_update_replay_advance_seconds
