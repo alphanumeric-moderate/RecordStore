@@ -1909,7 +1909,7 @@ do
 		revision = persistence_policy.revision + 1,
 		max_scheduled_in_flight = 3,
 		scheduler_critical_reserve = 1,
-		max_per_owner_in_flight = 4,
+		max_per_owner_in_flight = 2,
 	}), "critical persistence reserve policy was rejected")
 	local persistence_dispatcher = Scheduler.new_dispatcher(persistence_reserve, {
 		now_ms = function() return now_ms end,
