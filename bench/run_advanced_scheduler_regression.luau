@@ -822,6 +822,31 @@ assert(shadow_inheritance.known["shadow-delayed-prerequisite"].inherited_lane ==
 assert(shadow_inheritance:Stats().queue_items == 3,
 	"shadow priority inheritance altered the live queue")
 
+-- Deterministic trace replay must preserve terminal outcomes and expose selection statuses.
+do
+	local replay_governor = new_scheduler()
+	local replay_result = replay_governor:Replay({
+		{ kind = "enqueue", item = { id = "replay-failed-prerequisite", owner_id = "replay-owner" } },
+		{ kind = "enqueue", item = {
+			id = "replay-dependent",
+			owner_id = "replay-owner",
+			dependencies = { "replay-failed-prerequisite" },
+		} },
+		{ kind = "take" },
+		{ kind = "complete", id = "replay-failed-prerequisite", outcome = "unknown" },
+		{ kind = "take" },
+	})
+	assert(replay_result[1] == "replay-failed-prerequisite" and replay_result[2] == "replay-dependent",
+		"trace replay changed the selected work IDs")
+	assert(type(replay_result.statuses) == "table",
+		"trace replay did not expose selection statuses")
+	assert(replay_result.statuses[1] == "success" and replay_result.statuses[2] == "dependency_failed",
+		"trace replay did not preserve a failed prerequisite outcome")
+	assert(replay_governor.failed["replay-failed-prerequisite"] == "unknown"
+		and replay_governor.completed["replay-failed-prerequisite"] == nil,
+		"trace replay treated an unknown completion as successful")
+end
+
 -- Retry rescheduling preserves the logical ID and cannot run before its due time.
 local retry_queue = new_scheduler()
 enqueue(retry_queue, { id = "stable-retry-id", owner_id = "retry-owner", lane = "normal", work_class = "outbox" })
