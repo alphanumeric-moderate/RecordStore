@@ -121,7 +121,8 @@ local function new_governor(options)
 		failed = {}, failed_order = {}, retry_cooldown_until = {}, retry_tokens_by_class = {},
 		due_sequence = 0,
 		retry_tokens = 32, last_token_time = now_ms(),
-		last_budget = nil, last_budget_by_kind = {}, latency_ewma = {}, latency_samples_by_operation = {},
+		last_budget = nil, last_budget_by_kind = {}, last_budget_sampled_at_by_kind = {},
+		latency_ewma = {}, latency_samples_by_operation = {},
 		operation_kind_keys = {}, consecutive_errors = {}, circuits = {},
 		stats = { admitted = 0, rejected = 0, completed = 0, released = 0, throttled = 0, errors = 0,
 			scheduled_selected = 0, scheduled_expired = 0, scheduled_overdue = 0, shadow_samples = 0 },
@@ -245,6 +246,7 @@ local function new_governor(options)
 		if finite(budget) then
 			self.last_budget = budget
 			self.last_budget_by_kind[metric_kind] = budget
+			self.last_budget_sampled_at_by_kind[metric_kind] = now_ms()
 		end
 		if ok then
 			self.consecutive_errors[metric_kind] = 0
@@ -320,7 +322,10 @@ local function new_governor(options)
 			probe_needed = true
 		end
 		local observed_budget = self.last_budget_by_kind[request_kind]
-		if finite(observed_budget) and observed_budget < self.policy.minimum_budget and not critical then
+		local observed_budget_at = self.last_budget_sampled_at_by_kind[request_kind]
+		local observed_budget_age = if finite(observed_budget_at) then now_ms() - observed_budget_at else math.huge
+		local observed_budget_fresh = observed_budget_age >= 0 and observed_budget_age <= 1000
+		if finite(observed_budget) and observed_budget < self.policy.minimum_budget and observed_budget_fresh and not critical then
 			return { code = "backpressure", transient = true, budget_limited = true, retry_after_ms = 250,
 				message = "operation budget is below configured minimum" }, false, true
 		end
@@ -1300,7 +1305,9 @@ local function new_governor(options)
 			wake_heap = copy(self.wake_heap), wake_sequence = self.wake_sequence,
 			read_units_in_flight = self.read_units_in_flight, write_units_in_flight = self.write_units_in_flight,
 			estimated_bytes_in_flight = self.estimated_bytes_in_flight, handler_slots_in_flight = self.handler_slots_in_flight,
-			request_budgets = copy(self.request_budgets), last_budget_by_kind = copy(self.last_budget_by_kind),
+			request_budgets = copy(self.request_budgets),
+			last_budget_by_kind = copy(self.last_budget_by_kind),
+			last_budget_sampled_at_by_kind = copy(self.last_budget_sampled_at_by_kind),
 			latency_ewma = copy(self.latency_ewma), latency_samples_by_operation = copy(self.latency_samples_by_operation),
 			scheduler_metrics = copy(self.scheduler_metrics),
 			circuits = copy(self.circuits), stats = copy(self.stats),
@@ -1566,7 +1573,9 @@ local function new_governor(options)
 			lanes = lanes, classes = copy(self.by_class), stats = copy(self.stats),
 			latency_ewma = copy(self.latency_ewma), latency_percentiles_by_operation = latency_percentiles_by_operation,
 			circuits = copy(self.circuits),
-			last_budget_by_kind = copy(self.last_budget_by_kind), retry_tokens = self.retry_tokens,
+			last_budget_by_kind = copy(self.last_budget_by_kind),
+			last_budget_sampled_at_by_kind = copy(self.last_budget_sampled_at_by_kind),
+			retry_tokens = self.retry_tokens,
 			scheduler = {
 				by_lane = copy(self.scheduler_metrics.by_lane), by_lane_class = wait_by_lane_class,
 				oldest_eligible_age_ms = oldest_eligible_age_ms,
