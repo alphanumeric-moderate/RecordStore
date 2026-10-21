@@ -81,6 +81,12 @@ local function uses_critical_reserve(item)
 	return item.lane == "lease_renewal" or item.service_class == "critical"
 end
 
+local function noncritical_queue_capacity(queue_capacity)
+	if queue_capacity <= 1 then return queue_capacity end
+	local protected_slots = math.min(64, math.max(1, math.floor(queue_capacity / 16)), queue_capacity - 1)
+	return queue_capacity - protected_slots
+end
+
 local function new_governor(options)
 	options = options or {}
 	local function now_ms()
@@ -1071,9 +1077,7 @@ local function new_governor(options)
 			return { code = "capacity", message = "local queue full; no accepted work is evicted" }
 		end
 		if protect_critical_queue == true and not uses_critical_reserve(value) then
-			local protected_slots = if queue_capacity <= 1 then 0
-				else math.min(64, math.max(1, math.floor(queue_capacity / 16)), queue_capacity - 1)
-			local noncritical_capacity = queue_capacity - protected_slots
+			local noncritical_capacity = noncritical_queue_capacity(queue_capacity)
 			if #self.queue >= noncritical_capacity then
 				self.stats.rejected += 1
 				return {
@@ -1267,11 +1271,16 @@ local function new_governor(options)
 			end
 		end
 	end
-	function governor:Reschedule(id, due_at_ms)
+	function governor:Reschedule(id, due_at_ms, protect_critical_queue)
 		if not valid_text(id, 128) or not finite(due_at_ms) then return false, "invalid retry schedule" end
 		local item = self.known[id]
 		if item == nil or item.dispatch_state ~= "in_flight" then return false, "scheduled item is not in flight" end
 		if #self.queue >= self.policy.queue_capacity then return false, "local queue full; retry was not accepted" end
+		if protect_critical_queue == true and not uses_critical_reserve(item)
+			and #self.queue >= noncritical_queue_capacity(self.policy.queue_capacity)
+		then
+			return false, "local queue full; capacity is reserved for internal critical work"
+		end
 		local now = now_ms()
 		local cooldown_until = self.retry_cooldown_until[item.owner_id] or 0
 		local next_due = math.max(due_at_ms, cooldown_until, now)
@@ -1820,7 +1829,7 @@ local function new_dispatcher(governor, options)
 			delay_ms = math.clamp(math.max(token_wait_ms, retry_after_ms), 10, 60000)
 		end
 		local due_at_ms = now + delay_ms
-		local queued, message = governor:Reschedule(item.id, due_at_ms)
+		local queued, message = governor:Reschedule(item.id, due_at_ms, true)
 		if not queued then
 			return false, { code = "retry_rejected", message = tostring(message or "retry admission failed"), last_result = copy(result) }
 		end
@@ -1960,7 +1969,7 @@ local function new_dispatcher(governor, options)
 				dispatcher.metrics.retry_deferred += 1
 				local token_wait_ms = if finite(wait_ms) then math.clamp(math.floor(wait_ms), 10, 60000) else 60000
 				local retry_due_at = now_ms() + token_wait_ms
-				local requeued, retry_error = governor:Reschedule(item.id, retry_due_at)
+				local requeued, retry_error = governor:Reschedule(item.id, retry_due_at, true)
 				if requeued then
 					schedule_wake_at(retry_due_at)
 				else
@@ -1989,7 +1998,7 @@ local function new_dispatcher(governor, options)
 				local delay_ms = if finite(admission.retry_after_ms)
 					then math.clamp(math.floor(admission.retry_after_ms), 10, 60000) else 25
 				local requeued, retry_error, retry_due_at = governor:Reschedule(
-					item.id, math.max(now_ms() + delay_ms, item.available_at_ms or -math.huge)
+					item.id, math.max(now_ms() + delay_ms, item.available_at_ms or -math.huge), true
 				)
 				if requeued then
 					item.is_retry = false
