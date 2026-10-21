@@ -970,6 +970,52 @@ local retry_snapshot = retry_queue:Stats()
 assert(retry_snapshot.scheduler.active_owner_count == 0 and retry_snapshot.scheduler.active_by_owner == nil,
 	"completed owner state leaked or raw owner identifiers were exposed")
 
+-- Completing unrelated work must not erase the cooldown for queued retries of the same owner.
+do
+	local owner_retry_cooldown = new_scheduler()
+	local owner_retry_policy = owner_retry_cooldown:Stats().policy
+	assert(owner_retry_cooldown:SetPolicy({
+		revision = owner_retry_policy.revision + 1,
+		max_per_owner_in_flight = 4,
+	}), "per-owner retry cooldown policy was rejected")
+	local owner_id = "retry-cooldown-owner"
+	for index = 1, 3 do
+		enqueue(owner_retry_cooldown, {
+			id = "retry-cooldown-active-" .. index,
+			owner_id = owner_id,
+			lane = "normal",
+			work_class = "cooldown-test",
+		})
+	end
+	local first_active, first_status = owner_retry_cooldown:TakeNext()
+	local second_active, second_status = owner_retry_cooldown:TakeNext()
+	local completed_active, completed_status = owner_retry_cooldown:TakeNext()
+	assert(first_status == "success" and second_status == "success" and completed_status == "success",
+		"per-owner cooldown fixture could not activate its work")
+	local earlier_retry_due = now_ms + 100
+	local latest_retry_due = now_ms + 200
+	local first_rescheduled = owner_retry_cooldown:Reschedule(first_active.id, earlier_retry_due)
+	local second_rescheduled = owner_retry_cooldown:Reschedule(second_active.id, latest_retry_due)
+	assert(first_rescheduled and second_rescheduled, "per-owner retry fixture failed to queue retries")
+	assert(owner_retry_cooldown:MarkCompleted(completed_active.id, "committed"),
+		"unrelated same-owner work could not complete")
+	assert(owner_retry_cooldown.retry_cooldown_until[owner_id] == latest_retry_due,
+		"completing unrelated work erased a queued retry cooldown")
+	enqueue(owner_retry_cooldown, {
+		id = "retry-cooldown-after-completion",
+		owner_id = owner_id,
+		lane = "normal",
+		work_class = "cooldown-test",
+	})
+	local after_completion, after_completion_status = owner_retry_cooldown:TakeNext()
+	assert(after_completion_status == "success" and after_completion.id == "retry-cooldown-after-completion",
+		"fresh same-owner work was not selectable during the retry cooldown")
+	local third_rescheduled, _, third_retry_due =
+		owner_retry_cooldown:Reschedule(after_completion.id, now_ms + 10)
+	assert(third_rescheduled and third_retry_due == latest_retry_due,
+		"new same-owner retries bypassed an already queued cooldown")
+end
+
 -- Explicit throttled retries respect retry_after_ms, use the class-specific backoff,
 -- and report attempt classes without retrying an uncertain outcome.
 local typed_retry_governor = new_scheduler()
