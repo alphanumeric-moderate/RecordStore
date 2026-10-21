@@ -1380,31 +1380,6 @@ The buffer must have hard item, byte and age limits. It is not durable across cr
 
 #### F. Session contention and takeover diagnostics — P1
 
-Provide a bounded \`RecordStore.get_session_status_async(...)\` or session-wait result that distinguishes: no known competing session, competing session observed, wait/retry scheduled, cancellation requested, ownership acquired, and ownership fenced/lost. Include observed time and known source data only; do not reveal secrets or claim a globally current owner from a stale read.
-
-For a waiting caller, report elapsed contention time and the next retry window/rationale when known. Provide cancellation and timeout without abandoning an ambiguous ownership write. Any takeover remains governed by the existing CAS/session-fencing rules, never by the diagnostic endpoint. Diagnostics cannot grant permission to force-steal a session.
-
-Pair with jittered load retries, a fair bounded waiter scheduler, read-only coalescing of compatible status reads and per-key retry suppression. Measure acquisition latency and DataStore request amplification under many concurrent servers. Do not add periodic high-rate polling for every waiting player; use bounded intervals and a maximum retry cadence.
-
-#### G. Resumable retention compactor and offline maintenance runner — P1
-
-Create a shared maintenance runner for safe retention, index cleanup, migration backfills, erasure, projection rebuild and other bounded jobs. Each task declares a version, stable operation ID, key-family scope, page cursor, expected revision/generation, request budget, concurrency class, retention/deletion rule and resumable checkpoint.
-
-The runner must:
-- use bounded pages/item/byte/time limits and persist progress only at a well-defined safe checkpoint;
-- revalidate canonical state, index references, live workflow/outbox dependencies and lease/fencing tokens before deletion;
-- treat \`RemoveAsync\` as unconditional, not as a compare-and-set: first persist a tombstone/retired generation and ensure every writer rejects that generation, then physically remove only after references, leases and dependencies are retired;
-- reconcile unknown delete/update results with an authoritative follow-up before advancing its cursor; never trust cached absence after an ambiguous delete;
-- stop or yield when critical profile save/release/reconciliation work needs the scheduler;
-- support dry-run counts, pause/resume, cancellation, per-family progress and an explicit incomplete result;
-- never make a whole-keyspace scan part of a request path;
-- never compact the only evidence that protects idempotency or future recovery;
-- preserve a recovery source until a migration/compaction's result has been verified.
-
-Pair with cursor-based incremental scans, sharded maintenance lanes, bounded cleanup batches, backpressure and a budget-aware scheduler. Track bytes/keys processed, request count per item, oldest maintenance age and impact on critical-save latency. Faster cleanup is unacceptable if it can delete an item still referenced by an active index or pending transfer.
-
-#### F. Session contention and takeover diagnostics — P1
-
 Provide a bounded `RecordStore.get_session_status_async(...)` or session-wait result that distinguishes: no known competing session, competing session observed, wait/retry scheduled, cancellation requested, ownership acquired, and ownership fenced/lost. Include observed time and known source data only; do not reveal secrets or claim a globally current owner from a stale read.
 
 For a waiting caller, report elapsed contention time and the next retry window/rationale when known. Provide cancellation and timeout without abandoning an ambiguous ownership write. Any takeover remains governed by the existing CAS/session-fencing rules, never by the diagnostic endpoint. Diagnostics cannot grant permission to force-steal a session.
