@@ -388,3 +388,4 @@ test_clock_skew_cannot_break_ordering_under_adversarial_sort_keys()
 test_priority_burst_policy_is_bounded_and_configurable()
 
 print("[MailboxV2] ordering, replay recovery, stale-read resistance, deterministic priority fairness, and input validation regressions passed.")
+Shim.close()
