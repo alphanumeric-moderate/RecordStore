@@ -119,7 +119,7 @@ local function new_governor(options)
 		read_units_in_flight = 0, write_units_in_flight = 0,
 		estimated_bytes_in_flight = 0, handler_slots_in_flight = 0,
 		request_budgets = { read = nil, write = nil, sampled_at_ms = nil },
-		completed = {}, completed_order = {}, known = {}, active_owner = {}, active_renewals_by_owner = {},
+		completed = {}, completed_order = {}, known = {}, active_owner = {}, active_renewals_by_owner = {}, active_critical_by_owner = {},
 		dependency_ref_counts = {}, pending_completed_prune = {}, pending_failed_prune = {},
 		drr_deficit = {}, drr_cursor_key = nil, high_streak = 0, urgent_streak = 0,
 		failed = {}, failed_order = {}, retry_cooldown_until = {}, retry_tokens_by_class = {},
@@ -858,9 +858,13 @@ local function new_governor(options)
 				local owner_active = self.active_owner[item.owner_id] or 0
 				local effective_lane = scheduled_lane(item, now)
 				local renewal_count = self.active_renewals_by_owner[item.owner_id] or 0
-				-- At most one renewal may be active for a single claim/owner at a time.
+				local critical_owner_count = self.active_critical_by_owner[item.owner_id] or 0
+				-- Keep at most one protected persistence callback active for an owner.
 				local owner_can_renew = effective_lane ~= "lease_renewal" or renewal_count < 1
-				if owner_can_renew and (effective_lane == "lease_renewal" or owner_active < self.policy.max_per_owner_in_flight) then
+				local owner_can_use_reserve = not uses_critical_reserve(item) or critical_owner_count < 1
+				if owner_can_renew and owner_can_use_reserve
+					and (uses_critical_reserve(item) or owner_active < self.policy.max_per_owner_in_flight)
+				then
 					local batch_count = selected_batch_size(self, item)
 					local admission = admission_decision(self,
 						item.work_class, item.operation_class, effective_cost(item, batch_count), item.mutating ~= false,
@@ -1202,6 +1206,9 @@ local function new_governor(options)
 			self.urgent_streak = 0
 		end
 		self.active_owner[item.owner_id] = (self.active_owner[item.owner_id] or 0) + 1
+		if uses_critical_reserve(item) then
+			self.active_critical_by_owner[item.owner_id] = (self.active_critical_by_owner[item.owner_id] or 0) + 1
+		end
 		if item.lane == "lease_renewal" then self.active_renewals_by_owner[item.owner_id] = (self.active_renewals_by_owner[item.owner_id] or 0) + 1 end
 		item.selected_at_ms = now
 		item.dispatch_state = "in_flight"
@@ -1263,6 +1270,11 @@ local function new_governor(options)
 			local renewal_count = math.max(0, (self.active_renewals_by_owner[item.owner_id] or 1) - 1)
 			if renewal_count == 0 then self.active_renewals_by_owner[item.owner_id] = nil
 			else self.active_renewals_by_owner[item.owner_id] = renewal_count end
+		end
+		if uses_critical_reserve(item) then
+			local critical_count = math.max(0, (self.active_critical_by_owner[item.owner_id] or 1) - 1)
+			if critical_count == 0 then self.active_critical_by_owner[item.owner_id] = nil
+			else self.active_critical_by_owner[item.owner_id] = critical_count end
 		end
 		table.insert(self.queue, item)
 		heap_push(self.queued_due_heap, { id = item.id, due_at_ms = item.due_at_ms, item = item })
@@ -1363,6 +1375,11 @@ local function new_governor(options)
 				local renewal_count = math.max(0, (self.active_renewals_by_owner[item.owner_id] or 1) - 1)
 				if renewal_count == 0 then self.active_renewals_by_owner[item.owner_id] = nil
 				else self.active_renewals_by_owner[item.owner_id] = renewal_count end
+			end
+			if uses_critical_reserve(item) then
+				local critical_count = math.max(0, (self.active_critical_by_owner[item.owner_id] or 1) - 1)
+				if critical_count == 0 then self.active_critical_by_owner[item.owner_id] = nil
+				else self.active_critical_by_owner[item.owner_id] = critical_count end
 			end
 		end
 		release_dependencies(self, item)
@@ -2026,10 +2043,15 @@ local function new_dispatcher(governor, options)
 			local maximum = policy.max_scheduled_in_flight
 			local normal_limit = math.max(0, maximum - policy.scheduler_critical_reserve)
 			while dispatcher.in_flight < maximum do
-				local item, status = governor:TakeNext("critical")
+				local critical_in_flight = dispatcher.in_flight - dispatcher.normal_in_flight
+				local item, status
+				if critical_in_flight < policy.scheduler_critical_reserve then
+					item, status = governor:TakeNext("critical")
+				end
 				if item == nil and dispatcher.normal_in_flight < normal_limit then
 					item, status = governor:TakeNext("regular")
 				end
+				if item == nil then item, status = governor:TakeNext("critical") end
 				if item == nil then break end
 				dispatch_one(item, status)
 			end
