@@ -1928,16 +1928,52 @@ function MailboxV2.GetQueueAsync(self: Mailbox): ({ Dict }, Result)
 			and locator.slot == record_locator.slot and locator.generation == record_locator.generation
 			and not seen[route]
 		then
+			local attempts = record.attempts
+			local total_attempts = record.total_attempts
+			local replay_count = record.replay_count
+			local created_at = record.created_at
+			local updated_at = record.updated_at
+			local available_at = record.available_at
+			local expires_at = record.expires_at
+			local priority_valid = record.priority == "high" or record.priority == "normal"
+				or record.priority == "background"
+			local counters_valid = is_finite(attempts) and (attempts :: number) >= 0
+				and math.floor(attempts :: number) == attempts
+				and is_finite(total_attempts) and (total_attempts :: number) >= (attempts :: number)
+				and math.floor(total_attempts :: number) == total_attempts
+				and is_finite(replay_count) and (replay_count :: number) >= 0
+				and math.floor(replay_count :: number) == replay_count
+			local times_valid = is_finite(created_at) and is_finite(updated_at) and is_finite(available_at)
+				and (expires_at == nil or (is_finite(expires_at) and (expires_at :: number) > (available_at :: number)))
+			local ordering_valid = record.ordering_key == nil and record.ordering_sequence == nil
+			if record.ordering_key ~= nil then
+				ordering_valid = type(record.ordering_key) == "string" and record.ordering_key ~= ""
+					and #record.ordering_key <= MAX_ORDERING_KEY_LENGTH
+					and is_finite(record.ordering_sequence) and (record.ordering_sequence :: number) >= 1
+					and math.floor(record.ordering_sequence :: number) == record.ordering_sequence
+					and (record.ordering_sequence :: number) <= 9_007_199_254_740_991
+			end
+			if type(record.route) ~= "string" or record.route ~= route
+				or type(record.message_type) ~= "string" or record.message_type == "" or #record.message_type > 100
+				or not priority_valid or not counters_valid or not times_valid or not ordering_valid
+				or not is_finite(record.placement_generation) or (record.placement_generation :: number) < 1
+				or math.floor(record.placement_generation :: number) ~= record.placement_generation
+			then
+				return {}, ok("corrupt", route, nil, "ready mailbox message contains malformed priority, counter, time or ordering metadata")
+			end
 			seen[route] = true
 			table.insert(result, self:_record_snapshot(record))
 		end
 	end
+	local rank = { high = 1, normal = 2, background = 3 }
 	table.sort(result, function(left, right)
-		if left.Priority ~= right.Priority then
-			local rank = { high = 1, normal = 2, background = 3 }
-			return (rank[tostring(left.Priority)] or 2) < (rank[tostring(right.Priority)] or 2)
+		local left_rank = rank[tostring(left.Priority)] :: number
+		local right_rank = rank[tostring(right.Priority)] :: number
+		if left_rank ~= right_rank then return left_rank < right_rank end
+		if left.CreatedAt ~= right.CreatedAt then
+			return (left.CreatedAt :: number) < (right.CreatedAt :: number)
 		end
-		return (left.CreatedAt :: number) < (right.CreatedAt :: number)
+		return tostring(left.Id) < tostring(right.Id)
 	end)
 	return result, ok("success", nil, nil, nil)
 end
