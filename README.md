@@ -258,8 +258,11 @@ budget values and observed latencies must be finite and non-negative. Invalid tr
 The result's numeric array portion contains selected work IDs (using `"<empty>"` when nothing
 is selected), with a parallel `.statuses` array for each `take`. A `complete` record's optional
 `outcome` is preserved, so dependency failures and other terminal outcomes can be reproduced.
-A `budget` event injects a read/write budget snapshot; an `observe` event injects an operation
-latency/outcome observation, allowing replay to exercise admission and batching decisions.
+A `budget` event uses `{ kind = "budget", read = 16, write = 8 }` to inject a
+read/write budget snapshot. An `observe` event accepts `operation_kind`, boolean `succeeded`,
+non-negative `latency_ms`, and optional `error_class` and non-negative `budget`; it injects an
+operation latency/outcome observation so replay can exercise admission, circuit and batching
+decisions.
 
 The optional `policy_override` is merged onto the current policy for that isolated run, e.g.
 `{ algorithm = "deadline" }`. The replay assigns its own policy revision. Overrides cannot
