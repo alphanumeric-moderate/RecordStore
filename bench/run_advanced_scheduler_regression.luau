@@ -2070,6 +2070,74 @@ assert(dispatch_snapshot.accepted >= 3 and dispatch_snapshot.completed >= 3,
 local closed_code = core_record:Close()
 assert(closed_code == "closed", "scheduler regression fixture failed to close")
 
+-- A cancelled core autosave must become due immediately on legacy rollback.
+local rollback_policy_snapshot = RecordStore.get_scheduler_snapshot().policy
+local rollback_policy_code, rollback_policy_message = RecordStore.configure_scheduler_policy({
+	revision = rollback_policy_snapshot.revision + 1,
+	max_scheduled_in_flight = 2,
+	scheduler_critical_reserve = 1,
+})
+local release_rollback_blocker = false
+local rollback_blocker_started = false
+local rollback_blocker_job = RecordStore.schedule_work(
+	"rollback-owner",
+	"hold-normal-dispatch-slot",
+	function()
+		rollback_blocker_started = true
+		while not release_rollback_blocker do task.wait(0.01) end
+		return { code = "success" }
+	end,
+	{ lane = "normal", work_class = "integration-test" }
+)
+for _ = 1, 200 do
+	if rollback_blocker_started then break end
+	task.wait(0.005)
+end
+
+local rollback_record = RecordStore.Mock.new("SchedulerRollback", "global", "scheduler-player-rollback", {
+	schema_version = 1,
+	autosave_interval = 2,
+	lease_renewal = 60,
+})
+local rollback_open_code, rollback_open_message = rollback_record:Open({ coins = 0 })
+local rollback_update_code = rollback_record:Update(function(current)
+	local changed = table.clone(current)
+	changed.coins += 1
+	return changed
+end)
+local rollback_queued = false
+local rollback_queue_deadline = os.clock() + 6
+while not rollback_queued and os.clock() < rollback_queue_deadline do
+	rollback_queued = RecordStore.get_scheduler_snapshot().governor.queue_items > 0
+	if not rollback_queued then task.wait(0.01) end
+end
+local rollback_disabled = RecordStore.set_scheduler_enabled(false)
+release_rollback_blocker = true
+for _ = 1, 200 do
+	if RecordStore.get_scheduler_snapshot().dispatcher.in_flight == 0 then break end
+	task.wait(0.005)
+end
+local rollback_saved = false
+local rollback_save_deadline = os.clock() + 1.5
+while not rollback_saved and os.clock() < rollback_save_deadline do
+	local stats = rollback_record:Stats()
+	rollback_saved = stats.dirty == 0 and stats.busy == 0
+	if not rollback_saved then task.wait(0.01) end
+end
+local rollback_close_code = rollback_record:Close()
+local rollback_reenabled = RecordStore.set_scheduler_enabled(true)
+assert(rollback_policy_code == "success",
+	"scheduler rollback test policy was rejected: " .. tostring(rollback_policy_message))
+assert(rollback_blocker_job.code == "accepted" and rollback_blocker_started,
+	"rollback test did not occupy the normal dispatch slot")
+assert(rollback_open_code == "created" or rollback_open_code == "loaded", tostring(rollback_open_message))
+assert(rollback_update_code == "success", "rollback Record update failed")
+assert(rollback_queued, "core autosave did not queue behind the occupied scheduler slot")
+assert(rollback_disabled, "scheduler could not be disabled for rollback test")
+assert(rollback_saved, "cancelled autosave was not handed back to the legacy selector immediately")
+assert(rollback_close_code == "closed", "rollback Record did not close")
+assert(rollback_reenabled, "scheduler could not be re-enabled after rollback test")
+
 -- Disabling the scheduler immediately cancels queued future work and releases its callback.
 local cancelled_callback_ran = false
 local cancellation_result: any = nil
