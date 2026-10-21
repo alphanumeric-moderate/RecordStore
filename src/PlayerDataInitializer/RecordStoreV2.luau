@@ -4231,6 +4231,18 @@ function V2.new(record_store, mailbox_module, options)
 					max_retries = max_retries,
 					retry_delay_ms = retry_delay_ms,
 					retry_jitter_percent = retry_jitter_percent,
+					on_complete = function(result)
+						central_dispatch_in_flight = math.max(0, central_dispatch_in_flight - 1)
+						local result_code = if type(result) == "table" then result.code else nil
+						if result_code == "expired" then
+							dispatch_metrics.expired += 1
+						elseif result_code == "dependency_failed" then
+							dispatch_metrics.dependency_failed += 1
+						elseif result_code ~= "cancelled" then
+							dispatch_metrics.dispatched += 1
+						end
+						invoke_completion({ on_complete = completion }, result)
+					end,
 				}
 				local central_owner_id = owner_id
 				if type(owner) == "table" then
