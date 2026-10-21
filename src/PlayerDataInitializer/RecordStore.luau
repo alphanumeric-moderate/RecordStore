@@ -6971,6 +6971,9 @@ local function make_record(name: string, scope: string, key: string, options: Op
 		Reconcile = reconcile,
 		Save = save,
 		MessageAsync = message,
+		GetMailboxOwner = get_mailbox_owner,
+		CreateMailboxStoreAdapter = mailbox_store_adapter,
+		BindMailboxV2Async = bind_mailbox_v2_async,
 		EnqueueAsync = enqueue,
 		ProcessQueueAsync = process_queue,
 		GetQueueAsync = get_queue,
@@ -7078,6 +7081,7 @@ local function enqueue_state_work(
 	local slot = scheduled_state_slot(state)
 	if slot.pending[kind] == true then return { code = "already_pending" } end
 	local options = if schedule_options == nil then {} else table.clone(schedule_options)
+	local caller_on_complete = options.on_complete
 	options.lane = lane
 	options.work_class = work_class
 	options.operation_class = operation_class
@@ -7106,6 +7110,7 @@ local function enqueue_state_work(
 		elseif kind == "queue_poll" and type(result) == "table" and result.code == "retry_exhausted" and state.state == "active" then
 			state.next_queue_poll = math.min(state.next_queue_poll, now_local())
 		end
+		if type(caller_on_complete) == "function" then pcall(caller_on_complete, result) end
 	end
 	-- Set pending before enqueue: the dispatcher is allowed to start synchronously.
 	slot.pending[kind] = true
@@ -7130,6 +7135,72 @@ local function enqueue_state_work(
 	end
 	slot.jobs[kind] = result.id
 	return result
+end
+
+install_mailbox_renewal_scheduler = function(record: Record, state: InternalState, mailbox: any): (boolean, string?)
+	if type(mailbox) ~= "table" or type(mailbox.SetLeaseRenewalScheduler) ~= "function" then
+		return false, "V2 mailbox does not expose SetLeaseRenewalScheduler"
+	end
+	local set_ok, configured, configure_error = pcall(function()
+		return mailbox:SetLeaseRenewalScheduler(function(
+			message_id: string,
+			due_in_ms: number,
+			lease_remaining_ms: number,
+			callback: () -> unknown,
+			on_complete: (unknown) -> ()
+		)
+			if not scheduler_enabled then
+				return { code = "disabled", message = "advanced scheduler is disabled; V2 claim renewal cannot be guaranteed" }
+			end
+			if type(message_id) ~= "string" or message_id == "" or #message_id > 50
+				or not finite(due_in_ms) or due_in_ms < 0
+				or not finite(lease_remaining_ms) or lease_remaining_ms <= 0
+				or type(callback) ~= "function" or type(on_complete) ~= "function"
+			then
+				return { code = "invalid", message = "V2 claim renewal scheduling arguments are invalid" }
+			end
+			local schedule_now_ms = now_local() * 1000
+			local safety_margin_ms = math.min(5000, math.floor(lease_remaining_ms / 4))
+			local deadline_ms = schedule_now_ms + lease_remaining_ms - safety_margin_ms
+			if deadline_ms <= schedule_now_ms then
+				return { code = "expired", message = "verified mailbox lease has insufficient renewal margin" }
+			end
+			return enqueue_state_work(
+				record,
+				state,
+				"mailbox_lease_renewal",
+				"lease_renewal",
+				"lease_renewal",
+				"lease_renewal",
+				function()
+					local callback_ok, result = pcall(callback)
+					if not callback_ok then
+						return { code = "unknown", message = "V2 lease-renewal callback raised: " .. tostring(result) }
+					end
+					if type(result) ~= "table" or type(result.code) ~= "string" then
+						return { code = "unknown", message = "V2 lease-renewal callback returned no structured result" }
+					end
+					return result
+				end,
+				{
+					service_class = "critical",
+					read_units = 1,
+					write_units = 1,
+					handler_slots = 1,
+					due_at_ms = schedule_now_ms + due_in_ms,
+					deadline_ms = deadline_ms,
+					expires_at_ms = schedule_now_ms + lease_remaining_ms,
+					max_retries = 1,
+					retry_delay_ms = 10,
+					retry_jitter_percent = 0,
+					on_complete = on_complete,
+				}
+			)
+		end)
+	end)
+	if not set_ok then return false, tostring(configured) end
+	if configured ~= true then return false, tostring(configure_error or "scheduler configuration was rejected") end
+	return true, nil
 end
 
 -- Scheduling never replaces the durable request gate or session fencing.
@@ -8133,6 +8204,7 @@ RecordStore.Mock = (function()
 
 	return Mock
 end)()
+RecordStore.MailboxV2 = MailboxV2
 RecordStore.is_retryable_result = is_retryable_result
 RecordStore.get_diagnostic_code = get_diagnostic_code
 RecordStore.shutdown = shutdown
