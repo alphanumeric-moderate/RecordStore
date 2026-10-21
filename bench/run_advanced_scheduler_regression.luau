@@ -908,6 +908,29 @@ do
 		"lease-renewal trace selection status was not preserved")
 end
 
+-- Replay can inject request-budget and latency observations without touching a live service.
+do
+	local observed_replay = new_scheduler()
+	local observed_result = observed_replay:Replay({
+		{ kind = "budget", read = 3, write = 7 },
+		{
+			kind = "observe",
+			operation_kind = "update_async",
+			succeeded = true,
+			latency_ms = 40,
+			budget = 4,
+		},
+	})
+	assert(type(observed_result) == "table" and observed_result.code == nil,
+		"replay rejected supported budget/observation events")
+	local observed_stats = observed_replay:Stats()
+	assert(observed_stats.request_budgets.read == 3 and observed_stats.request_budgets.write == 7,
+		"replay did not apply the injected request-budget snapshot")
+	assert(observed_stats.latency_ewma.update_async == 40
+		and observed_stats.last_budget_by_kind.update_async == 4,
+		"replay did not apply the injected latency/budget observation")
+end
+
 -- Retry rescheduling preserves the logical ID and cannot run before its due time.
 local retry_queue = new_scheduler()
 enqueue(retry_queue, { id = "stable-retry-id", owner_id = "retry-owner", lane = "normal", work_class = "outbox" })
@@ -2073,6 +2096,31 @@ for _ = 1, 200 do
 	task.wait(0.001)
 end
 assert(delayed_callback_ran, "future-due live work was lost after isolated trace replay")
+
+-- Public replay policy overrides compare algorithms without mutating live policy.
+local live_algorithm_before_replay = RecordStore.get_scheduler_snapshot().policy.algorithm
+local comparison_now = os.clock() * 1000
+local policy_comparison_trace = {
+	{ kind = "enqueue", item = {
+		id = "fifo-earlier-deadline-later", owner_id = "policy-comparison-owner",
+		lane = "normal", work_class = "policy-comparison", service_class = "normal",
+		deadline_ms = comparison_now + 60000,
+	} },
+	{ kind = "enqueue", item = {
+		id = "deadline-earlier-deadline-sooner", owner_id = "policy-comparison-owner",
+		lane = "normal", work_class = "policy-comparison", service_class = "normal",
+		deadline_ms = comparison_now + 10,
+	} },
+	{ kind = "take" },
+}
+local fifo_comparison = RecordStore.replay_scheduler_trace(policy_comparison_trace, { algorithm = "fifo" })
+local deadline_comparison = RecordStore.replay_scheduler_trace(policy_comparison_trace, { algorithm = "deadline" })
+assert(fifo_comparison[1] == "fifo-earlier-deadline-later",
+	"isolated FIFO replay did not preserve enqueue order")
+assert(deadline_comparison[1] == "deadline-earlier-deadline-sooner",
+	"isolated deadline replay did not select the lower-slack candidate")
+assert(RecordStore.get_scheduler_snapshot().policy.algorithm == live_algorithm_before_replay,
+	"replay policy override mutated the live scheduler policy")
 
 -- A dirty mock Record is autosaved through the selector when explicitly enabled.
 local core_record = RecordStore.Mock.new("SchedulerRegression", "global", "scheduler-player", {
