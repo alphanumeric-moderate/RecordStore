@@ -4873,7 +4873,7 @@ local function mailbox_bound_for_state(state: InternalState): (any?, ResultCode?
 	end
 	if #state.user_ids > 0 and owner.user_id == nil then return nil, "fenced", "bound mailbox lost the UserId required by this Record" end
 	if owner.user_id ~= nil then
-		if type(owner.user_id) ~= "number" or not finite(owner.user_id) or math.floor(owner.user_id) ~= owner.user_id then
+		if type(owner.user_id) ~= "number" or not math.isfinite(owner.user_id) or math.floor(owner.user_id) ~= owner.user_id then
 			return nil, "fenced", "bound V2 mailbox UserId is invalid"
 		end
 		local found = false
@@ -5270,7 +5270,7 @@ local function bind_mailbox_v2_async(self: Record, mailbox: unknown): (ResultCod
 		return "invalid", "V2 mailbox owner must include a UserId for a UserId-associated Record"
 	end
 	if owner.user_id ~= nil then
-		if type(owner.user_id) ~= "number" or not finite(owner.user_id) or owner.user_id < 1
+		if type(owner.user_id) ~= "number" or not math.isfinite(owner.user_id) or owner.user_id < 1
 			or math.floor(owner.user_id) ~= owner.user_id
 		then return "invalid", "V2 mailbox owner UserId must be a positive integer" end
 		local found = false
@@ -7177,8 +7177,8 @@ install_mailbox_renewal_scheduler = function(record: Record, state: InternalStat
 				return { code = "disabled", message = "advanced scheduler is disabled; V2 claim renewal cannot be guaranteed" }
 			end
 			if type(message_id) ~= "string" or message_id == "" or #message_id > 50
-				or not finite(due_in_ms) or due_in_ms < 0
-				or not finite(lease_remaining_ms) or lease_remaining_ms <= 0
+				or not math.isfinite(due_in_ms) or due_in_ms < 0
+				or not math.isfinite(lease_remaining_ms) or lease_remaining_ms <= 0
 				or type(callback) ~= "function" or type(on_complete) ~= "function"
 			then
 				return { code = "invalid", message = "V2 claim renewal scheduling arguments are invalid" }
@@ -7401,7 +7401,7 @@ local function run_scheduled_record_work(record: Record, state: InternalState, n
 				elseif tails.update_async ~= nil then tails.update_async.p95_ms
 				else nil
 			local observed_service_ms = math.max(
-				if finite(renewal_tail) then renewal_tail else 0,
+				if math.isfinite(renewal_tail) then renewal_tail else 0,
 				latency.lease_renewal or 0,
 				latency.update_async or 0,
 				latency.service or 0
@@ -7473,7 +7473,7 @@ local function run_scheduled_record_work(record: Record, state: InternalState, n
 				return {
 					code = code,
 					message = message,
-					processed_count = if finite(processed_count) then processed_count else 0,
+					processed_count = if math.isfinite(processed_count) then processed_count else 0,
 				}
 			end,
 			{ service_class = "normal", read_units = 1, write_units = 1, handler_slots = 1,
