@@ -386,6 +386,20 @@ type QueueEnvelope = {
 	dead_letters: { DeadLetterItem },
 }
 
+type PendingDurableOperation = {
+	kind: "save" | "renew",
+	snapshot: JsonValue?,
+	captured_change_sequence: number,
+	expected_revision: number,
+	target_revision: number,
+	operation_id: string,
+	session_token: string,
+	fencing_generation: number,
+	reason: string,
+	started_at: number,
+	attempts: number,
+}
+
 type InternalState = {
 	change_observers: { [number]: ChangeObserver },
 	change_observer_next_id: number,
@@ -455,6 +469,11 @@ type InternalState = {
 	change_sequence: number,
 	saved_change_sequence: number,
 	durable_lease_until: number,
+	pending_operation: PendingDurableOperation?,
+	next_reconciliation: number,
+	last_reconciliation_category: string?,
+	dirty_since_local: number?,
+	last_successful_write_local: number?,
 }
 
 export type Record = {
@@ -477,6 +496,8 @@ export type Record = {
 	GetBackendInfo: (self: Record) -> BackendInfoView,
 	GetLastSaved: (self: Record) -> DurableSnapshot?,
 	IsDirty: (self: Record) -> boolean,
+	CanMutate: (self: Record) -> (boolean, string?),
+	GetDurabilityStatus: (self: Record) -> { [string]: any },
 	GetLastError: (self: Record) -> RecordError?,
 	GetHandoff: (self: Record) -> HandoffResult?,
 	SubscribeChanges: (self: Record, observer: ChangeObserver) -> (ChangeSubscription?, ResultCode, string?),
@@ -562,6 +583,8 @@ local active_requests = 0
 local records: { [string]: Record } = {}
 local private: { [Record]: InternalState } = {}
 local active_records: { [Record]: boolean } = {}
+local recovery_records: { [Record]: boolean } = {}
+local recovery_in_flight = false
 local mock_database: { [string]: { [string]: MockEntry } } = {}
 local mock_counter = 0
 local mock_test_clock: (() -> number)? = nil
@@ -571,6 +594,10 @@ local mock_update_replay_advance_seconds = 0
 local mock_update_failure_count = 0
 local mock_update_failure_code: ResultCode = "budget"
 local mock_update_failure_message: string? = nil
+local mock_update_commit_then_failure_count = 0
+local mock_update_commit_then_failure_message: string? = nil
+local mock_get_failure_count = 0
+local mock_get_failure_message: string? = nil
 
 local close_internal: (state: InternalState, shutdown: boolean) -> (ResultCode, string?)
 local complete_deferred_takeover: (state: InternalState) -> ()
@@ -1759,6 +1786,10 @@ end
 
 local function backend_get(backend: Backend, use_cache: boolean, deadline: number, request_state: InternalState?): (unknown, BackendInfo?, ResultCode?, string?)
 	if backend.mock then
+		if mock_get_failure_count > 0 then
+			mock_get_failure_count -= 1
+			return nil, nil, "unknown", mock_get_failure_message or "injected mock read failure"
+		end
 		local store = get_mock_store(backend.name, backend.scope)
 		local entry = store[backend.key]
 		if entry == nil then
@@ -1892,6 +1923,11 @@ local function backend_update(backend: Backend, transform: UpdateTransform, dead
 		end
 		local next_entry = mock_write_version(entry, value, ids, normalized_metadata, false)
 		store[backend.key] = next_entry
+		if mock_update_commit_then_failure_count > 0 then
+			mock_update_commit_then_failure_count -= 1
+			return nil, nil, "unknown", mock_update_commit_then_failure_message
+				or "injected UpdateAsync response failure after commit"
+		end
 		return copy_value(next_entry.Value), {
 			Version = next_entry.Version,
 			CreatedTime = next_entry.CreatedTime,
@@ -3827,6 +3863,21 @@ local function save_internal(state: InternalState, reason: string?, operation_de
 	if confirmed == nil then
 		state.busy = false
 		state.state = "unknown"
+		state.pending_operation = {
+			kind = "save",
+			snapshot = copy_value(snapshot),
+			captured_change_sequence = captured_change_sequence,
+			expected_revision = expected_revision,
+			target_revision = target_revision,
+			operation_id = write_id,
+			session_token = session_token,
+			fencing_generation = generation,
+			reason = reason or "manual",
+			started_at = now_local(),
+			attempts = 0,
+		}
+		state.next_reconciliation = now_local() + 0.25
+		state.last_reconciliation_category = "save_outcome_unknown"
 		observe(state, "save", "unknown", last_error or "save outcome is unresolved")
 		return "unknown", last_error or "save outcome is unresolved"
 	end
@@ -3840,14 +3891,22 @@ local function save_internal(state: InternalState, reason: string?, operation_de
 	state.token = if confirmed.session ~= nil then confirmed.session.token else state.token
 	state.durable_lease_until = if confirmed.session ~= nil then confirmed.session.lease_until else 0
 	state.last_observed = now_unix()
+	state.saved_change_sequence = math.max(state.saved_change_sequence, captured_change_sequence)
 	if not local_changed_during_save then
 		update_local_from_envelope(state, confirmed, confirmed_info)
-		state.saved_change_sequence = captured_change_sequence
+		state.dirty_since_local = nil
 	else
+		if state.dirty_since_local == nil then
+			state.dirty_since_local = now_local()
+		end
 		state.save_requested = true
 		state.next_autosave = now_local()
 	end
 	state.last_saved = make_durable_snapshot(confirmed, confirmed_info, reason or "manual")
+	state.pending_operation = nil
+	state.next_reconciliation = math.huge
+	state.last_reconciliation_category = nil
+	state.last_successful_write_local = now_local()
 	state.busy = false
 	state.state = "active"
 	state.next_autosave = now_local() + (state.options.autosave_interval or DEFAULT_AUTOSAVE_INTERVAL)
@@ -4214,6 +4273,12 @@ local function data_values_equal(left: JsonValue?, right: JsonValue?, depth: num
 	return true
 end
 
+local function mark_dirty(state: InternalState)
+	if state.dirty_since_local == nil then
+		state.dirty_since_local = now_local()
+	end
+end
+
 track_external_data_mutation = function(state: InternalState)
 	if state.state ~= "active" and state.state ~= "saving" then
 		return
@@ -4282,6 +4347,7 @@ track_external_data_mutation = function(state: InternalState)
 		public_record_table.Data = state.data
 	end
 	state.change_sequence += 1
+	mark_dirty(state)
 	local operation_id = HttpService:GenerateGUID(false)
 	state.current_operation_id = operation_id
 	enqueue_change_observation(state, old_data, current_data, operation_id, "direct_data_mutation")
@@ -4304,6 +4370,11 @@ local function sync_public(record: Record, skip_external_mutation_check: boolean
 		active_records[record] = true
 	else
 		active_records[record] = nil
+	end
+	if state.state == "unknown" and state.pending_operation ~= nil and not state.retired then
+		recovery_records[record] = true
+	else
+		recovery_records[record] = nil
 	end
 	record.Data = state.data
 	record.State = state.state
@@ -4452,6 +4523,68 @@ local function is_dirty(self: Record): boolean
 	return state.change_sequence ~= state.saved_change_sequence
 end
 
+local function can_mutate(self: Record): (boolean, string?)
+	local state = private[self]
+	if state == nil then
+		return false, "record does not exist"
+	end
+	if state.state ~= "active" or state.token == nil then
+		return false, "record ownership is not confirmed active"
+	end
+	if state.takeover_requested then
+		return false, "session takeover has been requested"
+	end
+	if state.busy or state.queue_busy then
+		return false, "record has a durable operation in flight"
+	end
+	return true, nil
+end
+
+local function get_durability_status(self: Record): { [string]: any }
+	local state = private[self]
+	if state == nil then
+		return {
+			ownership = "lost",
+			durability = "degraded",
+			unknown = true,
+			last_confirmed_revision = 0,
+			last_confirmed_generation = 0,
+			dirty_watermark = 0,
+			durable_watermark = 0,
+			oldest_dirty_age = 0,
+			lease_margin = 0,
+			pending_operation_id = nil,
+			reconciliation_category = "record_missing",
+		}
+	end
+	local dirty = state.change_sequence ~= state.saved_change_sequence
+	local pending = state.pending_operation
+	local ownership = if state.state == "unknown" then "uncertain"
+		elseif state.state == "active" or state.state == "saving" or state.state == "releasing" then "owned"
+		else "lost"
+	local durability = if state.state == "unknown" then "degraded"
+		elseif state.busy then "saving"
+		elseif dirty then "dirty"
+		else "clean"
+	return {
+		ownership = ownership,
+		durability = durability,
+		unknown = state.state == "unknown",
+		last_confirmed_revision = state.revision,
+		last_confirmed_generation = state.generation,
+		dirty_watermark = state.change_sequence,
+		durable_watermark = state.saved_change_sequence,
+		oldest_dirty_age = if dirty and state.dirty_since_local ~= nil
+			then math.max(0, now_local() - state.dirty_since_local) else 0,
+		last_successful_write_age = if state.last_successful_write_local ~= nil
+			then math.max(0, now_local() - state.last_successful_write_local) else nil,
+		lease_margin = math.max(0, state.durable_lease_until - session_now_unix(state.backend.mock)),
+		pending_operation_id = if pending ~= nil then pending.operation_id else nil,
+		reconciliation_category = state.last_reconciliation_category,
+		reconciliation_attempts = if pending ~= nil then pending.attempts else 0,
+	}
+end
+
 local function get_user_ids(self: Record): { number }
 	local state = private[self]
 	if state == nil then
@@ -4485,6 +4618,7 @@ local function set_user_ids(self: Record, user_ids: { number }): (ResultCode, st
 	local old_user_ids = state.user_ids
 	state.user_ids = normalized
 	state.change_sequence += 1
+	mark_dirty(state)
 	local operation_id = HttpService:GenerateGUID(false)
 	state.current_operation_id = operation_id
 	enqueue_change_observation(state, old_user_ids, normalized, operation_id, "user_ids")
@@ -4558,6 +4692,7 @@ local function set_metadata(self: Record, metadata: Metadata): (ResultCode, stri
 	local old_metadata = state.metadata
 	state.metadata = copied
 	state.change_sequence += 1
+	mark_dirty(state)
 	local operation_id = HttpService:GenerateGUID(false)
 	state.current_operation_id = operation_id
 	enqueue_change_observation(state, old_metadata, copied, operation_id, "metadata")
@@ -4615,6 +4750,7 @@ local function update_metadata(self: Record, callback: (Metadata) -> Metadata): 
 	local old_metadata = state.metadata
 	state.metadata = copied
 	state.change_sequence += 1
+	mark_dirty(state)
 	local operation_id = HttpService:GenerateGUID(false)
 	state.current_operation_id = operation_id
 	enqueue_change_observation(state, old_metadata, copied, operation_id, "metadata")
@@ -4704,6 +4840,7 @@ local function update(self: Record, callback: (JsonValue?) -> JsonValue?): (Resu
 	state.public_data_source = copy_value(state.data)
 	self.Data = state.data
 	state.change_sequence += 1
+	mark_dirty(state)
 	local operation_id = HttpService:GenerateGUID(false)
 	state.current_operation_id = operation_id
 	enqueue_change_observation(state, old_data, copied, operation_id, "update")
@@ -4815,6 +4952,7 @@ local function reconcile(self: Record, template: JsonValue): (ResultCode, string
 	self.Data = state.data
 	if changed == true then
 		state.change_sequence += 1
+	mark_dirty(state)
 		local operation_id = HttpService:GenerateGUID(false)
 		state.current_operation_id = operation_id
 		enqueue_change_observation(state, old_data, next_value, operation_id, "reconcile")
@@ -6420,6 +6558,11 @@ local function open_internal(state: InternalState, default_data: JsonValue?, rec
 		state.last_saved = make_durable_snapshot(confirmed, confirmed_info, "open")
 		state.change_sequence = 0
 		state.saved_change_sequence = 0
+		state.dirty_since_local = nil
+		state.pending_operation = nil
+		state.next_reconciliation = math.huge
+		state.last_reconciliation_category = nil
+		state.last_successful_write_local = now_local()
 		state.busy = false
 		state.state = "active"
 		state.next_autosave = now_local() + (state.options.autosave_interval or DEFAULT_AUTOSAVE_INTERVAL) * (0.9 + math.random() * 0.2)
@@ -6596,6 +6739,21 @@ local function renew_internal(state: InternalState): (ResultCode, string?)
 	if confirmed == nil then
 		state.busy = false
 		state.state = "unknown"
+		state.pending_operation = {
+			kind = "renew",
+			snapshot = nil,
+			captured_change_sequence = state.change_sequence,
+			expected_revision = state.revision,
+			target_revision = state.revision,
+			operation_id = write_id,
+			session_token = session_token,
+			fencing_generation = generation,
+			reason = "renew",
+			started_at = now_local(),
+			attempts = 0,
+		}
+		state.next_reconciliation = now_local() + 0.25
+		state.last_reconciliation_category = "renewal_outcome_unknown"
 		observe(state, "renew", "unknown", last_error or "renewal outcome is unresolved")
 		return "unknown", last_error or "renewal outcome is unresolved"
 	end
@@ -6613,6 +6771,10 @@ local function renew_internal(state: InternalState): (ResultCode, string?)
 		state.metadata = if confirmed_info ~= nil then clone_metadata(confirmed_info.Metadata) else state.metadata
 	end
 	state.last_saved = make_durable_snapshot(confirmed, confirmed_info, "renew")
+	state.pending_operation = nil
+	state.next_reconciliation = math.huge
+	state.last_reconciliation_category = nil
+	state.last_successful_write_local = now_local()
 	state.busy = false
 	state.state = "active"
 	state.next_renewal = now_local() + (state.options.lease_renewal or DEFAULT_LEASE_RENEWAL)
@@ -6972,6 +7134,11 @@ local function make_record(name: string, scope: string, key: string, options: Op
 		change_sequence = 0,
 		saved_change_sequence = 0,
 		durable_lease_until = 0,
+		pending_operation = nil,
+		next_reconciliation = math.huge,
+		last_reconciliation_category = nil,
+		dirty_since_local = nil,
+		last_successful_write_local = nil,
 	}
 	local record: Record = {
 		Data = nil,
@@ -6993,6 +7160,8 @@ local function make_record(name: string, scope: string, key: string, options: Op
 		GetBackendInfo = get_backend_info,
 		GetLastSaved = get_last_saved,
 		IsDirty = is_dirty,
+		CanMutate = can_mutate,
+		GetDurabilityStatus = get_durability_status,
 		GetLastError = get_last_error_info,
 		GetHandoff = get_handoff,
 		GetIdentity = get_identity,
