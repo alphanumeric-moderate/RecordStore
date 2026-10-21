@@ -1293,6 +1293,7 @@ function MailboxV2._ordering_blocked(self: Mailbox, record: Dict, route: string)
 	local sequence = record.ordering_sequence
 	if ordering_key == nil then return false, nil end
 	if type(ordering_key) ~= "string" or ordering_key == ""
+		or #ordering_key > MAX_ORDERING_KEY_LENGTH
 		or not is_finite(sequence) or (sequence :: number) < 1
 		or math.floor(sequence :: number) ~= sequence
 	then
@@ -1303,18 +1304,34 @@ function MailboxV2._ordering_blocked(self: Mailbox, record: Dict, route: string)
 	local ordering = as_dict(ordering_value)
 	if read_error ~= nil then return true, "ordering state read failed: " .. read_error end
 	local routes = if ordering ~= nil then as_dict(ordering.routes) else nil
+	local next_sequence = if ordering ~= nil then ordering.next_sequence else nil
 	if ordering == nil or ordering.version ~= VERSION or not same_owner(ordering.owner, self.owner)
 		or ordering.ordering_key ~= ordering_key or routes == nil
+		or not is_finite(next_sequence) or (next_sequence :: number) < 1
+		or math.floor(next_sequence :: number) ~= next_sequence
+		or (next_sequence :: number) > 9_007_199_254_740_991
+		or (next_sequence :: number) <= (sequence :: number)
 	then
 		return true, "ordering state is missing or corrupt"
 	end
 	if routes[route] ~= sequence then
 		return true, "ordered message does not match its durable ordering slot"
 	end
+	local sequence_routes = {}
 	for prior_route, prior_sequence in routes do
-		if type(prior_route) == "string" and is_finite(prior_sequence)
-			and (prior_sequence :: number) < (sequence :: number)
+		if type(prior_route) ~= "string" or prior_route == "" or #prior_route > MAX_KEY_LENGTH
+			or not is_finite(prior_sequence) or (prior_sequence :: number) < 1
+			or math.floor(prior_sequence :: number) ~= prior_sequence
+			or (prior_sequence :: number) >= (next_sequence :: number)
 		then
+			return true, "ordering state contains a malformed route or sequence"
+		end
+		local prior_route_for_sequence = sequence_routes[prior_sequence]
+		if prior_route_for_sequence ~= nil and prior_route_for_sequence ~= prior_route then
+			return true, "ordering state assigns one sequence to multiple messages"
+		end
+		sequence_routes[prior_sequence] = prior_route
+		if (prior_sequence :: number) < (sequence :: number) then
 			local prior_value, prior_error = self:_get_fresh(prior_route)
 			if prior_error ~= nil then return true, "predecessor state read failed: " .. prior_error end
 			local prior = as_dict(prior_value)
