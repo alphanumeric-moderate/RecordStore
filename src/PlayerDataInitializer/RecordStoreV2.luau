@@ -3893,6 +3893,7 @@ function V2.new(record_store, mailbox_module, options)
 	local dispatch_sequence = 0
 	local dispatcher_running = false
 	local dispatcher_in_flight = 0
+	local central_dispatch_in_flight = 0
 	local scheduled_wake_due_ms = nil
 	local scheduled_wake_generation = 0
 	local kick_dispatcher
@@ -4090,8 +4091,17 @@ function V2.new(record_store, mailbox_module, options)
 
 	api.GetSchedulerDispatchStats = function()
 		local snapshot = copy(dispatch_metrics)
-		snapshot.in_flight = dispatcher_in_flight
+		snapshot.local_dispatch_in_flight = dispatcher_in_flight
+		snapshot.central_dispatch_in_flight = central_dispatch_in_flight
+		snapshot.in_flight = dispatcher_in_flight + central_dispatch_in_flight
 		snapshot.next_wake_due_ms = scheduled_wake_due_ms
+		if type(record_store.get_scheduler_snapshot) == "function" then
+			local snapshot_ok, core_snapshot = pcall(record_store.get_scheduler_snapshot)
+			if snapshot_ok and type(core_snapshot) == "table" then
+				snapshot.core_scheduler_enabled = core_snapshot.enabled == true
+				snapshot.core_dispatcher = core_snapshot.dispatcher
+			end
+		end
 		return snapshot
 	end
 
@@ -4178,6 +4188,7 @@ function V2.new(record_store, mailbox_module, options)
 			or (if reason == "outbox_dispatch" then "outbox_dispatch" else "maintenance")
 		local item = {
 			id = job_id, owner_id = owner_id, lane = lane or "normal", due_at_ms = due_now,
+			available_at_ms = schedule_options.available_at_ms,
 			deadline_ms = schedule_options.deadline_ms, expires_at_ms = schedule_options.expires_at_ms,
 			service_class = schedule_options.service_class, work_class = work_class,
 			operation_class = schedule_options.operation_class or work_class,
@@ -4186,6 +4197,80 @@ function V2.new(record_store, mailbox_module, options)
 			estimated_bytes = schedule_options.estimated_bytes, handler_slots = schedule_options.handler_slots,
 			cost = schedule_options.cost, wake_reason = reason,
 		}
+		-- Prefer the shared core selector when enabled; retain the local dispatcher as fallback.
+		local core_scheduler_enabled = false
+		if type(record_store.get_scheduler_snapshot) == "function"
+			and type(record_store.schedule_internal_work) == "function"
+			and type(record_store.get_scheduler_clock_ms) == "function"
+		then
+			local snapshot_ok, snapshot = pcall(record_store.get_scheduler_snapshot)
+			core_scheduler_enabled = snapshot_ok and type(snapshot) == "table" and snapshot.enabled == true
+		end
+		if core_scheduler_enabled then
+			local clock_ok, core_now_ms = pcall(record_store.get_scheduler_clock_ms)
+			if clock_ok and finite(core_now_ms) then
+				local clock_offset_ms = core_now_ms - now
+				local central_options = {
+					lane = lane or "normal",
+					due_at_ms = due_now + clock_offset_ms,
+					available_at_ms = if finite(schedule_options.available_at_ms) then schedule_options.available_at_ms + clock_offset_ms else nil,
+					deadline_ms = if finite(schedule_options.deadline_ms) then schedule_options.deadline_ms + clock_offset_ms else nil,
+					expires_at_ms = if finite(schedule_options.expires_at_ms) then schedule_options.expires_at_ms + clock_offset_ms else nil,
+					service_class = schedule_options.service_class,
+					work_class = work_class,
+					operation_class = schedule_options.operation_class or work_class,
+					dependencies = schedule_options.dependencies,
+					read_units = schedule_options.read_units,
+					write_units = schedule_options.write_units,
+					estimated_bytes = schedule_options.estimated_bytes,
+					handler_slots = schedule_options.handler_slots,
+					cost = schedule_options.cost,
+					batchable = schedule_options.batchable,
+					batch_size = schedule_options.batch_size,
+					batch_backlog = schedule_options.batch_backlog,
+					max_retries = max_retries,
+					retry_delay_ms = retry_delay_ms,
+					retry_jitter_percent = retry_jitter_percent,
+				}
+				local central_owner_id = owner_id
+				if type(owner) == "table" then
+					local fields = owner :: { [string]: unknown }
+					local store_name, scope, profile_key = fields.store_name, fields.scope, fields.profile_key
+					if valid_text(store_name, 50) and valid_text(scope, 50) and valid_text(profile_key, 128) then
+						local function component(value: string): string
+							return tostring(#value) .. ":" .. value
+						end
+						central_owner_id = component(store_name) .. component(scope) .. component(profile_key)
+					end
+				end
+				central_dispatch_in_flight += 1
+				dispatch_metrics.max_in_flight = math.max(dispatch_metrics.max_in_flight, dispatcher_in_flight + central_dispatch_in_flight)
+				local accepted = record_store.schedule_internal_work(
+					central_owner_id,
+					job_id,
+					function()
+						local callback_ok, callback_result = pcall(callback)
+						if not callback_ok then
+							dispatch_metrics.callback_errors += 1
+							dispatch_metrics.last_error = text_error(callback_result, 200)
+							return { code = "unknown", message = "scheduled callback raised; side effects may have committed" }
+						end
+						return callback_result
+					end,
+					central_options
+				)
+				if type(accepted) == "table" and accepted.code == "accepted" then
+					dispatch_metrics.accepted += 1
+					return { code = "accepted", job_id = accepted.id or job_id, due_at_ms = due_now }
+				end
+				central_dispatch_in_flight = math.max(0, central_dispatch_in_flight - 1)
+				if type(accepted) ~= "table" or accepted.code ~= "disabled" then
+					dispatch_metrics.rejected += 1
+					return { code = if type(accepted) == "table" then accepted.code else "unknown",
+						message = if type(accepted) == "table" then accepted.message else "core scheduler returned no result" }
+				end
+			end
+		end
 		local accepted = runtime_governor:Enqueue(item)
 		if type(accepted) ~= "table" or accepted.code ~= "accepted" then
 			dispatch_metrics.rejected += 1
@@ -4328,32 +4413,29 @@ function V2.new(record_store, mailbox_module, options)
 		end
 
 		local registered, register_error = accelerator:Register(owner_text, function(reason)
-			dispatch_sequence += 1
-			local job_id = "rv2w:" .. tostring(dispatch_sequence)
 			local due_now = current_schedule_time_ms()
-			local accepted = runtime_governor:Enqueue({
-				id = job_id,
-				owner_id = owner_digest,
-				lane = "normal",
-				work_class = "mailbox_wakeup",
-				operation_class = "mailbox_claim",
-				cost = 4,
-				due_at_ms = due_now,
-				wake_reason = if valid_text(reason, 32) then reason else "unknown",
-			})
+			local accepted = enqueue_scheduled_callback(
+				owner, "normal", "mailbox_wakeup",
+				function()
+					local processed = 0
+					for _ = 1, limit do
+						local result = mailbox:ProcessNextAsync(handler)
+						if type(result) ~= "table" or result.code ~= "processed" then break end
+						processed += 1
+					end
+					return { code = "success", processed = processed }
+				end,
+				due_now,
+				{ lane = "normal", work_class = "mailbox_wakeup", operation_class = "mailbox_claim",
+					cost = 4, read_units = 1, write_units = 1, handler_slots = 1, max_retries = 0 },
+				nil
+			)
 			if type(accepted) ~= "table" or accepted.code ~= "accepted" then
 				dispatch_metrics.rejected += 1
 				return
 			end
-			dispatch_callbacks[job_id] = function()
-				for _ = 1, limit do
-					local result = mailbox:ProcessNextAsync(handler)
-					if type(result) ~= "table" or result.code ~= "processed" then break end
-				end
-			end
-			dispatch_metrics.accepted += 1
-			kick_dispatcher()
 		end)
+
 		if not registered and scheduler_installed then mailbox:SetLeaseRenewalScheduler(nil) end
 		return registered, register_error
 	end
