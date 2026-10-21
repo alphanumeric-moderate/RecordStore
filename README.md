@@ -247,12 +247,23 @@ class grants access to protected admission capacity and is reserved for library-
 persistence callbacks. The `lease_renewal` lane and `lease_renewal`/`profile_release`
 work and operation classes are likewise internal-only.
 
-`RecordStore.replay_scheduler_trace(trace)` replays `enqueue`, `take`, `complete`, and
-`advance` records against an isolated governor and virtual clock. It returns selected work
-IDs in its numeric array portion (using `"<empty>"` when nothing is selected) and a parallel
-`.statuses` array for each `take`. A `complete` record's optional `outcome` is preserved,
-so dependency failures and other terminal outcomes can be reproduced. Replay does not run
-callbacks or mutate the live scheduler queue.
+`RecordStore.replay_scheduler_trace(trace, policy_override?)` replays synthetic events
+against an isolated governor and virtual clock. The trace must be a dense array of at most
+8,192 events. Supported event kinds are `enqueue`, `take`, `complete`, `advance`, `budget`,
+and `observe`. Time advances must be non-negative and no greater than one year per event;
+budget values and observed latencies must be finite and non-negative. Invalid traces return
+`{ code = "invalid", message = ... }` before any event is executed.
+
+The result's numeric array portion contains selected work IDs (using `"<empty>"` when nothing
+is selected), with a parallel `.statuses` array for each `take`. A `complete` record's optional
+`outcome` is preserved, so dependency failures and other terminal outcomes can be reproduced.
+A `budget` event injects a read/write budget snapshot; an `observe` event injects an operation
+latency/outcome observation, allowing replay to exercise admission and batching decisions.
+
+The optional `policy_override` is merged onto the current policy for that isolated run, e.g.
+`{ algorithm = "deadline" }`. The replay assigns its own policy revision. Overrides cannot
+change the live policy, request-budget observations, scheduler queue, or callback state. Replay
+does not run callbacks or mutate the live scheduler queue.
 
 Priority inheritance is deliberately narrow: a `high`-lane dependent must declare a finite
 `deadline_ms` or an `interactive` service class before a ready background prerequisite can
