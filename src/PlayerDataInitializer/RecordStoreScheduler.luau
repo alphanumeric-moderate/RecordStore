@@ -77,6 +77,10 @@ local CORE_OPERATION_KINDS = {
 	migration = true, projection = true, tracing = true, batch = true,
 }
 
+local function uses_critical_reserve(item)
+	return item.lane == "lease_renewal" or item.service_class == "critical"
+end
+
 local function new_governor(options)
 	options = options or {}
 	local function now_ms()
@@ -704,10 +708,6 @@ local function new_governor(options)
 			end
 		end
 	end
-	local function uses_critical_reserve(item)
-		return item.lane == "lease_renewal" or item.service_class == "critical"
-	end
-
 	local function scheduled_lane(item, now)
 		if item.inherited_lane ~= nil and finite(item.inherited_until_ms) and item.inherited_until_ms > now then
 			return item.inherited_lane
