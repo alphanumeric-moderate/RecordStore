@@ -3,6 +3,7 @@
 -- session fencing and idempotency remain authoritative.
 local Scheduler = {}
 local MAX_REPLAY_TRACE_EVENTS = 8192
+local MAX_REPLAY_ADVANCE_MS = 31_536_000_000
 
 local function finite(value)
 	return type(value) == "number" and math.isfinite(value)
@@ -1438,9 +1439,25 @@ local function new_governor(options)
 				if entry.renewal_mode ~= nil and type(entry.renewal_mode) ~= "boolean" then
 					return invalid_trace("take event " .. tostring(index) .. " has an invalid renewal mode")
 				end
+			elseif entry.kind == "budget" then
+				if not finite(entry.read) or entry.read < 0 or not finite(entry.write) or entry.write < 0 then
+					return invalid_trace("budget event " .. tostring(index) .. " requires non-negative finite read and write budgets")
+				end
+			elseif entry.kind == "observe" then
+				if not valid_text(entry.operation_kind, 64) or type(entry.succeeded) ~= "boolean"
+					or not finite(entry.latency_ms) or entry.latency_ms < 0
+				then
+					return invalid_trace("observe event " .. tostring(index) .. " requires an operation kind, success flag and non-negative finite latency")
+				end
+				if entry.error_class ~= nil and not valid_text(entry.error_class, 64) then
+					return invalid_trace("observe event " .. tostring(index) .. " has an invalid error class")
+				end
+				if entry.budget ~= nil and (not finite(entry.budget) or entry.budget < 0) then
+					return invalid_trace("observe event " .. tostring(index) .. " has an invalid budget")
+				end
 			elseif entry.kind == "advance" then
-				if not finite(entry.ms) or entry.ms < 0 then
-					return invalid_trace("advance event " .. tostring(index) .. " must have a non-negative finite duration")
+				if not finite(entry.ms) or entry.ms < 0 or entry.ms > MAX_REPLAY_ADVANCE_MS then
+					return invalid_trace("advance event " .. tostring(index) .. " must be within the bounded virtual-time range")
 				end
 				if type(options.advance_ms) ~= "function" then
 					return invalid_trace("scheduler trace requires a virtual-time advance function")
@@ -1458,6 +1475,10 @@ local function new_governor(options)
 				local item, status = self:TakeNext(entry.renewal_mode)
 				result[#result + 1] = if item then item.id else "<empty>"
 				result.statuses[#result.statuses + 1] = status or "empty"
+			elseif entry.kind == "budget" then
+				self:ObserveRequestBudgets(entry.read, entry.write)
+			elseif entry.kind == "observe" then
+				self:Observe(entry.operation_kind, entry.succeeded, entry.latency_ms, entry.error_class, entry.budget)
 			elseif entry.kind == "advance" then
 				options.advance_ms(entry.ms)
 			end
