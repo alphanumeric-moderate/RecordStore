@@ -276,6 +276,69 @@ local function test_corrupt_ordering_index_fails_closed()
 		"corrupt ordering counter mutated the canonical message")
 end
 
+local function test_stale_cache_cannot_bypass_claim_metadata_validation()
+	local backing = MailboxV2.MockStore()
+	local target_route = nil
+	local cached_record = nil
+	local serve_stale = false
+	local store = {
+		GetAsync = function(_, key)
+			if serve_stale and key == target_route then return clone(cached_record) end
+			return backing:GetAsync(key)
+		end,
+		GetAsyncFresh = function(_, key) return backing:GetAsyncFresh(key) end,
+		UpdateAsync = function(_, key, transform) return backing:UpdateAsync(key, transform) end,
+	}
+	local mailbox = new_mailbox({ strict_ordering_enabled = true }, store)
+	local queued = enqueue(mailbox, "cached-snapshot", "cached-snapshot-id", nil, "normal")
+	target_route = queued.message_id
+	cached_record = clone(backing.values[target_route])
+	serve_stale = true
+	backing.values[target_route].priority = "critical"
+
+	local invoked = false
+	local result = process_one(mailbox, function()
+		invoked = true
+		return true
+	end)
+	assert(result.code == "corrupt" and not invoked,
+		"stale GetAsync snapshot let malformed canonical priority reach a handler")
+	assert(backing.values[target_route].state == "ready",
+		"invalid canonical metadata was mutated by a claim despite the stale cache")
+
+	local second_backing = MailboxV2.MockStore()
+	local second_target = nil
+	local mutate_key_on_claim = false
+	local mutated = false
+	local second_store = {
+		GetAsync = function(_, key) return second_backing:GetAsync(key) end,
+		GetAsyncFresh = function(_, key) return second_backing:GetAsyncFresh(key) end,
+		UpdateAsync = function(_, key, transform)
+			if mutate_key_on_claim and not mutated and key == second_target then
+				mutated = true
+				local current = second_backing.values[key]
+				assert(type(current) == "table", "unkeyed race fixture lost its canonical row")
+				current.ordering_key = "raced-in-key"
+				current.ordering_sequence = 1
+			end
+			return second_backing:UpdateAsync(key, transform)
+		end,
+	}
+	local second_mailbox = new_mailbox({ strict_ordering_enabled = true }, second_store)
+	local second = enqueue(second_mailbox, "unkeyed-race", "unkeyed-race-id", nil, "high")
+	second_target = second.message_id
+	mutate_key_on_claim = true
+	local second_invoked = false
+	local second_result = process_one(second_mailbox, function()
+		second_invoked = true
+		return true
+	end)
+	assert(mutated and second_result.code == "empty" and not second_invoked,
+		"claim committed after canonical ordering metadata changed from nil to a key")
+	assert(second_backing.values[second_target].state == "ready",
+		"ordering metadata race mutated the canonical message")
+end
+
 local function test_corrupt_ready_message_metadata_fails_closed()
 	local mailbox, store = new_mailbox({ strict_ordering_enabled = true })
 	local malformed_priority = enqueue(mailbox, "malformed-priority", "malformed-priority-id", nil, "normal")
@@ -530,6 +593,7 @@ test_claim_update_fails_closed_if_order_sequence_changes_after_arbitration()
 test_dead_letter_replay_gets_a_new_ordering_sequence_and_recovers_from_stale_reads()
 test_order_slot_mismatch_fails_closed()
 test_corrupt_ordering_index_fails_closed()
+test_stale_cache_cannot_bypass_claim_metadata_validation()
 test_corrupt_ready_message_metadata_fails_closed()
 test_high_priority_burst_does_not_starve_background_messages()
 test_clock_skew_cannot_break_ordering_under_adversarial_sort_keys()
