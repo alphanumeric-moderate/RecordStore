@@ -6860,8 +6860,21 @@ function RecordStore.compare_scheduler_shadow(): any
 	return scheduler_governor:ShadowDecision()
 end
 
-function RecordStore.replay_scheduler_trace(trace: { any }): { any }
+function RecordStore.replay_scheduler_trace(
+	trace: { any },
+	policy_override: { [string]: unknown }?
+): { any }
 	if type(trace) ~= "table" then return { code = "invalid", message = "scheduler trace must be an array" } end
+	if policy_override ~= nil and type(policy_override) ~= "table" then
+		return { code = "invalid", message = "replay policy override must be a table" }
+	end
+	if policy_override ~= nil then
+		for key in pairs(policy_override) do
+			if key == "revision" then
+				return { code = "invalid", message = "replay policy revision is assigned internally" }
+			end
+		end
+	end
 	-- Replay runs against an isolated governor and virtual clock. It must never
 	-- enqueue, dequeue or complete work in the live server scheduler.
 	local replay_now_ms = now_local() * 1000
@@ -6872,6 +6885,11 @@ function RecordStore.replay_scheduler_trace(trace: { any }): { any }
 	local current_policy = scheduler_governor:Stats().policy
 	local replay_policy = replay:Stats().policy
 	local policy_patch = table.clone(current_policy)
+	if policy_override ~= nil then
+		for key, value in pairs(policy_override) do
+			policy_patch[key] = value
+		end
+	end
 	policy_patch.revision = replay_policy.revision + 1
 	local policy_ok, policy_message = replay:SetPolicy(policy_patch)
 	if not policy_ok then return { code = "invalid", message = policy_message } end
