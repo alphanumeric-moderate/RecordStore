@@ -569,8 +569,10 @@ local function new_governor(options)
 		if policy.shadow_sample_rate < 0 or policy.shadow_sample_rate > 1 then return false, "shadow_sample_rate must be in 0..1" end
 		return true, nil
 	end
-	function governor:SetPolicy(patch)
-		if type(patch) ~= "table" or not finite(patch.revision) or patch.revision <= self.policy.revision then return false, "policy revision must increase" end
+	function governor:ValidatePolicy(patch)
+		if type(patch) ~= "table" or not finite(patch.revision) or patch.revision <= self.policy.revision then
+			return false, "policy revision must increase"
+		end
 		local allowed = {
 			revision = true, mode = true, max_in_flight = true, critical_reserve = true, queue_capacity = true,
 			max_batch = true, batch_window_ms = true, batch_latency_ceiling_ms = true, high_burst = true,
@@ -588,10 +590,16 @@ local function new_governor(options)
 		for key, value in pairs(patch) do next_policy[key] = value end
 		local valid, message = policy_valid(next_policy)
 		if not valid then return false, message end
+		return true, nil, next_policy
+	end
+	function governor:SetPolicy(patch)
+		local valid, message, next_policy = self:ValidatePolicy(patch)
+		if not valid then return false, message end
 		self.policy = next_policy
 		self.retry_tokens = math.min(self.retry_tokens, self.policy.retry_token_capacity)
 		return true, nil
 	end
+	
 	function governor:Observe(kind, ok, latency_ms, error_class, budget)
 		if type(kind) ~= "string" or kind == "" then return false end
 		if finite(latency_ms) and latency_ms >= 0 then
@@ -3869,7 +3877,43 @@ function V2.new(record_store, mailbox_module, options)
 	end
 	api.ApplySchedulerPolicy = function(policy)
 		if type(policy) ~= "table" then return "invalid", "scheduler policy must be a table" end
-		local applied, message = runtime_governor:SetPolicy(policy)
+		local v2_fields = {
+			revision = true, mode = true, max_in_flight = true, critical_reserve = true, queue_capacity = true,
+			max_batch = true, batch_window_ms = true, batch_latency_ceiling_ms = true, high_burst = true,
+			retry_token_capacity = true, retry_tokens_per_second = true, minimum_budget = true,
+			circuit_threshold = true, circuit_cooldown_ms = true, max_scheduled_in_flight = true,
+			scheduler_critical_reserve = true, max_per_owner_in_flight = true, drr_quantum = true,
+			max_item_cost = true, urgent_deadline_burst = true, priority_inheritance_max_ms = true,
+			retry_jitter_percent = true, algorithm = true, shadow_algorithm = true,
+			shadow_enabled = true, shadow_sample_rate = true,
+		}
+		local core_only_fields = {
+			max_read_units_in_flight = true, max_write_units_in_flight = true,
+			read_critical_reserve = true, write_critical_reserve = true,
+			max_estimated_bytes_in_flight = true, max_handler_slots_in_flight = true,
+		}
+		local v2_policy, core_policy = {}, {}
+		for key, value in pairs(policy) do
+			if v2_fields[key] then
+				v2_policy[key] = value
+				if key ~= "mode" or value ~= "bounded_buffer" then core_policy[key] = value end
+			elseif core_only_fields[key] then
+				core_policy[key] = value
+			else
+				return "invalid", "unsupported scheduler policy field: " .. tostring(key)
+			end
+		end
+		local v2_valid, v2_message = runtime_governor:ValidatePolicy(v2_policy)
+		if not v2_valid then return "invalid", v2_message end
+		local can_configure_core = type(record_store.validate_scheduler_policy) == "function"
+			and type(record_store.configure_scheduler_policy) == "function"
+		if can_configure_core then
+			local core_valid, core_message = record_store.validate_scheduler_policy(core_policy)
+			if core_valid ~= "success" then return "invalid", core_message end
+			local core_applied, apply_error = record_store.configure_scheduler_policy(core_policy)
+			if core_applied ~= "success" then return "invalid", apply_error end
+		end
+		local applied, message = runtime_governor:SetPolicy(v2_policy)
 		return if applied then "success" else "invalid", message
 	end
 	api.GetRuntimeSnapshot = function()
