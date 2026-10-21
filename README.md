@@ -247,6 +247,13 @@ class grants access to protected admission capacity and is reserved for library-
 persistence callbacks. The `lease_renewal` lane and `lease_renewal`/`profile_release`
 work and operation classes are likewise internal-only.
 
+`RecordStore.replay_scheduler_trace(trace)` replays `enqueue`, `take`, `complete`, and
+`advance` records against an isolated governor and virtual clock. It returns selected work
+IDs in its numeric array portion (using `"<empty>"` when nothing is selected) and a parallel
+`.statuses` array for each `take`. A `complete` record's optional `outcome` is preserved,
+so dependency failures and other terminal outcomes can be reproduced. Replay does not run
+callbacks or mutate the live scheduler queue.
+
 Priority inheritance is deliberately narrow: a `high`-lane dependent must declare a finite
 `deadline_ms` or an `interactive` service class before a ready background prerequisite can
 inherit temporary `normal`-lane urgency. The public API cannot request `critical` service
