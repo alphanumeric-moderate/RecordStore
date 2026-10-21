@@ -4155,8 +4155,8 @@ function V2.new(record_store, mailbox_module, options)
 	api.GetSchedulerDispatchStats = function()
 		local snapshot = copy(dispatch_metrics)
 		snapshot.local_dispatch_in_flight = dispatch_state.dispatcher_in_flight
-		snapshot.dispatch_state.central_dispatch_in_flight = dispatch_state.central_dispatch_in_flight
-		snapshot.dispatch_state.central_dispatch_pending = dispatch_state.central_dispatch_pending
+		snapshot.central_dispatch_in_flight = dispatch_state.central_dispatch_in_flight
+		snapshot.central_dispatch_pending = dispatch_state.central_dispatch_pending
 		snapshot.in_flight = dispatch_state.dispatcher_in_flight + dispatch_state.central_dispatch_in_flight
 		snapshot.next_wake_due_ms = dispatch_state.scheduled_wake_due_ms
 		if type(record_store.get_scheduler_snapshot) == "function" then
