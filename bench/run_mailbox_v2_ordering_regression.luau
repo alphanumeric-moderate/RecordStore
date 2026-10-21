@@ -296,13 +296,9 @@ local function test_stale_cache_cannot_bypass_claim_metadata_validation()
 	serve_stale = true
 	backing.values[target_route].priority = "critical"
 
-	local invoked = false
-	local result = process_one(mailbox, function()
-		invoked = true
-		return true
-	end)
-	assert(result.code == "corrupt" and not invoked,
-		"stale GetAsync snapshot let malformed canonical priority reach a handler")
+	local claimed, result = mailbox:_claim(target_route)
+	assert(claimed == nil and result.code == "corrupt",
+		"stale GetAsync snapshot let malformed canonical priority through claim validation")
 	assert(backing.values[target_route].state == "ready",
 		"invalid canonical metadata was mutated by a claim despite the stale cache")
 
@@ -328,12 +324,8 @@ local function test_stale_cache_cannot_bypass_claim_metadata_validation()
 	local second = enqueue(second_mailbox, "unkeyed-race", "unkeyed-race-id", nil, "high")
 	second_target = second.message_id
 	mutate_key_on_claim = true
-	local second_invoked = false
-	local second_result = process_one(second_mailbox, function()
-		second_invoked = true
-		return true
-	end)
-	assert(mutated and second_result.code == "empty" and not second_invoked,
+	local claimed_after_race, second_result = second_mailbox:_claim(second_target)
+	assert(mutated and claimed_after_race == nil and second_result.code == "busy",
 		"claim committed after canonical ordering metadata changed from nil to a key")
 	assert(second_backing.values[second_target].state == "ready",
 		"ordering metadata race mutated the canonical message")
