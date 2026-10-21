@@ -240,8 +240,9 @@ separate StandardRead and StandardWrite estimates, per-work-class caps, estimate
 and handler-slot limits, critical read/write reserves, circuit cooldowns, live request
 budget observations, opt-in batch windows for callbacks that already represent an
 application-defined batch, shadow comparisons, deterministic trace replay, and
-queue/latency metrics. Governor reservations are released on completion and before a
-retry is queued. It never combines separate callbacks into a new business transaction.
+queue/latency metrics. Snapshot diagnostics report the active-owner count without returning
+raw owner identifiers or DataStore record keys. Governor reservations are released on completion
+and before a retry is queued. It never combines separate callbacks into a new business transaction.
 The public `schedule_work` API cannot claim `service_class = "critical"`; that service
 class grants access to protected admission capacity and is reserved for library-managed
 persistence callbacks. The `critical`/`profile_save` work and operation classes, the
