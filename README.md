@@ -257,8 +257,11 @@ budget values and observed latencies must be finite and non-negative. Invalid tr
 `{ code = "invalid", message = ... }` before any event is executed.
 
 The result's numeric array portion contains selected work IDs (using `"<empty>"` when nothing
-is selected), with a parallel `.statuses` array for each `take`. A `complete` record's optional
-`outcome` is preserved, so dependency failures and other terminal outcomes can be reproduced.
+is selected), with a parallel `.statuses` array for each `take`. A `take` event may set
+`mode = "critical"` to select protected internal persistence/renewal work or
+`mode = "regular"` to select ordinary work; the legacy boolean `renewal_mode` selector remains
+supported for compatibility. A `complete` record's optional `outcome` is preserved, so
+dependency failures and other terminal outcomes can be reproduced.
 A `budget` event uses `{ kind = "budget", read = 16, write = 8 }` to inject a
 read/write budget snapshot. An `observe` event accepts `operation_kind`, boolean `succeeded`,
 non-negative `latency_ms`, and optional `error_class` and non-negative `budget`; it injects an
