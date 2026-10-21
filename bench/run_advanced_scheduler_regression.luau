@@ -859,6 +859,19 @@ do
 	local unknown_event = guarded_replay:Replay({ { kind = "unknown-event" } })
 	assert(type(unknown_event) == "table" and unknown_event.code == "invalid",
 		"trace replay silently ignored an unknown event kind")
+	local critical_mode_replay = new_scheduler():Replay({
+		{ kind = "enqueue", item = {
+			id = "ordinary-work", owner_id = "replay-owner", lane = "normal",
+			service_class = "normal", work_class = "maintenance",
+		} },
+		{ kind = "enqueue", item = {
+			id = "critical-profile-save", owner_id = "replay-owner", lane = "normal",
+			service_class = "critical", work_class = "profile_save", operation_class = "update_async",
+		} },
+		{ kind = "take", mode = "critical" },
+	})
+	assert(critical_mode_replay[1] == "critical-profile-save",
+		"trace replay's critical selector did not admit protected profile persistence")
 	local invalid_advance = guarded_replay:Replay({ { kind = "advance", ms = -1 } })
 	assert(type(invalid_advance) == "table" and invalid_advance.code == "invalid",
 		"trace replay accepted a negative virtual-time advance")
@@ -1887,6 +1900,91 @@ assert(deferred_read_ran, "noncritical read did not resume after request budget 
 assert(live_budget_governor:Stats().request_budgets.read == 8,
 	"dispatcher did not refresh request budget after the recovery observation")
 live_budget_dispatcher:Close()
+
+-- The protected concurrency share covers critical saves, reconciliation and release.
+do
+	local persistence_reserve = new_scheduler()
+	local persistence_policy = persistence_reserve:Stats().policy
+	assert(persistence_reserve:SetPolicy({
+		revision = persistence_policy.revision + 1,
+		max_scheduled_in_flight = 3,
+		scheduler_critical_reserve = 1,
+		max_per_owner_in_flight = 4,
+	}), "critical persistence reserve policy was rejected")
+	local persistence_dispatcher = Scheduler.new_dispatcher(persistence_reserve, {
+		now_ms = function() return now_ms end,
+	})
+	local release_ordinary_work = false
+	local ordinary_started, ordinary_completed = 0, 0
+	for index = 1, 3 do
+		local job = persistence_dispatcher:Schedule(
+			"ordinary-reserve-owner-" .. tostring(index),
+			"ordinary-reserve-job-" .. tostring(index),
+			function()
+				ordinary_started += 1
+				while not release_ordinary_work do task.wait(0.001) end
+				ordinary_completed += 1
+				return { code = "committed" }
+			end,
+			{
+				lane = "normal",
+				service_class = "normal",
+				work_class = "maintenance",
+				operation_class = "read",
+				mutating = false,
+			}
+		)
+		assert(job.code == "accepted", "ordinary reserve fixture was rejected")
+	end
+	for _ = 1, 200 do
+		if ordinary_started == 2 then break end
+		task.wait(0.001)
+	end
+	assert(ordinary_started == 2,
+		"ordinary work consumed the protected critical persistence slot")
+
+	local protected_work = {
+		{ work_class = "profile_save", operation_class = "update_async" },
+		{ work_class = "reconciliation", operation_class = "profile_reconcile" },
+		{ work_class = "profile_release", operation_class = "profile_release" },
+	}
+	local critical_started = 0
+	for _, item in ipairs(protected_work) do
+		local callback_started = false
+		local job = persistence_dispatcher:Schedule(
+			"internal-critical-owner",
+			"critical-reserve-" .. item.work_class,
+			function()
+				critical_started += 1
+				callback_started = true
+				return { code = "committed" }
+			end,
+			{
+				lane = "normal",
+				service_class = "critical",
+				work_class = item.work_class,
+				operation_class = item.operation_class,
+			}
+		)
+		assert(job.code == "accepted", "critical " .. item.work_class .. " work was rejected")
+		for _ = 1, 200 do
+			if callback_started then break end
+			task.wait(0.001)
+		end
+		assert(callback_started,
+			"critical " .. item.work_class .. " could not use the protected concurrency share")
+		assert(ordinary_started == 2,
+			"ordinary work entered the protected share while critical work was queued")
+	end
+
+	release_ordinary_work = true
+	for _ = 1, 300 do
+		if ordinary_completed == 3 then break end
+		task.wait(0.001)
+	end
+	assert(ordinary_completed == 3, "ordinary work failed to resume after reserve pressure cleared")
+	persistence_dispatcher:Close()
+end
 
 -- Closing a dispatcher drains callbacks and cancels its outstanding wake timer.
 local closing_governor = new_scheduler()
