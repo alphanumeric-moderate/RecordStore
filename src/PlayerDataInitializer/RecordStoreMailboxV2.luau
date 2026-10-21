@@ -367,7 +367,9 @@ function MailboxV2.new(store: unknown, owner_value: Owner, options_value: Option
 	options.retry_base_ms = options.retry_base_ms or DEFAULT_RETRY_BASE_MS
 	options.retry_max_ms = options.retry_max_ms or DEFAULT_RETRY_MAX_MS
 	options.priority_aging_ms = options.priority_aging_ms or DEFAULT_PRIORITY_AGING_MS
-	options.high_priority_burst = options.high_priority_burst or DEFAULT_HIGH_PRIORITY_BURST
+	if options.high_priority_burst == nil then
+		options.high_priority_burst = DEFAULT_HIGH_PRIORITY_BURST
+	end
 	if options.strict_ordering_enabled ~= nil and type(options.strict_ordering_enabled) ~= "boolean" then
 		error("strict_ordering_enabled must be a boolean", 2)
 	end
@@ -1749,11 +1751,11 @@ function MailboxV2.EnqueueAsync(self: Mailbox, message_type: string, payload: un
 	if ordering_key ~= nil and not self.options.strict_ordering_enabled then
 		return ok("invalid", nil, nil, "ordering_key requires strict_ordering_enabled=true")
 	end
-	local priority = options.priority or "normal"
+	local priority = if options.priority == nil then "normal" else options.priority
 	if priority ~= "high" and priority ~= "normal" and priority ~= "background" then
 		return ok("invalid", nil, nil, "priority must be high, normal or background")
 	end
-	local available_at = options.available_at or self:_now()
+	local available_at = if options.available_at == nil then self:_now() else options.available_at
 	local expires_at = options.expires_at
 	if not is_finite(available_at) or (expires_at ~= nil and (not is_finite(expires_at) or (expires_at :: number) <= (available_at :: number))) then
 		return ok("invalid", nil, nil, "available_at and expires_at must be finite milliseconds, with expiry after eligibility")
