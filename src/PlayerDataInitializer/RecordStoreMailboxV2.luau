@@ -49,6 +49,7 @@ type Options = {
 	retry_base_ms: number?,
 	retry_max_ms: number?,
 	priority_aging_ms: number?,
+	strict_ordering_enabled: boolean?,
 	lease_renewal_scheduler: ((string, number, number, () -> unknown, (unknown) -> ()) -> unknown)?,
 	activation_guard: ((string) -> (boolean, string?))?,
 	allow_unattested_activation: boolean?,
@@ -365,6 +366,10 @@ function MailboxV2.new(store: unknown, owner_value: Owner, options_value: Option
 	options.retry_base_ms = options.retry_base_ms or DEFAULT_RETRY_BASE_MS
 	options.retry_max_ms = options.retry_max_ms or DEFAULT_RETRY_MAX_MS
 	options.priority_aging_ms = options.priority_aging_ms or DEFAULT_PRIORITY_AGING_MS
+	if options.strict_ordering_enabled ~= nil and type(options.strict_ordering_enabled) ~= "boolean" then
+		error("strict_ordering_enabled must be a boolean", 2)
+	end
+	options.strict_ordering_enabled = options.strict_ordering_enabled == true
 	local numeric_options = {
 		"max_segments", "segment_max_messages", "max_payload_bytes", "max_request_bytes",
 		"preparation_shard_count", "preparation_max_entries_per_shard", "preparation_max_entry_bytes",
@@ -1097,7 +1102,12 @@ function MailboxV2._ensure_ordering_slot(self: Mailbox, route: string, ordering_
 	return sequence :: number, nil
 end
 
-function MailboxV2._release_ordering_slot(self: Mailbox, route: string, ordering_key: unknown): boolean
+function MailboxV2._release_ordering_slot(
+	self: Mailbox,
+	route: string,
+	ordering_key: unknown,
+	expected_sequence: number?
+): boolean
 	if type(ordering_key) ~= "string" or ordering_key == "" then return true end
 	local ordering_route = self:_ordering_route(ordering_key)
 	local updated, update_error = self:_update(ordering_route, function(raw)
@@ -1108,11 +1118,25 @@ function MailboxV2._release_ordering_slot(self: Mailbox, route: string, ordering
 			return raw
 		end
 		local routes = as_dict(current.routes)
-		if routes == nil or routes[route] == nil then return current end
+		local route_sequence = if routes ~= nil then routes[route] else nil
+		if routes == nil or route_sequence == nil
+			or (expected_sequence ~= nil and route_sequence ~= expected_sequence)
+		then
+			return current
+		end
 		local next_record = clone_dict(current)
 		local next_routes = clone_dict(routes)
 		next_routes[route] = nil
 		next_record.routes = next_routes
+		local replay_operations = if current.replay_operations == nil then {} else as_dict(current.replay_operations)
+		if replay_operations ~= nil then
+			local replay_entry = as_dict(replay_operations[route])
+			if replay_entry == nil or replay_entry.sequence == route_sequence then
+				local next_replay_operations = clone_dict(replay_operations)
+				next_replay_operations[route] = nil
+				next_record.replay_operations = next_replay_operations
+			end
+		end
 		next_record.updated_at = self:_now()
 		return next_record
 	end)
@@ -1120,16 +1144,127 @@ function MailboxV2._release_ordering_slot(self: Mailbox, route: string, ordering
 		local latest_value, read_error = self:_get(ordering_route)
 		local latest = as_dict(latest_value)
 		local routes = if latest ~= nil then as_dict(latest.routes) else nil
+		local latest_sequence = if routes ~= nil then routes[route] else nil
 		return read_error == nil and latest ~= nil and same_owner(latest.owner, self.owner)
-			and (routes == nil or routes[route] == nil)
+			and (latest_sequence == nil or (expected_sequence ~= nil and latest_sequence ~= expected_sequence))
 	end
 	local record = as_dict(updated)
 	local routes = if record ~= nil then as_dict(record.routes) else nil
+	local latest_sequence = if routes ~= nil then routes[route] else nil
 	return record ~= nil and same_owner(record.owner, self.owner)
-		and (routes == nil or routes[route] == nil)
+		and (latest_sequence == nil or (expected_sequence ~= nil and latest_sequence ~= expected_sequence))
 end
 
-function MailboxV2._ordering_blocked(self: Mailbox, record: Dict): (boolean, string?)
+function MailboxV2._reserve_replay_ordering_slot(
+	self: Mailbox,
+	route: string,
+	ordering_key: string,
+	operation_id: string
+): (number?, string?)
+	local ordering_route = self:_ordering_route(ordering_key)
+	local updated, update_error = self:_update(ordering_route, function(raw)
+		local current = as_dict(raw)
+		if current == nil then
+			current = {
+				version = VERSION,
+				owner = clone_owner(self.owner),
+				ordering_key = ordering_key,
+				next_sequence = 1,
+				routes = {},
+				replay_operations = {},
+			}
+		end
+		if current.version ~= VERSION or not same_owner(current.owner, self.owner)
+			or current.ordering_key ~= ordering_key
+		then
+			return raw
+		end
+		local routes = as_dict(current.routes)
+		local replay_operations = if current.replay_operations == nil then {} else as_dict(current.replay_operations)
+		if routes == nil or replay_operations == nil then return raw end
+		local prior_replay = as_dict(replay_operations[route])
+		local current_sequence = routes[route]
+		if prior_replay ~= nil and prior_replay.operation_id == operation_id
+			and is_finite(prior_replay.sequence) and current_sequence == prior_replay.sequence
+		then
+			return current
+		end
+		local next_sequence = current.next_sequence
+		if not is_finite(next_sequence) or (next_sequence :: number) < 1
+			or math.floor(next_sequence :: number) ~= next_sequence
+			or (next_sequence :: number) >= 9_007_199_254_740_991
+		then
+			return raw
+		end
+		local next_record = clone_dict(current)
+		local next_routes = clone_dict(routes)
+		local next_replay_operations = clone_dict(replay_operations)
+		next_routes[route] = next_sequence
+		next_replay_operations[route] = { operation_id = operation_id, sequence = next_sequence }
+		next_record.routes = next_routes
+		next_record.replay_operations = next_replay_operations
+		next_record.next_sequence = (next_sequence :: number) + 1
+		next_record.updated_at = self:_now()
+		return next_record
+	end)
+	if update_error ~= nil or updated == nil then
+		return nil, "replay ordering reservation is unresolved: " .. tostring(update_error or "no durable ordering state")
+	end
+	local record = as_dict(updated)
+	local routes = if record ~= nil then as_dict(record.routes) else nil
+	local replay_operations = if record ~= nil then as_dict(record.replay_operations) else nil
+	local replay_entry = if replay_operations ~= nil then as_dict(replay_operations[route]) else nil
+	local sequence = if replay_entry ~= nil then replay_entry.sequence else nil
+	if record == nil or record.version ~= VERSION or not same_owner(record.owner, self.owner)
+		or record.ordering_key ~= ordering_key or routes == nil or replay_entry == nil
+		or replay_entry.operation_id ~= operation_id or not is_finite(sequence)
+		or routes[route] ~= sequence
+	then
+		return nil, "replay ordering reservation could not be verified"
+	end
+	return sequence :: number, nil
+end
+
+function MailboxV2._ensure_replay_ordering_sequence(
+	self: Mailbox,
+	route: string,
+	operation_id: string,
+	record: Dict
+): (Dict?, string?)
+	local ordering_key = record.ordering_key
+	if ordering_key == nil then return record, nil end
+	if type(ordering_key) ~= "string" or ordering_key == "" or #ordering_key > MAX_ORDERING_KEY_LENGTH then
+		return nil, "replaying message has invalid ordering metadata"
+	end
+	local sequence, reserve_error = self:_reserve_replay_ordering_slot(route, ordering_key, operation_id)
+	if sequence == nil then return nil, reserve_error end
+	local updated, update_error = self:_update_message(route, function(current)
+		if current == nil or current.state ~= "replaying" or current.replay_operation_id ~= operation_id
+			or current.ordering_key ~= ordering_key
+		then
+			return current
+		end
+		if current.ordering_sequence == sequence then return current end
+		local next_record = clone_dict(current)
+		next_record.ordering_sequence = sequence
+		next_record.updated_at = self:_now()
+		return next_record
+	end)
+	if update_error ~= nil or updated == nil then
+		return nil, "replay message ordering sequence is unresolved: " .. tostring(update_error or "missing canonical record")
+	end
+	local canonical_record = as_dict(updated)
+	if canonical_record == nil or canonical_record.state ~= "replaying"
+		or canonical_record.replay_operation_id ~= operation_id
+		or canonical_record.ordering_key ~= ordering_key
+		or canonical_record.ordering_sequence ~= sequence
+	then
+		return nil, "replay message ordering sequence could not be verified"
+	end
+	return canonical_record, nil
+end
+
+function MailboxV2._ordering_blocked(self: Mailbox, record: Dict, route: string): (boolean, string?)
 	local ordering_key = record.ordering_key
 	local sequence = record.ordering_sequence
 	if ordering_key == nil then return false, nil end
@@ -1149,6 +1284,9 @@ function MailboxV2._ordering_blocked(self: Mailbox, record: Dict): (boolean, str
 	then
 		return true, "ordering state is missing or corrupt"
 	end
+	if routes[route] ~= sequence then
+		return true, "ordered message does not match its durable ordering slot"
+	end
 	for prior_route, prior_sequence in routes do
 		if type(prior_route) == "string" and is_finite(prior_sequence)
 			and (prior_sequence :: number) < (sequence :: number)
@@ -1159,10 +1297,13 @@ function MailboxV2._ordering_blocked(self: Mailbox, record: Dict): (boolean, str
 			if prior == nil or not same_owner(prior.owner, self.owner) then
 				return true, "earlier ordered message has no verifiable canonical record"
 			end
+			if prior.ordering_key ~= ordering_key or prior.ordering_sequence ~= prior_sequence then
+				return true, "predecessor does not match its current durable ordering slot"
+			end
 			if not TERMINAL[tostring(prior.state)] then
 				return true, "an earlier message with the same ordering_key is not terminal"
 			end
-			self:_release_ordering_slot(prior_route, ordering_key)
+			self:_release_ordering_slot(prior_route, ordering_key, prior_sequence)
 		end
 	end
 	return false, nil
@@ -1583,6 +1724,9 @@ function MailboxV2.EnqueueAsync(self: Mailbox, message_type: string, payload: un
 	then
 		return ok("invalid", nil, nil, "ordering_key must be 1 to " .. tostring(MAX_ORDERING_KEY_LENGTH) .. " bytes")
 	end
+	if ordering_key ~= nil and not self.options.strict_ordering_enabled then
+		return ok("invalid", nil, nil, "ordering_key requires strict_ordering_enabled=true")
+	end
 	local priority = options.priority or "normal"
 	if priority ~= "high" and priority ~= "normal" and priority ~= "background" then
 		return ok("invalid", nil, nil, "priority must be high, normal or background")
@@ -1777,7 +1921,7 @@ function MailboxV2._finish_acknowledgement(self: Mailbox, route: string, token: 
 		return ok("unknown", route, nil, "acknowledgement completion could not be verified")
 	end
 	if finished.state == "acknowledged" then
-		self:_release_ordering_slot(route, finished.ordering_key)
+		self:_release_ordering_slot(route, finished.ordering_key, finished.ordering_sequence)
 		return ok("processed", route, self:_record_snapshot(finished), nil)
 	end
 	return ok("unknown", route, self:_record_snapshot(finished), "acknowledgement terminal state was not confirmed")
@@ -1833,7 +1977,7 @@ function MailboxV2._finish_dead_letter(self: Mailbox, route: string): Result
 	if terminal_error ~= nil or terminal == nil or terminal.state ~= "dead_lettered" then
 		return ok("unknown", route, terminal, terminal_error or "DLQ append committed but terminal status is unknown")
 	end
-	self:_release_ordering_slot(route, terminal.ordering_key)
+	self:_release_ordering_slot(route, terminal.ordering_key, terminal.ordering_sequence)
 	return ok("dead_lettered", route, self:_record_snapshot(terminal), nil)
 end
 
@@ -1847,7 +1991,7 @@ function MailboxV2._claim(self: Mailbox, route: string): (Dict?, Result)
 		return nil, ok("not_found", route, nil, "message does not exist")
 	end
 	if current_record.state == "ready" or current_record.state == "claimed" then
-		local blocked, ordering_error = self:_ordering_blocked(current_record)
+		local blocked, ordering_error = self:_ordering_blocked(current_record, route)
 		if blocked then return nil, ok("ordered", route, self:_record_snapshot(current_record), ordering_error) end
 	end
 	local token = if self.options.guid ~= nil then self.options.guid() else digest(route .. tostring(self:_now()) .. tostring(math.random()))
@@ -1922,7 +2066,7 @@ function MailboxV2._claim(self: Mailbox, route: string): (Dict?, Result)
 		return nil, self:_finish_dead_letter(route)
 	end
 	if claimed.state == "expired" then
-		self:_release_ordering_slot(route, claimed.ordering_key)
+		self:_release_ordering_slot(route, claimed.ordering_key, claimed.ordering_sequence)
 		return nil, ok("expired", route, self:_record_snapshot(claimed), nil)
 	end
 	if claimed.state ~= "claimed" or claimed.claim_token ~= token then
@@ -2077,7 +2221,7 @@ function MailboxV2._retry_claim(self: Mailbox, route: string, token: string, rea
 		return self:_finish_dead_letter(route)
 	end
 	if updated.state == "expired" then
-		self:_release_ordering_slot(route, updated.ordering_key)
+		self:_release_ordering_slot(route, updated.ordering_key, updated.ordering_sequence)
 		return ok("expired", route, self:_record_snapshot(updated), nil)
 	end
 	if updated.state ~= "ready" then
@@ -2333,8 +2477,13 @@ function MailboxV2.RecoverAsync(self: Mailbox): Result
 					return result
 				end
 			elseif record.state == "replaying" then
-				local generation = record.pending_replay_generation
 				local replay_token = tostring(record.replay_operation_id)
+				local sequenced_record, ordering_error = self:_ensure_replay_ordering_sequence(route, replay_token, record)
+				if sequenced_record == nil then
+					return ok("unknown", route, nil, ordering_error or "replay ordering recovery is unresolved")
+				end
+				record = sequenced_record
+				local generation = record.pending_replay_generation
 				local locator, append_error = self:_append_index("active", {
 					route = route,
 					placement_generation = generation,
@@ -2375,8 +2524,13 @@ function MailboxV2.RecoverAsync(self: Mailbox): Result
 			local record_value = self:_get(route)
 			local record = as_dict(record_value)
 			if record ~= nil and same_owner(record.owner, self.owner) and record.state == "replaying" then
-				local generation = record.pending_replay_generation
 				local replay_token = tostring(record.replay_operation_id)
+				local sequenced_record, ordering_error = self:_ensure_replay_ordering_sequence(route, replay_token, record)
+				if sequenced_record == nil then
+					return ok("unknown", route, nil, ordering_error or "replay ordering recovery is unresolved")
+				end
+				record = sequenced_record
+				local generation = record.pending_replay_generation
 				local locator, append_error = self:_append_index("active", {
 					route = route,
 					placement_generation = generation,
@@ -2494,6 +2648,11 @@ function MailboxV2.ReplayDeadLetterAsync(self: Mailbox, message_id: string, oper
 	if record.state ~= "replaying" or record.replay_operation_id ~= operation_id then
 		return ok("conflict", message_id, self:_record_snapshot(record), "message is not available for replay")
 	end
+	local sequenced_record, ordering_error = self:_ensure_replay_ordering_sequence(message_id, operation_id, record)
+	if sequenced_record == nil then
+		return ok("unknown", message_id, self:_record_snapshot(record), ordering_error or "replay ordering is unresolved")
+	end
+	record = sequenced_record
 	local locator, append_error = self:_append_index("active", {
 		route = message_id,
 		placement_generation = record.pending_replay_generation,
