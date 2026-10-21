@@ -966,7 +966,9 @@ local retry_second, retry_second_status = retry_queue:TakeNext()
 assert(retry_second ~= nil and retry_second_status == "success" and retry_second.id == retry_first.id and retry_second.is_retry,
 	"retry did not preserve its ID and retry marker")
 assert(retry_queue:MarkCompleted(retry_second.id, "committed"), "retry did not release scheduler state")
-assert(next(retry_queue:Stats().scheduler.active_by_owner) == nil, "completed owner state leaked")
+local retry_snapshot = retry_queue:Stats()
+assert(retry_snapshot.scheduler.active_owner_count == 0 and retry_snapshot.scheduler.active_by_owner == nil,
+	"completed owner state leaked or raw owner identifiers were exposed")
 
 -- Explicit throttled retries respect retry_after_ms, use the class-specific backoff,
 -- and report attempt classes without retrying an uncertain outcome.
