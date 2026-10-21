@@ -2014,6 +2014,36 @@ end
 
 assert_reserved_work_class_rejected("lease_renewal")
 assert_reserved_work_class_rejected("profile_release")
+assert_reserved_work_class_rejected("critical")
+assert_reserved_work_class_rejected("profile_save")
+
+local function assert_reserved_operation_class_rejected(operation_class)
+	local callback_ran = false
+	local job = RecordStore.schedule_work(
+		"integration-owner",
+		"public-reserved-operation-class-" .. operation_class,
+		function()
+			callback_ran = true
+			return { code = "success" }
+		end,
+		{ lane = "normal", operation_class = operation_class }
+	)
+	if job.code ~= "invalid" then
+		RecordStore.set_scheduler_enabled(false)
+		for _ = 1, 200 do
+			if RecordStore.get_scheduler_snapshot().dispatcher.in_flight == 0 then break end
+			task.wait(0.001)
+		end
+		RecordStore.set_scheduler_enabled(true)
+	end
+	assert(job.code == "invalid",
+		"public schedule_work inferred a protected work class from operation_class " .. operation_class)
+	assert(not callback_ran,
+		"public callback ran with protected operation_class " .. operation_class)
+end
+
+assert_reserved_operation_class_rejected("critical")
+assert_reserved_operation_class_rejected("profile_save")
 
 -- The public API must not let generic work claim the governor's critical reserve.
 local privileged_service_class_callback_ran = false
