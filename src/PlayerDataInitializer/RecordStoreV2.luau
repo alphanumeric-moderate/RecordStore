@@ -4243,12 +4243,12 @@ function V2.new(record_store, mailbox_module, options)
 		}
 		-- Prefer the shared core selector when enabled; retain the local dispatcher as fallback.
 		local core_scheduler_enabled = false
-		if type(record_store.get_scheduler_snapshot) == "function"
+		if type(record_store.is_scheduler_enabled) == "function"
 			and type(record_store.schedule_internal_work) == "function"
 			and type(record_store.get_scheduler_clock_ms) == "function"
 		then
-			local snapshot_ok, snapshot = pcall(record_store.get_scheduler_snapshot)
-			core_scheduler_enabled = snapshot_ok and type(snapshot) == "table" and snapshot.enabled == true
+			local enabled_ok, enabled = pcall(record_store.is_scheduler_enabled)
+			core_scheduler_enabled = enabled_ok and enabled == true
 		end
 		if core_scheduler_enabled then
 			local clock_ok, core_now_ms = pcall(record_store.get_scheduler_clock_ms)
@@ -4278,6 +4278,20 @@ function V2.new(record_store, mailbox_module, options)
 					on_complete = function(result)
 						central_dispatch_in_flight = math.max(0, central_dispatch_in_flight - 1)
 						local result_code = if type(result) == "table" then result.code else nil
+						local selector_enabled = false
+						if type(record_store.is_scheduler_enabled) == "function" then
+							local enabled_ok, enabled = pcall(record_store.is_scheduler_enabled)
+						selector_enabled = enabled_ok and enabled == true
+						end
+						if result_code == "cancelled" and not selector_enabled then
+							-- A rollout reduction cancels queued core work. Re-submit it to the
+							-- V2 fallback dispatcher so a selector switch does not drop accepted work.
+							dispatch_metrics.retries += 1
+							local fallback = enqueue_scheduled_callback(owner, lane, reason, callback, due_at_ms, schedule_options, completion)
+							if type(fallback) == "table" and fallback.code == "accepted" then return end
+							invoke_completion({ on_complete = completion }, fallback)
+							return
+						end
 						if result_code == "expired" then
 							dispatch_metrics.expired += 1
 						elseif result_code == "dependency_failed" then
