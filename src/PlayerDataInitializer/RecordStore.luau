@@ -9483,6 +9483,11 @@ end
 
 -- Scheduling never replaces the durable request gate or session fencing.
 -- It is disabled until the caller explicitly enables the new selector.
+function RecordStore.validate_scheduler_policy(policy: { [string]: unknown }): (string, string?)
+	if type(policy) ~= "table" then return "invalid", "scheduler policy must be a table" end
+	return scheduler_dispatcher:ValidatePolicy(policy)
+end
+
 function RecordStore.configure_scheduler_policy(policy: { [string]: unknown }): (string, string?)
 	if type(policy) ~= "table" then return "invalid", "scheduler policy must be a table" end
 	return scheduler_dispatcher:SetPolicy(policy)
