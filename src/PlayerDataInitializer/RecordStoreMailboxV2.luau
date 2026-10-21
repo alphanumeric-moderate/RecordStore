@@ -370,6 +370,9 @@ function MailboxV2.new(store: unknown, owner_value: Owner, options_value: Option
 		error("strict_ordering_enabled must be a boolean", 2)
 	end
 	options.strict_ordering_enabled = options.strict_ordering_enabled == true
+	if options.strict_ordering_enabled and type((store :: Dict).GetAsyncFresh) ~= "function" then
+		error("strict_ordering_enabled requires store:GetAsyncFresh(key) to bypass stale DataStore caches", 2)
+	end
 	local numeric_options = {
 		"max_segments", "segment_max_messages", "max_payload_bytes", "max_request_bytes",
 		"preparation_shard_count", "preparation_max_entries_per_shard", "preparation_max_entry_bytes",
@@ -448,6 +451,20 @@ end
 function MailboxV2._get(self: Mailbox, key: string): (unknown, string?)
 	local success, value = pcall(function()
 		return self.store:GetAsync(key)
+	end)
+	if not success then
+		return nil, tostring(value)
+	end
+	return value, nil
+end
+
+function MailboxV2._get_fresh(self: Mailbox, key: string): (unknown, string?)
+	local fresh_get = (self.store :: Dict).GetAsyncFresh
+	if type(fresh_get) ~= "function" then
+		return nil, "store does not provide an authoritative uncached read"
+	end
+	local success, value = pcall(function()
+		return (fresh_get :: (any, string) -> unknown)(self.store, key)
 	end)
 	if not success then
 		return nil, tostring(value)
@@ -1275,7 +1292,7 @@ function MailboxV2._ordering_blocked(self: Mailbox, record: Dict, route: string)
 		return true, "ordered message has invalid durable ordering metadata"
 	end
 	local order_route = self:_ordering_route(ordering_key)
-	local ordering_value, read_error = self:_get(order_route)
+	local ordering_value, read_error = self:_get_fresh(order_route)
 	local ordering = as_dict(ordering_value)
 	if read_error ~= nil then return true, "ordering state read failed: " .. read_error end
 	local routes = if ordering ~= nil then as_dict(ordering.routes) else nil
@@ -1291,7 +1308,7 @@ function MailboxV2._ordering_blocked(self: Mailbox, record: Dict, route: string)
 		if type(prior_route) == "string" and is_finite(prior_sequence)
 			and (prior_sequence :: number) < (sequence :: number)
 		then
-			local prior_value, prior_error = self:_get(prior_route)
+			local prior_value, prior_error = self:_get_fresh(prior_route)
 			if prior_error ~= nil then return true, "predecessor state read failed: " .. prior_error end
 			local prior = as_dict(prior_value)
 			if prior == nil or not same_owner(prior.owner, self.owner) then
@@ -2810,6 +2827,11 @@ function MockStore.new()
 end
 
 function MockStore:GetAsync(key: string): unknown
+	self.get_calls += 1
+	return clone_json(self.values[key])
+end
+
+function MockStore:GetAsyncFresh(key: string): unknown
 	self.get_calls += 1
 	return clone_json(self.values[key])
 end
