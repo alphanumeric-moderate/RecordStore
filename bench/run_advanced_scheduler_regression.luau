@@ -1986,6 +1986,54 @@ do
 	persistence_dispatcher:Close()
 end
 
+-- Generic delayed work must not consume the queue capacity reserved for internal critical work.
+do
+	local reserved_queue_governor = new_scheduler()
+	local reserved_queue_policy = reserved_queue_governor:Stats().policy
+	assert(reserved_queue_governor:SetPolicy({
+		revision = reserved_queue_policy.revision + 1,
+		queue_capacity = 4,
+	}), "protected queue capacity policy was rejected")
+	local reserved_queue_dispatcher = Scheduler.new_dispatcher(reserved_queue_governor, {
+		now_ms = function() return now_ms end,
+	})
+	local far_future = now_ms + 100000000
+	for index = 1, 3 do
+		local job = reserved_queue_dispatcher:Schedule(
+			"queue-reserve-owner-" .. tostring(index),
+			"ordinary-future-job-" .. tostring(index),
+			function() return { code = "committed" } end,
+			{ lane = "background", work_class = "maintenance", due_at_ms = far_future }
+		)
+		assert(job.code == "accepted", "ordinary work was rejected before the noncritical queue allowance filled")
+	end
+	local ordinary_overflow = reserved_queue_dispatcher:Schedule(
+		"queue-reserve-overflow-owner",
+		"ordinary-future-overflow",
+		function() return { code = "committed" } end,
+		{ lane = "background", work_class = "maintenance", due_at_ms = far_future }
+	)
+	assert(ordinary_overflow.code == "capacity",
+		"ordinary delayed work consumed the queue slot reserved for protected work")
+	local protected_renewal = reserved_queue_dispatcher:Schedule(
+		"queue-reserve-critical-owner",
+		"critical-future-renewal",
+		function() return { code = "renewed" } end,
+		{
+			lane = "lease_renewal",
+			service_class = "critical",
+			work_class = "profile_release",
+			operation_class = "lease_renewal",
+			due_at_ms = far_future,
+		}
+	)
+	assert(protected_renewal.code == "accepted",
+		"critical lease renewal could not use queue capacity protected from generic work")
+	assert(reserved_queue_dispatcher:Stats().governor.queue_items == 4,
+		"protected queue admission did not preserve bounded total capacity")
+	reserved_queue_dispatcher:Close()
+end
+
 -- Closing a dispatcher drains callbacks and cancels its outstanding wake timer.
 local closing_governor = new_scheduler()
 local closing_dispatcher = Scheduler.new_dispatcher(closing_governor, {
