@@ -265,6 +265,82 @@ local function test_high_priority_burst_does_not_starve_background_messages()
 		"sustained high-priority work starved a background message beyond the configured burst")
 end
 
+local function test_retrying_predecessor_blocks_same_key_successor()
+	local mailbox = new_mailbox({
+		strict_ordering_enabled = true,
+		retry_base_ms = 1000,
+		retry_max_ms = 1000,
+	})
+	enqueue(mailbox, "retrying-predecessor", "retrying-predecessor-id", "retry-account", "background")
+	enqueue(mailbox, "high-successor", "retrying-successor-id", "retry-account", "high")
+	local attempts = 0
+	local first = process_one(mailbox, function(_, message)
+		assert(message.Type == "retrying-predecessor", "high-priority successor bypassed the retrying predecessor")
+		attempts += 1
+		return false
+	end)
+	assert(first.code == "retry_scheduled", "failed ordered predecessor did not schedule a retry")
+
+	local invoked_successor = false
+	local blocked = process_one(mailbox, function(_, message)
+		if message.Type == "high-successor" then invoked_successor = true end
+		return true
+	end)
+	assert(blocked.code == "empty" and not invoked_successor,
+		"same-key successor ran while its predecessor was waiting for retry")
+
+	now_ms += 60000
+	local retried = process_one(mailbox, function(_, message)
+		assert(message.Type == "retrying-predecessor", "retry did not reclaim the ordered predecessor")
+		attempts += 1
+		return true
+	end)
+	assert(retried.code == "processed" and attempts == 2,
+		"ordered predecessor did not reach a terminal state after retry")
+	local successor = process_one(mailbox, function(_, message)
+		assert(message.Type == "high-successor", "successor was not dispatched after predecessor became terminal")
+		invoked_successor = true
+		return true
+	end)
+	assert(successor.code == "processed" and invoked_successor,
+		"same-key successor remained blocked after the predecessor completed")
+end
+
+local function test_claim_update_fails_closed_if_order_sequence_changes_after_arbitration()
+	local backing = MailboxV2.MockStore()
+	local claim_route = nil
+	local intercept_claim = false
+	local intercept_done = false
+	local store = {
+		GetAsync = function(_, key) return backing:GetAsync(key) end,
+		GetAsyncFresh = function(_, key) return backing:GetAsyncFresh(key) end,
+		UpdateAsync = function(_, key, transform)
+			if intercept_claim and not intercept_done and key == claim_route then
+				intercept_done = true
+				local current = backing.values[key]
+				assert(type(current) == "table", "claim-race fixture lost the canonical message")
+				current.ordering_sequence += 100
+			end
+			return backing:UpdateAsync(key, transform)
+		end,
+	}
+	local mailbox = new_mailbox({ strict_ordering_enabled = true }, store)
+	local queued = enqueue(mailbox, "raced-claim", "raced-claim-id", "race-account", "high")
+	claim_route = queued.message_id
+	intercept_claim = true
+	local handler_invoked = false
+	local result = process_one(mailbox, function()
+		handler_invoked = true
+		return true
+	end)
+	local canonical = backing:GetAsyncFresh(queued.message_id)
+	assert(intercept_done, "race injector did not run between ordering arbitration and claim commit")
+	assert(result.code == "empty" and not handler_invoked,
+		"claim ran after its durable ordering sequence changed concurrently")
+	assert(canonical.state == "ready" and canonical.ordering_sequence ~= nil,
+		"raced claim did not leave the canonical message recoverable")
+end
+
 local function test_clock_skew_cannot_break_ordering_under_adversarial_sort_keys()
 	local mailbox, store = new_mailbox({ strict_ordering_enabled = true })
 	local first = enqueue(mailbox, "first", "skew-first", "skew-account", "normal")
@@ -381,6 +457,8 @@ test_ordering_is_opt_in_and_input_validation_is_side_effect_free()
 test_recordstore_installs_shared_scheduler_for_v2_claim_renewal()
 test_priority_never_overtakes_an_earlier_ordered_message()
 test_delayed_predecessor_blocks_later_high_priority_work()
+test_retrying_predecessor_blocks_same_key_successor()
+test_claim_update_fails_closed_if_order_sequence_changes_after_arbitration()
 test_dead_letter_replay_gets_a_new_ordering_sequence_and_recovers_from_stale_reads()
 test_order_slot_mismatch_fails_closed()
 test_high_priority_burst_does_not_starve_background_messages()
