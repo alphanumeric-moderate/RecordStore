@@ -4950,6 +4950,24 @@ local function mailbox_store_adapter(self: Record): (any?, ResultCode, string?)
 		if not call_ok then error(tostring(value), 2) end
 		return value
 	end
+	function adapter:GetAsyncFresh(key: string): unknown
+		check_key(key)
+		local deadline, deadline_error = resolve_operation_deadline(state.options.operation_deadline)
+		if deadline == nil then error(deadline_error or "invalid operation deadline", 2) end
+		if state.backend.mock then
+			local entry = get_mock_store(store_name, state.scope)[key]
+			return if entry ~= nil then copy_value(entry.Value) else nil
+		end
+		if not acquire_request(state, deadline, false, Enum.DataStoreRequestType.StandardRead) then
+			error("V2 mailbox authoritative read request deadline exceeded", 2)
+		end
+		local get_options = Instance.new("DataStoreGetOptions")
+		get_options.UseCache = false
+		local call_ok, value = pcall(function() return real_store:GetAsync(key, get_options) end)
+		release_slot()
+		if not call_ok then error(tostring(value), 2) end
+		return value
+	end
 	function adapter:UpdateAsync(
 		key: string,
 		transform: (unknown, unknown?) -> (unknown, { number }?, { [string]: unknown }?)
