@@ -1336,6 +1336,7 @@ local function new_governor(options)
 			failed = copy(self.failed), active_owner = copy(self.active_owner),
 			operation_kind_keys = copy(self.operation_kind_keys),
 			active_renewals_by_owner = copy(self.active_renewals_by_owner),
+			active_critical_by_owner = copy(self.active_critical_by_owner),
 			drr_deficit = copy(self.drr_deficit), drr_cursor_key = self.drr_cursor_key,
 			high_streak = self.high_streak, urgent_streak = self.urgent_streak,
 			policy = copy(self.policy), in_flight = self.in_flight, by_class = copy(self.by_class),
