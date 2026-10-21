@@ -294,7 +294,65 @@ local function test_priority_burst_policy_is_bounded_and_configurable()
 		"configurable burst failed to serve background work after two high-priority claims")
 end
 
+local function test_recordstore_installs_shared_scheduler_for_v2_claim_renewal()
+	RecordStore.Mock.reset()
+	local renewal_calls = 0
+	local HttpService = game:GetService("HttpService")
+	local record = RecordStore.Mock.new("MailboxV2SchedulerIntegration", "global", "profile-scheduler", {
+		schema_version = 1,
+		durable_queue_enabled = true,
+		queue_store_name = "MailboxV2SchedulerIntegrationQueue",
+		autosave_interval = 1000,
+		lease_duration = 180,
+		lease_renewal = 60,
+		on_queue_message_async = function(_, payload, _, _, _, _, context)
+			assert(type(context) == "table" and type(context.renew_lease_async) == "function",
+				"V2 core did not pass a renewable handler context")
+			local renewal = context.renew_lease_async()
+			assert(type(renewal) == "table" and renewal.code == "renewed",
+				"V2 claim renewal did not complete through the shared scheduler: " .. tostring(renewal and renewal.code))
+			assert(context.is_cancelled() == false, "successful renewal unexpectedly cancelled the handler")
+			renewal_calls += 1
+			return true
+		end,
+	})
+	local open_result, open_message = record:Open({ value = 0 })
+	assert(open_result == "created" or open_result == "loaded", "integration Record open failed: " .. tostring(open_message))
+
+	local adapter, adapter_code, adapter_message = record:CreateMailboxStoreAdapter()
+	assert(adapter_code == "success" and type(adapter) == "table",
+		"core mailbox adapter creation failed: " .. tostring(adapter_message))
+	local mailbox = MailboxV2.new(adapter, record:GetMailboxOwner(), {
+		active_record = record,
+		encode = function(value) return HttpService:JSONEncode(value) end,
+		activation_guard = function() return true end,
+		strict_ordering_enabled = true,
+		lease_ms = 10000,
+		lease_renewal_horizon_ms = 40000,
+	})
+	local enabled, enable_message = RecordStore.set_scheduler_enabled(true)
+	assert(enabled, "shared scheduler could not be enabled: " .. tostring(enable_message))
+	local bind_result, bind_message = record:BindMailboxV2Async(mailbox)
+	assert(bind_result == "success", "core did not bind the V2 mailbox: " .. tostring(bind_message))
+
+	local enqueue_result, enqueue_message = record:EnqueueAsync("update", { value = 1 }, {
+		idempotency_key = "scheduler-renewal-integration",
+		ordering_key = "profile-value",
+		priority = "high",
+	})
+	assert(enqueue_result == "enqueued", "bound Record could not enqueue an ordered message: " .. tostring(enqueue_message))
+	local process_result, process_message = record:ProcessQueueAsync(1)
+	assert(process_result == "processed", "Record did not process a V2 message: " .. tostring(process_message))
+	assert(renewal_calls == 1, "V2 handler did not exercise the shared scheduler's lease-renewal callback")
+
+	local disabled, disable_message = RecordStore.set_scheduler_enabled(false)
+	assert(disabled, "scheduler kill switch could not be restored: " .. tostring(disable_message))
+	assert(record:Close() == "closed", "integration Record did not close cleanly")
+	RecordStore.Mock.reset()
+end
+
 test_ordering_is_opt_in_and_input_validation_is_side_effect_free()
+test_recordstore_installs_shared_scheduler_for_v2_claim_renewal()
 test_priority_never_overtakes_an_earlier_ordered_message()
 test_delayed_predecessor_blocks_later_high_priority_work()
 test_dead_letter_replay_gets_a_new_ordering_sequence_and_recovers_from_stale_reads()
