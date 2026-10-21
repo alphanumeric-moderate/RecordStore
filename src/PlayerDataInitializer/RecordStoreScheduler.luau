@@ -1780,6 +1780,13 @@ local function new_dispatcher(governor, options)
 			schedule_next_wake()
 		end
 	end
+	function dispatcher:HasActiveSource(source)
+		if not valid_text(source, 64) then return false end
+		for _, entry in pairs(self.callbacks) do
+			if type(entry) == "table" and entry.source == source then return true end
+		end
+		return false
+	end
 	function dispatcher:CancelQueuedWhere(predicate, message)
 		if self.closed or type(predicate) ~= "function" then return 0 end
 		local pending = {}
@@ -1943,6 +1950,7 @@ local function new_dispatcher(governor, options)
 		read_units = true, write_units = true, estimated_bytes = true, handler_slots = true, cost = true,
 		max_retries = true, retry_delay_ms = true, retry_jitter_percent = true, batch_window_ms = true,
 		batchable = true, batch_size = true, batch_backlog = true, on_complete = true, mutating = true,
+		id = true,
 	}
 	function dispatcher:Schedule(owner_id, work_id, callback, schedule_options, source)
 		if self.closed or self.closing then return { code = "closed", message = "scheduler dispatcher is closing or closed" } end
@@ -2007,8 +2015,12 @@ local function new_dispatcher(governor, options)
 		then
 			return { code = "invalid", message = "batch_window_ms must fit the bounded scheduler window" }
 		end
+		local requested_id = schedule_options.id
+		if requested_id ~= nil and not valid_text(requested_id, 128) then
+			return { code = "invalid", message = "id must be 1..128 bytes" }
+		end
 		self.sequence += 1
-		local id = "rsjob:" .. tostring(self.sequence)
+		local id = requested_id or ("rsjob:" .. tostring(self.sequence))
 		local now = now_ms()
 		local due = if finite(schedule_options.due_at_ms) then schedule_options.due_at_ms
 			elseif finite(schedule_options.available_at_ms) then schedule_options.available_at_ms else now
