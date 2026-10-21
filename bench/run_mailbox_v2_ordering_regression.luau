@@ -96,6 +96,27 @@ local function test_ordering_is_opt_in_and_input_validation_is_side_effect_free(
 	assert(store.get_calls == reads_before and store.update_calls == writes_before,
 		"invalid priority validation performed a DataStore operation")
 
+	local invalid_false_priority = mailbox:EnqueueAsync("purchase", { amount = 1 }, {
+		idempotency_key = "invalid-false-priority",
+		priority = false,
+	})
+	assert(invalid_false_priority.code == "invalid", "false priority silently fell back to normal")
+	assert(store.get_calls == reads_before and store.update_calls == writes_before,
+		"false priority validation performed a DataStore operation")
+
+	local invalid_available_time = mailbox:EnqueueAsync("purchase", { amount = 1 }, {
+		idempotency_key = "invalid-available-time",
+		available_at = false,
+	})
+	assert(invalid_available_time.code == "invalid", "false available_at silently fell back to the current time")
+	assert(store.get_calls == reads_before and store.update_calls == writes_before,
+		"invalid available_at validation performed a DataStore operation")
+
+	local invalid_burst_ok = pcall(function()
+		new_mailbox({ high_priority_burst = false })
+	end)
+	assert(not invalid_burst_ok, "false high_priority_burst silently fell back to the default")
+
 	local wrong_type = mailbox:EnqueueAsync("purchase", { amount = 1 }, {
 		idempotency_key = "invalid-order-type",
 		ordering_key = 42,
