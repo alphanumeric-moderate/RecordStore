@@ -6783,6 +6783,256 @@ local function renew_internal(state: InternalState): (ResultCode, string?)
 	return "success", nil
 end
 
+
+local function required_recovery_lease_margin(state: InternalState): number
+	return math.max(1, math.min(
+		state.options.operation_deadline or DEFAULT_OPERATION_DEADLINE,
+		(state.options.lease_duration or DEFAULT_LEASE_DURATION) * 0.25
+	))
+end
+
+local function reconcile_unknown_internal(state: InternalState): (ResultCode, string?)
+	if state.retired then return "invalid", "record has been retired" end
+	if closing and not state.shutdown then return "closing", "server is shutting down" end
+	if state.state ~= "unknown" then
+		return if state.state == "active" then "success" else "fenced", "record is not awaiting reconciliation"
+	end
+	local pending = state.pending_operation
+	if pending == nil then
+		state.next_reconciliation = math.huge
+		state.last_reconciliation_category = "missing_operation_identity"
+		return "unknown", "unknown record has no retained logical operation"
+	end
+	if state.busy or state.queue_busy then return "busy", "record is already processing durable work" end
+
+	local function retry(category: string, message: string, wait_seconds: number?): (ResultCode, string?)
+		pending.attempts += 1
+		state.busy = false
+		state.next_reconciliation = now_local() + (wait_seconds or math.max(0.25, retry_delay(pending.attempts)))
+		state.last_reconciliation_category = category
+		observe(state, "reconcile", "unknown", message)
+		return "unknown", message
+	end
+	local function stop(session_state: SessionState, category: string, result: ResultCode, message: string): (ResultCode, string?)
+		state.busy = false
+		state.state = session_state
+		state.next_reconciliation = math.huge
+		state.last_reconciliation_category = category
+		disconnect_message_subscription(state)
+		observe(state, "reconcile", result, message)
+		return result, message
+	end
+	local function confirm(envelope: Envelope, info: BackendInfo?): (ResultCode, string?)
+		if not backend_metadata_matches(info, envelope) then
+			return stop("corrupt", "committed_key_metadata_mismatch", "corrupt",
+				"operation matched but DataStore key metadata did not match the envelope")
+		end
+		local lease_until = if envelope.session ~= nil then envelope.session.lease_until else 0
+		local lease_remaining = lease_until - session_now_unix(state.backend.mock)
+		state.generation = envelope.fencing_generation
+		state.revision = envelope.revision
+		state.created_at = envelope.created_at
+		state.updated_at = envelope.updated_at
+		state.tombstoned = envelope.tombstone ~= nil
+		state.token = if envelope.session ~= nil then envelope.session.token else nil
+		state.durable_lease_until = lease_until
+		update_state_metadata_from_info(state, info)
+		state.last_saved = make_durable_snapshot(envelope, info, "reconcile_" .. pending.reason)
+		if pending.kind == "save" then
+			state.saved_change_sequence = math.max(state.saved_change_sequence, pending.captured_change_sequence)
+			if state.change_sequence == pending.captured_change_sequence then
+				update_local_from_envelope(state, envelope, info)
+				state.dirty_since_local = nil
+				state.save_requested = false
+			else
+				if state.dirty_since_local == nil then state.dirty_since_local = now_local() end
+				state.save_requested = true
+			end
+		end
+		state.pending_operation = nil
+		state.busy = false
+		state.last_successful_write_local = now_local()
+		state.next_reconciliation = math.huge
+		if envelope.session ~= nil and lease_remaining > required_recovery_lease_margin(state) then
+			state.state = "active"
+			state.last_reconciliation_category = nil
+			state.next_renewal = now_local() + (state.options.lease_renewal or DEFAULT_LEASE_RENEWAL)
+			state.next_autosave = if state.change_sequence ~= state.saved_change_sequence
+				then now_local()
+				else now_local() + (state.options.autosave_interval or DEFAULT_AUTOSAVE_INTERVAL)
+			observe(state, "reconcile", "success", nil)
+			complete_deferred_takeover(state)
+			return "success", nil
+		end
+		state.state = "fenced"
+		state.last_reconciliation_category = "commit_confirmed_without_safe_lease_margin"
+		disconnect_message_subscription(state)
+		observe(state, "reconcile", "fenced", "operation committed without a safe remaining lease margin")
+		return "fenced", "operation committed without a safe remaining lease margin"
+	end
+
+	local deadline = now_local() + (state.options.operation_deadline or DEFAULT_OPERATION_DEADLINE)
+	state.busy = true
+	local raw, info, read_result, read_message = backend_get(state.backend, false, deadline, state)
+	if read_result ~= nil then return retry("authoritative_read_" .. read_result, read_message or "reconciliation read failed", nil) end
+	if raw == nil then
+		return stop("fenced", "durable_record_missing", "fenced", "durable profile is missing during reconciliation")
+	end
+	local envelope, parse_error, current_format = parse_envelope(raw)
+	if not current_format or envelope == nil then
+		local result: ResultCode = if parse_error == "future implementation version" then "future_schema" else "corrupt"
+		return stop(if result == "future_schema" then "future" else "corrupt", result, result,
+			parse_error or "durable envelope is invalid")
+	end
+	if envelope.schema_version > state.options.schema_version then
+		return stop("future", "future_schema", "future_schema", "durable schema is newer than this server supports")
+	end
+	if envelope.write_id == pending.operation_id
+		and envelope.revision == pending.target_revision
+		and matches_session(envelope, pending.session_token, pending.fencing_generation)
+	then
+		return confirm(envelope, info)
+	end
+	if not matches_session(envelope, pending.session_token, pending.fencing_generation) then
+		return stop("fenced", "ownership_fence_changed", "fenced",
+			"durable ownership no longer matches the retained logical operation")
+	end
+	if envelope.revision ~= pending.expected_revision then
+		return stop("fenced", "revision_conflict", "fenced",
+			"durable revision changed; refusing to overwrite a newer revision")
+	end
+	local session = envelope.session
+	if session == nil then
+		return stop("fenced", "durable_session_missing", "fenced", "durable session is missing")
+	end
+	local remaining_lease = session.lease_until - session_now_unix(state.backend.mock)
+	if remaining_lease <= 0 then
+		return stop("fenced", "lease_expired", "fenced", "session lease expired before recovery could safely retry")
+	end
+	local required_margin = required_recovery_lease_margin(state)
+	if remaining_lease <= required_margin then
+		return retry("lease_margin_low",
+			"waiting for the existing lease to expire rather than retrying near its safety boundary",
+			remaining_lease + 0.1)
+	end
+
+	local decision: ResultCode? = nil
+	local decision_message: string? = nil
+	local result, result_info, result_code, result_message = backend_update(state.backend, function(current_raw, current_info)
+		decision = nil
+		decision_message = nil
+		local transform_time = session_now_unix(state.backend.mock)
+		local current, current_error, current_format = parse_envelope(current_raw)
+		if not current_format or current == nil then
+			decision = if current_error == "future implementation version" then "future_schema" else "corrupt"
+			decision_message = current_error or "durable envelope is invalid"
+			return nil, nil, nil
+		end
+		if current.schema_version > state.options.schema_version then
+			decision = "future_schema"
+			decision_message = "durable schema is newer than this server supports"
+			return nil, nil, nil
+		end
+		if current.write_id == pending.operation_id
+			and current.revision == pending.target_revision
+			and matches_session(current, pending.session_token, pending.fencing_generation)
+		then
+			decision = "success"
+			return current,
+				(if current_info ~= nil then current_info.UserIds else current.user_ids),
+				(if current_info ~= nil then current_info.RawMetadata else make_backend_metadata(state.metadata, current))
+		end
+		if not matches_session(current, pending.session_token, pending.fencing_generation) then
+			decision = "fenced"
+			decision_message = "durable ownership no longer matches the retained operation"
+			return nil, nil, nil
+		end
+		if current.revision ~= pending.expected_revision then
+			decision = "conflict"
+			decision_message = "durable revision changed during reconciliation"
+			return nil, nil, nil
+		end
+		local current_session = current.session
+		if current_session == nil or current_session.lease_until <= transform_time then
+			decision = "fenced"
+			decision_message = "durable session is missing or expired"
+			return nil, nil, nil
+		end
+		if current_session.lease_until <= transform_time + required_margin then
+			decision = "fenced"
+			decision_message = "lease safety margin is insufficient"
+			return nil, nil, nil
+		end
+		local user_ids = if current_info ~= nil then clone_user_ids(current_info.UserIds)
+			elseif current.user_ids ~= nil then clone_user_ids(current.user_ids) else {}
+		local durable_metadata = if current_info ~= nil then clone_metadata(current_info.Metadata) else clone_metadata(state.metadata)
+		local next_envelope: Envelope = {
+			implementation_version = IMPLEMENTATION_VERSION,
+			schema_version = if pending.kind == "save" then state.options.schema_version else current.schema_version,
+			revision = if pending.kind == "save" then pending.target_revision else current.revision,
+			fencing_generation = pending.fencing_generation,
+			created_at = current.created_at,
+			updated_at = transform_time,
+			data = if pending.kind == "save" then pending.snapshot else current.data,
+			user_ids = user_ids,
+			tombstone = nil,
+			session = {
+				token = pending.session_token,
+				generation = pending.fencing_generation,
+				job_id = server_id,
+				place_id = game.PlaceId,
+				acquired_at = current_session.acquired_at,
+				lease_until = transform_time + (state.options.lease_duration or DEFAULT_LEASE_DURATION),
+			},
+			write_id = pending.operation_id,
+		}
+		local valid, validation_error = validate_envelope(next_envelope)
+		if not valid then
+			decision = "validation"
+			decision_message = validation_error
+			return nil, nil, nil
+		end
+		decision = "success"
+		return next_envelope, user_ids, make_backend_metadata(durable_metadata, next_envelope)
+	end, deadline, state)
+	if result_code ~= nil then
+		decision = result_code
+		decision_message = result_message
+	end
+	if state.retired then
+		state.busy = false
+		return "closing", "record was retired"
+	end
+	if decision == "future_schema" then
+		return stop("future", "future_schema", "future_schema", decision_message or "future schema")
+	elseif decision == "corrupt" then
+		return stop("corrupt", "corrupt", "corrupt", decision_message or "corrupt envelope")
+	elseif decision == "fenced" or decision == "conflict" then
+		if decision_message == "lease safety margin is insufficient" then
+			return retry("lease_margin_low", decision_message,
+				math.max(0.1, session.lease_until - session_now_unix(state.backend.mock) + 0.1))
+		end
+		return stop("fenced", if decision == "conflict" then "revision_conflict" else "ownership_fence_changed",
+			"fenced", decision_message or "operation was fenced")
+	elseif decision == "validation" then
+		return stop("corrupt", "recovery_snapshot_invalid", "validation", decision_message or "recovery snapshot failed validation")
+	end
+	if result ~= nil then
+		local returned = parse_envelope(result)
+		if returned ~= nil
+			and returned.write_id == pending.operation_id
+			and returned.revision == pending.target_revision
+			and matches_session(returned, pending.session_token, pending.fencing_generation)
+		then
+			return confirm(returned, result_info)
+		end
+	end
+	return retry("retry_result_unconfirmed",
+		result_message or (if result_code ~= nil then tostring(result_code) else nil)
+			or decision_message or "recovery write did not confirm the retained operation",
+		nil)
+end
+
 close_internal = function(state: InternalState, shutdown: boolean): (ResultCode, string?)
 	if state.retired then
 		return "closed", nil
