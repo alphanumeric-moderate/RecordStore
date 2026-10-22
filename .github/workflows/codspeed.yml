@@ -20,7 +20,7 @@ jobs:
   benchmarks:
     name: Run benchmarks
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
@@ -66,12 +66,16 @@ jobs:
         timeout-minutes: 2
         run: timeout --signal=TERM --kill-after=5s 60s lune run bench/run_scheduler_critical_vulnerability_regression.luau
 
+      - name: Regression - scheduler hot-path performance
+        timeout-minutes: 2
+        run: timeout --signal=TERM --kill-after=5s 60s lune run bench/run_scheduler_hot_path_regression.luau
+
       - name: Regression - V2 mailbox ordering and security
         timeout-minutes: 2
         run: timeout --signal=TERM --kill-after=5s 60s lune run bench/run_mailbox_v2_ordering_regression.luau
 
       - name: Run the benchmarks
-        timeout-minutes: 10
+        timeout-minutes: 16
         uses: CodSpeedHQ/action@v5
         with:
           mode: simulation,walltime

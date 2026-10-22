@@ -1714,6 +1714,20 @@ local function new_governor(options)
 		local stats = read_record_stats(record)
 		return { state = stats.state, busy = stats.busy == 1, queue_busy = stats.queue_busy == 1, takeover_requested = stats.takeover_requested == 1, generation = stats.generation, revision = stats.revision, last_error = stats.last_error, can_force_takeover = false }
 	end
+	function governor:OldestEligibleAgeMs()
+		local oldest_eligible_age_ms, instant = 0, now_ms()
+		for _, item in ipairs(self.queue) do
+			if (item.due_at_ms or 0) <= instant
+				and (item.available_at_ms == nil or item.available_at_ms <= instant)
+				and dependencies_ready(self, item)
+				and (item.expires_at_ms == nil or item.expires_at_ms > instant)
+			then
+				oldest_eligible_age_ms = math.max(oldest_eligible_age_ms, instant - item.enqueued_at_ms)
+			end
+		end
+		return oldest_eligible_age_ms
+	end
+
 	function governor:Stats()
 		local lanes = { high = 0, normal = 0, background = 0, lease_renewal = 0 }
 		local oldest_eligible_age_ms, now = 0, now_ms()
@@ -2185,7 +2199,7 @@ local function new_dispatcher(governor, options)
 		dispatcher.running = true
 		spawn_scheduled(function()
 			governor:RefreshRequestBudgets()
-			local policy = governor:Stats().policy
+			local policy = governor.policy
 			local maximum = policy.max_scheduled_in_flight
 			local normal_limit = math.max(0, maximum - policy.scheduler_critical_reserve)
 			while dispatcher.in_flight < maximum do
@@ -2202,7 +2216,7 @@ local function new_dispatcher(governor, options)
 				dispatch_one(item, status)
 			end
 			dispatcher.running = false
-			if dispatcher.in_flight < governor:Stats().policy.max_scheduled_in_flight then schedule_next_wake() end
+			if dispatcher.in_flight < governor.policy.max_scheduled_in_flight then schedule_next_wake() end
 		end)
 	end
 	local allowed_options = {
@@ -2238,7 +2252,7 @@ local function new_dispatcher(governor, options)
 			then schedule_options.operation_class else work_class
 		local retry_limit = if schedule_options.max_retries == nil then 0 else schedule_options.max_retries
 		local retry_delay_ms = if schedule_options.retry_delay_ms == nil then 100 else schedule_options.retry_delay_ms
-		local current_policy = governor:Stats().policy
+		local current_policy = governor.policy
 		local jitter = if schedule_options.retry_jitter_percent == nil
 			then current_policy.retry_jitter_percent else schedule_options.retry_jitter_percent
 		if not finite(retry_limit) or math.floor(retry_limit) ~= retry_limit or retry_limit < 0 or retry_limit > 8 then
@@ -2281,7 +2295,7 @@ local function new_dispatcher(governor, options)
 		end
 		if schedule_options.batch_window_ms ~= nil and (not finite(schedule_options.batch_window_ms)
 			or schedule_options.batch_window_ms < 0
-			or schedule_options.batch_window_ms > governor:Stats().policy.batch_window_ms)
+			or schedule_options.batch_window_ms > governor.policy.batch_window_ms)
 		then
 			return { code = "invalid", message = "batch_window_ms must fit the bounded scheduler window" }
 		end
@@ -2295,15 +2309,15 @@ local function new_dispatcher(governor, options)
 			batch_window = if finite(schedule_options.batch_window_ms) then schedule_options.batch_window_ms else current_policy.batch_window_ms
 			local latency = math.max(governor.latency_ewma[work_class] or 0, governor.latency_ewma.outbox_dispatch or 0,
 				governor.latency_ewma.write or 0, governor.latency_ewma.update_async or 0, governor.latency_ewma.service or 0)
-			local snapshot = governor:Stats()
+			local budgets = governor.request_budgets
 			local budget_headroom
-			local budgets = snapshot.request_budgets
 			if finite(budgets.sampled_at_ms) and now - budgets.sampled_at_ms <= 1000 then
 				budget_headroom = math.min(budgets.read or math.huge, budgets.write or math.huge)
 			end
+			local oldest_eligible_age_ms = governor:OldestEligibleAgeMs()
 			if latency >= current_policy.batch_latency_ceiling_ms
 				or (finite(budget_headroom) and budget_headroom < current_policy.minimum_budget)
-				or (finite(snapshot.scheduler.oldest_eligible_age_ms) and snapshot.scheduler.oldest_eligible_age_ms >= batch_window)
+				or (finite(oldest_eligible_age_ms) and oldest_eligible_age_ms >= batch_window)
 			then
 				batch_window = 0
 			elseif latency >= current_policy.batch_latency_ceiling_ms * 0.75 then
