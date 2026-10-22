@@ -10472,7 +10472,7 @@ local function reconcile(self: Record, template: JsonValue): (ResultCode, string
 			if type(key) ~= "string" and type(key) ~= "number" then
 				return target, false
 			end
-			local current = get_table_child(result, key)
+			local current = (result :: { [string | number]: JsonValue })[key]
 			if current == nil then
 				local updated, updated_ok = set_table_child(result, key, template_child)
 				if updated_ok then
