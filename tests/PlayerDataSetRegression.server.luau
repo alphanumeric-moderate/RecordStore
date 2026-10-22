@@ -82,11 +82,16 @@ local test_ok, test_error = pcall(function()
 	RecordStore.Mock.set_get_failures(100, "hold unknown state for mutation test")
 	local current_status = recovery_record:GetDurabilityStatus()
 	assert(current_status.ownership == "uncertain", "mutation fixture did not retain uncertain ownership")
-	local previous_kills = (kills_backing :: NumberValue).Value
-	local backing_value = kills_backing :: NumberValue
-	assert(backing_value.Parent == player_data_values
-		and player_data_values:FindFirstChild("kills") == backing_value,
+	local live_player_data_values = player:FindFirstChild("PlayerDataValues")
+	assert(live_player_data_values ~= nil and live_player_data_values.Parent == player,
+		"test could not find the live PlayerDataValues folder")
+	local live_kills_backing = live_player_data_values:FindFirstChild("kills")
+	assert(live_kills_backing ~= nil and live_kills_backing:IsA("NumberValue"),
+		"test could not find the live kills backing value")
+	local backing_value = live_kills_backing :: NumberValue
+	assert(live_player_data_values:FindFirstChild("kills") == backing_value,
 		"test must mutate the live RecordStore-managed kills backing value")
+	local previous_kills = backing_value.Value
 	local observed_uncertain_change = false
 	local change_connection = backing_value.Changed:Connect(function()
 		if recovery_record.State == "unknown" then observed_uncertain_change = true end
