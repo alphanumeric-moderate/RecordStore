@@ -443,7 +443,6 @@ do
 	assert(record:Close() == "closed", "copy-traversal record did not close")
 end
 
-
 RecordStore.Mock.reset()
 do
 	local function make_wide(value: number)
@@ -497,6 +496,57 @@ do
 	local persisted_wide = persisted["Wide"] :: { [string]: RecordStore.JsonValue }
 	assert(persisted_wide["key-0001"] == 1, "truncated event payload mutation changed persisted data")
 	assert(record:Close() == "closed", "reopened truncation regression record did not close")
+end
+
+RecordStore.Mock.reset()
+do
+	local record: RecordStore.Record? = nil
+	local flood_started = false
+	local update_failures = 0
+	local truncated_events = 0
+	record = RecordStore.Mock.new(
+		"RecordStore_ChangeDispatchOverflowRegression",
+		"global",
+		"dispatch-overflow",
+		{ schema_version = 1 }
+	)
+	local open_result, open_message = record:Open({ Value = 0 })
+	assert(open_result == "created" or open_result == "loaded", open_message)
+	local subscription, subscribe_result, subscribe_message = record:SubscribeChanges(function(event)
+		if event.Truncated then
+			truncated_events += 1
+			local snapshot = event.NewValue :: { [string]: RecordStore.JsonValue }
+			snapshot["Value"] = -1
+			return
+		end
+		if flood_started or record == nil then
+			return
+		end
+		flood_started = true
+		for _ = 1, 4100 do
+			local result = record:Update(function(data)
+				local current = data :: { [string]: RecordStore.JsonValue }
+				return { Value = (current["Value"] :: number) + 1 }
+			end)
+			if result ~= "success" then
+				update_failures += 1
+			end
+		end
+	end)
+	assert(subscription ~= nil and subscribe_result == "success", subscribe_message)
+	local update_result, update_message = record:Update(function(data)
+		local current = data :: { [string]: RecordStore.JsonValue }
+		return { Value = (current["Value"] :: number) + 1 }
+	end)
+	assert(update_result == "success", update_message)
+	task.wait()
+	assert(flood_started, "change observer did not trigger the dispatch-queue flood")
+	assert(update_failures == 0, ("dispatch overflow flood rejected %d local updates"):format(update_failures))
+	assert(truncated_events >= 1, "dispatch queue overflow did not emit a truncated snapshot")
+	local current = record:Get() :: { [string]: RecordStore.JsonValue }
+	assert(current["Value"] == 4101, "mutating the dispatch-overflow snapshot changed canonical data")
+	subscription:Disconnect()
+	assert(record:Close() == "closed", "dispatch-overflow regression record did not close")
 end
 
 RecordStore.Mock.reset()
