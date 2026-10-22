@@ -23,6 +23,9 @@ While processing a durable message, local Record mutations remain synchronous an
 
 Refactor the numeric body of `NumberFormatter.format` behind a private helper that accepts already-validated decimal options. `formatScientific` can then call that helper directly instead of resolving the same options again. Public input validation and formatting output must remain identical. Keep the refactor only if equivalent CodSpeed workloads show an improvement outside measurement noise; otherwise revert it.
 
+
+The shared scheduler benchmark workload was reduced from 256 to 128 items after the PR CI logs showed repeated scheduler selections consumed the 16-minute CodSpeed step budget on a slower runner. It still exercises all 16 owners (8 items each), all priority lanes, service classes, operation classes, fairness assertions, and the independent regression suite. Scheduler benchmark names include the item count so CodSpeed treats them as new workload identities rather than comparing unlike workloads.
+
 ## Validation
 
 1. Add regressions for truncated full-record payload isolation and queue-processing durability interleaving.
