@@ -266,6 +266,34 @@ do
 end
 
 
+
+-- Arbitrary nested payloads must not cause unbounded deep-copy work at scheduler boundaries.
+do
+	local payload = {}
+	for index = 1, 5000 do payload[index] = index end
+
+	local governor = new_governor()
+	local enqueue_result = governor:Enqueue({
+		id = "oversized-scheduler-payload",
+		owner_id = "security-probe",
+		payload = payload,
+	})
+	report("bounded enqueue copy", enqueue_result.code == "invalid",
+		"oversized arbitrary payload was deep-copied into the scheduler; got "
+			.. tostring(enqueue_result.code))
+	if enqueue_result.code == "accepted" then
+		local queued = governor:CancelQueued("oversized-scheduler-payload")
+		if queued ~= nil then governor:MarkCompleted(queued.id, "cancelled") end
+	end
+
+	local due_governor = new_governor()
+	local due_ok = due_governor:ScheduleDue("oversized-due-payload", now_ms, payload)
+	report("bounded due-payload copy", due_ok == false,
+		"oversized due-event payload was deep-copied into scheduler state")
+	if due_ok then due_governor:PopDue(1) end
+end
+
+
 -- Malformed callback result tables must not interrupt retry or terminal bookkeeping.
 do
 	local governor = Scheduler.new()
