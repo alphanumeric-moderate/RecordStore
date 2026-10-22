@@ -266,7 +266,7 @@ do
 		activation_guard = function() return true end,
 		strict_ordering_enabled = true,
 		lease_ms = 10000,
-		lease_renewal_horizon_ms = 2000,
+		lease_renewal_horizon_ms = 40000,
 	})
 	local scheduler_enabled, scheduler_message = RecordStore.set_scheduler_enabled(true)
 	assert(scheduler_enabled, scheduler_message)
