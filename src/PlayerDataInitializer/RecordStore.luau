@@ -7025,6 +7025,13 @@ local function sorted_child_keys(old_value: JsonValue?, new_value: JsonValue?): 
 	return result
 end
 
+local function clone_change_payload(value: JsonValue?): JsonValue?
+	if type(value) ~= "table" and typeof(value) ~= "buffer" then
+		return value
+	end
+	return copy_value(value)
+end
+
 local function append_change_event(events: { ChangeEvent }, path: { string }, old_value: JsonValue?, new_value: JsonValue?, operation_id: string, sequence: number, kind: string): boolean
 	if #events >= CHANGE_OBSERVER_CAPACITY then
 		return false
@@ -7033,8 +7040,8 @@ local function append_change_event(events: { ChangeEvent }, path: { string }, ol
 		OperationId = operation_id,
 		Sequence = sequence,
 		Path = table.clone(path),
-		OldValue = copy_value(old_value),
-		NewValue = copy_value(new_value),
+		OldValue = clone_change_payload(old_value),
+		NewValue = clone_change_payload(new_value),
 		Truncated = false,
 		Kind = kind,
 	}
