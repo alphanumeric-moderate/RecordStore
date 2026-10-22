@@ -1358,6 +1358,105 @@ local function new(dependencies: Dependencies?): Controller
 		end
 	end
 
+	local function deferred_close_is_terminal(state: string): boolean
+		return state == "fenced" or state == "corrupt" or state == "future"
+			or state == "closed" or state == "tombstoned"
+	end
+
+	local function finish_deferred_close(record: PlayerRecord, discard_pending: boolean, reason: string?)
+		local deferred = deferred_close_records[record]
+		if deferred == nil then return end
+		local pending = pending_changes[record]
+		if discard_pending and pending ~= nil and next(pending) ~= nil then
+			warn("[PlayerData]", record.Key,
+				"queued PlayerData changes cannot be persisted safely after ownership became unavailable",
+				tostring(record.State), reason or "")
+		end
+		pending_changes[record] = nil
+		deferred_close_records[record] = nil
+		deferred_close_requested[record] = nil
+		recovery_flush_requested[record] = nil
+		if record.State ~= "closed" then
+			close_record(deferred.player, record)
+		end
+		closing_records[record] = nil
+		removing[deferred.player] = nil
+	end
+
+	start_deferred_close = function(record: PlayerRecord)
+		local deferred = deferred_close_records[record]
+		if deferred == nil then return end
+		if deferred_close_running[record] then
+			deferred_close_requested[record] = true
+			return
+		end
+		deferred_close_running[record] = true
+		scheduler.spawn(function()
+			local retry_delay = 0.25
+			while deferred_close_records[record] ~= nil do
+				deferred = deferred_close_records[record]
+				if deferred == nil then break end
+				local state = record.State
+				if state == "unknown" then
+					break
+				elseif deferred_close_is_terminal(state) then
+					finish_deferred_close(record, true, "record entered a terminal non-owned state")
+					break
+				elseif state ~= "active" then
+					if shutting_down and os.clock() >= deferred.deadline then
+						break
+					end
+					scheduler.wait(0.05)
+				else
+					local pending = pending_changes[record]
+					if pending == nil or next(pending) == nil then
+						finish_deferred_close(record, false, nil)
+						break
+					end
+					local attempt_deadline = os.clock() + CONFIG.operation_deadline
+					if shutting_down then
+						attempt_deadline = math.min(attempt_deadline, deferred.deadline)
+					end
+					if attempt_deadline <= os.clock() then
+						break
+					end
+					local flushed, result, message = flush_pending_changes(record, attempt_deadline)
+					local remaining = pending_changes[record]
+					if (flushed or remaining == nil or next(remaining) == nil) and record.State == "active" then
+						finish_deferred_close(record, false, nil)
+						break
+					elseif record.State == "unknown" then
+						break
+					elseif deferred_close_is_terminal(record.State) then
+						finish_deferred_close(record, true, message or tostring(result))
+						break
+					elseif shutting_down and os.clock() >= deferred.deadline then
+						break
+					else
+						scheduler.wait(retry_delay)
+						retry_delay = math.min(5, retry_delay * 2)
+					end
+				end
+			end
+			deferred_close_running[record] = nil
+			deferred = deferred_close_records[record]
+			if deferred ~= nil and shutting_down and os.clock() >= deferred.deadline then
+				if not deferred.warned_timeout then
+					warn("[PlayerData]", deferred.player.Name,
+						"shutdown deadline expired with unresolved PlayerData changes; retaining the record and queued values rather than issuing an unsafe close")
+					deferred.warned_timeout = true
+				end
+				removing[deferred.player] = nil
+			end
+			if deferred ~= nil and deferred_close_requested[record] then
+				deferred_close_requested[record] = nil
+				if record.State ~= "unknown" then
+					scheduler.defer(function() start_deferred_close(record) end)
+				end
+			end
+		end)
+	end
+
 	local function setup_player(player: Player)
 		if shutting_down or departed_players[player] or loading[player] or sessions[player] ~= nil then
 			return
