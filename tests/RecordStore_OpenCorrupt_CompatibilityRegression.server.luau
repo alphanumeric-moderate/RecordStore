@@ -500,6 +500,60 @@ end
 
 RecordStore.Mock.reset()
 do
+	local record = RecordStore.Mock.new(
+		"RecordStore_ChangeEventSubscriberIsolationRegression",
+		"global",
+		"subscriber-isolation",
+		{ schema_version = 1 }
+	)
+	local open_result, open_message = record:Open({ Value = 0 })
+	assert(open_result == "created" or open_result == "loaded", open_message)
+
+	local callback_count = 0
+	local sibling_value: number? = nil
+	local sibling_path: string? = nil
+	local sibling_kind: string? = nil
+	local function observer(event: RecordStore.ChangeEvent)
+		callback_count += 1
+		if callback_count == 1 then
+			local new_value = event.NewValue :: { [string]: RecordStore.JsonValue }
+			local nested = new_value["Nested"] :: { [string]: RecordStore.JsonValue }
+			nested["Count"] = -1
+			event.Path[1] = "tampered"
+			event.Kind = "tampered"
+		else
+			local new_value = event.NewValue :: { [string]: RecordStore.JsonValue }
+			local nested = new_value["Nested"] :: { [string]: RecordStore.JsonValue }
+			sibling_value = nested["Count"] :: number
+			sibling_path = event.Path[1]
+			sibling_kind = event.Kind
+		end
+	end
+	local first, first_result, first_message = record:SubscribeChanges(observer)
+	local second, second_result, second_message = record:SubscribeChanges(observer)
+	assert(first ~= nil and first_result == "success", first_message)
+	assert(second ~= nil and second_result == "success", second_message)
+
+	local update_result, update_message = record:Update(function(_data)
+		return { Value = { Nested = { Count = 10 } } }
+	end)
+	assert(update_result == "success", update_message)
+	task.wait()
+	assert(callback_count == 2, "expected both subscribers to receive the event")
+	assert(sibling_value == 10, "one subscriber's mutation leaked into another subscriber's payload")
+	assert(sibling_path == "Value", "one subscriber's path mutation leaked into another subscriber's payload")
+	assert(sibling_kind == "update", "one subscriber's event mutation leaked into another subscriber's payload")
+	local canonical = record:Get() :: { [string]: RecordStore.JsonValue }
+	local canonical_value = canonical["Value"] :: { [string]: RecordStore.JsonValue }
+	local canonical_nested = canonical_value["Nested"] :: { [string]: RecordStore.JsonValue }
+	assert(canonical_nested["Count"] == 10, "subscriber payload mutation changed canonical record data")
+	first:Disconnect()
+	second:Disconnect()
+	assert(record:Close() == "closed", "subscriber-isolation regression record did not close")
+end
+
+RecordStore.Mock.reset()
+do
 	local record: RecordStore.Record? = nil
 	local flood_started = false
 	local update_failures = 0
