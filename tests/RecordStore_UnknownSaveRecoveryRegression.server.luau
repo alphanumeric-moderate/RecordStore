@@ -157,4 +157,36 @@ do
 end
 
 RecordStore.Mock.reset()
+
+do
+	local record = open_test_record("mutation-during-close")
+	local update_result, update_message = record:Update(function(data)
+		(data :: { [string]: RecordStore.JsonValue }).coins = 20
+		return data
+	end)
+	assert(update_result == "success", update_message)
+	local retained_data = record.Data :: { [string]: RecordStore.JsonValue }
+
+	local injected = false
+	RecordStore.Mock.set_test_clock(function()
+		if not injected then
+			injected = true
+			retained_data.coins = 30
+		end
+		return DateTime.now().UnixTimestampMillis / 1000 + 1
+	end)
+	local close_result, close_message = record:Close()
+	RecordStore.Mock.set_test_clock(nil)
+	assert(injected, "mock clock did not inject the retained-alias edit during release UpdateAsync")
+	assert(close_result == "closed", close_message)
+	local durable = RecordStore.Mock.get_record_raw(
+		"RecordStore_UnknownSaveRecoveryRegression",
+		"global",
+		"mutation-during-close"
+	) :: { [string]: any }
+	assert((durable.data :: { [string]: any }).coins == 20,
+		"a retained Record.Data alias mutated during release and changed the durable close snapshot")
+end
+
+RecordStore.Mock.reset()
 print("[PASS] Unknown-save recovery retains immutable operation identity, confirms committed writes, retries only the exact base revision, and blocks mutation while ownership is uncertain.")

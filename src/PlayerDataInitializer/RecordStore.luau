@@ -7082,6 +7082,40 @@ local function reconcile_unknown_internal(state: InternalState): (ResultCode, st
 		nil)
 end
 
+local function detach_public_data_for_release(state: InternalState): (boolean, string?)
+	if state.public_data_detached then
+		return true, nil
+	end
+	local detached_data: JsonValue? = nil
+	if state.data ~= nil then
+		local copy_ok, copy_or_error = pcall(function()
+			return copy_value(state.data)
+		end)
+		if not copy_ok or copy_or_error == nil then
+			local message = "could not isolate public Data before session release"
+			state.data = nil
+			state.public_data_source = nil
+			state.public_data_detached = true
+			if type(state.public_record) == "table" then
+				local public_record = state.public_record :: { Data: unknown }
+				public_record.Data = nil
+			end
+			return false, message
+		end
+		detached_data = copy_or_error
+	end
+	-- Never let a reference obtained while owned retain an alias to canonical data
+	-- after release has started and its durable operation can yield.
+	state.data = detached_data
+	state.public_data_source = copy_value(detached_data)
+	state.public_data_detached = true
+	if type(state.public_record) == "table" then
+		local public_record = state.public_record :: { Data: unknown }
+		public_record.Data = copy_value(detached_data)
+	end
+	return true, nil
+end
+
 close_internal = function(state: InternalState, shutdown: boolean): (ResultCode, string?)
 	if state.retired then
 		return "closed", nil
@@ -7126,6 +7160,14 @@ close_internal = function(state: InternalState, shutdown: boolean): (ResultCode,
 	if not valid then
 		observe(state, "close", "validation", validation_error)
 		return "validation", validation_error
+	end
+	local detached, detach_error = detach_public_data_for_release(state)
+	if not detached then
+		state.busy = false
+		state.state = "corrupt"
+		state.last_error = detach_error
+		observe(state, "close", "corrupt", detach_error)
+		return "corrupt", detach_error
 	end
 	local write_id = HttpService:GenerateGUID(false)
 	state.current_operation_id = write_id
