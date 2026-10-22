@@ -671,6 +671,9 @@ local function new(dependencies: Dependencies?): Controller
 	local pending_changes: {[PlayerRecord]: {[string]: DataValue}} = {}
 	local flush_running: {[PlayerRecord]: boolean} = {}
 	local flush_scheduled: {[PlayerRecord]: boolean} = {}
+	local recovery_flush_requested: {[PlayerRecord]: boolean} = {}
+	local schedule_pending_flush: (PlayerRecord) -> ()
+	local request_recovery_flush: (PlayerRecord) -> ()
 
 	local function merge_pending(record: PlayerRecord, changes: {[string]: DataValue})
 		local pending = pending_changes[record]
@@ -772,7 +775,7 @@ local function new(dependencies: Dependencies?): Controller
 		return false, last_result, last_message
 	end
 
-	local function schedule_pending_flush(record: PlayerRecord)
+	schedule_pending_flush = function(record: PlayerRecord)
 		if flush_scheduled[record] or flush_running[record] or closing_records[record] then
 			return
 		end
@@ -785,6 +788,15 @@ local function new(dependencies: Dependencies?): Controller
 				warn("[PlayerData]", record.Key, result, message or "")
 			end
 		end)
+	end
+
+	request_recovery_flush = function(record: PlayerRecord)
+		if closing_records[record] then return end
+		if flush_running[record] or flush_scheduled[record] then
+			recovery_flush_requested[record] = true
+			return
+		end
+		schedule_pending_flush(record)
 	end
 
 	local function queue_value_change(
@@ -1363,11 +1375,8 @@ local function new(dependencies: Dependencies?): Controller
 						if recovered_record ~= nil then
 							scheduler.defer(function()
 								local pending = pending_changes[recovered_record]
-							if recovered_record.State == "active"
-								and not closing_records[recovered_record]
-								and pending ~= nil and next(pending) ~= nil
-							then
-								schedule_pending_flush(recovered_record)
+							if pending ~= nil and next(pending) ~= nil then
+								request_recovery_flush(recovered_record)
 							end
 							end)
 						end
