@@ -7070,14 +7070,6 @@ local function append_change_event(events: { ChangeEvent }, path: { string }, ol
 	return true
 end
 
-local function get_table_child(value: JsonValue?, key: string | number): JsonValue?
-	if value == nil or type(value) ~= "table" then
-		return nil
-	end
-	local table_value = value :: { [string | number]: JsonValue }
-	return table_value[key]
-end
-
 local function diff_change_events(events: { ChangeEvent }, old_value: JsonValue?, new_value: JsonValue?, path: { string }, operation_id: string, sequence: number, kind: string): boolean
 	if old_value == new_value
 		or (type(old_value) == "number"
@@ -7091,8 +7083,8 @@ local function diff_change_events(events: { ChangeEvent }, old_value: JsonValue?
 		local keys = sorted_child_keys(old_value, new_value)
 		for _, entry in ipairs(keys) do
 			path[#path + 1] = entry.PathSegment
-			local old_child = get_table_child(old_value, entry.Key)
-			local new_child = get_table_child(new_value, entry.Key)
+			local old_child = (old_value :: { [string | number]: JsonValue })[entry.Key]
+			local new_child = (new_value :: { [string | number]: JsonValue })[entry.Key]
 			local complete = diff_change_events(events, old_child, new_child, path, operation_id, sequence, kind)
 			path[#path] = nil
 			if not complete then
