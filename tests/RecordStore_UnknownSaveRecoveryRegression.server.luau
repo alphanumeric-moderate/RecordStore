@@ -22,6 +22,7 @@ RecordStore.Mock.reset()
 do
 	local record = open_test_record("commit-then-error")
 	local base_revision = record:GetRevision()
+	local retained_data = record.Data :: { [string]: RecordStore.JsonValue }
 	local update_result, update_message = record:Update(function(data)
 		(data :: { [string]: RecordStore.JsonValue }).coins = 20
 		return data
@@ -40,6 +41,10 @@ do
 	local operation_id = status.pending_operation_id
 	assert(status.dirty_watermark > status.durable_watermark, "unconfirmed save must retain a dirty watermark")
 
+	retained_data.coins = 888
+	local retained_visible_data = record:Get() :: { [string]: RecordStore.JsonValue }
+	assert(retained_visible_data.coins == 20,
+		"a Record.Data reference captured before uncertainty must not mutate canonical data afterward")
 	local exposed_data = record.Data :: { [string]: RecordStore.JsonValue }
 	exposed_data.coins = 999
 	local visible_data = record:Get() :: { [string]: RecordStore.JsonValue }
