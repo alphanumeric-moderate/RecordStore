@@ -249,13 +249,17 @@ local function new_governor(options)
 		end
 		local next_policy = copy(self.policy)
 		for key, value in pairs(patch) do next_policy[key] = value end
-		if patch.max_estimated_bytes_in_flight ~= nil and patch.estimated_bytes_critical_reserve == nil then
+		if patch.max_estimated_bytes_in_flight ~= nil and patch.estimated_bytes_critical_reserve == nil
+			and finite(next_policy.max_estimated_bytes_in_flight)
+		then
 			next_policy.estimated_bytes_critical_reserve = math.min(
 				self.policy.estimated_bytes_critical_reserve,
 				math.floor(next_policy.max_estimated_bytes_in_flight / 4)
 			)
 		end
-		if patch.max_handler_slots_in_flight ~= nil and patch.handler_slots_critical_reserve == nil then
+		if patch.max_handler_slots_in_flight ~= nil and patch.handler_slots_critical_reserve == nil
+			and finite(next_policy.max_handler_slots_in_flight)
+		then
 			next_policy.handler_slots_critical_reserve = math.min(
 				self.policy.handler_slots_critical_reserve,
 				math.max(0, next_policy.max_handler_slots_in_flight - 1)
@@ -1079,6 +1083,9 @@ local function new_governor(options)
 		return nil, false
 	end
 	function governor:Enqueue(item, protect_critical_queue)
+		if protect_critical_queue ~= nil and type(protect_critical_queue) ~= "boolean" then
+			return { code = "invalid", message = "protect_critical_queue must be boolean" }
+		end
 		if type(item) ~= "table" or not valid_text(item.id, 128) or not valid_text(item.owner_id, 512) then return { code = "invalid" } end
 		if self.known[item.id] or self.completed[item.id] == true or self.failed[item.id] ~= nil then
 			return { code = "duplicate", message = "work ID is active or has retained terminal history" }
