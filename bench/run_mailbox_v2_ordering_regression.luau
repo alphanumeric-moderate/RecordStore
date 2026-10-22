@@ -43,7 +43,7 @@ local function new_mailbox(options, store)
 	options.allow_unattested_activation = true
 	options.encode = function(value) return serde.encode("json", value) end
 	options.guid = next_guid
-	options.now_ms = function() return now_ms end
+	options.now_ms = options.now_ms or function() return now_ms end
 	options.lease_ms = options.lease_ms or 10000
 	options.lease_renewal_horizon_ms = options.lease_renewal_horizon_ms or 40000
 	options.max_segments = options.max_segments or 8
@@ -73,6 +73,37 @@ local function process_one(mailbox, handler)
 	return mailbox:ProcessNextAsync(function(payload, message, context)
 		return handler(payload, message, context)
 	end)
+end
+
+local function test_clock_is_never_called_inside_update_async_transform()
+	local backing = MailboxV2.MockStore()
+	local inside_transform = false
+	local store = {
+		GetAsync = function(_, key) return backing:GetAsync(key) end,
+		GetAsyncFresh = function(_, key) return backing:GetAsyncFresh(key) end,
+		UpdateAsync = function(_, key, transform)
+			return backing:UpdateAsync(key, function(raw, key_info)
+				inside_transform = true
+				local call_ok, value, user_ids, metadata = pcall(transform, raw, key_info)
+				inside_transform = false
+				if not call_ok then error(value) end
+				return value, user_ids, metadata
+			end)
+		end,
+	}
+	local mailbox = new_mailbox({
+		strict_ordering_enabled = true,
+		max_attempts = 1,
+		now_ms = function()
+			assert(not inside_transform, "clock callback ran inside a DataStore UpdateAsync transform")
+			return now_ms
+		end,
+	}, store)
+	local queued = enqueue(mailbox, "clock-safe", "clock-safe-id", "clock-safe-account", "high")
+	local dead_letter = process_one(mailbox, function() return false end)
+	assert(dead_letter.code == "dead_lettered", "clock-safe fixture did not reach dead letter")
+	local replay = mailbox:ReplayDeadLetterAsync(queued.message_id, "clock-safe-replay")
+	assert(replay.code == "accepted", "clock-safe replay failed: " .. tostring(replay.error))
 end
 
 local function test_ordering_is_opt_in_and_input_validation_is_side_effect_free()
@@ -615,6 +646,7 @@ local function test_recordstore_installs_shared_scheduler_for_v2_claim_renewal()
 	RecordStore.Mock.reset()
 end
 
+test_clock_is_never_called_inside_update_async_transform()
 test_ordering_is_opt_in_and_input_validation_is_side_effect_free()
 test_recordstore_installs_shared_scheduler_for_v2_claim_renewal()
 test_priority_never_overtakes_an_earlier_ordered_message()

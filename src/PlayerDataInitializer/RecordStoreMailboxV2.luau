@@ -1146,6 +1146,7 @@ end
 function MailboxV2._ensure_ordering_slot(self: Mailbox, route: string, ordering_key: string?): (number?, string?)
 	if ordering_key == nil then return nil, nil end
 	local ordering_route = self:_ordering_route(ordering_key)
+	local updated_at = self:_now()
 	local updated, update_error = self:_update(ordering_route, function(raw)
 		local current = as_dict(raw)
 		if current == nil then
@@ -1177,7 +1178,7 @@ function MailboxV2._ensure_ordering_slot(self: Mailbox, route: string, ordering_
 		next_routes[route] = next_sequence
 		next_record.routes = next_routes
 		next_record.next_sequence = (next_sequence :: number) + 1
-		next_record.updated_at = self:_now()
+		next_record.updated_at = updated_at
 		return next_record
 	end)
 	if update_error ~= nil or updated == nil then
@@ -1214,6 +1215,7 @@ function MailboxV2._release_ordering_slot(
 ): boolean
 	if type(ordering_key) ~= "string" or ordering_key == "" then return true end
 	local ordering_route = self:_ordering_route(ordering_key)
+	local released_at = self:_now()
 	local updated, update_error = self:_update(ordering_route, function(raw)
 		local current = as_dict(raw)
 		if current == nil or not same_owner(current.owner, self.owner)
@@ -1241,7 +1243,7 @@ function MailboxV2._release_ordering_slot(
 				next_record.replay_operations = next_replay_operations
 			end
 		end
-		next_record.updated_at = self:_now()
+		next_record.updated_at = released_at
 		return next_record
 	end)
 	if update_error ~= nil or updated == nil then
@@ -1268,6 +1270,7 @@ function MailboxV2._reserve_replay_ordering_slot(
 	operation_id: string
 ): (number?, string?)
 	local ordering_route = self:_ordering_route(ordering_key)
+	local reserved_at = self:_now()
 	local updated, update_error = self:_update(ordering_route, function(raw)
 		local current = as_dict(raw)
 		if current == nil then
@@ -1314,7 +1317,7 @@ function MailboxV2._reserve_replay_ordering_slot(
 		next_record.routes = next_routes
 		next_record.replay_operations = next_replay_operations
 		next_record.next_sequence = (next_sequence :: number) + 1
-		next_record.updated_at = self:_now()
+		next_record.updated_at = reserved_at
 		return next_record
 	end)
 	if update_error ~= nil or updated == nil then
@@ -1349,6 +1352,7 @@ function MailboxV2._ensure_replay_ordering_sequence(
 	end
 	local sequence, reserve_error = self:_reserve_replay_ordering_slot(route, ordering_key, operation_id)
 	if sequence == nil then return nil, reserve_error end
+	local updated_at = self:_now()
 	local updated, update_error = self:_update_message(route, function(current)
 		if current == nil or current.state ~= "replaying" or current.replay_operation_id ~= operation_id
 			or current.ordering_key ~= ordering_key
@@ -1358,7 +1362,7 @@ function MailboxV2._ensure_replay_ordering_sequence(
 		if current.ordering_sequence == sequence then return current end
 		local next_record = clone_dict(current)
 		next_record.ordering_sequence = sequence
-		next_record.updated_at = self:_now()
+		next_record.updated_at = updated_at
 		return next_record
 	end)
 	if update_error ~= nil or updated == nil then
