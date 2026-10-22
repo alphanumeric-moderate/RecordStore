@@ -7022,18 +7022,35 @@ local function diff_change_events(events: { ChangeEvent }, old_value: JsonValue?
 		local new_table = new_value :: { [string | number]: JsonValue }
 		for key, old_child in old_table do
 			if type(key) == "string" or type(key) == "number" then
-				path[#path + 1] = key
-				local complete = diff_change_events(events, old_child, new_table[key], path, operation_id, sequence, kind)
-				path[#path] = nil
-				if not complete then
-					return false
+				local new_child = new_table[key]
+				local equal = old_child == new_child
+				if not equal
+					and type(old_child) == "number"
+					and type(new_child) == "number"
+					and math.isnan(old_child)
+					and math.isnan(new_child)
+				then
+					equal = true
+				end
+				if not equal then
+					path[#path + 1] = key
+					local complete: boolean
+					if type(old_child) == "table" and type(new_child) == "table" then
+						complete = diff_change_events(events, old_child, new_child, path, operation_id, sequence, kind)
+					else
+						complete = append_change_event(events, path, old_child, new_child, operation_id, sequence, kind)
+					end
+					path[#path] = nil
+					if not complete then
+						return false
+					end
 				end
 			end
 		end
 		for key, new_child in new_table do
 			if (type(key) == "string" or type(key) == "number") and old_table[key] == nil then
 				path[#path + 1] = key
-				local complete = diff_change_events(events, nil, new_child, path, operation_id, sequence, kind)
+				local complete = append_change_event(events, path, nil, new_child, operation_id, sequence, kind)
 				path[#path] = nil
 				if not complete then
 					return false
