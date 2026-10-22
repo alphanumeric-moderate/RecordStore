@@ -189,4 +189,99 @@ do
 end
 
 RecordStore.Mock.reset()
-print("[PASS] Unknown-save recovery retains immutable operation identity, confirms committed writes, retries only the exact base revision, and blocks mutation while ownership is uncertain.")
+
+do
+	local fake_now = DateTime.now().UnixTimestampMillis / 1000 + 1
+	RecordStore.Mock.set_test_clock(function()
+		return fake_now
+	end)
+	local record = open_test_record("renew-commit-then-error")
+	local base_revision = record:GetRevision()
+	local before = RecordStore.Mock.get_record_raw(
+		"RecordStore_UnknownSaveRecoveryRegression",
+		"global",
+		"renew-commit-then-error"
+	) :: { [string]: any }
+	local before_lease = (before.session :: { [string]: any }).lease_until
+	fake_now += 10
+
+	RecordStore.Mock.set_update_commit_then_failures(1)
+	RecordStore.Mock.set_get_failures(100, "hold ambiguous renewal outcome")
+	local renew_result = RecordStore.Mock.renew(record)
+	assert(renew_result == "unknown", "commit-then-error renewal must remain unknown until authoritative verification")
+	local status = record:GetDurabilityStatus()
+	local operation_id = status.pending_operation_id
+	assert(operation_id ~= nil, "ambiguous renewal must retain its logical operation ID")
+	assert(status.ownership == "uncertain", "ambiguous renewal must fence mutation while ownership is uncertain")
+	assert(record:GetRevision() == base_revision, "lease renewal must not increment the data revision")
+
+	local committed = RecordStore.Mock.get_record_raw(
+		"RecordStore_UnknownSaveRecoveryRegression",
+		"global",
+		"renew-commit-then-error"
+	) :: { [string]: any }
+	assert(committed.write_id == operation_id, "ambiguous renewal must commit under its original operation ID")
+	assert(committed.revision == base_revision, "ambiguous renewal must not create a data revision")
+	assert(((committed.session :: { [string]: any }).lease_until) > before_lease,
+		"committed renewal must extend the lease")
+
+	RecordStore.Mock.set_get_failures(0)
+	local recovery_result, recovery_message = RecordStore.Mock.reconcile(record)
+	assert(recovery_result == "success", recovery_message)
+	status = record:GetDurabilityStatus()
+	assert(status.ownership == "owned", "verified renewal should restore ownership")
+	assert(status.pending_operation_id == nil, "verified renewal must clear its pending operation")
+	assert(record:GetRevision() == base_revision, "renewal reconciliation must preserve the data revision")
+	local data = record:Get() :: { [string]: RecordStore.JsonValue }
+	assert(data.coins == 10, "renewal reconciliation changed profile data")
+	assert(record:Close() == "closed", "renewal recovery fixture should close")
+end
+
+RecordStore.Mock.reset()
+
+do
+	local fake_now = DateTime.now().UnixTimestampMillis / 1000 + 1
+	RecordStore.Mock.set_test_clock(function()
+		return fake_now
+	end)
+	local record = open_test_record("expired-lease-no-retry")
+	local base_revision = record:GetRevision()
+	local updated, update_message = record:Update(function(data)
+		(data :: { [string]: RecordStore.JsonValue }).coins = 40
+		return data
+	end)
+	assert(updated == "success", update_message)
+	local before = RecordStore.Mock.get_record_raw(
+		"RecordStore_UnknownSaveRecoveryRegression",
+		"global",
+		"expired-lease-no-retry"
+	) :: { [string]: any }
+	local previous_write_id = before.write_id
+
+	RecordStore.Mock.set_update_failures(1, "unknown", "injected pre-commit failure")
+	RecordStore.Mock.set_get_failures(100, "hold save outcome until lease expiry")
+	local save_result = record:Save("known-not-committed-after-lease-expiry")
+	assert(save_result == "unknown", "unconfirmed write should remain unknown before lease reconciliation")
+	local status = record:GetDurabilityStatus()
+	local operation_id = status.pending_operation_id
+	assert(operation_id ~= nil, "expired-lease fixture must retain the pending operation ID")
+
+	fake_now += 181
+	RecordStore.Mock.set_get_failures(0)
+	local recovery_result = RecordStore.Mock.reconcile(record)
+	assert(recovery_result == "fenced", "reconciliation must fence an expired owner instead of retrying its stale snapshot")
+	status = record:GetDurabilityStatus()
+	assert(status.ownership == "lost", "expired lease recovery must report lost ownership")
+	local durable = RecordStore.Mock.get_record_raw(
+		"RecordStore_UnknownSaveRecoveryRegression",
+		"global",
+		"expired-lease-no-retry"
+	) :: { [string]: any }
+	assert(durable.write_id == previous_write_id, "expired lease recovery must not perform a stale conditional retry")
+	assert(durable.revision == base_revision, "expired lease recovery must not advance durable revision")
+	assert((durable.data :: { [string]: any }).coins == 10,
+		"expired lease recovery must not persist the uncommitted local snapshot")
+end
+
+RecordStore.Mock.reset()
+print("[PASS] Unknown-save recovery retains immutable operation identity, fences public mutation, preserves in-flight edits, and never retries a stale snapshot after lease expiry.")
