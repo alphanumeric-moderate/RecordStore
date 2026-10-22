@@ -366,10 +366,18 @@ local function new_governor(options)
 				return { code = "invalid", terminal = true, message = "unsupported admission dimension: " .. tostring(field) }, false, false
 			end
 		end
-		local read_units = if dimensions.read_units == nil then 0 else dimensions.read_units
-		local write_units = if dimensions.write_units == nil then 0 else dimensions.write_units
-		local estimated_bytes = if dimensions.estimated_bytes == nil then 0 else dimensions.estimated_bytes
-		local handler_slots = if dimensions.handler_slots == nil then 1 else dimensions.handler_slots
+		if dimensions.read_units == nil or dimensions.write_units == nil
+			or dimensions.estimated_bytes == nil or dimensions.handler_slots == nil
+		then
+			return {
+				code = "invalid", terminal = true,
+				message = "dimensions must explicitly provide read_units, write_units, estimated_bytes, and handler_slots",
+			}, false, false
+		end
+		local read_units = dimensions.read_units
+		local write_units = dimensions.write_units
+		local estimated_bytes = dimensions.estimated_bytes
+		local handler_slots = dimensions.handler_slots
 		if not finite(read_units) or read_units < 0 or math.floor(read_units) ~= read_units
 			or not finite(write_units) or write_units < 0 or math.floor(write_units) ~= write_units
 			or not finite(estimated_bytes) or estimated_bytes < 0 or math.floor(estimated_bytes) ~= estimated_bytes
@@ -481,7 +489,11 @@ local function new_governor(options)
 		end
 		return {
 			code = "admitted", work_class = work_class, request_kind = request_kind,
-			cost = cost, critical = critical, dimensions = dimensions,
+			cost = cost, critical = critical,
+			dimensions = {
+				read_units = read_units, write_units = write_units,
+				estimated_bytes = estimated_bytes, handler_slots = handler_slots,
+			},
 		}, probe_needed, false
 	end
 	function governor:CanAdmit(work_class, request_kind, cost, mutating, critical_override, dimensions)
