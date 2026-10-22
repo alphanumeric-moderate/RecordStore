@@ -1083,7 +1083,7 @@ local function new_governor(options)
 		if self.known[item.id] or self.completed[item.id] == true or self.failed[item.id] ~= nil then
 			return { code = "duplicate", message = "work ID is active or has retained terminal history" }
 		end
-		local lane = item.lane or "normal"
+		local lane = if item.lane == nil then "normal" else item.lane
 		if lane ~= "high" and lane ~= "normal" and lane ~= "background" and lane ~= "lease_renewal" then return { code = "invalid", message = "unsupported lane" } end
 		local copy_ok, value = pcall(copy, item)
 		if not copy_ok or type(value) ~= "table" then
