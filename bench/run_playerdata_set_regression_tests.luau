@@ -113,6 +113,31 @@ task.wait(0.1)
 assert(saved_records[saved_key].kills == previous_kills,
 	"PlayerData.Set should persist the restored baseline after recovery")
 
+-- A leave during an ambiguous PlayerData flush must retain queued values until recovery.
+local players = harness.players
+local baseline_equipped = saved_records[saved_key].equipped
+local leave_pending_equipped = baseline_equipped .. "-leave"
+local original_leave_update = record.Update
+record.Update = function(self, transform)
+	self.State = "unknown"
+	return "unknown", "injected ambiguous save during player removal"
+end
+equipped_display.Value = leave_pending_equipped
+task.wait(0.1)
+assert(saved_records[saved_key].equipped == baseline_equipped,
+	"unknown record must not accept a queued leave-time mutation")
+players.PlayerRemoving:Fire(player)
+task.wait(0.1)
+assert(saved_records[saved_key].equipped == baseline_equipped,
+	"leave cleanup must not falsely persist the ambiguous mutation")
+record.Update = original_leave_update
+record.State = "active"
+record_options.on_event("reconcile", record.Key, "success", nil)
+task.wait(0.5)
+assert(saved_records[saved_key].equipped == leave_pending_equipped,
+	"successful reconciliation must flush retained values before closing a departed player's record")
+assert(record.State == "closed", "deferred leave cleanup must close the record after flushing")
+
 -- A removed cached value must trigger a safe child lookup rather than being reused.
 local lookups_before_removed_value = get_find_first_child_calls()
 kills:Destroy()
@@ -128,7 +153,7 @@ assert(controller:Shutdown(), "controller failed to shut down")
 local stored = saved_records["PlayerData_Test1|global|Player_" .. tostring(player.UserId)]
 assert(stored ~= nil, "mock record was not saved")
 assert(stored.kills == 12500124, "kills was not persisted")
-assert(stored.equipped == "Hi", "equipped was not persisted")
+assert(stored.equipped == leave_pending_equipped, "leave-time equipped value was not persisted")
 assert(stored.admin == true, "non-leaderstat admin value was not persisted")
 
 print("[PlayerData.Set] Lune integration regression passed")
