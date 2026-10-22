@@ -82,6 +82,7 @@ local test_ok, test_error = pcall(function()
 	local previous_kills = (kills_backing :: NumberValue).Value
 	local backing_value = kills_backing :: NumberValue
 	backing_value.Value = previous_kills + 1
+	task.wait(0.05)
 	assert(backing_value.Value == previous_kills,
 		"PlayerData backing value mutation must be reverted while record ownership is uncertain")
 	local blocked_set = controller.Set(player, "kills", previous_kills + 2)
