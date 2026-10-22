@@ -18,6 +18,12 @@ benchmarks:
   - name: "advanced scheduler deficit round robin"
     exec: lune run bench/advanced_scheduler_drr.bench.luau
 
+  - name: "scheduler disabled direct-execution baseline"
+    exec: lune run bench/scheduler_disabled_overhead.bench.luau
+
+  - name: "scheduler enabled dispatch workload"
+    exec: lune run bench/scheduler_enabled_overhead.bench.luau
+
   - name: "session lifecycle (create/update/save/close/reopen)"
     exec: lune run bench/session_lifecycle.bench.luau
 

@@ -19,7 +19,7 @@ env:
 jobs:
   benchmarks:
     name: Run benchmarks
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
@@ -57,6 +57,14 @@ jobs:
       - name: Regression - scheduler admission safety
         timeout-minutes: 2
         run: timeout --signal=TERM --kill-after=5s 60s lune run bench/run_scheduler_security_regression.luau
+
+      - name: Regression - scheduler bug fixes
+        timeout-minutes: 2
+        run: timeout --signal=TERM --kill-after=5s 60s lune run bench/run_scheduler_bugfix_regression.luau
+
+      - name: Regression - scheduler critical vulnerabilities
+        timeout-minutes: 2
+        run: timeout --signal=TERM --kill-after=5s 60s lune run bench/run_scheduler_critical_vulnerability_regression.luau
 
       - name: Regression - V2 mailbox ordering and security
         timeout-minutes: 2
