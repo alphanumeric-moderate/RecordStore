@@ -7062,6 +7062,20 @@ local function diff_change_events(events: { ChangeEvent }, old_value: JsonValue?
 	return append_change_event(events, path, old_value, new_value, operation_id, sequence, kind)
 end
 
+local function change_event_path_before(left: ChangeEvent, right: ChangeEvent): boolean
+	local left_path = left.Path
+	local right_path = right.Path
+	local shared_length = math.min(#left_path, #right_path)
+	for index = 1, shared_length do
+		local left_segment = left_path[index]
+		local right_segment = right_path[index]
+		if left_segment ~= right_segment then
+			return left_segment < right_segment
+		end
+	end
+	return #left_path < #right_path
+end
+
 local function enqueue_change_observation(state: InternalState, old_value: unknown, new_value: unknown, operation_id: string, kind: string)
 	if next(state.change_observers) == nil then
 		return
@@ -7091,19 +7105,9 @@ local function enqueue_change_observation(state: InternalState, old_value: unkno
 			Kind = kind,
 		}
 	else
-		table.sort(events, function(left: ChangeEvent, right: ChangeEvent): boolean
-			local left_path = left.Path
-			local right_path = right.Path
-			local shared_length = math.min(#left_path, #right_path)
-			for index = 1, shared_length do
-				local left_segment = left_path[index]
-				local right_segment = right_path[index]
-				if left_segment ~= right_segment then
-					return left_segment < right_segment
-				end
-			end
-			return #left_path < #right_path
-		end)
+		if #events > 1 then
+			table.sort(events, change_event_path_before)
+		end
 	end
 	local queued_events = if state.change_dispatch_tail >= state.change_dispatch_head then state.change_dispatch_tail - state.change_dispatch_head + 1 else 0
 	if queued_events + #events > CHANGE_DISPATCH_QUEUE_CAPACITY then
