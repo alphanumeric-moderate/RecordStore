@@ -760,12 +760,12 @@ local function new(dependencies: Dependencies?): Controller
 		end
 
 		flush_running[record] = nil
-		if recovery_flush_requested[record] and record.State == "active"
-			and not closing_records[record]
-		then
-			recovery_flush_requested[record] = nil
+		if recovery_flush_requested[record] then
 			local retained = pending_changes[record]
-			if retained ~= nil and next(retained) ~= nil then
+			if closing_records[record] or retained == nil or next(retained) == nil then
+				recovery_flush_requested[record] = nil
+			elseif record.State == "active" then
+				recovery_flush_requested[record] = nil
 				schedule_pending_flush(record)
 			end
 		end
