@@ -1835,6 +1835,10 @@ local function new(dependencies: Dependencies?): Controller
 		end
 
 		local deadline = os.clock() + CONFIG.shutdown_deadline
+		for record, deferred in pairs(deferred_close_records) do
+			deferred.deadline = deadline
+			start_deferred_close(record)
+		end
 		local load_wait_deadline = math.min(deadline, os.clock() + CONFIG.operation_deadline)
 		while os.clock() < load_wait_deadline do
 			local still_loading = false
