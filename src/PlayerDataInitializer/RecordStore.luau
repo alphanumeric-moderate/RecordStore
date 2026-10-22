@@ -7025,13 +7025,6 @@ local function sorted_child_keys(old_value: JsonValue?, new_value: JsonValue?): 
 	return result
 end
 
-local function clone_change_payload(value: JsonValue?): JsonValue?
-	if type(value) ~= "table" and typeof(value) ~= "buffer" then
-		return value
-	end
-	return copy_value(value)
-end
-
 local function append_change_event(events: { ChangeEvent }, path: { string }, old_value: JsonValue?, new_value: JsonValue?, operation_id: string, sequence: number, kind: string): boolean
 	if #events >= CHANGE_OBSERVER_CAPACITY then
 		return false
@@ -7040,8 +7033,8 @@ local function append_change_event(events: { ChangeEvent }, path: { string }, ol
 		OperationId = operation_id,
 		Sequence = sequence,
 		Path = table.clone(path),
-		OldValue = clone_change_payload(old_value),
-		NewValue = clone_change_payload(new_value),
+		OldValue = if type(old_value) == "table" or typeof(old_value) == "buffer" then copy_value(old_value) else old_value,
+		NewValue = if type(new_value) == "table" or typeof(new_value) == "buffer" then copy_value(new_value) else new_value,
 		Truncated = false,
 		Kind = kind,
 	}
@@ -7145,7 +7138,15 @@ local function enqueue_change_observation(state: InternalState, old_value: unkno
 			if event ~= nil then
 				for _, observer in pairs(state.change_observers) do
 					local thread = coroutine.create(observer)
-					local ok = coroutine.resume(thread, event)
+					local ok = coroutine.resume(thread, {
+						OperationId = event.OperationId,
+						Sequence = event.Sequence,
+						Path = table.clone(event.Path),
+						OldValue = if type(event.OldValue) == "table" or typeof(event.OldValue) == "buffer" then copy_value(event.OldValue) else event.OldValue,
+						NewValue = if type(event.NewValue) == "table" or typeof(event.NewValue) == "buffer" then copy_value(event.NewValue) else event.NewValue,
+						Truncated = event.Truncated,
+						Kind = event.Kind,
+					})
 					if not ok or coroutine.status(thread) ~= "dead" then
 						coroutine.close(thread)
 						state.observer_errors += 1
