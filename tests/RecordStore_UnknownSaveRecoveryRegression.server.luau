@@ -123,7 +123,7 @@ do
 			local data = record.Data :: { [string]: RecordStore.JsonValue }
 			data.coins = 25
 		end
-		return os.time()
+		return DateTime.now().UnixTimestampMillis / 1000 + 1
 	end)
 	RecordStore.Mock.set_update_commit_then_failures(1)
 	RecordStore.Mock.set_get_failures(100, "hold unknown state after injected in-flight mutation")
