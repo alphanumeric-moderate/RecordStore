@@ -345,6 +345,15 @@ function MailboxV2.new(store: unknown, owner_value: Owner, options_value: Option
 		error("store must implement GetAsync and UpdateAsync", 2)
 	end
 	local options = table.clone(options_value or {}) :: Options
+	if options.now_ms ~= nil and type(options.now_ms) ~= "function" then
+		error("options.now_ms must be a function returning finite milliseconds", 2)
+	end
+	if options.guid ~= nil and type(options.guid) ~= "function" then
+		error("options.guid must be a function returning a non-empty string of at most 256 bytes", 2)
+	end
+	if options.lease_renewal_scheduler ~= nil and type(options.lease_renewal_scheduler) ~= "function" then
+		error("options.lease_renewal_scheduler must be a function", 2)
+	end
 	if type(options.encode) ~= "function" then
 		error("options.encode must provide the exact serialized representation used by the DataStore adapter", 2)
 	end
@@ -439,7 +448,26 @@ function MailboxV2._check_activation(self: Mailbox, operation: string): Result?
 end
 
 function MailboxV2._now(self: Mailbox): number
-	return if self.options.now_ms ~= nil then self.options.now_ms() else now_default()
+	local value = if self.options.now_ms ~= nil then self.options.now_ms() else now_default()
+	if not is_finite(value) then
+		error("options.now_ms must return finite milliseconds", 2)
+	end
+	return value
+end
+
+function MailboxV2._guid(self: Mailbox): (string?, string?)
+	local callback = self.options.guid
+	if type(callback) ~= "function" then
+		return nil, "a guid callback is required for this operation"
+	end
+	local call_ok, value = pcall(callback)
+	if not call_ok then
+		return nil, "options.guid raised: " .. tostring(value)
+	end
+	if type(value) ~= "string" or value == "" or #value > 256 then
+		return nil, "options.guid must return a non-empty string of at most 256 bytes"
+	end
+	return value, nil
 end
 
 function MailboxV2._encode_size(self: Mailbox, value: unknown): (number?, string?)
@@ -503,9 +531,9 @@ function MailboxV2._route_key(self: Mailbox, idempotency_key: string?): (string?
 		end
 		return result_route_key(self, "m2i-", "producer:" .. idempotency_key), nil
 	end
-	local guid = if self.options.guid ~= nil then self.options.guid() else nil
-	if type(guid) ~= "string" or guid == "" then
-		return nil, "a guid callback is required when enqueueing without an idempotency key"
+	local guid, guid_error = self:_guid()
+	if guid == nil then
+		return nil, guid_error or "a guid callback is required when enqueueing without an idempotency key"
 	end
 	return result_route_key(self, "m2g-", "generated:" .. guid), nil
 end
@@ -827,7 +855,14 @@ function MailboxV2._open_segment(self: Mailbox, kind: string): (Locator?, string
 				return nil, finish_error
 			end
 		end
-		local token = if self.options.guid ~= nil then self.options.guid() else digest(self.owner_text .. tostring(self:_now()) .. tostring(math.random()))
+		local token
+		if self.options.guid ~= nil then
+			local generated, generation_error = self:_guid()
+			if generated == nil then return nil, generation_error end
+			token = generated
+		else
+			token = digest(self.owner_text .. tostring(self:_now()) .. tostring(math.random()))
+		end
 		local allocated, allocate_error = self:_update(self:_manifest_key(kind), function(raw)
 			local current = as_dict(raw)
 			if current == nil then
@@ -1917,7 +1952,14 @@ function MailboxV2.EnqueueAsync(self: Mailbox, message_type: string, payload: un
 		return publish_after_enqueue(self, ok("duplicate", route, self:_record_snapshot(existing), nil))
 	end
 
-	local token = if self.options.guid ~= nil then self.options.guid() else digest(route .. request_text .. tostring(self:_now()))
+	local token
+	if self.options.guid ~= nil then
+		local generated, generation_error = self:_guid()
+		if generated == nil then return ok("invalid", route, nil, generation_error) end
+		token = generated
+	else
+		token = digest(route .. request_text .. tostring(self:_now()))
+	end
 	local entry, reserve_error = self:_reserve(route, request_text, request, token)
 	if entry == nil then
 		local code = if string.find(reserve_error or "", "capacity", 1, true) then "capacity"
@@ -2162,7 +2204,14 @@ function MailboxV2._claim(self: Mailbox, route: string): (Dict?, Result)
 		local blocked, ordering_error = self:_ordering_blocked(current_record, route)
 		if blocked then return nil, ok("ordered", route, self:_record_snapshot(current_record), ordering_error) end
 	end
-	local token = if self.options.guid ~= nil then self.options.guid() else digest(route .. tostring(self:_now()) .. tostring(math.random()))
+	local token
+	if self.options.guid ~= nil then
+		local generated, generation_error = self:_guid()
+		if generated == nil then return nil, ok("invalid", route, nil, generation_error) end
+		token = generated
+	else
+		token = digest(route .. tostring(self:_now()) .. tostring(math.random()))
+	end
 	local now = self:_now()
 	local claimed, claim_error = self:_update_message(route, function(current)
 		if current == nil or not same_owner(current.owner, self.owner) then
@@ -2274,8 +2323,14 @@ function MailboxV2.RenewClaimAsync(self: Mailbox, message_id: string, claim_toke
 	end
 
 	local now = self:_now()
-	local renewal_id = if self.options.guid ~= nil then self.options.guid()
-		else digest(message_id .. ":" .. claim_token .. ":renew:" .. tostring(now) .. ":" .. tostring(math.random()))
+	local renewal_id
+	if self.options.guid ~= nil then
+		local generated, generation_error = self:_guid()
+		if generated == nil then return ok("invalid", message_id, nil, generation_error) end
+		renewal_id = generated
+	else
+		renewal_id = digest(message_id .. ":" .. claim_token .. ":renew:" .. tostring(now) .. ":" .. tostring(math.random()))
+	end
 	local renewed, update_error = self:_update_message(message_id, function(current)
 		if current == nil or current.state ~= "claimed" or current.claim_token ~= claim_token then
 			return current

@@ -75,6 +75,52 @@ local function process_one(mailbox, handler)
 	end)
 end
 
+local function test_injected_clock_and_guid_contracts_fail_closed()
+	local now_ok = pcall(function()
+		new_mailbox({ now_ms = false })
+	end)
+	assert(not now_ok, "non-function now_ms option was accepted")
+	local guid_ok = pcall(function()
+		new_mailbox({ guid = false })
+	end)
+	assert(not guid_ok, "non-function guid option was accepted")
+
+	local guid_calls = 0
+	local mailbox, store = new_mailbox({
+		guid = function()
+			guid_calls += 1
+			if guid_calls == 1 then return "valid-reservation-token" end
+			return false
+		end,
+	})
+	local reads_before, writes_before = store.get_calls, store.update_calls
+	local no_idempotency = mailbox:EnqueueAsync("invalid-guid", { amount = 1 }, {
+		priority = "normal",
+	})
+	assert(no_idempotency.code == "invalid",
+		"malformed GUID result was accepted for a generated idempotency route")
+	assert(store.get_calls == reads_before and store.update_calls == writes_before,
+		"invalid generated idempotency route performed store operations")
+
+	local good_mailbox, good_store = new_mailbox({
+		guid = function() return "valid-token" end,
+		strict_ordering_enabled = true,
+	})
+	local queued = enqueue(good_mailbox, "invalid-claim-guid", "invalid-claim-guid-id", "guid-test-account", "high")
+	good_mailbox.options.guid = function() return string.rep("g", 257) end
+	local claim, claim_result = good_mailbox:_claim(queued.message_id)
+	assert(claim == nil and claim_result.code == "invalid",
+		"oversized generated claim token was accepted")
+	assert(good_store.values[queued.message_id].state == "ready",
+		"invalid generated claim token mutated the durable message")
+
+	local writes_before_renewal = good_store.update_calls
+	local renewal = good_mailbox:RenewClaimAsync(queued.message_id, "not-a-claim-token")
+	assert(renewal.code == "invalid", "malformed generated renewal identifier was accepted")
+	assert(good_store.update_calls == writes_before_renewal,
+		"invalid renewal identifier performed a DataStore write")
+end
+
 local function test_clock_is_never_called_inside_update_async_transform()
 	local backing = MailboxV2.MockStore()
 	local inside_transform = false
@@ -645,6 +691,7 @@ local function test_recordstore_installs_shared_scheduler_for_v2_claim_renewal()
 	RecordStore.Mock.reset()
 end
 
+test_injected_clock_and_guid_contracts_fail_closed()
 test_clock_is_never_called_inside_update_async_transform()
 test_ordering_is_opt_in_and_input_validation_is_side_effect_free()
 test_recordstore_installs_shared_scheduler_for_v2_claim_renewal()
