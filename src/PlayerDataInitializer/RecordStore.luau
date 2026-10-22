@@ -7025,7 +7025,7 @@ local function change_values_equal(old_value: JsonValue?, new_value: JsonValue?)
 	return true
 end
 
-local function sorted_child_keys(old_value: JsonValue?, new_value: JsonValue?): { DiffKey }
+local function sorted_child_keys(old_value: JsonValue?, new_value: JsonValue?, skip_table_equality: boolean): { DiffKey }
 	local old_table = old_value :: { [string | number]: JsonValue }
 	local new_table = new_value :: { [string | number]: JsonValue }
 	local result: { DiffKey } = {}
@@ -7038,7 +7038,14 @@ local function sorted_child_keys(old_value: JsonValue?, new_value: JsonValue?): 
 	for key, old_child in old_table do
 		if type(key) == "string" or type(key) == "number" then
 			local new_child = new_table[key]
-			if new_child == nil or not change_values_equal(old_child, new_child) then
+			if new_child == nil
+				or (
+					skip_table_equality
+					and type(old_child) == "table"
+					and type(new_child) == "table"
+				)
+				or not change_values_equal(old_child, new_child)
+			then
 				add_key(key)
 			end
 		end
@@ -7080,7 +7087,7 @@ local function diff_change_events(events: { ChangeEvent }, old_value: JsonValue?
 		return true
 	end
 	if type(old_value) == "table" and type(new_value) == "table" then
-		local keys = sorted_child_keys(old_value, new_value)
+		local keys = sorted_child_keys(old_value, new_value, #path == 0)
 		for _, entry in ipairs(keys) do
 			path[#path + 1] = entry.PathSegment
 			local old_child = (old_value :: { [string | number]: JsonValue })[entry.Key]
