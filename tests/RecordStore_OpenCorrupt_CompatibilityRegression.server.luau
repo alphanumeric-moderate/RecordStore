@@ -501,7 +501,7 @@ end
 RecordStore.Mock.reset()
 do
 	local record = RecordStore.Mock.new(
-		"RecordStore_ChangeEventSubscriberIsolationRegression",
+		"RS_SubscriberIsolation",
 		"global",
 		"subscriber-isolation",
 		{ schema_version = 1 }
