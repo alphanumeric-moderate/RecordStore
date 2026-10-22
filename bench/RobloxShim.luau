@@ -189,6 +189,13 @@ Shim.environment = {
 	require = shim_require,
 }
 
+function Shim.set_service(name: string, service: any)
+	assert(loaded_module == nil, "services must be injected before RecordStore is loaded")
+	assert(type(name) == "string" and name ~= "", "service name must be a non-empty string")
+	assert(service ~= nil, "service must not be nil")
+	services[name] = service
+end
+
 -- Returns the RecordStore module, loaded inside the shimmed environment.
 function Shim.load(source_path: string?): any
 	return load_record_store(source_path)
