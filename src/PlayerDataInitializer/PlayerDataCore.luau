@@ -674,7 +674,7 @@ local function new(dependencies: Dependencies?): Controller
 	local recovery_flush_requested: {[PlayerRecord]: boolean} = {}
 	local schedule_pending_flush: (PlayerRecord) -> ()
 	local request_recovery_flush: (PlayerRecord) -> ()
-	local deferred_close_records: {[PlayerRecord]: { player: Player, deadline: number }} = {}
+	local deferred_close_records: {[PlayerRecord]: { player: Player, deadline: number, warned_timeout: boolean? }} = {}
 	local deferred_close_running: {[PlayerRecord]: boolean} = {}
 	local deferred_close_requested: {[PlayerRecord]: boolean} = {}
 	local start_deferred_close: (PlayerRecord) -> ()
