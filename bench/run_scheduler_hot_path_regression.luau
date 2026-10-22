@@ -1,6 +1,6 @@
 --!nocheck
 -- Guard that dispatch stays off the diagnostic snapshot path for regular and batchable work.
-local Scheduler = require("../src/PlayerDataInitializer/RecordStoreScheduler")
+local Scheduler = require("./RobloxShim").load_scheduler()
 local task = require("@lune/task")
 
 local function run_case(batchable)
