@@ -436,6 +436,7 @@ type InternalState = {
 	state: SessionState,
 	data: JsonValue?,
 	public_data_source: JsonValue?,
+	public_data_detached: boolean,
 	public_record: unknown,
 	token: string?,
 	generation: number,
@@ -4280,6 +4281,9 @@ local function mark_dirty(state: InternalState)
 end
 
 track_external_data_mutation = function(state: InternalState)
+	if state.public_data_detached then
+		return
+	end
 	if state.state ~= "active" and state.state ~= "saving" then
 		return
 	end
@@ -4363,7 +4367,7 @@ local function sync_public(record: Record, skip_external_mutation_check: boolean
 		return
 	end
 
-	if not skip_external_mutation_check then
+	if not state.public_data_detached and not skip_external_mutation_check then
 		track_external_data_mutation(state)
 	end
 	if state.state == "active" then
@@ -4376,7 +4380,16 @@ local function sync_public(record: Record, skip_external_mutation_check: boolean
 	else
 		recovery_records[record] = nil
 	end
-	record.Data = state.data
+	if state.state == "active" or state.state == "saving" then
+		if state.public_data_detached then
+			state.public_data_detached = false
+			state.public_data_source = copy_value(state.data)
+		end
+		record.Data = state.data
+	else
+		state.public_data_detached = true
+		record.Data = copy_value(state.data)
+	end
 	record.State = state.state
 	record.Key = state.key
 	record.Generation = state.generation
@@ -7352,6 +7365,7 @@ local function make_record(name: string, scope: string, key: string, options: Op
 		state = "closed",
 		data = nil,
 		public_data_source = nil,
+		public_data_detached = false,
 		public_record = nil,
 		token = nil,
 		generation = 0,
