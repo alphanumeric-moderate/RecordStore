@@ -75,6 +75,22 @@ local function process_one(mailbox, handler)
 	end)
 end
 
+local function test_platform_guid_fallback_when_no_callback_is_supplied()
+	local store = MailboxV2.MockStore()
+	local mailbox = MailboxV2.new(store, owner, {
+		allow_unattested_activation = true,
+		encode = function(value) return serde.encode("json", value) end,
+		now_ms = function() return now_ms end,
+	})
+	local result = mailbox:EnqueueAsync("platform-guid", { value = 1 }, {
+		priority = "normal",
+	})
+	assert(result.code == "accepted",
+		"platform HttpService GUID fallback failed: " .. tostring(result.error))
+	assert(type(result.message_id) == "string" and result.message_id ~= "",
+		"platform GUID fallback did not produce a message identifier")
+end
+
 local function test_injected_clock_and_guid_contracts_fail_closed()
 	local now_ok = pcall(function()
 		new_mailbox({ now_ms = false })
@@ -692,6 +708,7 @@ local function test_recordstore_installs_shared_scheduler_for_v2_claim_renewal()
 	RecordStore.Mock.reset()
 end
 
+test_platform_guid_fallback_when_no_callback_is_supplied()
 test_injected_clock_and_guid_contracts_fail_closed()
 test_clock_is_never_called_inside_update_async_transform()
 test_ordering_is_opt_in_and_input_validation_is_side_effect_free()

@@ -456,16 +456,24 @@ function MailboxV2._now(self: Mailbox): number
 end
 
 function MailboxV2._guid(self: Mailbox): (string?, string?)
-	local callback = self.options.guid
-	if type(callback) ~= "function" then
-		return nil, "a guid callback is required for this operation"
-	end
-	local call_ok, value = pcall(callback)
-	if not call_ok then
-		return nil, "options.guid raised: " .. tostring(value)
+	local value
+	if self.options.guid == nil then
+		local call_ok, generated = pcall(function()
+			return game:GetService("HttpService"):GenerateGUID(false)
+		end)
+		if not call_ok then
+			return nil, "HttpService:GenerateGUID(false) failed: " .. tostring(generated)
+		end
+		value = generated
+	else
+		local call_ok, generated = pcall(self.options.guid)
+		if not call_ok then
+			return nil, "options.guid raised: " .. tostring(generated)
+		end
+		value = generated
 	end
 	if type(value) ~= "string" or value == "" or #value > 256 then
-		return nil, "options.guid must return a non-empty string of at most 256 bytes"
+		return nil, "GUID provider must return a non-empty string of at most 256 bytes"
 	end
 	return value, nil
 end
@@ -533,7 +541,7 @@ function MailboxV2._route_key(self: Mailbox, idempotency_key: string?): (string?
 	end
 	local guid, guid_error = self:_guid()
 	if guid == nil then
-		return nil, guid_error or "a guid callback is required when enqueueing without an idempotency key"
+		return nil, guid_error
 	end
 	return result_route_key(self, "m2g-", "generated:" .. guid), nil
 end
@@ -855,14 +863,8 @@ function MailboxV2._open_segment(self: Mailbox, kind: string): (Locator?, string
 				return nil, finish_error
 			end
 		end
-		local token
-		if self.options.guid ~= nil then
-			local generated, generation_error = self:_guid()
-			if generated == nil then return nil, generation_error end
-			token = generated
-		else
-			token = digest(self.owner_text .. tostring(self:_now()) .. tostring(math.random()))
-		end
+		local token, generation_error = self:_guid()
+		if token == nil then return nil, generation_error end
 		local allocated, allocate_error = self:_update(self:_manifest_key(kind), function(raw)
 			local current = as_dict(raw)
 			if current == nil then
@@ -1952,14 +1954,8 @@ function MailboxV2.EnqueueAsync(self: Mailbox, message_type: string, payload: un
 		return publish_after_enqueue(self, ok("duplicate", route, self:_record_snapshot(existing), nil))
 	end
 
-	local token
-	if self.options.guid ~= nil then
-		local generated, generation_error = self:_guid()
-		if generated == nil then return ok("invalid", route, nil, generation_error) end
-		token = generated
-	else
-		token = digest(route .. request_text .. tostring(self:_now()))
-	end
+	local token, generation_error = self:_guid()
+	if token == nil then return ok("invalid", route, nil, generation_error) end
 	local entry, reserve_error = self:_reserve(route, request_text, request, token)
 	if entry == nil then
 		local code = if string.find(reserve_error or "", "capacity", 1, true) then "capacity"
@@ -2204,14 +2200,8 @@ function MailboxV2._claim(self: Mailbox, route: string): (Dict?, Result)
 		local blocked, ordering_error = self:_ordering_blocked(current_record, route)
 		if blocked then return nil, ok("ordered", route, self:_record_snapshot(current_record), ordering_error) end
 	end
-	local token
-	if self.options.guid ~= nil then
-		local generated, generation_error = self:_guid()
-		if generated == nil then return nil, ok("invalid", route, nil, generation_error) end
-		token = generated
-	else
-		token = digest(route .. tostring(self:_now()) .. tostring(math.random()))
-	end
+	local token, generation_error = self:_guid()
+	if token == nil then return nil, ok("invalid", route, nil, generation_error) end
 	local now = self:_now()
 	local claimed, claim_error = self:_update_message(route, function(current)
 		if current == nil or not same_owner(current.owner, self.owner) then
@@ -2323,14 +2313,8 @@ function MailboxV2.RenewClaimAsync(self: Mailbox, message_id: string, claim_toke
 	end
 
 	local now = self:_now()
-	local renewal_id
-	if self.options.guid ~= nil then
-		local generated, generation_error = self:_guid()
-		if generated == nil then return ok("invalid", message_id, nil, generation_error) end
-		renewal_id = generated
-	else
-		renewal_id = digest(message_id .. ":" .. claim_token .. ":renew:" .. tostring(now) .. ":" .. tostring(math.random()))
-	end
+	local renewal_id, generation_error = self:_guid()
+	if renewal_id == nil then return ok("invalid", message_id, nil, generation_error) end
 	local renewed, update_error = self:_update_message(message_id, function(current)
 		if current == nil or current.state ~= "claimed" or current.claim_token ~= claim_token then
 			return current
