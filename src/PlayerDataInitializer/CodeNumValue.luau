@@ -1,6 +1,5 @@
 --!strict
 --!optimize 2
--- CodeNumValue: StringValue transport for CodeNum's native, versioned JSON codec.
 
 local NumberFormatterFactory = require(script.Parent.NumberFormatter)
 
@@ -14,7 +13,6 @@ type CodeNumAPI = {
     toString: (value: Value) -> string,
 }
 
--- Roblox's StringValue hard limit is conservatively treated as 199,999 bytes.
 local MAX_SERIALIZED_LENGTH = 199_999
 local cached_api: CodeNumAPI? = nil
 
@@ -169,7 +167,6 @@ local function decode_for_format(value: unknown): Value
 end
 
 function CodeNumValue.format(value: unknown, options: NumberFormatterFactory.Options?): string
-    -- Formatting only needs a decoded node; don't re-encode an already-valid payload.
     local decoded = decode_for_format(value)
     local api = resolve_api()
     local node = decoded :: { [string]: unknown }

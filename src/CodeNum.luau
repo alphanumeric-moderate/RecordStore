@@ -1,13 +1,4 @@
 --!nonstrict
--- CodeNum 0.2.0-preview.1
--- Standalone high-range numeric representation for Roblox Luau.
---
--- finite     native binary64 values; NaN and infinities use special nodes
--- integer    exact signed decimal integer outside the safe native range
--- scientific approximate binary64 significand + exact decimal exponent
--- hyper      Knuth up-arrow expression, kept symbolic when too large
--- expression unevaluated binary operation
--- call       unevaluated unary function
 
 local HttpService = game:GetService("HttpService")
 
@@ -32,7 +23,6 @@ local MAX_DISPLAY_DEPTH = 48
 local MAX_DISPLAY_NODES = 2048
 local LIMB_BASE = 10000000
 local LIMB_WIDTH = 7
--- Bound quadratic limb multiplication; larger products stay symbolic.
 local MAX_EXACT_MULTIPLICATION_DIGITS = 4096
 local LOG10_MAX_DOUBLE = 308.25471555991675
 
@@ -141,8 +131,6 @@ local function compareSignedText(left, right)
     return leftSign < 0 and -result or result
 end
 
--- Decimal text is converted into base-10^7 limbs for exact integer work.
--- Intermediate products remain below binary64's exact-integer limit.
 local function digitsToLimbs(digits)
     local limbs = {}
     local finish = #digits
@@ -183,7 +171,6 @@ local function addUnsigned(left, right)
     return limbsToDigits(out)
 end
 
--- Requires left >= right.
 local function subtractUnsigned(left, right)
     local a, b = digitsToLimbs(left), digitsToLimbs(right)
     local out = table.create(#a, 0)
@@ -357,9 +344,6 @@ local function knownInteger(value, depth)
     elseif value.kind == KIND_INTEGER then
         return true
     elseif value.kind == KIND_SCIENTIFIC then
-        -- Retained nonnegative-exponent scientific nodes are outside the native
-        -- finite range; multiplying their binary significand by 10^exponent
-        -- clears its binary denominator and gives an integer.
         return compareSignedText(value.exponent, "0") >= 0
     elseif value.kind == KIND_HYPER then
         return knownInteger(value.base, depth + 1)
@@ -491,8 +475,6 @@ local function nativeValue(value)
     elseif value.kind == KIND_INTEGER then
         return nativeInteger(value)
     elseif value.kind == KIND_SCIENTIFIC then
-        -- 10^-324 underflows before multiplication on binary64 even though
-        -- some mantissas (for example 5e-324) round to a non-zero subnormal.
         if value.exponent == "-324" then
             local result = tonumber(string.format("%.17ge%s", value.mantissa, value.exponent))
             if result ~= nil and isFiniteNumber(result) then
@@ -547,8 +529,6 @@ local function compareIntegerToScientific(integer, scientific)
     local exponentComparison = compareSignedText(integerExponent, scientific.exponent)
     if exponentComparison ~= 0 then return exponentComparison end
 
-    -- The scientific significand is a binary64 approximation. Compare its
-    -- round-trip decimal digits before considering lower-order integer digits.
     local text = string.format("%.17e", scientific.mantissa)
     local significand = string.gsub(string.match(text, "^([%d%.]+)e"), "%.", "")
     local count = math.min(#integer.digits, #significand)
@@ -1176,8 +1156,6 @@ function CodeNum.compare(left, right)
     return compareInternal(numberNode(left), numberNode(right), 0)
 end
 
--- Keep input conversion inside pcall. In the previous implementation,
--- numberNode(left/right) ran before pcall and invalid arguments still threw.
 function CodeNum.equals(left, right)
     local ok, result = pcall(function()
         return compareInternal(numberNode(left), numberNode(right), 0)
@@ -1477,6 +1455,5 @@ CodeNum.ONE = ONE
 CodeNum.TWO = TWO
 CodeNum.TEN = TEN
 
--- Freezing MT protects the methods without blocking table.freeze on CodeNum nodes.
 table.freeze(MT)
 return table.freeze(CodeNum)
