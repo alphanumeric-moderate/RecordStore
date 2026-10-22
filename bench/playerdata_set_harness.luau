@@ -387,6 +387,7 @@ end
 	return {
 		controller = controller,
 		player = player,
+		players = Players,
 		record = captured_record,
 		saved_records = saved_records,
 		get_record_options = function()
