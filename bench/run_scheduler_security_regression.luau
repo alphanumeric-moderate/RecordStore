@@ -265,6 +265,81 @@ do
 	end
 end
 
+
+-- Malformed callback result tables must not interrupt retry or terminal bookkeeping.
+do
+	local governor = Scheduler.new()
+	local dispatcher = Scheduler.new_dispatcher(governor)
+	local attempts = 0
+	local retry_job = dispatcher:Schedule(
+		"security-probe",
+		"cyclic-retry-result",
+		function()
+			attempts += 1
+			if attempts == 1 then
+				local result = { code = "retryable", retry_class = "transient" }
+				result.self = result
+				return result
+			end
+			return { code = "success" }
+		end,
+		{ max_retries = 1, retry_delay_ms = 10 }
+	)
+	if retry_job.code == "accepted" then
+		for _ = 1, 200 do
+			local snapshot = governor:Stats()
+			if attempts >= 2 and snapshot.known[retry_job.id] == nil then break end
+			task.wait(0.001)
+		end
+	end
+	local retry_snapshot = governor:Stats()
+	local retry_dispatcher_snapshot = dispatcher:Stats()
+	report("cyclic retry-result safety", retry_job.code == "accepted" and attempts == 2,
+		"cyclic retry result prevented the bounded retry from finishing; attempts=" .. tostring(attempts))
+	report("cyclic retry accounting",
+		retry_snapshot.known[retry_job.id] == nil and retry_snapshot.in_flight == 0
+			and retry_dispatcher_snapshot.in_flight == 0,
+		"cyclic retry result left scheduler bookkeeping or in-flight counters allocated")
+	dispatcher:Close()
+end
+
+do
+	local governor = Scheduler.new()
+	local dispatcher = Scheduler.new_dispatcher(governor)
+	local completion_code = nil
+	local completion_job = dispatcher:Schedule(
+		"security-probe",
+		"cyclic-completion-result",
+		function()
+			local result = { code = "success" }
+			result.self = result
+			return result
+		end,
+		{
+			on_complete = function(result)
+				completion_code = result.code
+			end,
+		}
+	)
+	if completion_job.code == "accepted" then
+		for _ = 1, 100 do
+			if governor:Stats().known[completion_job.id] == nil then break end
+			task.wait(0.001)
+		end
+	end
+	local completion_snapshot = governor:Stats()
+	local dispatcher_snapshot = dispatcher:Stats()
+	report("cyclic completion-result safety", completion_job.code == "accepted"
+		and completion_code == "invalid_result",
+		"cyclic callback result did not degrade safely for on_complete; code="
+			.. tostring(completion_code))
+	report("cyclic completion accounting",
+		completion_snapshot.known[completion_job.id] == nil and completion_snapshot.in_flight == 0
+			and dispatcher_snapshot.in_flight == 0,
+		"cyclic completion result prevented terminal state and counter cleanup")
+	dispatcher:Close()
+end
+
 if #findings > 0 then
 	for _, finding in ipairs(findings) do
 		warn("[SAFETY FINDING] " .. finding)
