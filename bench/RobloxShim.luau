@@ -97,28 +97,24 @@ local Instance = table.freeze({
 
 local loaded_module: any = nil
 local loaded_scheduler_module: any = nil
-local loaded_mailbox_module: any = nil
 
 local function load_scheduler()
 	if loaded_scheduler_module ~= nil then return loaded_scheduler_module end
-	local source = fs.readFile(REPO_ROOT .. "/src/PlayerDataInitializer/RecordStoreScheduler.luau")
-	local chunk = luau.load(source, {
+	local source = fs.readFile(SOURCE_PATH)
+	local start_marker = "-- BEGIN INTERNAL MODULE: RecordStoreScheduler"
+	local end_marker = "-- END INTERNAL MODULE: RecordStoreScheduler"
+	local start_index = string.find(source, start_marker, 1, true)
+	assert(start_index ~= nil, "RecordStore.luau is missing its embedded scheduler")
+	start_index += #start_marker
+	local end_index = string.find(source, end_marker, start_index, true)
+	assert(end_index ~= nil, "RecordStore.luau has an unterminated embedded scheduler")
+	local embedded_source = string.sub(source, start_index, end_index - 1)
+	local chunk = luau.load(embedded_source, {
 		debugName = "RecordStoreScheduler",
 		environment = Shim.environment,
 	})
 	loaded_scheduler_module = chunk()
 	return loaded_scheduler_module
-end
-
-local function load_mailbox()
-	if loaded_mailbox_module ~= nil then return loaded_mailbox_module end
-	local source = fs.readFile(REPO_ROOT .. "/src/PlayerDataInitializer/RecordStoreMailboxV2.luau")
-	local chunk = luau.load(source, {
-		debugName = "RecordStoreMailboxV2",
-		environment = Shim.environment,
-	})
-	loaded_mailbox_module = chunk()
-	return loaded_mailbox_module
 end
 
 local function load_record_store(source_path: string?)
@@ -135,13 +131,9 @@ local function load_record_store(source_path: string?)
 end
 
 local RecordStoreInstance = table.freeze({ Name = "RecordStore", ClassName = "ModuleScript" })
-local RecordStoreSchedulerInstance = table.freeze({ Name = "RecordStoreScheduler", ClassName = "ModuleScript" })
-local RecordStoreMailboxV2Instance = table.freeze({ Name = "RecordStoreMailboxV2", ClassName = "ModuleScript" })
 local script = {
 	Parent = {
 		RecordStore = RecordStoreInstance,
-		RecordStoreScheduler = RecordStoreSchedulerInstance,
-		RecordStoreMailboxV2 = RecordStoreMailboxV2Instance,
 	},
 }
 
@@ -181,10 +173,6 @@ local game = {
 local function shim_require(target: any)
 	if target == RecordStoreInstance then
 		return load_record_store()
-	elseif target == RecordStoreSchedulerInstance then
-		return load_scheduler()
-	elseif target == RecordStoreMailboxV2Instance then
-		return load_mailbox()
 	end
 	return require(target)
 end
@@ -202,6 +190,10 @@ Shim.environment = {
 -- Returns the RecordStore module, loaded inside the shimmed environment.
 function Shim.load(source_path: string?): any
 	return load_record_store(source_path)
+end
+
+function Shim.load_scheduler(): any
+	return load_scheduler()
 end
 
 -- Runs a Roblox-style script (e.g. the regression tests) inside the shimmed environment.
