@@ -43,7 +43,7 @@ local function new_mailbox(options, store)
 	options.allow_unattested_activation = true
 	options.encode = function(value) return serde.encode("json", value) end
 	options.guid = next_guid
-	options.now_ms = options.now_ms or function() return now_ms end
+	if options.now_ms == nil then options.now_ms = function() return now_ms end end
 	options.lease_ms = options.lease_ms or 10000
 	options.lease_renewal_horizon_ms = options.lease_renewal_horizon_ms or 40000
 	options.max_segments = options.max_segments or 8
@@ -85,15 +85,16 @@ local function test_injected_clock_and_guid_contracts_fail_closed()
 	end)
 	assert(not guid_ok, "non-function guid option was accepted")
 
-	local guid_calls = 0
 	local mailbox, store = new_mailbox({
-		guid = function()
-			guid_calls += 1
-			if guid_calls == 1 then return "valid-reservation-token" end
-			return false
-		end,
+		guid = function() return false end,
 	})
 	local reads_before, writes_before = store.get_calls, store.update_calls
+	local invalid_clock, clock_store = new_mailbox({
+		now_ms = function() return math.huge end,
+		guid = function() return "valid-clock-test" end,
+	})
+	local clock_ok = pcall(function() return invalid_clock:_now() end)
+	assert(not clock_ok, "non-finite now_ms return value was accepted")
 	local no_idempotency = mailbox:EnqueueAsync("invalid-guid", { amount = 1 }, {
 		priority = "normal",
 	})
