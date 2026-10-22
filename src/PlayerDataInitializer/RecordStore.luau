@@ -7025,7 +7025,7 @@ local function change_values_equal(old_value: JsonValue?, new_value: JsonValue?)
 	return true
 end
 
-local function sorted_changed_child_keys(old_value: JsonValue?, new_value: JsonValue?): { DiffKey }
+local function sorted_child_keys(old_value: JsonValue?, new_value: JsonValue?): { DiffKey }
 	local old_table = old_value :: { [string | number]: JsonValue }
 	local new_table = new_value :: { [string | number]: JsonValue }
 	local result: { DiffKey } = {}
@@ -7052,13 +7052,6 @@ local function sorted_changed_child_keys(old_value: JsonValue?, new_value: JsonV
 		return left.PathSegment < right.PathSegment
 	end)
 	return result
-end
-
-local function copy_change_event_value(value: JsonValue?): JsonValue?
-	if type(value) == "table" or typeof(value) == "buffer" then
-		return copy_value(value)
-	end
-	return value
 end
 
 local function append_change_event(events: { ChangeEvent }, path: { string }, old_value: JsonValue?, new_value: JsonValue?, operation_id: string, sequence: number, kind: string): boolean
@@ -7095,7 +7088,7 @@ local function diff_change_events(events: { ChangeEvent }, old_value: JsonValue?
 		return true
 	end
 	if type(old_value) == "table" and type(new_value) == "table" then
-		local keys = sorted_changed_child_keys(old_value, new_value)
+		local keys = sorted_child_keys(old_value, new_value)
 		for _, entry in ipairs(keys) do
 			path[#path + 1] = entry.PathSegment
 			local old_child = get_table_child(old_value, entry.Key)
@@ -7159,8 +7152,8 @@ local function enqueue_change_observation(state: InternalState, old_value: unkno
 	else
 		for _, event in ipairs(events) do
 			if not event.Truncated then
-				event.OldValue = copy_change_event_value(event.OldValue)
-				event.NewValue = copy_change_event_value(event.NewValue)
+				event.OldValue = if type(event.OldValue) == "table" or typeof(event.OldValue) == "buffer" then copy_value(event.OldValue) else event.OldValue
+				event.NewValue = if type(event.NewValue) == "table" or typeof(event.NewValue) == "buffer" then copy_value(event.NewValue) else event.NewValue
 			end
 			state.change_dispatch_tail += 1
 			state.change_dispatch_queue[state.change_dispatch_tail] = event
@@ -7182,8 +7175,8 @@ local function enqueue_change_observation(state: InternalState, old_value: unkno
 						OperationId = event.OperationId,
 						Sequence = event.Sequence,
 						Path = table.clone(event.Path),
-						OldValue = copy_change_event_value(event.OldValue),
-						NewValue = copy_change_event_value(event.NewValue),
+						OldValue = if type(event.OldValue) == "table" or typeof(event.OldValue) == "buffer" then copy_value(event.OldValue) else event.OldValue,
+						NewValue = if type(event.NewValue) == "table" or typeof(event.NewValue) == "buffer" then copy_value(event.NewValue) else event.NewValue,
 						Truncated = event.Truncated,
 						Kind = event.Kind,
 					})
