@@ -21,7 +21,7 @@ end
 
 RecordStore.Mock.reset()
 local record = RecordStore.Mock.new("Bench_EventPayloads", "global", "subtree-payloads", { schema_version = 1 })
-local open_result, open_message = record:Open({ Revision = 0 })
+local open_result, open_message = record:Open({ Revision = 0, Archive = make_archive() })
 assert(open_result == "created", open_message)
 
 local subscription, subscribe_result, subscribe_message = record:SubscribeChanges(function(_event)
@@ -29,11 +29,15 @@ local subscription, subscribe_result, subscribe_message = record:SubscribeChange
 end)
 assert(subscription ~= nil and subscribe_result == "success", subscribe_message)
 
-local archive = make_archive()
 local result, message = record:Update(function(data)
 	local next_data = table.clone(data)
+	local next_archive = table.clone(data.Archive)
+	local key = "item-0500"
+	local item = table.clone(next_archive[key])
+	item.Count += 1
+	next_archive[key] = item
+	next_data.Archive = next_archive
 	next_data.Revision += 1
-	next_data.Archive = archive
 	return next_data
 end)
 assert(result == "success", message)
