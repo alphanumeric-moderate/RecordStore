@@ -88,7 +88,8 @@ local function noncritical_queue_capacity(queue_capacity)
 end
 
 local function new_governor(options)
-	options = options or {}
+	if options == nil then options = {} end
+	if type(options) ~= "table" then error("scheduler options must be a table", 2) end
 	local function now_ms()
 		return if type(options.now_ms) == "function" then options.now_ms() else os.clock() * 1000
 	end
@@ -116,6 +117,7 @@ local function new_governor(options)
 			max_read_units_in_flight = 32, max_write_units_in_flight = 32,
 			read_critical_reserve = 4, write_critical_reserve = 4,
 			max_estimated_bytes_in_flight = 16777216, max_handler_slots_in_flight = 16,
+			estimated_bytes_critical_reserve = 4194304, handler_slots_critical_reserve = 1,
 			drr_quantum = 4, max_item_cost = 64, urgent_deadline_burst = 4,
 			priority_inheritance_max_ms = 1000, retry_jitter_percent = 20,
 			algorithm = "drr", shadow_algorithm = "weighted", shadow_enabled = false, shadow_sample_rate = 0,
@@ -148,6 +150,7 @@ local function new_governor(options)
 			"max_scheduled_in_flight", "scheduler_critical_reserve", "max_per_owner_in_flight",
 			"max_read_units_in_flight", "max_write_units_in_flight", "read_critical_reserve",
 			"write_critical_reserve", "max_estimated_bytes_in_flight", "max_handler_slots_in_flight",
+			"estimated_bytes_critical_reserve", "handler_slots_critical_reserve",
 			"drr_quantum", "max_item_cost", "urgent_deadline_burst", "priority_inheritance_max_ms",
 			"retry_jitter_percent", "shadow_sample_rate"
 		}
@@ -205,6 +208,18 @@ local function new_governor(options)
 		then
 			return false, "max_estimated_bytes_in_flight must be an integer from 16384 to 67108864"
 		end
+		if policy.estimated_bytes_critical_reserve < 0
+			or policy.estimated_bytes_critical_reserve >= policy.max_estimated_bytes_in_flight
+			or math.floor(policy.estimated_bytes_critical_reserve) ~= policy.estimated_bytes_critical_reserve
+		then
+			return false, "estimated_bytes_critical_reserve must be an integer below max_estimated_bytes_in_flight"
+		end
+		if policy.handler_slots_critical_reserve < 0
+			or policy.handler_slots_critical_reserve >= policy.max_handler_slots_in_flight
+			or math.floor(policy.handler_slots_critical_reserve) ~= policy.handler_slots_critical_reserve
+		then
+			return false, "handler_slots_critical_reserve must be an integer below max_handler_slots_in_flight"
+		end
 		if policy.drr_quantum < 1 or policy.drr_quantum > 32 or math.floor(policy.drr_quantum) ~= policy.drr_quantum then return false, "drr_quantum must be an integer from 1 to 32" end
 		if policy.max_item_cost < 1 or policy.max_item_cost > 256 or math.floor(policy.max_item_cost) ~= policy.max_item_cost then return false, "max_item_cost must be an integer from 1 to 256" end
 		if policy.urgent_deadline_burst < 1 or policy.urgent_deadline_burst > 64 or math.floor(policy.urgent_deadline_burst) ~= policy.urgent_deadline_burst then return false, "invalid urgent_deadline_burst" end
@@ -224,6 +239,7 @@ local function new_governor(options)
 			max_read_units_in_flight = true, max_write_units_in_flight = true,
 			read_critical_reserve = true, write_critical_reserve = true,
 			max_estimated_bytes_in_flight = true, max_handler_slots_in_flight = true,
+			estimated_bytes_critical_reserve = true, handler_slots_critical_reserve = true,
 			drr_quantum = true, max_item_cost = true, urgent_deadline_burst = true,
 			priority_inheritance_max_ms = true, retry_jitter_percent = true,
 			algorithm = true, shadow_algorithm = true, shadow_enabled = true, shadow_sample_rate = true,
@@ -277,16 +293,49 @@ local function new_governor(options)
 		return true
 	end
 	local function admission_decision(self, work_class, request_kind, cost, mutating, critical_override, dimensions)
-		work_class, request_kind, cost = work_class or "interactive", request_kind or "default", cost or 1
-		request_kind = operation_metric_key(self, request_kind)
-		if not finite(cost) or math.floor(cost) ~= cost or cost < 1 then
-			return { code = "invalid", terminal = true }, false, false
+		if work_class == nil then work_class = "interactive" end
+		if request_kind == nil then request_kind = "default" end
+		if cost == nil then cost = 1 end
+		if mutating == nil then
+			mutating = true
+		elseif type(mutating) ~= "boolean" then
+			return { code = "invalid", terminal = true, message = "mutating must be boolean" }, false, false
 		end
-		dimensions = dimensions or estimate_dimensions({ operation_class = request_kind })
-		local read_units, write_units = dimensions.read_units or 0, dimensions.write_units or 0
-		local estimated_bytes, handler_slots = dimensions.estimated_bytes or 0, dimensions.handler_slots or 1
-		if not finite(read_units) or read_units < 0 or not finite(write_units) or write_units < 0
-			or not finite(estimated_bytes) or estimated_bytes < 0 or not finite(handler_slots) or handler_slots < 1
+		if critical_override == nil then
+			critical_override = false
+		elseif type(critical_override) ~= "boolean" then
+			return { code = "invalid", terminal = true, message = "critical_override must be boolean" }, false, false
+		end
+		if not valid_text(work_class, 64) then
+			return { code = "invalid", terminal = true, message = "work_class must be 1..64 bytes" }, false, false
+		end
+		if not valid_text(request_kind, 128) then
+			return { code = "invalid", terminal = true, message = "request_kind must be 1..128 bytes" }, false, false
+		end
+		request_kind = operation_metric_key(self, request_kind)
+		if not finite(cost) or math.floor(cost) ~= cost or cost < 1 or cost > self.policy.max_item_cost then
+			return { code = "invalid", terminal = true, message = "cost must be an integer within max_item_cost" }, false, false
+		end
+		if dimensions == nil then
+			dimensions = estimate_dimensions({ operation_class = request_kind })
+		elseif type(dimensions) ~= "table" then
+			return { code = "invalid", terminal = true, message = "dimensions must be a table" }, false, false
+		end
+		for field in pairs(dimensions) do
+			if field ~= "read_units" and field ~= "write_units"
+				and field ~= "estimated_bytes" and field ~= "handler_slots"
+			then
+				return { code = "invalid", terminal = true, message = "unsupported admission dimension: " .. tostring(field) }, false, false
+			end
+		end
+		local read_units = if dimensions.read_units == nil then 0 else dimensions.read_units
+		local write_units = if dimensions.write_units == nil then 0 else dimensions.write_units
+		local estimated_bytes = if dimensions.estimated_bytes == nil then 0 else dimensions.estimated_bytes
+		local handler_slots = if dimensions.handler_slots == nil then 1 else dimensions.handler_slots
+		if not finite(read_units) or read_units < 0 or math.floor(read_units) ~= read_units
+			or not finite(write_units) or write_units < 0 or math.floor(write_units) ~= write_units
+			or not finite(estimated_bytes) or estimated_bytes < 0 or math.floor(estimated_bytes) ~= estimated_bytes
+			or not finite(handler_slots) or handler_slots < 1 or math.floor(handler_slots) ~= handler_slots
 		then
 			return { code = "invalid", terminal = true, message = "invalid multi-dimensional admission estimate" }, false, false
 		end
@@ -376,8 +425,18 @@ local function new_governor(options)
 		if self.estimated_bytes_in_flight + estimated_bytes > self.policy.max_estimated_bytes_in_flight then
 			return { code = "capacity", transient = true, message = "estimated in-flight byte capacity reached" }, false, true
 		end
+		if not critical and self.estimated_bytes_in_flight + estimated_bytes
+			> self.policy.max_estimated_bytes_in_flight - self.policy.estimated_bytes_critical_reserve
+		then
+			return { code = "backpressure", transient = true, message = "critical estimated-byte reserve protected" }, false, true
+		end
 		if self.handler_slots_in_flight + handler_slots > self.policy.max_handler_slots_in_flight then
 			return { code = "capacity", transient = true, message = "handler-slot admission capacity reached" }, false, true
+		end
+		if not critical and self.handler_slots_in_flight + handler_slots
+			> self.policy.max_handler_slots_in_flight - self.policy.handler_slots_critical_reserve
+		then
+			return { code = "backpressure", transient = true, message = "critical handler-slot reserve protected" }, false, true
 		end
 		if (self.by_class[work_class] or 0) + cost > math.min(limits[work_class] or limits.interactive, self.policy.max_in_flight) then
 			return { code = "capacity", transient = true, message = "work-class cap reached" }, false, true
@@ -725,7 +784,7 @@ local function new_governor(options)
 			elseif item.service_class == "normal" then 2 elseif item.service_class == "bulk" then 3 else 4
 	end
 	local function record_wait_sample(self, item, age_ms)
-		local lane = item.lane or "normal"
+		local lane = if item.lane == nil then "normal" else item.lane
 		local work_class = item.work_class or "default"
 		local service_class = item.service_class or "best_effort"
 		local key = tostring(#lane) .. ":" .. lane
@@ -1043,7 +1102,7 @@ local function new_governor(options)
 		elseif value.batch_size ~= nil or value.batch_backlog ~= nil then
 			return { code = "invalid", message = "batch sizing requires batchable = true" }
 		end
-		local dependencies = value.dependencies or {}
+		local dependencies = if value.dependencies == nil then {} else value.dependencies
 		if type(dependencies) ~= "table" or #dependencies > 32 then return { code = "invalid", message = "dependencies must be an array of at most 32 IDs" } end
 		local dependency_count, seen_dependencies = 0, {}
 		for key in pairs(dependencies) do
@@ -2102,10 +2161,20 @@ local function new_dispatcher(governor, options)
 		for key in pairs(schedule_options) do
 			if not allowed_options[key] then return { code = "invalid", message = "unsupported scheduled-work option: " .. tostring(key) } end
 		end
-		local lane = schedule_options.lane or "normal"
+		local lane = if schedule_options.lane == nil then "normal" else schedule_options.lane
 		if lane ~= "high" and lane ~= "normal" and lane ~= "background" and lane ~= "lease_renewal" then
 			return { code = "invalid", message = "unsupported scheduler lane" }
 		end
+		if schedule_options.work_class ~= nil and not valid_text(schedule_options.work_class, 64) then
+			return { code = "invalid", message = "work_class must be 1..64 bytes" }
+		end
+		if schedule_options.operation_class ~= nil and not valid_text(schedule_options.operation_class, 64) then
+			return { code = "invalid", message = "operation_class must be 1..64 bytes" }
+		end
+		local work_class = if schedule_options.work_class ~= nil then schedule_options.work_class
+			elseif schedule_options.operation_class ~= nil then schedule_options.operation_class else "default"
+		local operation_class = if schedule_options.operation_class ~= nil
+			then schedule_options.operation_class else work_class
 		local retry_limit = if schedule_options.max_retries == nil then 0 else schedule_options.max_retries
 		local retry_delay_ms = if schedule_options.retry_delay_ms == nil then 100 else schedule_options.retry_delay_ms
 		local current_policy = governor:Stats().policy
@@ -2160,8 +2229,6 @@ local function new_dispatcher(governor, options)
 		local now = now_ms()
 		local due = if finite(schedule_options.due_at_ms) then schedule_options.due_at_ms
 			elseif finite(schedule_options.available_at_ms) then schedule_options.available_at_ms else now
-		local work_class = schedule_options.work_class or schedule_options.operation_class or "default"
-		if not valid_text(work_class, 64) then return { code = "invalid", message = "work_class must be 1..64 bytes" } end
 		local batch_window = 0
 		if schedule_options.batchable == true then
 			batch_window = if finite(schedule_options.batch_window_ms) then schedule_options.batch_window_ms else current_policy.batch_window_ms
@@ -2197,7 +2264,7 @@ local function new_dispatcher(governor, options)
 			id = id, owner_id = owner_id, lane = lane, due_at_ms = due,
 			available_at_ms = schedule_options.available_at_ms, deadline_ms = schedule_options.deadline_ms,
 			expires_at_ms = schedule_options.expires_at_ms, service_class = schedule_options.service_class,
-			work_class = work_class, operation_class = schedule_options.operation_class or work_class,
+			work_class = work_class, operation_class = operation_class,
 			dependencies = schedule_options.dependencies, read_units = schedule_options.read_units,
 			write_units = schedule_options.write_units, estimated_bytes = schedule_options.estimated_bytes,
 			handler_slots = schedule_options.handler_slots, cost = schedule_options.cost,
@@ -2214,7 +2281,7 @@ local function new_dispatcher(governor, options)
 		self.callbacks[id] = {
 			callback = callback, on_complete = schedule_options.on_complete,
 			work_id = work_id, work_class = work_class,
-			operation_class = schedule_options.operation_class or work_class,
+			operation_class = operation_class,
 			batchable = schedule_options.batchable == true, batch_size = batch_size, batch_backlog = batch_backlog,
 			retry_attempt = 0, max_retries = retry_limit,
 			retry_delay_ms = retry_delay_ms, retry_jitter_percent = jitter,
