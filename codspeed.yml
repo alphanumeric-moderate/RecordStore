@@ -3,7 +3,7 @@ $schema: https://raw.githubusercontent.com/CodSpeedHQ/codspeed/refs/heads/main/s
 # RecordStore benchmarks, executed with Lune (standalone Luau runtime) through
 # bench/RobloxShim.luau, which provides the Roblox APIs used by RecordStore.Mock.
 benchmarks:
-  - name: "advanced scheduler mixed-policy smoke workload"
+  - name: "advanced scheduler mixed-policy smoke workload (128 items)"
     exec: lune run bench/advanced_scheduler.bench.luau
 
   - name: "lease renewal full diagnostic snapshot"
@@ -12,16 +12,16 @@ benchmarks:
   - name: "lease renewal lightweight advice"
     exec: lune run bench/lease_renewal_advice.bench.luau
 
-  - name: "advanced scheduler FIFO baseline"
+  - name: "advanced scheduler FIFO baseline (128 items)"
     exec: lune run bench/advanced_scheduler_fifo.bench.luau
 
-  - name: "advanced scheduler weighted selection"
+  - name: "advanced scheduler weighted selection (128 items)"
     exec: lune run bench/advanced_scheduler_weighted.bench.luau
 
-  - name: "advanced scheduler deadline selection"
+  - name: "advanced scheduler deadline selection (128 items)"
     exec: lune run bench/advanced_scheduler_deadline.bench.luau
 
-  - name: "advanced scheduler deficit round robin"
+  - name: "advanced scheduler deficit round robin (128 items)"
     exec: lune run bench/advanced_scheduler_drr.bench.luau
 
   - name: "scheduler disabled direct-execution baseline"
