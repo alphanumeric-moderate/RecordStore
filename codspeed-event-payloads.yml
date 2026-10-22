@@ -1,8 +1,8 @@
 $schema: https://raw.githubusercontent.com/CodSpeedHQ/codspeed/refs/heads/main/schemas/codspeed.schema.json
 
 benchmarks:
-  - name: "change-event subtree payload baseline"
+  - name: "sparse change-event profile baseline (16 updates)"
     exec: lune run bench/event_payloads_baseline.bench.luau
 
-  - name: "change-event subtree payload optimized"
+  - name: "sparse change-event profile optimized (16 updates)"
     exec: lune run bench/event_payloads.bench.luau
