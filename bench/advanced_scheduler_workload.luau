@@ -3,7 +3,7 @@
 -- This measures local selection cost only, not Roblox DataStore request latency.
 local Scheduler = require("./RobloxShim").load_scheduler()
 
-local ITEM_COUNT = 256
+local ITEM_COUNT = 128
 local OWNER_COUNT = 16
 local now_ms = 1_800_000_000_000
 
