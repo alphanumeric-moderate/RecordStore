@@ -129,6 +129,29 @@ do
 		report("reserve policy validation " .. index, not accepted,
 			"invalid reserve policy patch was accepted: " .. tostring(index))
 	end
+
+	for index, fields in ipairs({
+		{ max_estimated_bytes_in_flight = false },
+		{ max_handler_slots_in_flight = false },
+	}) do
+		fields.revision = revision
+		local ok, accepted = pcall(function() return governor:SetPolicy(fields) end)
+		report("malformed capacity policy " .. index, ok and accepted == false,
+			"malformed capacity patch threw or was accepted instead of returning false")
+	end
+end
+
+-- The queue protection control is itself validated and cannot be truthy-coerced.
+do
+	local governor = new_governor()
+	local item = {
+		id = "malformed-critical-queue-protection",
+		owner_id = "security-probe",
+		lane = "normal",
+	}
+	local result = governor:Enqueue(item, "true")
+	report("critical queue protection type", result.code == "invalid",
+		"non-boolean queue protection was accepted; got " .. tostring(result.code))
 end
 
 -- Nil means omitted. Explicit false lane/dependency/work-class values are malformed.
