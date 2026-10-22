@@ -823,6 +823,88 @@ local function new(dependencies: Dependencies?): Controller
 	end
 
 
+	local function assign_backing_value(instance: Instance, value: DataValue)
+		if instance:IsA("StringValue") then
+			if type(value) ~= "string" then error("expected a string value") end
+			(instance :: StringValue).Value = value
+		elseif instance:IsA("BoolValue") then
+			if type(value) ~= "boolean" then error("expected a boolean value") end
+			(instance :: BoolValue).Value = value
+		elseif instance:IsA("IntValue") then
+			if type(value) ~= "number" then error("expected a numeric value") end
+			(instance :: IntValue).Value = value
+		elseif instance:IsA("NumberValue") then
+			if type(value) ~= "number" then error("expected a numeric value") end
+			(instance :: NumberValue).Value = value
+		else
+			error("configured PlayerData value is not a supported ValueBase instance")
+		end
+	end
+
+	local function connect_persistent_value(
+		record: PlayerRecord,
+		key: string,
+		instance: Instance,
+		initial_value: DataValue
+	)
+		local field = CONFIG.data[key]
+		if field == nil then return end
+		local last_valid_value = initial_value
+		local restoring = false
+
+		instance.Changed:Connect(function(new_value)
+			if restoring then return end
+			if record.State ~= "active" or closing_records[record] then
+				restoring = true
+				local restore_ok, restore_error = pcall(assign_backing_value, instance, last_valid_value)
+				restoring = false
+				if not restore_ok then
+					warn("[PlayerData]", record.Key, "could not restore a rejected value change", key, tostring(restore_error))
+				end
+				return
+			end
+
+			local value_type = type(new_value)
+			if value_type ~= "number" and value_type ~= "string" and value_type ~= "boolean" then
+				restoring = true
+				local restore_ok, restore_error = pcall(assign_backing_value, instance, last_valid_value)
+				restoring = false
+				if not restore_ok then
+					warn("[PlayerData]", record.Key, "could not restore an invalid value change", key, tostring(restore_error))
+				end
+				return
+			end
+
+			local normalized_value = normalize_runtime_field_value(
+				field,
+				new_value :: DataValue,
+				integer_infinity_value_factory,
+				code_num_value_factory
+			)
+			if normalized_value == nil then
+				restoring = true
+				local restore_ok, restore_error = pcall(assign_backing_value, instance, last_valid_value)
+				restoring = false
+				if not restore_ok then
+					warn("[PlayerData]", record.Key, "could not restore an invalid value change", key, tostring(restore_error))
+				end
+				return
+			end
+
+			last_valid_value = normalized_value
+			if normalized_value ~= new_value then
+				restoring = true
+				local assign_ok, assign_error = pcall(assign_backing_value, instance, normalized_value)
+				restoring = false
+				if not assign_ok then
+					warn("[PlayerData]", record.Key, "could not canonicalize a value change", key, tostring(assign_error))
+					return
+				end
+			end
+			queue_value_change(record, key, normalized_value)
+		end)
+	end
+
 	local function create_codenum_backing_value(
 		player: Player,
 		record: PlayerRecord,
@@ -842,13 +924,19 @@ local function new(dependencies: Dependencies?): Controller
 				warn("[PlayerData]", player.Name, "rejected invalid CodeNum value for", key)
 				return
 			end
+			if record.State ~= "active" or closing_records[record] then
+				restoring = true
+				backing_value.Value = last_valid_serialized
+				restoring = false
+				return
+			end
 			if normalized ~= serialized_value then
 				restoring = true
 				backing_value.Value = normalized
 				restoring = false
 			end
 			last_valid_serialized = normalized
-			if record.State == "active" then queue_value_change(record, key, normalized, true) end
+			queue_value_change(record, key, normalized, true)
 		end)
 		return backing_value
 	end
@@ -972,10 +1060,8 @@ local function new(dependencies: Dependencies?): Controller
 
 				backing_value.Changed:Connect(function(new_value: number)
 					display_value.Value = number_formatter.format(new_value, format_options)
-					if record.State == "active" then
-						queue_value_change(record, definition.key, new_value)
-					end
 				end)
+				connect_persistent_value(record, definition.key, backing_value, stored_value)
 
 				display_value.Parent = leaderstats
 				backing_value.Parent = value_folder
@@ -989,11 +1075,7 @@ local function new(dependencies: Dependencies?): Controller
 				local value = new_int_value()
 				value.Name = definition.name
 				value.Value = stored_value
-				value.Changed:Connect(function(new_value)
-					if record.State == "active" then
-						queue_value_change(record, definition.key, new_value)
-					end
-				end)
+				connect_persistent_value(record, definition.key, value, stored_value)
 				value.Parent = leaderstats
 
 			elseif field.class_name == "NumberValue" then
@@ -1003,11 +1085,7 @@ local function new(dependencies: Dependencies?): Controller
 				local value = new_number_value()
 				value.Name = definition.name
 				value.Value = stored_value
-				value.Changed:Connect(function(new_value)
-					if record.State == "active" then
-						queue_value_change(record, definition.key, new_value)
-					end
-				end)
+				connect_persistent_value(record, definition.key, value, stored_value)
 				value.Parent = leaderstats
 
 			elseif field.class_name == "IntegerInfinityValue" then
@@ -1022,11 +1100,7 @@ local function new(dependencies: Dependencies?): Controller
 				if not value:IsA("NumberValue") then
 					error("IntegerInfinityValue factory must return a NumberValue")
 				end
-				value.Changed:Connect(function(new_value)
-					if record.State == "active" then
-						queue_value_change(record, definition.key, new_value)
-					end
-				end)
+				connect_persistent_value(record, definition.key, value, stored_value)
 				value.Parent = leaderstats
 
 			elseif field.class_name == "StringValue" then
@@ -1036,11 +1110,7 @@ local function new(dependencies: Dependencies?): Controller
 				local value = new_string_value()
 				value.Name = definition.name
 				value.Value = stored_value
-				value.Changed:Connect(function(new_value)
-					if record.State == "active" then
-						queue_value_change(record, definition.key, new_value)
-					end
-				end)
+				connect_persistent_value(record, definition.key, value, stored_value)
 				value.Parent = leaderstats
 
 			elseif field.class_name == "BoolValue" then
@@ -1050,11 +1120,7 @@ local function new(dependencies: Dependencies?): Controller
 				local value = new_bool_value()
 				value.Name = definition.name
 				value.Value = stored_value
-				value.Changed:Connect(function(new_value)
-					if record.State == "active" then
-						queue_value_change(record, definition.key, new_value)
-					end
-				end)
+				connect_persistent_value(record, definition.key, value, stored_value)
 				value.Parent = leaderstats
 			end
 		end
