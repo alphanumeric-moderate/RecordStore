@@ -288,7 +288,11 @@ do
 	if retry_job.code == "accepted" then
 		for _ = 1, 200 do
 			local snapshot = governor:Stats()
-			if attempts >= 2 and snapshot.known[retry_job.id] == nil then break end
+			if attempts >= 2 and snapshot.queue_items == 0
+				and snapshot.active_reservation_tickets == 0
+			then
+				break
+			end
 			task.wait(0.001)
 		end
 	end
@@ -297,9 +301,9 @@ do
 	report("cyclic retry-result safety", retry_job.code == "accepted" and attempts == 2,
 		"cyclic retry result prevented the bounded retry from finishing; attempts=" .. tostring(attempts))
 	report("cyclic retry accounting",
-		retry_snapshot.known[retry_job.id] == nil and retry_snapshot.in_flight == 0
-			and retry_dispatcher_snapshot.in_flight == 0,
-		"cyclic retry result left scheduler bookkeeping or in-flight counters allocated")
+		retry_snapshot.queue_items == 0 and retry_snapshot.active_reservation_tickets == 0
+			and retry_snapshot.in_flight == 0 and retry_dispatcher_snapshot.in_flight == 0,
+		"cyclic retry result left queued work, reservations, or in-flight counters allocated")
 	dispatcher:Close()
 end
 
@@ -323,7 +327,8 @@ do
 	)
 	if completion_job.code == "accepted" then
 		for _ = 1, 100 do
-			if governor:Stats().known[completion_job.id] == nil then break end
+			local snapshot = governor:Stats()
+			if snapshot.queue_items == 0 and snapshot.active_reservation_tickets == 0 then break end
 			task.wait(0.001)
 		end
 	end
@@ -334,8 +339,8 @@ do
 		"cyclic callback result did not degrade safely for on_complete; code="
 			.. tostring(completion_code))
 	report("cyclic completion accounting",
-		completion_snapshot.known[completion_job.id] == nil and completion_snapshot.in_flight == 0
-			and dispatcher_snapshot.in_flight == 0,
+		completion_snapshot.queue_items == 0 and completion_snapshot.active_reservation_tickets == 0
+			and completion_snapshot.in_flight == 0 and dispatcher_snapshot.in_flight == 0,
 		"cyclic completion result prevented terminal state and counter cleanup")
 	dispatcher:Close()
 end
