@@ -39,6 +39,28 @@ local function copy(value, depth, seen)
 	return result
 end
 
+local MAX_SCHEDULER_COPY_NODES = 4096
+
+local function copy_bounded(value, maximum_nodes)
+	local seen = {}
+	local nodes = 0
+	local function visit(current, depth)
+		nodes += 1
+		if nodes > maximum_nodes then error("scheduler value exceeds maximum node count", 3) end
+		if depth > 64 then error("scheduler value exceeds maximum depth", 3) end
+		if type(current) ~= "table" then return current end
+		if seen[current] then error("scheduler does not accept cyclic values", 3) end
+		seen[current] = true
+		local result = {}
+		for key, child in pairs(current) do
+			result[visit(key, depth + 1)] = visit(child, depth + 1)
+		end
+		seen[current] = nil
+		return result
+	end
+	return visit(value, 0)
+end
+
 local dirty_seen = setmetatable({}, { __mode = "k" })
 
 local operation_dimension_defaults = {
@@ -720,9 +742,9 @@ local function new_governor(options)
 	function governor:ScheduleDue(id, due_at_ms, value)
 		if not valid_text(id, 128) or not finite(due_at_ms) then return false, "invalid due item" end
 		if self.due[id] == nil and key_count(self.due) >= self.policy.queue_capacity then return false, "due queue full" end
-		local copy_ok, copied_value = pcall(copy, value)
+		local copy_ok, copied_value = pcall(copy_bounded, value, MAX_SCHEDULER_COPY_NODES)
 		if not copy_ok then
-			return false, "due item value must be acyclic and within the maximum nesting depth"
+			return false, "due item value must be acyclic, within the maximum depth, and within the node limit"
 		end
 		self.due_sequence = (self.due_sequence or 0) + 1
 		local item = { id = id, due_at_ms = due_at_ms, value = copied_value, sequence = self.due_sequence }
@@ -1092,9 +1114,9 @@ local function new_governor(options)
 		end
 		local lane = if item.lane == nil then "normal" else item.lane
 		if lane ~= "high" and lane ~= "normal" and lane ~= "background" and lane ~= "lease_renewal" then return { code = "invalid", message = "unsupported lane" } end
-		local copy_ok, value = pcall(copy, item)
+		local copy_ok, value = pcall(copy_bounded, item, MAX_SCHEDULER_COPY_NODES)
 		if not copy_ok or type(value) ~= "table" then
-			return { code = "invalid", message = "scheduled item must be acyclic and within the maximum nesting depth" }
+			return { code = "invalid", message = "scheduled item must be acyclic, within the maximum depth, and within the node limit" }
 		end
 		if value.work_class ~= nil and not valid_text(value.work_class, 64) then return { code = "invalid", message = "work_class must be 1..64 bytes" } end
 		if value.operation_class ~= nil and not valid_text(value.operation_class, 64) then return { code = "invalid", message = "operation_class must be 1..64 bytes" } end
@@ -1837,7 +1859,7 @@ local function new_dispatcher(governor, options)
 		end
 	end
 	local function safe_result_copy(result)
-		local ok, copied = pcall(copy, result)
+		local ok, copied = pcall(copy_bounded, result, MAX_SCHEDULER_COPY_NODES)
 		if ok then return copied end
 		return {
 			code = "invalid_result",
