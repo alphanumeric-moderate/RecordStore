@@ -237,6 +237,13 @@ do
 	admission_result("false dimensions table", function(governor)
 		return governor:Admit("maintenance", "tracing", 1, false, false, false)
 	end)
+
+	admission_result("partial dimensions table", function(governor)
+		return governor:Admit("maintenance", "update_async", 1, false, false, {
+			estimated_bytes = 1024,
+			handler_slots = 1,
+		})
+	end)
 	admission_result("false mutating type", function(governor)
 		return governor:Admit("maintenance", "tracing", 1, "false", false, dimensions(1024, 1))
 	end)
