@@ -2,7 +2,7 @@
 -- Adversarial scheduling resource and public-option validation regressions.
 -- These tests must reject noncritical reserve exhaustion and malformed false values.
 
-local Scheduler = require("../src/PlayerDataInitializer/RecordStoreScheduler")
+local Scheduler = require("./RobloxShim").load_scheduler()
 local task = require("@lune/task")
 local now_ms = 1_800_000_000_000
 local findings = {}
