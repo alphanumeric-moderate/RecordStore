@@ -1482,16 +1482,18 @@ local function new(dependencies: Dependencies?): Controller
 					return validate_player_data(value, code_num_value_factory)
 				end,
 				on_event = function(event, key, result, message)
-					if event == "reconcile" and result == "success" then
-						local recovered_record = event_record
-						if recovered_record ~= nil then
-							scheduler.defer(function()
-								local pending = pending_changes[recovered_record]
-							if pending ~= nil and next(pending) ~= nil then
-								request_recovery_flush(recovered_record)
-							end
-							end)
+					local observed_record = event_record
+					if observed_record ~= nil and deferred_close_records[observed_record] ~= nil then
+						scheduler.defer(function()
+							start_deferred_close(observed_record)
+						end)
+					elseif event == "reconcile" and result == "success" and observed_record ~= nil then
+						scheduler.defer(function()
+							local pending = pending_changes[observed_record]
+						if pending ~= nil and next(pending) ~= nil then
+							request_recovery_flush(observed_record)
 						end
+						end)
 					end
 					if should_warn_result(result) then
 						warn("[RecordStore]", event, key, result, message or "")
