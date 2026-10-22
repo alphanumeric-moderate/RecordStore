@@ -7033,8 +7033,8 @@ local function append_change_event(events: { ChangeEvent }, path: { string }, ol
 		OperationId = operation_id,
 		Sequence = sequence,
 		Path = table.clone(path),
-		OldValue = old_value,
-		NewValue = new_value,
+		OldValue = copy_value(old_value),
+		NewValue = copy_value(new_value),
 		Truncated = false,
 		Kind = kind,
 	}
@@ -7079,8 +7079,8 @@ local function enqueue_change_observation(state: InternalState, old_value: unkno
 	if next(state.change_observers) == nil then
 		return
 	end
-	local old_json = copy_value(old_value)
-	local new_json = copy_value(new_value)
+	local old_json = old_value :: JsonValue?
+	local new_json = new_value :: JsonValue?
 	local events: { ChangeEvent } = {}
 	local complete = diff_change_events(
 		events,
@@ -7098,8 +7098,8 @@ local function enqueue_change_observation(state: InternalState, old_value: unkno
 			OperationId = operation_id,
 			Sequence = state.change_sequence,
 			Path = {},
-			OldValue = old_json,
-			NewValue = new_json,
+			OldValue = copy_value(old_json),
+			NewValue = copy_value(new_json),
 			Truncated = true,
 			Kind = kind,
 		}
@@ -7107,15 +7107,16 @@ local function enqueue_change_observation(state: InternalState, old_value: unkno
 	local queued_events = if state.change_dispatch_tail >= state.change_dispatch_head then state.change_dispatch_tail - state.change_dispatch_head + 1 else 0
 	if queued_events + #events > CHANGE_DISPATCH_QUEUE_CAPACITY then
 		state.change_events_dropped += #events
+		local fallback_event = events[1]
 		state.change_dispatch_queue = {}
 		state.change_dispatch_head = 1
 		state.change_dispatch_tail = 1
-		state.change_dispatch_queue[1] = {
+		state.change_dispatch_queue[1] = if #events == 1 and fallback_event.Truncated then fallback_event else {
 			OperationId = operation_id,
 			Sequence = state.change_sequence,
 			Path = {},
-			OldValue = old_json,
-			NewValue = new_json,
+			OldValue = copy_value(old_json),
+			NewValue = copy_value(new_json),
 			Truncated = true,
 			Kind = kind,
 		}
