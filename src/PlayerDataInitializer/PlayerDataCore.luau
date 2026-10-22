@@ -1386,6 +1386,16 @@ local function new(dependencies: Dependencies?): Controller
 	start_deferred_close = function(record: PlayerRecord)
 		local deferred = deferred_close_records[record]
 		if deferred == nil then return end
+		if shutting_down and os.clock() >= deferred.deadline then
+			if not deferred.warned_timeout then
+				warn("[PlayerData]", deferred.player.Name,
+					"shutdown deadline expired with unresolved PlayerData changes; retaining the record and queued values rather than issuing an unsafe close")
+				deferred.warned_timeout = true
+			end
+			deferred_close_requested[record] = nil
+			removing[deferred.player] = nil
+			return
+		end
 		if deferred_close_running[record] then
 			deferred_close_requested[record] = true
 			return
@@ -1396,6 +1406,10 @@ local function new(dependencies: Dependencies?): Controller
 			while deferred_close_records[record] ~= nil do
 				deferred = deferred_close_records[record]
 				if deferred == nil then break end
+				if shutting_down and os.clock() >= deferred.deadline then
+					removing[deferred.player] = nil
+					break
+				end
 				local state = record.State
 				if state == "unknown" then
 					break
@@ -1450,7 +1464,9 @@ local function new(dependencies: Dependencies?): Controller
 			end
 			if deferred ~= nil and deferred_close_requested[record] then
 				deferred_close_requested[record] = nil
-				if record.State ~= "unknown" then
+				if record.State ~= "unknown"
+					and not (shutting_down and os.clock() >= deferred.deadline)
+				then
 					scheduler.defer(function() start_deferred_close(record) end)
 				end
 			end
