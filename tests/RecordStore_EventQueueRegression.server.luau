@@ -118,6 +118,81 @@ end
 
 RecordStore.Mock.reset()
 do
+	local record = RecordStore.Mock.new(
+		"RecordStore_ChangeEventSparseDiffOrderRegression",
+		"global",
+		"sparse-diff-order",
+		{ schema_version = 1 }
+	)
+	local initial_data = {
+		Archive = {
+			["item-0001"] = { Count = 1, Stats = { Power = 10, Defense = 5 } },
+			["item-0002"] = { Count = 2, Stats = { Power = 20, Defense = 10 } },
+		},
+		Removed = { Nested = { Value = 9 } },
+		Revision = 0,
+		StableNaN = 0 / 0,
+		Unchanged = { Nested = { Value = 42 } },
+	}
+	local open_result, open_message = record:Open(initial_data)
+	assert(open_result == "created" or open_result == "loaded", open_message)
+
+	local events: { RecordStore.ChangeEvent } = {}
+	local subscription, subscribe_result, subscribe_message = record:SubscribeChanges(function(event)
+		events[#events + 1] = event
+	end)
+	assert(subscription ~= nil and subscribe_result == "success", subscribe_message)
+
+	local update_result, update_message = record:Update(function(data)
+		local current = data :: { [string]: RecordStore.JsonValue }
+		local next_data = table.clone(current)
+		local archive = table.clone(current["Archive"] :: { [string]: RecordStore.JsonValue })
+		local target = table.clone(archive["item-0002"] :: { [string]: RecordStore.JsonValue })
+		target["Count"] = (target["Count"] :: number) + 1
+		archive["item-0002"] = target
+		next_data["Archive"] = archive
+		next_data["Removed"] = nil
+		next_data["Added"] = { Nested = { Value = 29 } }
+		next_data["Revision"] = (next_data["Revision"] :: number) + 1
+		return next_data
+	end)
+	assert(update_result == "success", update_message)
+	task.wait()
+
+	local expected_paths = { "Added", "Archive.item-0002.Count", "Removed", "Revision" }
+	assert(#events == #expected_paths, ("expected %d changed-leaf events, got %d"):format(#expected_paths, #events))
+	for index, expected_path in ipairs(expected_paths) do
+		assert(
+			table.concat(events[index].Path, ".") == expected_path,
+			("event %d path/order changed: expected %s, got %s"):format(
+				index,
+				expected_path,
+				table.concat(events[index].Path, ".")
+			)
+		)
+		assert(not events[index].Truncated, "small sparse update unexpectedly emitted a truncated event")
+	end
+
+	local added = events[1].NewValue :: { [string]: RecordStore.JsonValue }
+	local added_nested = added["Nested"] :: { [string]: RecordStore.JsonValue }
+	assert(added_nested["Value"] == 29, "added subtree payload changed")
+	assert(events[2].OldValue == 2 and events[2].NewValue == 3, "changed scalar payloads changed")
+	local removed = events[3].OldValue :: { [string]: RecordStore.JsonValue }
+	local removed_nested = removed["Nested"] :: { [string]: RecordStore.JsonValue }
+	assert(removed_nested["Value"] == 9 and events[3].NewValue == nil, "removed subtree payload changed")
+	assert(events[4].OldValue == 0 and events[4].NewValue == 1, "revision payload changed")
+
+	local canonical = record:Get() :: { [string]: RecordStore.JsonValue }
+	assert(math.isnan(canonical["StableNaN"] :: number), "unchanged NaN was not preserved")
+	local unchanged = canonical["Unchanged"] :: { [string]: RecordStore.JsonValue }
+	local unchanged_nested = unchanged["Nested"] :: { [string]: RecordStore.JsonValue }
+	assert(unchanged_nested["Value"] == 42, "unchanged nested data was modified")
+	subscription:Disconnect()
+	assert(record:Close() == "closed", "sparse diff order regression record did not close")
+end
+
+RecordStore.Mock.reset()
+do
 	local record: RecordStore.Record? = nil
 	local flood_started = false
 	local update_failures = 0
