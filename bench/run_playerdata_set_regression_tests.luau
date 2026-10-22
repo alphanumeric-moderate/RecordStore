@@ -4,6 +4,7 @@ local create_harness = require("./playerdata_set_harness")
 local harness = create_harness(true)
 local controller = harness.controller
 local player = harness.player
+local record = harness.record
 local saved_records = harness.saved_records
 local task = harness.task
 local get_find_first_child_calls = harness.get_find_first_child_calls
@@ -72,6 +73,20 @@ assert(
 	get_find_first_child_calls() == lookups_before_cached_set,
 	"Set did not reuse the rebuilt folder and value path"
 )
+
+-- Public PlayerData changes must be rejected and restored while durability is uncertain.
+local previous_kills = kills.Value
+local previous_equipped = equipped_display.Value
+record.State = "unknown"
+kills.Value = previous_kills + 1
+equipped_display.Value = previous_equipped .. "-uncertain"
+assert(kills.Value == previous_kills,
+	"PlayerData backing numeric mutation must be reverted while ownership is uncertain")
+assert(equipped_display.Value == previous_equipped,
+	"PlayerData backing string mutation must be reverted while ownership is uncertain")
+assert(not controller.Set(player, "kills", previous_kills + 2),
+	"PlayerData.Set must reject mutation while record ownership is uncertain")
+record.State = "active"
 
 -- A removed cached value must trigger a safe child lookup rather than being reused.
 local lookups_before_removed_value = get_find_first_child_calls()

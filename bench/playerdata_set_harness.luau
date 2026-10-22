@@ -184,6 +184,7 @@ end
 	
 	local saved_records = {}
 	local captured_record_options = nil
+	local captured_record = nil
 	local function clone_data(data)
 		local result = {}
 		for key, value in pairs(data) do
@@ -208,6 +209,7 @@ end
 			_options = options,
 			_storage_key = storage_key,
 		}
+		captured_record = record
 	
 		function record:Open(template)
 			if saved_records[self._storage_key] == nil then
@@ -385,6 +387,7 @@ end
 	return {
 		controller = controller,
 		player = player,
+		record = captured_record,
 		saved_records = saved_records,
 		get_record_options = function()
 			return captured_record_options
