@@ -387,7 +387,7 @@ type QueueEnvelope = {
 }
 
 type PendingDurableOperation = {
-	kind: "save" | "renew",
+	kind: "save" | "renew" | "release",
 	snapshot: JsonValue?,
 	captured_change_sequence: number,
 	expected_revision: number,
@@ -6840,6 +6840,223 @@ local function required_recovery_lease_margin(state: InternalState): number
 	))
 end
 
+local function reconcile_unknown_release_internal(state: InternalState): (ResultCode, string?)
+	if state.retired then return "invalid", "record has been retired" end
+	if closing and not state.shutdown then return "closing", "server is shutting down" end
+	local pending = state.pending_operation
+	if pending == nil or pending.kind ~= "release" then
+		return "invalid", "record has no pending release operation"
+	end
+	if state.state ~= "unknown" then
+		return if state.state == "closed" then "success" else "fenced",
+			"record is not awaiting release reconciliation"
+	end
+	if state.busy or state.queue_busy then
+		return "busy", "record is already processing durable work"
+	end
+
+	local function retry(category: string, message: string, wait_seconds: number?): (ResultCode, string?)
+		pending.attempts += 1
+		state.busy = false
+		state.next_reconciliation = now_local() + (wait_seconds or math.max(0.25, retry_delay(pending.attempts)))
+		state.last_reconciliation_category = category
+		observe(state, "reconcile_release", "unknown", message)
+		return "unknown", message
+	end
+	local function stop(session_state: SessionState, category: string, result: ResultCode, message: string): (ResultCode, string?)
+		state.busy = false
+		state.state = session_state
+		state.next_reconciliation = math.huge
+		state.last_reconciliation_category = category
+		disconnect_message_subscription(state)
+		observe(state, "reconcile_release", result, message)
+		return result, message
+	end
+	local function is_confirmed_release(envelope: Envelope): boolean
+		return envelope.write_id == pending.operation_id
+			and envelope.revision == pending.target_revision
+			and envelope.fencing_generation == pending.fencing_generation
+			and envelope.session == nil
+			and envelope.tombstone == nil
+	end
+	local function confirm_release(envelope: Envelope, info: BackendInfo?): (ResultCode, string?)
+		if not backend_metadata_matches(info, envelope) then
+			return stop("corrupt", "release_metadata_mismatch", "corrupt",
+				"release operation matched but DataStore key metadata did not match the envelope")
+		end
+		state.generation = envelope.fencing_generation
+		state.revision = envelope.revision
+		state.created_at = envelope.created_at
+		state.updated_at = envelope.updated_at
+		state.tombstoned = envelope.tombstone ~= nil
+		update_state_metadata_from_info(state, info)
+		update_local_from_envelope(state, envelope, info)
+		state.saved_change_sequence = state.change_sequence
+		state.dirty_since_local = nil
+		state.last_saved = make_durable_snapshot(envelope, info, "reconcile_" .. pending.reason)
+		state.pending_operation = nil
+		state.token = nil
+		state.durable_lease_until = 0
+		state.busy = false
+		state.state = "closed"
+		state.next_reconciliation = math.huge
+		state.next_autosave = math.huge
+		state.next_renewal = math.huge
+		state.next_queue_poll = math.huge
+		state.takeover_requested = false
+		state.queue_hint = false
+		state.save_requested = false
+		state.last_successful_write_local = now_local()
+		state.last_reconciliation_category = nil
+		disconnect_message_subscription(state)
+		observe(state, "reconcile_release", "success", nil)
+		return "success", nil
+	end
+
+	local deadline = now_local() + (state.options.operation_deadline or DEFAULT_OPERATION_DEADLINE)
+	state.busy = true
+	local raw, info, read_result, read_message = backend_get(state.backend, false, deadline, state)
+	if read_result ~= nil then
+		return retry("release_authoritative_read_" .. read_result,
+			read_message or "release reconciliation read failed", nil)
+	end
+	if raw == nil then
+		return stop("fenced", "release_record_missing", "fenced",
+			"durable record is missing during release reconciliation")
+	end
+	local envelope, parse_error, current_format = parse_envelope(raw)
+	if not current_format or envelope == nil then
+		local result: ResultCode = if parse_error == "future implementation version" then "future_schema" else "corrupt"
+		return stop(if result == "future_schema" then "future" else "corrupt", result, result,
+			parse_error or "durable release envelope is invalid")
+	end
+	if envelope.schema_version > state.options.schema_version then
+		return stop("future", "future_schema", "future_schema",
+			"durable schema is newer than this server supports")
+	end
+	if is_confirmed_release(envelope) then
+		return confirm_release(envelope, info)
+	end
+	if envelope.write_id == pending.operation_id then
+		return stop("corrupt", "release_operation_identity_mismatch", "corrupt",
+			"release operation ID exists with incompatible durable state")
+	end
+	if not matches_session(envelope, pending.session_token, pending.fencing_generation) then
+		return stop("fenced", "ownership_fence_changed", "fenced",
+			"durable ownership no longer matches the retained release operation")
+	end
+	if envelope.revision ~= pending.expected_revision then
+		return stop("fenced", "revision_conflict", "fenced",
+			"durable revision changed; refusing to release a newer revision")
+	end
+	if envelope.session == nil or envelope.session.lease_until <= session_now_unix(state.backend.mock) then
+		return stop("fenced", "lease_expired", "fenced",
+			"session lease expired before release could be safely retried")
+	end
+
+	local decision: ResultCode? = nil
+	local decision_message: string? = nil
+	local result, result_info, result_code, result_message = backend_update(state.backend, function(current_raw, current_info)
+		decision = nil
+		decision_message = nil
+		local transform_time = session_now_unix(state.backend.mock)
+		local current, current_error, current_format = parse_envelope(current_raw)
+		if not current_format or current == nil then
+			decision = if current_error == "future implementation version" then "future_schema" else "corrupt"
+			decision_message = current_error or "durable envelope is invalid"
+			return nil, nil, nil
+		end
+		if current.schema_version > state.options.schema_version then
+			decision = "future_schema"
+			decision_message = "durable schema is newer than this server supports"
+			return nil, nil, nil
+		end
+		if is_confirmed_release(current) then
+			decision = "success"
+			return nil, nil, nil
+		end
+		if current.write_id == pending.operation_id then
+			decision = "corrupt"
+			decision_message = "release operation ID exists with incompatible durable state"
+			return nil, nil, nil
+		end
+		if not matches_session(current, pending.session_token, pending.fencing_generation) then
+			decision = "fenced"
+			decision_message = "durable ownership no longer matches the retained release operation"
+			return nil, nil, nil
+		end
+		if current.revision ~= pending.expected_revision then
+			decision = "conflict"
+			decision_message = "durable revision changed during release reconciliation"
+			return nil, nil, nil
+		end
+		local session = current.session
+		if session == nil or session.lease_until <= transform_time then
+			decision = "fenced"
+			decision_message = "durable session is missing or expired"
+			return nil, nil, nil
+		end
+		local user_ids = if current_info ~= nil then clone_user_ids(current_info.UserIds)
+			elseif current.user_ids ~= nil then clone_user_ids(current.user_ids) else {}
+		local durable_metadata = if current_info ~= nil then clone_metadata(current_info.Metadata)
+			else clone_metadata(state.metadata)
+		local next_envelope: Envelope = {
+			implementation_version = IMPLEMENTATION_VERSION,
+			schema_version = state.options.schema_version,
+			revision = pending.target_revision,
+			fencing_generation = pending.fencing_generation,
+			created_at = current.created_at,
+			updated_at = transform_time,
+			data = pending.snapshot :: JsonValue,
+			user_ids = user_ids,
+			tombstone = nil,
+			session = nil,
+			write_id = pending.operation_id,
+		}
+		local valid, validation_error = validate_envelope(next_envelope)
+		if not valid then
+			decision = "validation"
+			decision_message = validation_error
+			return nil, nil, nil
+		end
+		decision = "success"
+		return next_envelope, user_ids, make_backend_metadata(durable_metadata, next_envelope)
+	end, deadline, state)
+	if state.retired then
+		state.busy = false
+		return "closing", "record was retired"
+	end
+	if result_code ~= nil then
+		decision = result_code
+		decision_message = result_message
+	end
+	if result ~= nil then
+		local returned = parse_envelope(result)
+		if returned ~= nil and is_confirmed_release(returned) then
+			return confirm_release(returned, result_info)
+		end
+	end
+	if decision == "future_schema" then
+		return stop("future", "future_schema", "future_schema", decision_message or "future schema")
+	elseif decision == "corrupt" then
+		return stop("corrupt", "corrupt", "corrupt", decision_message or "corrupt release envelope")
+	elseif decision == "fenced" or decision == "conflict" then
+		return stop("fenced", if decision == "conflict" then "revision_conflict" else "ownership_fence_changed",
+			"fenced", decision_message or "release operation was fenced")
+	elseif decision == "validation" then
+		return stop("corrupt", "release_snapshot_invalid", "validation",
+			decision_message or "release snapshot failed validation")
+	end
+	local verified, verified_envelope, verified_info = verify_release_write(
+		state, pending.operation_id, pending.fencing_generation, pending.target_revision, false, deadline
+	)
+	if verified and verified_envelope ~= nil then
+		return confirm_release(verified_envelope, verified_info)
+	end
+	return retry("release_result_unconfirmed",
+		result_message or decision_message or "release outcome is unresolved", nil)
+end
+
 local function reconcile_unknown_internal(state: InternalState): (ResultCode, string?)
 	if state.retired then return "invalid", "record has been retired" end
 	if closing and not state.shutdown then return "closing", "server is shutting down" end
@@ -6851,6 +7068,9 @@ local function reconcile_unknown_internal(state: InternalState): (ResultCode, st
 		state.next_reconciliation = math.huge
 		state.last_reconciliation_category = "missing_operation_identity"
 		return "unknown", "unknown record has no retained logical operation"
+	end
+	if pending.kind == "release" then
+		return reconcile_unknown_release_internal(state)
 	end
 	if state.busy or state.queue_busy then return "busy", "record is already processing durable work" end
 
@@ -7283,6 +7503,21 @@ close_internal = function(state: InternalState, shutdown: boolean): (ResultCode,
 	if confirmed == nil then
 		state.busy = false
 		state.state = "unknown"
+		state.pending_operation = {
+			kind = "release",
+			snapshot = copy_value(snapshot),
+			captured_change_sequence = state.change_sequence,
+			expected_revision = expected_revision,
+			target_revision = target_revision,
+			operation_id = write_id,
+			session_token = session_token,
+			fencing_generation = generation,
+			reason = if shutdown then "shutdown" else "close",
+			started_at = now_local(),
+			attempts = 0,
+		}
+		state.next_reconciliation = now_local() + 0.25
+		state.last_reconciliation_category = "release_outcome_unknown"
 		observe(state, "close", "unknown", last_error or "release outcome is unresolved")
 		return "unknown", last_error or "release outcome is unresolved"
 	end
@@ -8018,13 +8253,14 @@ local function run_scheduled_recovery(record: Record, state: InternalState, now:
 	end
 	local slot = scheduled_state_slot(state)
 	if slot.pending.reconciliation == true then return end
+	local operation_class = if state.pending_operation.kind == "release" then "profile_release" else "profile_save"
 	local result = enqueue_state_work(
 		record,
 		state,
 		"reconciliation",
 		"high",
 		"profile_reconciliation",
-		"profile_save",
+		operation_class,
 		function()
 			local outcome, message = reconcile_unknown_internal(state)
 			sync_public(record)
