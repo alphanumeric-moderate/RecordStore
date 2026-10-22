@@ -79,6 +79,9 @@ local test_ok, test_error = pcall(function()
 	RecordStore.Mock.set_get_failures(1)
 	local unknown_result = recovery_record:Save("playerdata-mutation-backpressure")
 	assert(unknown_result == "unknown", "injected uncertain save did not enter unknown state")
+	RecordStore.Mock.set_get_failures(100, "hold unknown state for mutation test")
+	local current_status = recovery_record:GetDurabilityStatus()
+	assert(current_status.ownership == "uncertain", "mutation fixture did not retain uncertain ownership")
 	local previous_kills = (kills_backing :: NumberValue).Value
 	local backing_value = kills_backing :: NumberValue
 	backing_value.Value = previous_kills + 1
@@ -87,6 +90,7 @@ local test_ok, test_error = pcall(function()
 		"PlayerData backing value mutation must be reverted while record ownership is uncertain")
 	local blocked_set = controller.Set(player, "kills", previous_kills + 2)
 	assert(not blocked_set, "PlayerData.Set must reject mutation while record ownership is uncertain")
+	RecordStore.Mock.set_get_failures(0)
 	local recovery_result, recovery_message = RecordStore.Mock.reconcile(recovery_record)
 	assert(recovery_result == "success", recovery_message)
 
