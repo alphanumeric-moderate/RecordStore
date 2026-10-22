@@ -68,6 +68,18 @@ assert(
 assert(NumberFormatter.format(1e36) == "1Ud", "custom suffix sequence failed")
 assert(NumberFormatter.formatInteger("123456789012345678901234567890123456789") == "123.45Ud", "exact integer suffix failed")
 assert(NumberFormatter.formatScientific(1, 1.25, "12") == "1.25T", "scientific suffix failed")
+
+assert(
+	NumberFormatter.formatScientific(1, 1.259, "12", { decimals = 2 }) == "1.25T",
+	"scientific formatting with resolved options changed"
+)
+local huge_exponent = string.rep("9", 80)
+assert(
+	NumberFormatter.formatScientific(1, 1.25, huge_exponent, { decimals = 3, trim_trailing_zeros = false })
+		== "1.250e+" .. huge_exponent,
+	"unrepresentable scientific exponent fallback changed"
+)
+
 local invalid_scientific_mantissa = pcall(function()
 	NumberFormatter.formatScientific(1, "1.25", "12")
 end)
