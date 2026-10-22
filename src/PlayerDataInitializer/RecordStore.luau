@@ -6,9 +6,6 @@ local MessagingService = game:GetService("MessagingService")
 local RecordStore = {}
 
 local RecordStoreScheduler: any = (function()
--- BEGIN INTERNAL MODULE: RecordStoreScheduler
--- Server-local advanced scheduler. Queue selection is advisory; durable state,
--- session fencing and idempotency remain authoritative.
 local Scheduler = {}
 local MAX_REPLAY_TRACE_EVENTS = 8192
 local MAX_REPLAY_ADVANCE_MS = 31_536_000_000
@@ -125,8 +122,6 @@ local function new_governor(options)
 	end
 	local function operation_metric_key(self, kind)
 		if type(kind) ~= "string" or kind == "" then kind = "default" end
-		-- Keep built-in persistence operations isolated. Internal-only labels cannot be
-		-- claimed by custom work, because "service" tracks global latency and "__other__" aggregates overflow.
 		if CORE_OPERATION_KINDS[kind] then return kind end
 		if kind == OTHER_OPERATION_KIND or kind == "service" then return OTHER_OPERATION_KIND end
 		local existing = self.operation_kind_keys[kind]
@@ -445,8 +440,6 @@ local function new_governor(options)
 		local budgets = self.request_budgets
 		local budget_fresh = finite(budgets.sampled_at_ms) and now_ms() - budgets.sampled_at_ms <= 1000
 		if budget_fresh then
-			-- Critical work can use reserved local scheduler capacity below the normal
-			-- headroom target, but cannot bypass an exhausted Roblox request budget.
 			local read_threshold = if critical then read_units else math.max(self.policy.minimum_budget, read_units)
 			local write_threshold = if critical then write_units else math.max(self.policy.minimum_budget, write_units)
 			if read_units > 0 and finite(budgets.read) and budgets.read < read_threshold then
@@ -874,8 +867,6 @@ local function new_governor(options)
 	end
 	local function inherit_ready_prerequisites(self, dependent, instant)
 		if dependent.lane ~= "high" then return end
-		-- High priority alone is not an SLO. Boost a predecessor only when the
-		-- dependent declares a deadline or an explicitly time-sensitive service class.
 		if not finite(dependent.deadline_ms)
 			and dependent.service_class ~= "interactive"
 			and dependent.service_class ~= "critical"
@@ -921,8 +912,6 @@ local function new_governor(options)
 		local estimate = self.latency_ewma[metric_kind] or 0
 		local samples = self.latency_samples_by_operation[metric_kind]
 		if samples ~= nil and #samples > 0 then
-			-- P95 is deliberately conservative; EWMA protects against a recent
-			-- latency spike that a short sample window has not fully reflected.
 			local ordered = copy(samples)
 			table.sort(ordered)
 			estimate = math.max(estimate, ordered[math.ceil(#ordered * 0.95)] or 0)
@@ -948,7 +937,6 @@ local function new_governor(options)
 			value = tostring(value or "default")
 			return tostring(#value) .. ":" .. value
 		end
-		-- Length-prefix every identity component; hash collisions must not merge owners.
 		return component(item.owner_id)
 			.. component(item.work_class or "default")
 			.. component(scheduled_lane(item, instant))
@@ -957,9 +945,6 @@ local function new_governor(options)
 	local function choose_index(self, algorithm, renewal_mode)
 		local now, eligible = now_ms(), {}
 		local urgent_fallback = self.urgent_streak >= self.policy.urgent_deadline_burst
-		-- A dependent may be queued before its prerequisite becomes due/available.
-		-- Re-evaluate only high-lane items with dependencies so inheritance begins
-		-- when the prerequisite is actually ready, not only at dependent enqueue.
 		for _, dependent in ipairs(self.queue) do
 			if dependent.lane == "high" and #(dependent.dependencies or {}) > 0 then
 				inherit_ready_prerequisites(self, dependent, now)
@@ -982,7 +967,6 @@ local function new_governor(options)
 				local effective_lane = scheduled_lane(item, now)
 				local renewal_count = self.active_renewals_by_owner[item.owner_id] or 0
 				local critical_owner_count = self.active_critical_by_owner[item.owner_id] or 0
-				-- Keep at most one protected persistence callback active for an owner.
 				local owner_can_renew = effective_lane ~= "lease_renewal" or renewal_count < 1
 				local owner_can_use_reserve = not uses_critical_reserve(item) or critical_owner_count < 1
 				if owner_can_renew and owner_can_use_reserve
@@ -1019,18 +1003,12 @@ local function new_governor(options)
 			end
 		end
 		if renewal_mode == true then
-			-- Lease renewal is a safety lane: order it globally by remaining deadline
-			-- slack across owners, rather than allowing DRR's lane cursor to delay the
-			-- claim closest to lease expiry. item_precedes also ages older work.
 			local best
 			for _, row in ipairs(eligible) do
 				if best == nil or item_precedes(row.item, best.item, now) then best = row end
 			end
 			return best and best.index or nil, urgent_fallback
 		elseif renewal_mode == "critical" then
-			-- The protected share is shared by internal renewals and critical
-			-- profile persistence. Order these by service class, deadline slack,
-			-- and age instead of excluding every critical non-renewal item.
 			local best
 			for _, row in ipairs(eligible) do
 				if best == nil or item_precedes(row.item, best.item, now) then best = row end
@@ -1052,17 +1030,10 @@ local function new_governor(options)
 				local slack = if finite(item.deadline_ms)
 					then item.deadline_ms - now - estimated_service_time_ms(self, item, service_time_estimates)
 					else 60000
-				-- After a bounded urgent burst, preserve lane/service priority but age
-				-- rather than deadline slack decides the next candidate.
 				local urgency_score = if self.urgent_streak >= self.policy.urgent_deadline_burst then 0 else slack
 				local lane = row.effective_lane
 				local lane_weight = if lane == "lease_renewal" then 8 elseif lane == "high" then 4 elseif lane == "normal" then 2 else 1
 				local service_rank = if item.service_class == "critical" then 4 elseif item.service_class == "interactive" then 3 elseif item.service_class == "normal" then 2 elseif item.service_class == "bulk" then 1 else 0
-				-- Keep class preference inside the bounded aging envelope. A class
-				-- may run ahead, but it must not hold a permanent 40k-point lead over
-				-- old eligible work while new high-class items continue to arrive.
-				-- Deadline slack is a bounded tie-breaker, not a replacement for
-				-- lane/service priority. Aging remains a separate bounded promotion.
 				local deadline_bonus = math.clamp(urgency_score, -499, 499)
 				local weighted_deadline_bonus = math.clamp(urgency_score * 0.01, -249, 249)
 				local score = if algorithm == "deadline"
@@ -1210,7 +1181,6 @@ local function new_governor(options)
 		value.enqueued_at_ms = now_ms()
 		local requested_due = value.due_at_ms or value.available_at_ms or value.enqueued_at_ms
 		value.due_at_ms = math.max(requested_due, value.available_at_ms or -math.huge)
-		-- Expiry is a terminal wake boundary; unlike availability, it may precede the no-start boundary.
 		if value.expires_at_ms ~= nil and value.expires_at_ms < value.due_at_ms then
 			value.due_at_ms = value.expires_at_ms
 		end
@@ -1337,8 +1307,6 @@ local function new_governor(options)
 		local effective_lane = scheduled_lane(item, now)
 		if effective_lane == "high" then self.high_streak += 1 else self.high_streak = 0 end
 		if urgent_fallback then
-			-- A fairness yield consumes the urgent burst; deadline preference may
-			-- resume after this older eligible item receives service.
 			self.urgent_streak = 0
 		elseif finite(item.deadline_ms) and item.deadline_ms - now <= 5000 then
 			self.urgent_streak += 1
@@ -1361,8 +1329,6 @@ local function new_governor(options)
 			if entry.item.queued ~= true or self.known[entry.id] ~= entry.item
 				or entry.due_at_ms ~= entry.item.due_at_ms
 			then
-				-- Reschedule mutates the queue item's due time and pushes a replacement
-				-- heap entry. Ignore the stale entry or observers may see the old deadline.
 				heap_pop(self.queued_due_heap)
 			else
 				return entry.due_at_ms
@@ -1383,8 +1349,6 @@ local function new_governor(options)
 				and tokens ~= nil and tokens[event.kind] == event.sequence
 				and current_at == event.due_at_ms
 			if not valid or event.due_at_ms <= now then
-				-- Lazy deletion is safe because each item retains only its latest
-				-- per-kind token. Due, expiry and admission can be replaced independently.
 				heap_pop(self.wake_heap)
 			else
 				return event.due_at_ms
@@ -1446,8 +1410,6 @@ local function new_governor(options)
 			while #order > limit do
 				local oldest = table.remove(order, 1)
 				if terminal_dependency_referenced(self, oldest) then
-					-- Retain live dependency outcomes without retaining their FIFO slots.
-					-- release_dependencies reclaims them when the last dependent ends.
 					pending[oldest] = true
 				else
 					outcomes[oldest] = nil
@@ -1471,9 +1433,6 @@ local function new_governor(options)
 		end
 		local known = {}
 		for id, item in pairs(self.known) do
-			-- Queue selection can promote a queued prerequisite through known[id].
-			-- Keep both views pointed at the same shadow clone; copying them separately
-			-- loses the object relationship and makes shadow inheritance inaccurate.
 			known[id] = queued_by_id[id] or copy(item)
 		end
 		return {
@@ -1502,9 +1461,6 @@ local function new_governor(options)
 		local code = if type(outcome) == "table" then outcome.code else outcome
 		local item = self.known[id]
 		if item == nil then
-			-- Expiry and dependency failures are recorded in TakeNext before the
-			-- dispatcher reconciles their terminal result. Accept only that exact
-			-- recorded failure as an idempotent no-op; never create ghost completion.
 			if self.failed[id] ~= nil and tostring(code or "unknown") == self.failed[id] then return true end
 			return false, "scheduled item is not known"
 		end
@@ -1532,9 +1488,6 @@ local function new_governor(options)
 		self.known[id] = nil
 		if item ~= nil then refresh_owner_retry_cooldown(self, item.owner_id) end
 		for _, dependent_item in pairs(self.known) do
-			-- A blocking prerequisite may already be in flight when its dependent
-			-- finishes or is cancelled. Clear inheritance on all active work so a
-			-- later retry cannot keep urgency inherited from a terminal dependency.
 			if dependent_item.inherited_from == id then
 				dependent_item.inherited_lane = nil
 				dependent_item.inherited_until_ms = nil
@@ -1736,8 +1689,6 @@ local function new_governor(options)
 		return oldest_eligible_age_ms
 	end
 
-	-- Renewal scheduling needs a small bounded view, not the allocation-heavy
-	-- diagnostic snapshot that copies and sorts every operation's samples.
 	function governor:LeaseRenewalAdvice()
 		local function p95_for(operation)
 			local source = self.latency_samples_by_operation[operation]
@@ -1904,8 +1855,6 @@ local function new_dispatcher(governor, options)
 		if due ~= nil then
 			schedule_wake_at(due)
 		elseif dispatcher.wake_due_ms ~= nil or dispatcher.wake_thread ~= nil then
-			-- Cancellation, completion, or rescheduling can invalidate the final
-			-- heap event. Drop its timer instead of waking the dispatcher pointlessly.
 			dispatcher.wake_generation += 1
 			cancel_scheduled(dispatcher.wake_thread)
 			dispatcher.wake_thread = nil
@@ -1986,7 +1935,6 @@ local function new_dispatcher(governor, options)
 			local jitter = if jitter_span > 0 then (math.random() * 2 - 1) * jitter_span else 0
 			delay_ms = math.clamp(math.max(retry_after_ms, math.floor(exponential + jitter), 10), 10, 60000)
 		else
-			-- Token pressure can defer retries, but cannot shorten a caller's retry-after.
 			local token_wait_ms = if finite(wait_ms) then math.floor(wait_ms) else 60000
 			delay_ms = math.clamp(math.max(token_wait_ms, retry_after_ms), 10, 60000)
 		end
@@ -2000,7 +1948,6 @@ local function new_dispatcher(governor, options)
 			entry.retry_waiting_for_token = false
 			dispatcher.metrics.retries += 1
 		else
-			-- Defer visibly; do not execute a retry without class/global admission.
 			entry.retry_waiting_for_token = true
 			dispatcher.metrics.retry_deferred += 1
 		end
@@ -2041,7 +1988,6 @@ local function new_dispatcher(governor, options)
 		elseif not callback_ok then
 			dispatcher.metrics.callback_errors += 1
 			dispatcher.metrics.last_error = string.sub(tostring(callback_result), 1, 200)
-			-- A raised callback may have committed an external side effect. Never retry it automatically.
 			callback_result = { code = "unknown", message = "scheduled callback raised; effect outcome may be unknown" }
 		elseif type(callback_result) == "table" and callback_result.code == "retryable"
 			and type(entry) == "table" and entry.retry_attempt < entry.max_retries
@@ -2076,8 +2022,6 @@ local function new_dispatcher(governor, options)
 				then table.clone(callback_result)
 				else { code = if callback_result == true or callback_result == nil then "success" else tostring(callback_result) }
 			if item.overdue == true then
-				-- Reserve these field names for scheduler metadata. Advisory deadlines
-				-- never suppress work, but every terminal callback can observe lateness.
 				completion_result.scheduler_overdue = true
 				completion_result.scheduler_deadline_ms = item.deadline_ms
 				completion_result.scheduler_selected_at_ms = item.selected_at_ms
@@ -2151,8 +2095,6 @@ local function new_dispatcher(governor, options)
 			estimate_dimensions(item, item.admission_batch_size)
 		)
 		if admission.code ~= "admitted" then
-			-- Admission is checked during selection and cannot race in this
-			-- non-yielding section, but defer safely if a future caller changes that.
 			if admission.terminal then
 				item.terminal_result = admission
 				finish_scheduled_item(item, "admission_rejected", entry, true, admission, false)
@@ -2182,8 +2124,6 @@ local function new_dispatcher(governor, options)
 				finish_scheduled_item(item, "cancelled", entry, true, nil, true)
 				return
 			end
-			-- A queued item can become expired after selection but before its
-			-- coroutine actually starts. Check the no-new-start boundary again here.
 			if finite(item.expires_at_ms) and item.expires_at_ms <= now_ms() then
 				finish_scheduled_item(item, "expired", entry, true, nil, true)
 				return
@@ -2207,8 +2147,6 @@ local function new_dispatcher(governor, options)
 			local result_code = if type(callback_result) == "table" then callback_result.code
 				elseif callback_ok and (callback_result == true or callback_result == nil) then "success"
 				elseif not callback_ok then "unknown" else tostring(callback_result)
-			-- Schedule normalizes operation_class to work_class when omitted;
-			-- keep observations keyed exactly like the admission reservation.
 			local operation_kind = if type(entry) == "table"
 				then entry.operation_class or entry.work_class or "default" else "scheduled_callback"
 			local outcome_class = classify_outcome(callback_result, callback_ok)
@@ -2355,13 +2293,10 @@ local function new_dispatcher(governor, options)
 			end
 		end
 		if finite(schedule_options.deadline_ms) then
-			-- Batching may wait only within the remaining advisory deadline slack.
-			-- Explicit due/availability timestamps still remain authoritative below.
 			batch_window = math.min(batch_window, math.max(0, schedule_options.deadline_ms - now))
 		end
 		due = math.max(due, now + batch_window)
 		if finite(schedule_options.available_at_ms) then due = math.max(due, schedule_options.available_at_ms) end
-		-- Deadlines influence selection priority; they never override availability.
 		if finite(schedule_options.expires_at_ms) and due >= schedule_options.expires_at_ms then due = schedule_options.expires_at_ms end
 		local item = {
 			id = id, owner_id = owner_id, lane = lane, due_at_ms = due,
@@ -2444,13 +2379,9 @@ Scheduler.new = new_governor
 Scheduler.new_dispatcher = new_dispatcher
 
 return Scheduler
--- END INTERNAL MODULE: RecordStoreScheduler
 end)()
 
 local MailboxV2: any = (function()
--- BEGIN INTERNAL MODULE: RecordStoreMailboxV2
--- Experimental per-message durable mailbox. It is opt-in and does not replace RecordStore's v3 queue.
--- Call UpdateAsync transforms are pure. Handler callbacks run only after a claim is verified.
 
 local MailboxV2 = {}
 MailboxV2.__index = MailboxV2
@@ -2549,9 +2480,6 @@ local DEFAULT_PRIORITY_AGING_MS = 60000
 local DEFAULT_HIGH_PRIORITY_BURST = 4
 local MAX_ORDERING_KEY_LENGTH = 256
 
--- Roblox provides the global task library; Lune exposes the same operations
--- as @lune/task. Cache the adapter so deterministic harnesses can run the
--- synchronous path without pretending to execute lease heartbeats.
 local resolved_task_api = false
 local cached_task_api: any = nil
 local function task_api(): any
@@ -2682,7 +2610,6 @@ local function canonical(value: unknown, stack: { [table]: boolean }?, depth: nu
 	return "o" .. tostring(#keys) .. "{" .. table.concat(parts, "") .. "}"
 end
 
--- SDBM-derived routing digest. It is not authentication or proof of identity; stored full identities are checked.
 local function digest(value: string): string
 	local result = table.create(4)
 	for seed_index = 1, 4 do
@@ -2702,7 +2629,6 @@ local function now_default(): number
 	if success and is_finite(value) then
 		return value
 	end
-	-- Lune and isolated test shims may not expose Roblox's DateTime class.
 	return os.time() * 1000
 end
 
@@ -2977,7 +2903,6 @@ function MailboxV2._update(self: Mailbox, key: string, transform: (unknown) -> u
 		return self.store:UpdateAsync(key, function(raw: unknown, key_info: any)
 			local next_value = transform(raw)
 			if key_info ~= nil then
-				-- Preserve existing DataStore user IDs and metadata across queue-key mutations.
 				return next_value, key_info:GetUserIds(), key_info:GetMetadata()
 			end
 			return next_value
@@ -3188,8 +3113,6 @@ function MailboxV2._reclaim_slot(self: Mailbox, kind: string): boolean
 			elseif record.state == "replaying"
 				or (record.state == "dead_lettered" and record.dlq_placement_generation == row.placement_generation)
 			then
-				-- Keep the independent DLQ row while it is still the authoritative terminal record,
-				-- and while replay is not yet durably placed in the active index.
 				return false
 			end
 		end
@@ -3211,8 +3134,6 @@ function MailboxV2._reclaim_slot(self: Mailbox, kind: string): boolean
 			end
 			local segment = as_dict(segment_value)
 
-			-- A crash can occur after RemoveAsync commits but before the manifest slot is
-			-- released. A draining slot plus authoritative absence is safe to finish.
 			if slot.state == "draining" and segment == nil then
 				if release_draining_slot(slot_number, generation) then
 					return true
@@ -3257,7 +3178,6 @@ function MailboxV2._reclaim_slot(self: Mailbox, kind: string): boolean
 				end
 			end
 
-			-- Removal is unconditional, so it occurs only after a durable generation fence.
 			local storage_remove = self.store.RemoveAsync
 			if storage_remove == nil then
 				return false
@@ -3265,7 +3185,6 @@ function MailboxV2._reclaim_slot(self: Mailbox, kind: string): boolean
 			pcall(function()
 				storage_remove(self.store, locator.key)
 			end)
-			-- Do not trust the ambiguous RemoveAsync response or a cached GetAsync result.
 			local after_remove, verify_error = self:_update(locator.key, function(raw)
 				return raw
 			end)
@@ -4126,7 +4045,6 @@ function MailboxV2._resume_reservation(self: Mailbox, route: string, initial_ent
 			return ok("conflict", route, nil, "canonical route collision or different exact request")
 		end
 		if TERMINAL[tostring(current_record.state)] then
-			-- The canonical terminal state is the durable producer receipt.
 			self:_set_registry_entry(route, token, nil, true)
 			return ok("duplicate", route, self:_record_snapshot(current_record), nil)
 		end
@@ -4759,8 +4677,6 @@ function MailboxV2._claim(self: Mailbox, route: string): (Dict?, Result)
 end
 
 
--- Renew a still-live claim using its existing fencing token. Expired claims are
--- never resurrected; ambiguous writes are reconciled by reading the canonical row.
 function MailboxV2.RenewClaimAsync(self: Mailbox, message_id: string, claim_token: string): Result
 	if type(message_id) ~= "string" or message_id == "" or #message_id > MAX_KEY_LENGTH then
 		return ok("invalid", message_id, nil, "message_id must be a valid v2 key")
@@ -5036,9 +4952,6 @@ local function process_next_internal(self: Mailbox, handler: (unknown, Dict, Han
 				cancellation_reason = function(): string? return cancellation_reason end,
 				renew_lease_async = renew_for_handler,
 			}
-			-- Run the handler in its own task so yielding callbacks can be protected by
-			-- periodic, token-fenced lease renewal. A lost lease signals cancellation;
-			-- it cannot forcibly undo arbitrary external side effects.
 			spawn_scheduled(function()
 				local call_ok, result_value, error_value = pcall(handler, clone_json(record.payload), snapshot, context)
 				handler_ok = call_ok
@@ -5109,7 +5022,6 @@ function MailboxV2.RecoverAsync(self: Mailbox): Result
 						if result.code ~= "accepted" and result.code ~= "duplicate" then
 							local latest_entry, entry_error = self:_get_registry_entry(route)
 							if result.code == "unknown" and entry_error == nil and latest_entry ~= nil and latest_entry.capacity_blocked == true then
-								-- Capacity-blocked preparation remains durable, but cannot stall already-ready work.
 								capacity_blocked_preparations += 1
 							else
 								return result
@@ -5141,8 +5053,6 @@ function MailboxV2.RecoverAsync(self: Mailbox): Result
 				and is_finite(record.locked_until)
 				and (record.locked_until :: number) + (self.options.clock_skew_grace_ms :: number) <= self:_now()
 			then
-				-- An expired claim does not prove the handler had no external effect.
-				-- Requeue it as an uncertain, at-least-once attempt under the same message ID.
 				local result = self:_retry_claim(route, tostring(record.claim_token), "claim lease expired; handler outcome is unknown")
 				if result.code ~= "retry_scheduled" and result.code ~= "expired" and result.code ~= "dead_lettered" then
 					return result
@@ -5304,7 +5214,6 @@ function MailboxV2.ReplayDeadLetterAsync(self: Mailbox, message_id: string, oper
 		next_record.replay_operation_id = operation_id
 		next_record.pending_replay_generation = (current.placement_generation :: number) + 1
 		next_record.replay_count = (current.replay_count :: number) + 1
-		-- Attempts are per delivery generation; preserve total_attempts as lifetime telemetry.
 		next_record.attempts = 0
 		next_record.claim_token = nil
 		next_record.locked_until = 0
@@ -5465,7 +5374,6 @@ function MailboxV2.ReclaimAsync(self: Mailbox): Result
 	return ok(if reclaimed_active or reclaimed_dlq then "success" else "empty", nil, nil, nil)
 end
 
--- Small deterministic store model for Lune tests. Production code must pass a real DataStore.
 local MockStore = {}
 MockStore.__index = MockStore
 
@@ -5577,7 +5485,6 @@ end
 MailboxV2.Version = VERSION
 
 return MailboxV2
--- END INTERNAL MODULE: RecordStoreMailboxV2
 end)()
 
 type MetadataValue = boolean | number | string
@@ -9434,8 +9341,6 @@ local function save_internal(state: InternalState, reason: string?, operation_de
 		end
 	end
 	if confirmed == nil then
-		-- Capture direct mutations that happened while the durable write was in flight.
-		-- The pending snapshot stays immutable; these newer local changes remain dirty.
 		track_external_data_mutation(state)
 		state.busy = false
 		state.state = "unknown"
@@ -9958,8 +9863,6 @@ local function sync_public(record: Record, skip_external_mutation_check: boolean
 					return copy_value(state.data)
 				end)
 				if detach_ok and detached_data ~= nil then
-					-- Replace the canonical table as well as the public alias. A caller may
-					-- have retained the old Record.Data reference before ownership was lost.
 					state.data = detached_data
 					state.public_data_source = copy_value(detached_data)
 				else
@@ -12351,8 +12254,6 @@ local function renew_internal(state: InternalState): (ResultCode, string?)
 		end
 	end
 	if confirmed == nil then
-		-- A renewal doesn't replace the public snapshot, but direct edits can happen
-		-- while UpdateAsync is in flight. Preserve them as dirty before fencing.
 		track_external_data_mutation(state)
 		state.busy = false
 		state.state = "unknown"
@@ -12896,8 +12797,6 @@ local function detach_public_data_for_release(state: InternalState): (boolean, s
 		end
 		detached_data = copy_or_error
 	end
-	-- Never let a reference obtained while owned retain an alias to canonical data
-	-- after release has started and its durable operation can yield.
 	state.data = detached_data
 	state.public_data_source = copy_value(detached_data)
 	state.public_data_detached = true
@@ -13380,8 +13279,6 @@ local scheduler_activation = {
 	cohort_bucket = 0,
 }
 local function scheduler_rollout_bucket(salt: string): number
-	-- Stable per server and rollout wave. Keep arithmetic below 2^53 so every
-	-- intermediate integer is exact without depending on bit32 availability.
 	local identity = tostring(game.PlaceId) .. ":" .. tostring(server_id) .. ":" .. salt
 	local hash = 0
 	for index = 1, #identity do
@@ -13399,8 +13296,6 @@ local function apply_scheduler_activation()
 	if should_enable then
 		scheduler_dispatcher:Kick()
 	else
-		-- A rollout reduction is a kill-switch for queued, not-yet-started work.
-		-- In-flight callbacks are not preempted; durable session fences remain authoritative.
 		scheduler_dispatcher:CancelQueued("advanced scheduler disabled or excluded by rollout")
 	end
 end
@@ -13447,8 +13342,6 @@ local function enqueue_state_work(
 		if type(result) == "table" and result.code == "cancelled"
 			and not scheduler_enabled and not closing and state.state == "active"
 		then
-			-- A kill-switch cancellation must return due work to the legacy selector
-			-- instead of leaving the next timer at a future time for work that never ran.
 			local retry_at = now_local()
 			if kind == "lease_renewal" then
 				state.next_renewal = math.min(state.next_renewal, retry_at)
@@ -13467,7 +13360,6 @@ local function enqueue_state_work(
 		end
 		if type(caller_on_complete) == "function" then pcall(caller_on_complete, result) end
 	end
-	-- Set pending before enqueue: the dispatcher is allowed to start synchronously.
 	slot.pending[kind] = true
 	local result = scheduler_dispatcher:Schedule(
 		scheduler_owner_id(state),
@@ -13561,8 +13453,6 @@ install_mailbox_renewal_scheduler = function(record: Record, state: InternalStat
 	return true, nil
 end
 
--- Scheduling never replaces the durable request gate or session fencing.
--- It is disabled until the caller explicitly enables the new selector.
 function RecordStore.configure_scheduler_policy(policy: { [string]: unknown }): (string, string?)
 	if type(policy) ~= "table" then return "invalid", "scheduler policy must be a table" end
 	return scheduler_dispatcher:SetPolicy(policy)
@@ -13677,8 +13567,6 @@ function RecordStore.replay_scheduler_trace(
 			end
 		end
 	end
-	-- Replay runs against an isolated governor and virtual clock. It must never
-	-- enqueue, dequeue or complete work in the live server scheduler.
 	local replay_now_ms = now_local() * 1000
 	local replay = RecordStoreScheduler.new({
 		now_ms = function() return replay_now_ms end,
@@ -13738,9 +13626,6 @@ local function run_scheduled_record_work(record: Record, state: InternalState, n
 				renewal_advice.update_async_ewma_ms,
 				renewal_advice.service_ewma_ms
 			)
-			-- Reserve a conservative service-time and current queue-delay margin from
-			-- the remaining durable lease. The deadline is advisory; the lease-token
-			-- check in renew_internal remains the ownership authority.
 			local queue_delay_ms = math.max(0, renewal_advice.oldest_eligible_age_ms)
 			local safety_margin_ms = math.max(100, observed_service_ms * 2 + queue_delay_ms)
 			local safe_slack_ms = math.max(0, remaining_ms - safety_margin_ms)
@@ -13753,8 +13638,6 @@ local function run_scheduled_record_work(record: Record, state: InternalState, n
 				end
 				local code, message = renew_internal(state)
 				sync_public(record)
-				-- Do not retry a result returned by the persistence operation. In particular,
-				-- an unknown outcome may already have committed.
 				return { code = code, message = message }
 			end, renewal_options)
 		if type(result) == "table" and result.code == "accepted" then
@@ -13939,8 +13822,6 @@ local function shutdown()
 	end
 	shutdown_started = true
 	closing = true
-	-- Cancel timers and notify queued work before record release begins. In-flight
-	-- persistence callbacks are not preempted and still release their reservations.
 	scheduler_dispatcher:Close()
 	local closing_records: { Record } = {}
 	for record, state in private do

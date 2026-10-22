@@ -1,6 +1,5 @@
 --!strict
 --!optimize 2
--- NumberFormatter for native numbers and exact CodeNum integer/scientific payloads.
 local NumberFormatter = {}
 export type Options = { decimals: number?, trim_trailing_zeros: boolean? }
 local SUFFIX_GROUPS = {

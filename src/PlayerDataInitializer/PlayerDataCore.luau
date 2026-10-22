@@ -1,7 +1,5 @@
 --!strict
 --!optimize 2
--- Hardened lifecycle/persistence core.
--- RecordStore persists non-finite numbers using its versioned envelope encoding.
 
 local Players = game:GetService("Players")
 
@@ -46,7 +44,6 @@ type CodeNumValueFactoryAPI = {
 	normalize_serialized: ((value: unknown) -> (string?, CodeNumValueNode?))?,
 }
 
--- The default schema does not use CodeNumValue, so defer its module load.
 local cached_code_num_value_factory: CodeNumValueFactoryAPI? = nil
 
 local function get_code_num_value_factory(): CodeNumValueFactoryAPI
@@ -107,7 +104,6 @@ type PlayerValuePathKey = "leaderstats" | "player_data_values"
 export type Controller = {
 	Start: (self: Controller) -> boolean,
 	Shutdown: (self: Controller) -> boolean,
-	-- Set is intentionally dot-callable: controller.Set(player, key, value).
 	Set: (player: Player, key: string, value: unknown) -> (boolean, string?),
 }
 
@@ -136,14 +132,12 @@ local function define_leaderstat(
 end
 
 local CONFIG = {
-	-- Retained to preserve the existing dataset; change only as an explicit migration.
 	store_name = "PlayerData_Test1",
 	scope = "global",
 	key_prefix = "Player_",
 
 	schema_version = 1,
 
-	-- Tuned for a broad production workload, with a generous lease recovery margin.
 	lease_duration = 180,
 	lease_renewal = 60,
 	autosave_interval = 90,
@@ -159,21 +153,16 @@ local CONFIG = {
 	budget_wait = 2,
 
 	data = {
-		-- NumberValue-backed integer semantics allow +/-infinity and NaN.
 		kills = define_data_field("IntegerInfinityValue", 0, "nearest"),
 		equipped = define_data_field("StringValue", "Default"),
 		admin = define_data_field("BoolValue", false),
 
-		-- Examples:
-		-- balance = define_data_field("IntegerInfinityValue", 0, "nearest"),
-		-- cash = define_data_field("CodeNumValue", 0),
 	},
 
 	leaderstats = {
 		enabled = true,
 		name = "leaderstats",
 		values = {
-			-- Kills is display-formatted by default. Update PlayerDataValues.kills.Value in gameplay code.
 			define_leaderstat("kills", "Kills", { decimals = 2 }),
 			define_leaderstat("equipped", "Equipped"),
 		},
@@ -686,7 +675,6 @@ local function new(dependencies: Dependencies?): Controller
 			pending_changes[record] = pending
 		end
 
-		-- Keep the newest observed value if another change arrived while Update was running.
 		for key, value in pairs(changes) do
 			if pending[key] == nil then
 				pending[key] = value
@@ -740,8 +728,6 @@ local function new(dependencies: Dependencies?): Controller
 					if type(current) ~= "table" then
 						return nil
 					end
-					-- RecordStore supplies an isolated copy of its validated active data.
-					-- queue_value_change canonicalizes every batched value before it arrives.
 					local data = current :: PlayerData
 					for key, value in pairs(batch) do
 						data[key] = value
@@ -1335,12 +1321,9 @@ local function new(dependencies: Dependencies?): Controller
 			if not assign_ok then
 				return false, ("could not assign PlayerData field %q: %s"):format(key, tostring(assign_error))
 			end
-			-- The existing Value.Changed connection updates the coalesced persistence queue
-			-- and, for formatted fields, refreshes the display StringValue.
 			return true, nil
 		end
 
-		-- Non-leaderstat fields have no replicated ValueBase. Queue them directly.
 		queue_value_change(record, key, normalized)
 		return true, nil
 	end
@@ -1646,7 +1629,6 @@ local function new(dependencies: Dependencies?): Controller
 				update_attempts = attempt
 				local update_call_ok, returned_result, returned_message = pcall(function()
 					return record:Update(function()
-						-- normalized already contains the canonical persisted representation.
 				return normalized
 					end)
 				end)
