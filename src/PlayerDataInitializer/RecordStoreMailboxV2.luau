@@ -246,6 +246,13 @@ local function digest(value: string): string
 end
 
 local function now_default(): number
+	local success, value = pcall(function()
+		return DateTime.now().UnixTimestampMillis
+	end)
+	if success and is_finite(value) then
+		return value
+	end
+	-- Lune and isolated test shims may not expose Roblox's DateTime class.
 	return os.time() * 1000
 end
 
