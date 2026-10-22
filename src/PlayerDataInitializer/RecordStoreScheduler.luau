@@ -249,6 +249,18 @@ local function new_governor(options)
 		end
 		local next_policy = copy(self.policy)
 		for key, value in pairs(patch) do next_policy[key] = value end
+		if patch.max_estimated_bytes_in_flight ~= nil and patch.estimated_bytes_critical_reserve == nil then
+			next_policy.estimated_bytes_critical_reserve = math.min(
+				self.policy.estimated_bytes_critical_reserve,
+				math.floor(next_policy.max_estimated_bytes_in_flight / 4)
+			)
+		end
+		if patch.max_handler_slots_in_flight ~= nil and patch.handler_slots_critical_reserve == nil then
+			next_policy.handler_slots_critical_reserve = math.min(
+				self.policy.handler_slots_critical_reserve,
+				math.max(0, next_policy.max_handler_slots_in_flight - 1)
+			)
+		end
 		local valid, message = policy_valid(next_policy)
 		if not valid then return false, message end
 		self.policy = next_policy
