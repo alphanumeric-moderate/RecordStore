@@ -356,4 +356,68 @@ do
 end
 
 RecordStore.Mock.reset()
+
+do
+	local fake_now = DateTime.now().UnixTimestampMillis / 1000 + 1
+	RecordStore.Mock.set_test_clock(function()
+		return fake_now
+	end)
+	local record = open_test_record("release-after-takeover")
+	local updated, update_message = record:Update(function(data)
+		(data :: { [string]: RecordStore.JsonValue }).coins = 20
+		return data
+	end)
+	assert(updated == "success", update_message)
+	local base_revision = record:GetRevision()
+
+	RecordStore.Mock.set_update_failures(1, "unknown", "injected pre-commit release failure")
+	RecordStore.Mock.set_get_failures(100, "hold release verification before ownership replacement")
+	local close_result = record:Close()
+	assert(close_result == "unknown", "uncommitted release with failed verification must remain unknown")
+	local status = record:GetDurabilityStatus()
+	assert(status.pending_operation_id ~= nil, "unknown release must retain its operation identity")
+
+	local winner_write_id = "00000000-0000-4000-8000-000000000001"
+	local winner_session_token = "00000000-0000-4000-8000-000000000002"
+	local winner = RecordStore.Mock.get_record_raw(
+		"RecordStore_UnknownSaveRecoveryRegression",
+		"global",
+		"release-after-takeover"
+	) :: { [string]: any }
+	winner.fencing_generation += 1
+	winner.revision = base_revision + 1
+	winner.updated_at = fake_now + 1
+	winner.data = { coins = 77, label = "new-owner" }
+	winner.write_id = winner_write_id
+	local winner_session = winner.session :: { [string]: any }
+	winner_session.token = winner_session_token
+	winner_session.generation = winner.fencing_generation
+	winner_session.lease_until = fake_now + 180
+	local seed_result, seed_message = RecordStore.Mock.seed_record_raw(
+		"RecordStore_UnknownSaveRecoveryRegression",
+		"global",
+		"release-after-takeover",
+		winner
+	)
+	assert(seed_result == "success", seed_message)
+
+	RecordStore.Mock.set_get_failures(0)
+	local recovery_result = RecordStore.Mock.reconcile(record)
+	assert(recovery_result == "fenced", "old release operation must fence after a replacement owner appears")
+	assert(record.State == "fenced", "stale releasing record must not become active after takeover")
+	local durable = RecordStore.Mock.get_record_raw(
+		"RecordStore_UnknownSaveRecoveryRegression",
+		"global",
+		"release-after-takeover"
+	) :: { [string]: any }
+	assert(durable.write_id == winner_write_id, "stale release must not overwrite the replacement owner's operation")
+	assert(durable.fencing_generation == winner.fencing_generation,
+		"stale release must not roll back the replacement fencing generation")
+	assert((durable.data :: { [string]: any }).coins == 77,
+		"stale release must not overwrite the replacement owner's data")
+	assert(((durable.session :: { [string]: any }).token) == winner_session_token,
+		"stale release must not remove the replacement owner's session")
+end
+
+RecordStore.Mock.reset()
 print("[PASS] Unknown-save and release recovery retain operation identity, fence public mutation, preserve in-flight edits, and refuse stale-owner writes.")
