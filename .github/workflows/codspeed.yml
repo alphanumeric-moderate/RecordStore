@@ -38,6 +38,10 @@ jobs:
         timeout-minutes: 2
         run: timeout --signal=TERM --kill-after=5s 60s lune run bench/run_regression_tests.luau
 
+      - name: Regression - production DataStore adapter safety
+        timeout-minutes: 2
+        run: timeout --signal=TERM --kill-after=5s 60s lune run bench/run_production_adapter_safety_regression.luau
+
       - name: Regression - CodeNum
         timeout-minutes: 2
         run: timeout --signal=TERM --kill-after=5s 60s lune run bench/run_codenum_regression_tests.luau
