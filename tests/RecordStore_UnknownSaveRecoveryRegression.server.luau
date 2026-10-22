@@ -22,12 +22,12 @@ RecordStore.Mock.reset()
 do
 	local record = open_test_record("commit-then-error")
 	local base_revision = record:GetRevision()
-	local retained_data = record.Data :: { [string]: RecordStore.JsonValue }
 	local update_result, update_message = record:Update(function(data)
 		(data :: { [string]: RecordStore.JsonValue }).coins = 20
 		return data
 	end)
 	assert(update_result == "success", update_message)
+	local retained_data = record.Data :: { [string]: RecordStore.JsonValue }
 
 	RecordStore.Mock.set_update_commit_then_failures(1)
 	RecordStore.Mock.set_get_failures(1)
