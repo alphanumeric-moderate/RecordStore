@@ -1836,9 +1836,17 @@ local function new_dispatcher(governor, options)
 			dispatcher.wake_due_ms = nil
 		end
 	end
+	local function safe_result_copy(result)
+		local ok, copied = pcall(copy, result)
+		if ok then return copied end
+		return {
+			code = "invalid_result",
+			message = "scheduled callback returned a cyclic or excessively deep result",
+		}
+	end
 	local function invoke_completion(entry, result)
 		if type(entry) ~= "table" or type(entry.on_complete) ~= "function" then return end
-		local ok, message = pcall(entry.on_complete, copy(result))
+		local ok, message = pcall(entry.on_complete, safe_result_copy(result))
 		if not ok then
 			dispatcher.metrics.callback_errors += 1
 			dispatcher.metrics.last_error = string.sub(tostring(message), 1, 200)
@@ -1885,10 +1893,10 @@ local function new_dispatcher(governor, options)
 			then result.retry_class else "transient"
 		if retry_classes[retry_class] ~= true then
 			local code = if retry_class == "unknown" then "unknown" else "retry_rejected"
-			return false, { code = code, message = "retry was requested with a non-retryable outcome class", retry_class = retry_class, last_result = copy(result) }
+			return false, { code = code, message = "retry was requested with a non-retryable outcome class", retry_class = retry_class, last_result = safe_result_copy(result) }
 		end
 		if entry.retry_attempt >= entry.max_retries then
-			return false, { code = "retry_exhausted", message = "configured retry cap reached", retry_class = retry_class, last_result = copy(result) }
+			return false, { code = "retry_exhausted", message = "configured retry cap reached", retry_class = retry_class, last_result = safe_result_copy(result) }
 		end
 		local token, wait_ms = governor:AcquireRetryToken(entry.work_class)
 		local now = now_ms()
@@ -1909,7 +1917,7 @@ local function new_dispatcher(governor, options)
 		local due_at_ms = now + delay_ms
 		local queued, message = governor:Reschedule(item.id, due_at_ms, true)
 		if not queued then
-			return false, { code = "retry_rejected", message = tostring(message or "retry admission failed"), last_result = copy(result) }
+			return false, { code = "retry_rejected", message = tostring(message or "retry admission failed"), last_result = safe_result_copy(result) }
 		end
 		if token then
 			entry.retry_attempt += 1
@@ -1920,7 +1928,7 @@ local function new_dispatcher(governor, options)
 			entry.retry_waiting_for_token = true
 			dispatcher.metrics.retry_deferred += 1
 		end
-		entry.last_result = copy(result)
+		entry.last_result = safe_result_copy(result)
 		schedule_wake_at(due_at_ms)
 		return true, nil
 	end
@@ -1971,7 +1979,7 @@ local function new_dispatcher(governor, options)
 		elseif type(callback_result) == "table" and callback_result.code == "retryable"
 			and type(entry) == "table"
 		then
-			callback_result = { code = "retry_exhausted", message = "configured retry cap reached", last_result = copy(callback_result) }
+			callback_result = { code = "retry_exhausted", message = "configured retry cap reached", last_result = safe_result_copy(callback_result) }
 		end
 		if counted_in_flight then
 			dispatcher.in_flight = math.max(0, dispatcher.in_flight - 1)
