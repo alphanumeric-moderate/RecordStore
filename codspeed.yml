@@ -36,6 +36,9 @@ benchmarks:
   - name: "large profile update and save"
     exec: lune run bench/large_profile.bench.luau
 
+  - name: "change-event diff with wide profile"
+    exec: lune run bench/change_diff.bench.luau
+
   - name: "legacy envelope migration and history recovery"
     exec: lune run bench/legacy_migration.bench.luau
 
