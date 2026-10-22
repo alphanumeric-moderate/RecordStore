@@ -80,8 +80,9 @@ local test_ok, test_error = pcall(function()
 	local unknown_result = recovery_record:Save("playerdata-mutation-backpressure")
 	assert(unknown_result == "unknown", "injected uncertain save did not enter unknown state")
 	local previous_kills = (kills_backing :: NumberValue).Value
-	(kills_backing :: NumberValue).Value = previous_kills + 1
-	assert((kills_backing :: NumberValue).Value == previous_kills,
+	local backing_value = kills_backing :: NumberValue
+	backing_value.Value = previous_kills + 1
+	assert(backing_value.Value == previous_kills,
 		"PlayerData backing value mutation must be reverted while record ownership is uncertain")
 	local blocked_set = controller.Set(player, "kills", previous_kills + 2)
 	assert(not blocked_set, "PlayerData.Set must reject mutation while record ownership is uncertain")
