@@ -42,7 +42,7 @@ local function new_mailbox(options, store)
 	options.active_record = active_record
 	options.allow_unattested_activation = true
 	options.encode = function(value) return serde.encode("json", value) end
-	options.guid = next_guid
+	if options.guid == nil then options.guid = next_guid end
 	if options.now_ms == nil then options.now_ms = function() return now_ms end end
 	options.lease_ms = options.lease_ms or 10000
 	options.lease_renewal_horizon_ms = options.lease_renewal_horizon_ms or 40000
