@@ -1738,45 +1738,43 @@ local function new(dependencies: Dependencies?): Controller
 			scheduler.wait(0.05)
 		end
 
-		if flush_running[record] then
-			warn(
-				"[PlayerData]",
-				player.Name,
-				"an active flush exceeded its cleanup deadline; deferring record close until it settles"
-			)
-			scheduler.spawn(function()
-				while flush_running[record] do
-					scheduler.wait(0.05)
-				end
-				local deferred_deadline = os.clock() + CONFIG.operation_deadline
-				local deferred_flushed, deferred_result, deferred_message = flush_pending_changes(record, deferred_deadline)
-				if not deferred_flushed and deferred_result ~= nil then
-					warn(
-						"[PlayerData]",
-						player.Name,
-						"deferred pending changes could not be fully flushed",
-						deferred_result,
-						deferred_message or ""
-					)
-				end
-				pending_changes[record] = nil
-				close_record(player, record)
-				closing_records[record] = nil
-				removing[player] = nil
-			end)
+		local flushed, flush_result, flush_message = flush_pending_changes(record, deadline)
+		local pending = pending_changes[record]
+		if record.State == "active"
+			and (flushed or pending == nil or next(pending) == nil)
+		then
+			pending_changes[record] = nil
+			close_record(player, record)
+			closing_records[record] = nil
+			removing[player] = nil
 			return
 		end
 
-		local flushed, flush_result, flush_message = flush_pending_changes(record, deadline)
-		if not flushed and flush_result ~= nil then
-			warn("[PlayerData]", player.Name, "pending changes could not be fully flushed", flush_result, flush_message or "")
+		if deferred_close_is_terminal(record.State) then
+			if pending ~= nil and next(pending) ~= nil then
+				warn("[PlayerData]", player.Name,
+					"pending changes could not be persisted because record ownership is no longer available",
+					tostring(record.State), flush_message or tostring(flush_result))
+			end
+			pending_changes[record] = nil
+			close_record(player, record)
+			closing_records[record] = nil
+			removing[player] = nil
+			return
 		end
-		pending_changes[record] = nil
-		close_record(player, record)
-		closing_records[record] = nil
-		removing[player] = nil
-	end
 
+		if not flushed and flush_result ~= nil then
+			warn("[PlayerData]", player.Name,
+				"deferring record close until pending PlayerData changes can be flushed",
+				flush_result, flush_message or "")
+		end
+		deferred_close_records[record] = {
+			player = player,
+			deadline = deadline,
+			warned_timeout = false,
+		}
+		start_deferred_close(record)
+	end
 	local function start(): boolean
 		if started or shutting_down then
 			return false
