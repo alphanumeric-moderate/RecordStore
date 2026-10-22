@@ -88,6 +88,20 @@ assert(not controller.Set(player, "kills", previous_kills + 2),
 	"PlayerData.Set must reject mutation while record ownership is uncertain")
 record.State = "active"
 
+-- A coalesced change must be retried after an unknown save is reconciled.
+local pending_recovery_kills = previous_kills + 17
+kills.Value = pending_recovery_kills
+record.State = "unknown"
+task.wait(0.1)
+local saved_key = "PlayerData_Test1|global|Player_" .. tostring(player.UserId)
+assert(saved_records[saved_key].kills == previous_kills,
+	"uncertain record must not accept a pending PlayerData flush")
+record.State = "active"
+record_options.on_event("reconcile", record.Key, "success", nil)
+task.wait(0.1)
+assert(saved_records[saved_key].kills == pending_recovery_kills,
+	"successful reconciliation must reschedule retained PlayerData changes")
+
 -- A removed cached value must trigger a safe child lookup rather than being reused.
 local lookups_before_removed_value = get_find_first_child_calls()
 kills:Destroy()
