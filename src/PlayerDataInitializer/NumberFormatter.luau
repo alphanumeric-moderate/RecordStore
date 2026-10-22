@@ -106,9 +106,7 @@ local function exponent_fallback(sign: string, mantissa: number, exponent: strin
 	if string.sub(exponent, 1, 1) ~= "-" and string.sub(exponent, 1, 1) ~= "+" then exponent = "+" .. exponent end
 	return sign .. formatted .. "e" .. exponent
 end
-function NumberFormatter.format(value: number, options: Options?): string
-	if type(value) ~= "number" then error("value must be a number", 2) end
-	local decimals, trim = resolve_options(options)
+local function format_number(value: number, decimals: number, trim: boolean): string
 	if math.isnan(value) then return "NaN" elseif value == math.huge then return "∞" elseif value == -math.huge then return "-∞" elseif value == 0 then return "0" end
 	local magnitude = math.abs(value)
 	if magnitude < 1000 then return tostring(value) end
@@ -119,6 +117,12 @@ function NumberFormatter.format(value: number, options: Options?): string
 		return exponent_fallback(value < 0 and "-" or "", magnitude / math.pow(10, exponent), tostring(exponent), decimals, trim)
 	end
 	return format_scaled(scaled, SUFFIXES[index], value < 0 and "-" or "", decimals, trim)
+end
+
+function NumberFormatter.format(value: number, options: Options?): string
+	if type(value) ~= "number" then error("value must be a number", 2) end
+	local decimals, trim = resolve_options(options)
+	return format_number(value, decimals, trim)
 end
 local function suffix_index_from_exponent(exponent: number): number
 	return math.floor(exponent / 3)
@@ -162,11 +166,11 @@ function NumberFormatter.formatScientific(sign_value: number, mantissa: number, 
 		if exp >= 0 and exp <= (#SUFFIXES * 3 + 2) then
 			local index = suffix_index_from_exponent(exp)
 			local scaled = mantissa * (10 ^ (exp % 3))
-			if index == 0 then return NumberFormatter.format(sign_value * scaled, options) end
+			if index == 0 then return format_number(sign_value * scaled, decimals, trim) end
 			if index <= #SUFFIXES then return format_scaled(scaled, SUFFIXES[index], sign, decimals, trim) end
 		elseif exp < 0 and exp >= -308 then
 			local native = sign_value * mantissa * math.pow(10, exp)
-			if native ~= 0 and math.isfinite(native) then return NumberFormatter.format(native, options) end
+			if native ~= 0 and math.isfinite(native) then return format_number(native, decimals, trim) end
 		end
 	end
 	return exponent_fallback(sign, mantissa, exponent, decimals, trim)
