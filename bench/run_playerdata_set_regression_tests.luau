@@ -113,6 +113,16 @@ task.wait(0.1)
 assert(saved_records[saved_key].kills == previous_kills,
 	"PlayerData.Set should persist the restored baseline after recovery")
 
+-- A removed cached value must trigger a safe child lookup rather than being reused.
+local lookups_before_removed_value = get_find_first_child_calls()
+kills:Destroy()
+local removed_value_ok = controller.Set(player, "kills", 12500124)
+assert(not removed_value_ok, "Set accepted a removed cached value instance")
+assert(
+	get_find_first_child_calls() == lookups_before_removed_value + 1,
+	"Set did not re-resolve a removed cached value instance"
+)
+
 -- A leave during an ambiguous PlayerData flush must retain queued values until recovery.
 local players = harness.players
 local baseline_equipped = saved_records[saved_key].equipped
@@ -137,16 +147,6 @@ task.wait(0.5)
 assert(saved_records[saved_key].equipped == leave_pending_equipped,
 	"successful reconciliation must flush retained values before closing a departed player's record")
 assert(record.State == "closed", "deferred leave cleanup must close the record after flushing")
-
--- A removed cached value must trigger a safe child lookup rather than being reused.
-local lookups_before_removed_value = get_find_first_child_calls()
-kills:Destroy()
-local removed_value_ok = controller.Set(player, "kills", 12500124)
-assert(not removed_value_ok, "Set accepted a removed cached value instance")
-assert(
-	get_find_first_child_calls() == lookups_before_removed_value + 1,
-	"Set did not re-resolve a removed cached value instance"
-)
 
 task.wait(0.1)
 assert(controller:Shutdown(), "controller failed to shut down")
