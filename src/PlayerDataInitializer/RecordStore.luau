@@ -4370,6 +4370,38 @@ local function sync_public(record: Record, skip_external_mutation_check: boolean
 	if not state.public_data_detached and not skip_external_mutation_check then
 		track_external_data_mutation(state)
 	end
+	if state.state == "active" or state.state == "saving" then
+		if state.public_data_detached then
+			state.public_data_detached = false
+			state.public_data_source = copy_value(state.data)
+		end
+		record.Data = state.data
+	else
+		if not state.public_data_detached then
+			if state.data ~= nil then
+				local detach_ok, detached_data = pcall(function()
+					return copy_value(state.data)
+				end)
+				if detach_ok and detached_data ~= nil then
+					-- Replace the canonical table as well as the public alias. A caller may
+					-- have retained the old Record.Data reference before ownership was lost.
+					state.data = detached_data
+					state.public_data_source = copy_value(detached_data)
+				else
+					local message = "could not isolate canonical data from a retained public reference"
+					state.data = nil
+					state.public_data_source = nil
+					state.state = "corrupt"
+					state.last_error = message
+					observe(state, "public_data_detach_failed", "corrupt", message)
+				end
+			else
+				state.public_data_source = nil
+			end
+			state.public_data_detached = true
+		end
+		record.Data = if state.data ~= nil then copy_value(state.data) else nil
+	end
 	if state.state == "active" then
 		active_records[record] = true
 	else
@@ -4379,16 +4411,6 @@ local function sync_public(record: Record, skip_external_mutation_check: boolean
 		recovery_records[record] = true
 	else
 		recovery_records[record] = nil
-	end
-	if state.state == "active" or state.state == "saving" then
-		if state.public_data_detached then
-			state.public_data_detached = false
-			state.public_data_source = copy_value(state.data)
-		end
-		record.Data = state.data
-	else
-		state.public_data_detached = true
-		record.Data = copy_value(state.data)
 	end
 	record.State = state.state
 	record.Key = state.key
