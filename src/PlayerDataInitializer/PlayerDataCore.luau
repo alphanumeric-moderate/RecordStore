@@ -1341,6 +1341,7 @@ local function new(dependencies: Dependencies?): Controller
 		loading[player] = true
 		set_load_status(player, "Loading")
 
+		local event_record: PlayerRecord? = nil
 		local create_ok, record_or_error = pcall(function()
 			return record_store.new(CONFIG.store_name, CONFIG.scope, resolve_key(player), {
 				schema_version = CONFIG.schema_version,
@@ -1357,6 +1358,20 @@ local function new(dependencies: Dependencies?): Controller
 					return validate_player_data(value, code_num_value_factory)
 				end,
 				on_event = function(event, key, result, message)
+					if event == "reconcile" and result == "success" then
+						local recovered_record = event_record
+						if recovered_record ~= nil then
+							scheduler.defer(function()
+								local pending = pending_changes[recovered_record]
+							if recovered_record.State == "active"
+								and not closing_records[recovered_record]
+								and pending ~= nil and next(pending) ~= nil
+							then
+								schedule_pending_flush(recovered_record)
+							end
+							end)
+						end
+					end
 					if should_warn_result(result) then
 						warn("[RecordStore]", event, key, result, message or "")
 					end
@@ -1375,6 +1390,7 @@ local function new(dependencies: Dependencies?): Controller
 		end
 
 		local record: PlayerRecord = record_or_error :: PlayerRecord
+		event_record = record
 		local open_result: RecordStore.ResultCode = "unknown"
 		local open_message: string? = nil
 		local open_succeeded = false
