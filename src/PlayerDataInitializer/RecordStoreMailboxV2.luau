@@ -1117,6 +1117,32 @@ function MailboxV2._ordering_route(self: Mailbox, ordering_key: string): string
 	return result_route_key(self, "m2o-", "ordering:" .. ordering_key)
 end
 
+local function valid_ordering_routes(routes: Dict, next_sequence: unknown): boolean
+	if not is_finite(next_sequence) then return false end
+	local next_value = next_sequence :: number
+	if next_value < 1 or next_value > 9_007_199_254_740_991
+		or math.floor(next_value) ~= next_value
+	then
+		return false
+	end
+	local sequence_routes = {}
+	for route, sequence in routes do
+		if type(route) ~= "string" or route == "" or #route > MAX_KEY_LENGTH
+			or not is_finite(sequence)
+		then
+			return false
+		end
+		local value = sequence :: number
+		if value < 1 or value >= next_value or math.floor(value) ~= value
+			or sequence_routes[value] ~= nil
+		then
+			return false
+		end
+		sequence_routes[value] = route
+	end
+	return true
+end
+
 function MailboxV2._ensure_ordering_slot(self: Mailbox, route: string, ordering_key: string?): (number?, string?)
 	if ordering_key == nil then return nil, nil end
 	local ordering_route = self:_ordering_route(ordering_key)
@@ -1137,18 +1163,13 @@ function MailboxV2._ensure_ordering_slot(self: Mailbox, route: string, ordering_
 			return raw
 		end
 		local routes = as_dict(current.routes)
-		if routes == nil then return raw end
+		if routes == nil or not valid_ordering_routes(routes, current.next_sequence) then return raw end
 		local existing = routes[route]
-		if is_finite(existing) and (existing :: number) >= 1
-			and math.floor(existing :: number) == existing
-		then
+		if existing ~= nil then
 			return current
 		end
-		local next_sequence = current.next_sequence
-		if not is_finite(next_sequence) or (next_sequence :: number) < 1
-			or math.floor(next_sequence :: number) ~= next_sequence
-			or (next_sequence :: number) >= 9_007_199_254_740_991
-		then
+		local next_sequence = current.next_sequence :: number
+		if next_sequence >= 9_007_199_254_740_991 then
 			return raw
 		end
 		local next_record = clone_dict(current)
@@ -1160,12 +1181,14 @@ function MailboxV2._ensure_ordering_slot(self: Mailbox, route: string, ordering_
 		return next_record
 	end)
 	if update_error ~= nil or updated == nil then
-		local latest_value, read_error = self:_get(ordering_route)
+		local latest_value, read_error = self:_get_fresh(ordering_route)
 		local latest = as_dict(latest_value)
 		local routes = if latest ~= nil then as_dict(latest.routes) else nil
 		local sequence = if routes ~= nil then routes[route] else nil
-		if read_error == nil and latest ~= nil and same_owner(latest.owner, self.owner)
-			and latest.ordering_key == ordering_key and is_finite(sequence)
+		if read_error == nil and latest ~= nil and latest.version == VERSION
+			and same_owner(latest.owner, self.owner) and latest.ordering_key == ordering_key
+			and routes ~= nil and valid_ordering_routes(routes, latest.next_sequence)
+			and is_finite(sequence)
 		then
 			return sequence :: number, nil
 		end
@@ -1175,8 +1198,8 @@ function MailboxV2._ensure_ordering_slot(self: Mailbox, route: string, ordering_
 	local routes = if record ~= nil then as_dict(record.routes) else nil
 	local sequence = if routes ~= nil then routes[route] else nil
 	if record == nil or record.version ~= VERSION or not same_owner(record.owner, self.owner)
-		or record.ordering_key ~= ordering_key or not is_finite(sequence)
-		or (sequence :: number) < 1 or math.floor(sequence :: number) ~= sequence
+		or record.ordering_key ~= ordering_key or routes == nil
+		or not valid_ordering_routes(routes, record.next_sequence) or not is_finite(sequence)
 	then
 		return nil, "ordering sequence reservation could not be verified"
 	end
@@ -1222,11 +1245,13 @@ function MailboxV2._release_ordering_slot(
 		return next_record
 	end)
 	if update_error ~= nil or updated == nil then
-		local latest_value, read_error = self:_get(ordering_route)
+		local latest_value, read_error = self:_get_fresh(ordering_route)
 		local latest = as_dict(latest_value)
 		local routes = if latest ~= nil then as_dict(latest.routes) else nil
 		local latest_sequence = if routes ~= nil then routes[route] else nil
-		return read_error == nil and latest ~= nil and same_owner(latest.owner, self.owner)
+		return read_error == nil and latest ~= nil and latest.version == VERSION
+			and same_owner(latest.owner, self.owner) and latest.ordering_key == ordering_key
+			and routes ~= nil and valid_ordering_routes(routes, latest.next_sequence)
 			and (latest_sequence == nil or (expected_sequence ~= nil and latest_sequence ~= expected_sequence))
 	end
 	local record = as_dict(updated)
@@ -1262,7 +1287,11 @@ function MailboxV2._reserve_replay_ordering_slot(
 		end
 		local routes = as_dict(current.routes)
 		local replay_operations = if current.replay_operations == nil then {} else as_dict(current.replay_operations)
-		if routes == nil or replay_operations == nil then return raw end
+		if routes == nil or replay_operations == nil
+			or not valid_ordering_routes(routes, current.next_sequence)
+		then
+			return raw
+		end
 		local prior_replay = as_dict(replay_operations[route])
 		local current_sequence = routes[route]
 		if prior_replay ~= nil and prior_replay.operation_id == operation_id
@@ -1297,7 +1326,8 @@ function MailboxV2._reserve_replay_ordering_slot(
 	local replay_entry = if replay_operations ~= nil then as_dict(replay_operations[route]) else nil
 	local sequence = if replay_entry ~= nil then replay_entry.sequence else nil
 	if record == nil or record.version ~= VERSION or not same_owner(record.owner, self.owner)
-		or record.ordering_key ~= ordering_key or routes == nil or replay_entry == nil
+		or record.ordering_key ~= ordering_key or routes == nil
+		or not valid_ordering_routes(routes, record.next_sequence) or replay_entry == nil
 		or replay_entry.operation_id ~= operation_id or not is_finite(sequence)
 		or routes[route] ~= sequence
 	then

@@ -243,6 +243,27 @@ local function test_order_slot_mismatch_fails_closed()
 	assert(canonical.state == "ready", "ordering mismatch changed canonical message state")
 end
 
+local function test_corrupt_existing_ordering_slot_fails_closed()
+	local mailbox, store = new_mailbox({ strict_ordering_enabled = true })
+	local ordering_key = "corrupt-existing-slot-account"
+	local route = "mailbox-route-existing-slot"
+	local initial_sequence, initial_error = mailbox:_ensure_ordering_slot(route, ordering_key)
+	assert(initial_sequence == 1 and initial_error == nil, "could not create an ordering-slot fixture")
+	local ordering_route = mailbox:_ordering_route(ordering_key)
+	local ordering = store.values[ordering_route]
+	assert(type(ordering) == "table", "ordering-slot fixture was not persisted")
+
+	ordering.next_sequence = initial_sequence
+	local reused_sequence, reuse_error = mailbox:_ensure_ordering_slot(route, ordering_key)
+	assert(reused_sequence == nil and reuse_error ~= nil,
+		"existing sequence was reused when next_sequence did not exceed it")
+
+	ordering.next_sequence = 0 / 0
+	local nonfinite_sequence, nonfinite_error = mailbox:_ensure_ordering_slot(route, ordering_key)
+	assert(nonfinite_sequence == nil and nonfinite_error ~= nil,
+		"existing sequence was reused with a non-finite next_sequence")
+end
+
 local function test_corrupt_ordering_index_fails_closed()
 	local mailbox, store = new_mailbox({ strict_ordering_enabled = true })
 	local queued = enqueue(mailbox, "corrupt-index", "corrupt-index-id", "corrupt-index-account", "high")
@@ -584,6 +605,7 @@ test_retrying_predecessor_blocks_same_key_successor()
 test_claim_update_fails_closed_if_order_sequence_changes_after_arbitration()
 test_dead_letter_replay_gets_a_new_ordering_sequence_and_recovers_from_stale_reads()
 test_order_slot_mismatch_fails_closed()
+test_corrupt_existing_ordering_slot_fails_closed()
 test_corrupt_ordering_index_fails_closed()
 test_stale_cache_cannot_bypass_claim_metadata_validation()
 test_corrupt_ready_message_metadata_fails_closed()
