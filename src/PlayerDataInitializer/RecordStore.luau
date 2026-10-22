@@ -7111,7 +7111,7 @@ local function enqueue_change_observation(state: InternalState, old_value: unkno
 		state.change_dispatch_queue = {}
 		state.change_dispatch_head = 1
 		state.change_dispatch_tail = 1
-		state.change_dispatch_queue[1] = if #events == 1 and fallback_event.Truncated then fallback_event else {
+		state.change_dispatch_queue[1] = if fallback_event ~= nil and #events == 1 and fallback_event.Truncated then fallback_event else {
 			OperationId = operation_id,
 			Sequence = state.change_sequence,
 			Path = {},
