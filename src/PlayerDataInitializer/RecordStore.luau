@@ -6988,87 +6988,18 @@ local function observe(state: InternalState, event: string, result: ResultCode, 
 	end
 end
 
-type DiffKey = {
-	Key: string | number,
-	PathSegment: string,
-}
-
-local function change_values_equal(old_value: JsonValue?, new_value: JsonValue?): boolean
-	if old_value == new_value then
-		return true
-	end
-	if type(old_value) == "number"
-		and type(new_value) == "number"
-		and math.isnan(old_value)
-		and math.isnan(new_value)
-	then
-		return true
-	end
-	if type(old_value) ~= "table" or type(new_value) ~= "table" then
-		return false
-	end
-	local old_table = old_value :: { [string | number]: JsonValue }
-	local new_table = new_value :: { [string | number]: JsonValue }
-	for key, old_child in old_table do
-		if type(key) == "string" or type(key) == "number" then
-			local new_child = new_table[key]
-			if new_child == nil or not change_values_equal(old_child, new_child) then
-				return false
-			end
-		end
-	end
-	for key in new_table do
-		if (type(key) == "string" or type(key) == "number") and old_table[key] == nil then
-			return false
-		end
-	end
-	return true
-end
-
-local function sorted_child_keys(old_value: JsonValue?, new_value: JsonValue?, skip_table_equality: boolean): { DiffKey }
-	local old_table = old_value :: { [string | number]: JsonValue }
-	local new_table = new_value :: { [string | number]: JsonValue }
-	local result: { DiffKey } = {}
-	local function add_key(key: string | number)
-		result[#result + 1] = {
-			Key = key,
-			PathSegment = if type(key) == "number" then "[" .. tostring(key) .. "]" else key,
-		}
-	end
-	for key, old_child in old_table do
-		if type(key) == "string" or type(key) == "number" then
-			local new_child = new_table[key]
-			if new_child == nil
-				or (
-					skip_table_equality
-					and type(old_child) == "table"
-					and type(new_child) == "table"
-				)
-				or not change_values_equal(old_child, new_child)
-			then
-				add_key(key)
-			end
-		end
-	end
-	for key in new_table do
-		if (type(key) == "string" or type(key) == "number") and old_table[key] == nil then
-			add_key(key)
-		end
-	end
-	table.sort(result, function(left: DiffKey, right: DiffKey): boolean
-		return left.PathSegment < right.PathSegment
-	end)
-	return result
-end
-
-local function append_change_event(events: { ChangeEvent }, path: { string }, old_value: JsonValue?, new_value: JsonValue?, operation_id: string, sequence: number, kind: string): boolean
+local function append_change_event(events: { ChangeEvent }, path: { string | number }, old_value: JsonValue?, new_value: JsonValue?, operation_id: string, sequence: number, kind: string): boolean
 	if #events >= CHANGE_OBSERVER_CAPACITY then
 		return false
+	end
+	local event_path: { string } = {}
+	for _, segment in ipairs(path) do
+		event_path[#event_path + 1] = if type(segment) == "number" then "[" .. tostring(segment) .. "]" else segment
 	end
 	events[#events + 1] = {
 		OperationId = operation_id,
 		Sequence = sequence,
-		Path = table.clone(path),
+		Path = event_path,
 		OldValue = old_value,
 		NewValue = new_value,
 		Truncated = false,
@@ -7077,7 +7008,7 @@ local function append_change_event(events: { ChangeEvent }, path: { string }, ol
 	return true
 end
 
-local function diff_change_events(events: { ChangeEvent }, old_value: JsonValue?, new_value: JsonValue?, path: { string }, operation_id: string, sequence: number, kind: string): boolean
+local function diff_change_events(events: { ChangeEvent }, old_value: JsonValue?, new_value: JsonValue?, path: { string | number }, operation_id: string, sequence: number, kind: string): boolean
 	if old_value == new_value
 		or (type(old_value) == "number"
 			and type(new_value) == "number"
@@ -7087,15 +7018,26 @@ local function diff_change_events(events: { ChangeEvent }, old_value: JsonValue?
 		return true
 	end
 	if type(old_value) == "table" and type(new_value) == "table" then
-		local keys = sorted_child_keys(old_value, new_value, #path == 0)
-		for _, entry in ipairs(keys) do
-			path[#path + 1] = entry.PathSegment
-			local old_child = (old_value :: { [string | number]: JsonValue })[entry.Key]
-			local new_child = (new_value :: { [string | number]: JsonValue })[entry.Key]
-			local complete = diff_change_events(events, old_child, new_child, path, operation_id, sequence, kind)
-			path[#path] = nil
-			if not complete then
-				return false
+		local old_table = old_value :: { [string | number]: JsonValue }
+		local new_table = new_value :: { [string | number]: JsonValue }
+		for key, old_child in old_table do
+			if type(key) == "string" or type(key) == "number" then
+				path[#path + 1] = key
+				local complete = diff_change_events(events, old_child, new_table[key], path, operation_id, sequence, kind)
+				path[#path] = nil
+				if not complete then
+					return false
+				end
+			end
+		end
+		for key, new_child in new_table do
+			if (type(key) == "string" or type(key) == "number") and old_table[key] == nil then
+				path[#path + 1] = key
+				local complete = diff_change_events(events, nil, new_child, path, operation_id, sequence, kind)
+				path[#path] = nil
+				if not complete then
+					return false
+				end
 			end
 		end
 		return true
@@ -7131,6 +7073,20 @@ local function enqueue_change_observation(state: InternalState, old_value: unkno
 			Truncated = true,
 			Kind = kind,
 		}
+	else
+		table.sort(events, function(left: ChangeEvent, right: ChangeEvent): boolean
+			local left_path = left.Path
+			local right_path = right.Path
+			local shared_length = math.min(#left_path, #right_path)
+			for index = 1, shared_length do
+				local left_segment = left_path[index]
+				local right_segment = right_path[index]
+				if left_segment ~= right_segment then
+					return left_segment < right_segment
+				end
+			end
+			return #left_path < #right_path
+		end)
 	end
 	local queued_events = if state.change_dispatch_tail >= state.change_dispatch_head then state.change_dispatch_tail - state.change_dispatch_head + 1 else 0
 	if queued_events + #events > CHANGE_DISPATCH_QUEUE_CAPACITY then
