@@ -84,8 +84,17 @@ local test_ok, test_error = pcall(function()
 	assert(current_status.ownership == "uncertain", "mutation fixture did not retain uncertain ownership")
 	local previous_kills = (kills_backing :: NumberValue).Value
 	local backing_value = kills_backing :: NumberValue
+	assert(backing_value.Parent == player_data_values
+		and player_data_values:FindFirstChild("kills") == backing_value,
+		"test must mutate the live RecordStore-managed kills backing value")
+	local observed_uncertain_change = false
+	local change_connection = backing_value.Changed:Connect(function()
+		if recovery_record.State == "unknown" then observed_uncertain_change = true end
+	end)
 	backing_value.Value = previous_kills + 1
 	task.wait(0.05)
+	change_connection:Disconnect()
+	assert(observed_uncertain_change, "backing value did not emit a change while ownership remained uncertain")
 	assert(backing_value.Value == previous_kills,
 		"PlayerData backing value mutation must be reverted while record ownership is uncertain")
 	local blocked_set = controller.Set(player, "kills", previous_kills + 2)
