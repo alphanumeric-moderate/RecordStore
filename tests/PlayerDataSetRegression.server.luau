@@ -58,6 +58,36 @@ local test_ok, test_error = pcall(function()
 	local unknown_key_ok = controller.Set(player, "missing", 1)
 	assert(not unknown_key_ok, "Set accepted an unknown data field")
 
+	local recovery_record = RecordStore.Mock.new(
+		"PlayerData_Test1",
+		"global",
+		"Player_" .. tostring(player.UserId),
+		{ schema_version = 1 }
+	)
+	local flush_deadline = os.clock() + 5
+	while os.clock() < flush_deadline do
+		local stats = recovery_record:Stats()
+		if not recovery_record:IsDirty() and stats.busy == 0 and stats.queue_busy == 0 then
+			break
+		end
+		task.wait(0.05)
+	end
+	assert(not recovery_record:IsDirty(), "PlayerData changes did not become durable before recovery test")
+	local user_ids_result, user_ids_message = recovery_record:SetUserIds({ player.UserId })
+	assert(user_ids_result == "success", user_ids_message)
+	RecordStore.Mock.set_update_commit_then_failures(1)
+	RecordStore.Mock.set_get_failures(1)
+	local unknown_result = recovery_record:Save("playerdata-mutation-backpressure")
+	assert(unknown_result == "unknown", "injected uncertain save did not enter unknown state")
+	local previous_kills = (kills_backing :: NumberValue).Value
+	(kills_backing :: NumberValue).Value = previous_kills + 1
+	assert((kills_backing :: NumberValue).Value == previous_kills,
+		"PlayerData backing value mutation must be reverted while record ownership is uncertain")
+	local blocked_set = controller.Set(player, "kills", previous_kills + 2)
+	assert(not blocked_set, "PlayerData.Set must reject mutation while record ownership is uncertain")
+	local recovery_result, recovery_message = RecordStore.Mock.reconcile(recovery_record)
+	assert(recovery_result == "success", recovery_message)
+
 	local display_deadline = os.clock() + 3
 	while os.clock() < display_deadline and (kills_display :: StringValue).Value ~= "12.5M" do
 		task.wait(0.05)
