@@ -96,6 +96,26 @@ local Instance = table.freeze({
 })
 
 local loaded_module: any = nil
+local loaded_scheduler_module: any = nil
+
+local function load_scheduler()
+	if loaded_scheduler_module ~= nil then return loaded_scheduler_module end
+	local source = fs.readFile(SOURCE_PATH)
+	local start_marker = "-- BEGIN INTERNAL MODULE: RecordStoreScheduler"
+	local end_marker = "-- END INTERNAL MODULE: RecordStoreScheduler"
+	local start_index = string.find(source, start_marker, 1, true)
+	assert(start_index ~= nil, "RecordStore.luau is missing its embedded scheduler")
+	start_index += #start_marker
+	local end_index = string.find(source, end_marker, start_index, true)
+	assert(end_index ~= nil, "RecordStore.luau has an unterminated embedded scheduler")
+	local embedded_source = string.sub(source, start_index, end_index - 1)
+	local chunk = luau.load(embedded_source, {
+		debugName = "RecordStoreScheduler",
+		environment = Shim.environment,
+	})
+	loaded_scheduler_module = chunk()
+	return loaded_scheduler_module
+end
 
 local function load_record_store(source_path: string?)
 	if loaded_module ~= nil then
@@ -111,6 +131,11 @@ local function load_record_store(source_path: string?)
 end
 
 local RecordStoreInstance = table.freeze({ Name = "RecordStore", ClassName = "ModuleScript" })
+local script = {
+	Parent = {
+		RecordStore = RecordStoreInstance,
+	},
+}
 
 local ServerScriptService = {
 	RecordStore = RecordStoreInstance,
@@ -158,12 +183,17 @@ Shim.environment = {
 	Enum = Enum,
 	DateTime = DateTime,
 	Instance = Instance,
+	script = script,
 	require = shim_require,
 }
 
 -- Returns the RecordStore module, loaded inside the shimmed environment.
 function Shim.load(source_path: string?): any
 	return load_record_store(source_path)
+end
+
+function Shim.load_scheduler(): any
+	return load_scheduler()
 end
 
 -- Runs a Roblox-style script (e.g. the regression tests) inside the shimmed environment.

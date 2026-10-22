@@ -58,6 +58,56 @@ local test_ok, test_error = pcall(function()
 	local unknown_key_ok = controller.Set(player, "missing", 1)
 	assert(not unknown_key_ok, "Set accepted an unknown data field")
 
+	local recovery_record = RecordStore.Mock.new(
+		"PlayerData_Test1",
+		"global",
+		"Player_" .. tostring(player.UserId),
+		{ schema_version = 1 }
+	)
+	local flush_deadline = os.clock() + 5
+	while os.clock() < flush_deadline do
+		local stats = recovery_record:Stats()
+		if not recovery_record:IsDirty() and stats.busy == 0 and stats.queue_busy == 0 then
+			break
+		end
+		task.wait(0.05)
+	end
+	assert(not recovery_record:IsDirty(), "PlayerData changes did not become durable before recovery test")
+	local user_ids_result, user_ids_message = recovery_record:SetUserIds({ player.UserId })
+	assert(user_ids_result == "success", user_ids_message)
+	RecordStore.Mock.set_update_commit_then_failures(1)
+	RecordStore.Mock.set_get_failures(1)
+	local unknown_result = recovery_record:Save("playerdata-mutation-backpressure")
+	assert(unknown_result == "unknown", "injected uncertain save did not enter unknown state")
+	RecordStore.Mock.set_get_failures(100, "hold unknown state for mutation test")
+	local current_status = recovery_record:GetDurabilityStatus()
+	assert(current_status.ownership == "uncertain", "mutation fixture did not retain uncertain ownership")
+	local live_player_data_values = player:FindFirstChild("PlayerDataValues")
+	assert(live_player_data_values ~= nil and live_player_data_values.Parent == player,
+		"test could not find the live PlayerDataValues folder")
+	local live_kills_backing = live_player_data_values:FindFirstChild("kills")
+	assert(live_kills_backing ~= nil and live_kills_backing:IsA("NumberValue"),
+		"test could not find the live kills backing value")
+	local backing_value = live_kills_backing :: NumberValue
+	assert(live_player_data_values:FindFirstChild("kills") == backing_value,
+		"test must mutate the live RecordStore-managed kills backing value")
+	local previous_kills = backing_value.Value
+	local observed_uncertain_change = false
+	local change_connection = backing_value.Changed:Connect(function()
+		if recovery_record.State == "unknown" then observed_uncertain_change = true end
+	end)
+	backing_value.Value = previous_kills + 1
+	task.wait(0.05)
+	change_connection:Disconnect()
+	assert(observed_uncertain_change, "backing value did not emit a change while ownership remained uncertain")
+	assert(backing_value.Value == previous_kills,
+		"PlayerData backing value mutation must be reverted while record ownership is uncertain")
+	local blocked_set = controller.Set(player, "kills", previous_kills + 2)
+	assert(not blocked_set, "PlayerData.Set must reject mutation while record ownership is uncertain")
+	RecordStore.Mock.set_get_failures(0)
+	local recovery_result, recovery_message = RecordStore.Mock.reconcile(recovery_record)
+	assert(recovery_result == "success", recovery_message)
+
 	local display_deadline = os.clock() + 3
 	while os.clock() < display_deadline and (kills_display :: StringValue).Value ~= "12.5M" do
 		task.wait(0.05)

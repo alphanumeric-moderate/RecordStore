@@ -19,11 +19,13 @@ env:
 jobs:
   benchmarks:
     name: Run benchmarks
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
       - name: Install Lune
+        timeout-minutes: 2
         run: |
           curl -fsSL -o lune.zip "https://github.com/lune-org/lune/releases/download/v${LUNE_VERSION}/lune-${LUNE_VERSION}-linux-x86_64.zip"
           mkdir -p "$HOME/.local/bin"
@@ -32,14 +34,48 @@ jobs:
           rm lune.zip
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
-      - name: Check the regression suite passes
-        run: |
-          lune run bench/run_regression_tests.luau
-          lune run bench/run_codenum_regression_tests.luau
-          lune run bench/run_codenumvalue_regression_tests.luau
-          lune run bench/run_playerdata_set_regression_tests.luau
+      - name: Regression - RecordStore core
+        timeout-minutes: 2
+        run: timeout --signal=TERM --kill-after=5s 60s lune run bench/run_regression_tests.luau
+
+      - name: Regression - CodeNum
+        timeout-minutes: 2
+        run: timeout --signal=TERM --kill-after=5s 60s lune run bench/run_codenum_regression_tests.luau
+
+      - name: Regression - CodeNumValue
+        timeout-minutes: 2
+        run: timeout --signal=TERM --kill-after=5s 60s lune run bench/run_codenumvalue_regression_tests.luau
+
+      - name: Regression - PlayerData.Set
+        timeout-minutes: 2
+        run: timeout --signal=TERM --kill-after=5s 60s lune run bench/run_playerdata_set_regression_tests.luau
+
+      - name: Regression - Advanced scheduler
+        timeout-minutes: 2
+        run: timeout --signal=TERM --kill-after=5s 60s lune run bench/run_advanced_scheduler_regression.luau
+
+      - name: Regression - scheduler admission safety
+        timeout-minutes: 2
+        run: timeout --signal=TERM --kill-after=5s 60s lune run bench/run_scheduler_security_regression.luau
+
+      - name: Regression - scheduler bug fixes
+        timeout-minutes: 2
+        run: timeout --signal=TERM --kill-after=5s 60s lune run bench/run_scheduler_bugfix_regression.luau
+
+      - name: Regression - scheduler critical vulnerabilities
+        timeout-minutes: 2
+        run: timeout --signal=TERM --kill-after=5s 60s lune run bench/run_scheduler_critical_vulnerability_regression.luau
+
+      - name: Regression - scheduler hot-path performance
+        timeout-minutes: 2
+        run: timeout --signal=TERM --kill-after=5s 60s lune run bench/run_scheduler_hot_path_regression.luau
+
+      - name: Regression - V2 mailbox ordering and security
+        timeout-minutes: 2
+        run: timeout --signal=TERM --kill-after=5s 60s lune run bench/run_mailbox_v2_ordering_regression.luau
 
       - name: Run the benchmarks
+        timeout-minutes: 16
         uses: CodSpeedHQ/action@v5
         with:
           mode: simulation,walltime

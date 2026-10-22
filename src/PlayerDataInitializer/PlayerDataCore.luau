@@ -671,6 +671,13 @@ local function new(dependencies: Dependencies?): Controller
 	local pending_changes: {[PlayerRecord]: {[string]: DataValue}} = {}
 	local flush_running: {[PlayerRecord]: boolean} = {}
 	local flush_scheduled: {[PlayerRecord]: boolean} = {}
+	local recovery_flush_requested: {[PlayerRecord]: boolean} = {}
+	local schedule_pending_flush: (PlayerRecord) -> ()
+	local request_recovery_flush: (PlayerRecord) -> ()
+	local deferred_close_records: {[PlayerRecord]: { player: Player, deadline: number, warned_timeout: boolean? }} = {}
+	local deferred_close_running: {[PlayerRecord]: boolean} = {}
+	local deferred_close_requested: {[PlayerRecord]: boolean} = {}
+	local start_deferred_close: (PlayerRecord) -> ()
 
 	local function merge_pending(record: PlayerRecord, changes: {[string]: DataValue})
 		local pending = pending_changes[record]
@@ -757,6 +764,15 @@ local function new(dependencies: Dependencies?): Controller
 		end
 
 		flush_running[record] = nil
+		if recovery_flush_requested[record] then
+			local retained = pending_changes[record]
+			if closing_records[record] or retained == nil or next(retained) == nil then
+				recovery_flush_requested[record] = nil
+			elseif record.State == "active" then
+				recovery_flush_requested[record] = nil
+				schedule_pending_flush(record)
+			end
+		end
 		local remaining = pending_changes[record]
 		if remaining == nil or next(remaining) == nil then
 			return true, nil, nil
@@ -772,7 +788,7 @@ local function new(dependencies: Dependencies?): Controller
 		return false, last_result, last_message
 	end
 
-	local function schedule_pending_flush(record: PlayerRecord)
+	schedule_pending_flush = function(record: PlayerRecord)
 		if flush_scheduled[record] or flush_running[record] or closing_records[record] then
 			return
 		end
@@ -785,6 +801,15 @@ local function new(dependencies: Dependencies?): Controller
 				warn("[PlayerData]", record.Key, result, message or "")
 			end
 		end)
+	end
+
+	request_recovery_flush = function(record: PlayerRecord)
+		if closing_records[record] then return end
+		if flush_running[record] or flush_scheduled[record] then
+			recovery_flush_requested[record] = true
+			return
+		end
+		schedule_pending_flush(record)
 	end
 
 	local function queue_value_change(
@@ -823,6 +848,88 @@ local function new(dependencies: Dependencies?): Controller
 	end
 
 
+	local function assign_backing_value(instance: Instance, value: DataValue)
+		if instance:IsA("StringValue") then
+			if type(value) ~= "string" then error("expected a string value") end
+			(instance :: StringValue).Value = value
+		elseif instance:IsA("BoolValue") then
+			if type(value) ~= "boolean" then error("expected a boolean value") end
+			(instance :: BoolValue).Value = value
+		elseif instance:IsA("IntValue") then
+			if type(value) ~= "number" then error("expected a numeric value") end
+			(instance :: IntValue).Value = value
+		elseif instance:IsA("NumberValue") then
+			if type(value) ~= "number" then error("expected a numeric value") end
+			(instance :: NumberValue).Value = value
+		else
+			error("configured PlayerData value is not a supported ValueBase instance")
+		end
+	end
+
+	local function connect_persistent_value(
+		record: PlayerRecord,
+		key: string,
+		instance: Instance,
+		initial_value: DataValue
+	)
+		local field = CONFIG.data[key]
+		if field == nil then return end
+		local last_valid_value = initial_value
+		local restoring = false
+
+		instance.Changed:Connect(function(new_value)
+			if restoring then return end
+			if record.State ~= "active" or closing_records[record] then
+				restoring = true
+				local restore_ok, restore_error = pcall(assign_backing_value, instance, last_valid_value)
+				restoring = false
+				if not restore_ok then
+					warn("[PlayerData]", record.Key, "could not restore a rejected value change", key, tostring(restore_error))
+				end
+				return
+			end
+
+			local value_type = type(new_value)
+			if value_type ~= "number" and value_type ~= "string" and value_type ~= "boolean" then
+				restoring = true
+				local restore_ok, restore_error = pcall(assign_backing_value, instance, last_valid_value)
+				restoring = false
+				if not restore_ok then
+					warn("[PlayerData]", record.Key, "could not restore an invalid value change", key, tostring(restore_error))
+				end
+				return
+			end
+
+			local normalized_value = normalize_runtime_field_value(
+				field,
+				new_value :: DataValue,
+				integer_infinity_value_factory,
+				code_num_value_factory
+			)
+			if normalized_value == nil then
+				restoring = true
+				local restore_ok, restore_error = pcall(assign_backing_value, instance, last_valid_value)
+				restoring = false
+				if not restore_ok then
+					warn("[PlayerData]", record.Key, "could not restore an invalid value change", key, tostring(restore_error))
+				end
+				return
+			end
+
+			last_valid_value = normalized_value
+			if normalized_value ~= new_value then
+				restoring = true
+				local assign_ok, assign_error = pcall(assign_backing_value, instance, normalized_value)
+				restoring = false
+				if not assign_ok then
+					warn("[PlayerData]", record.Key, "could not canonicalize a value change", key, tostring(assign_error))
+					return
+				end
+			end
+			queue_value_change(record, key, normalized_value)
+		end)
+	end
+
 	local function create_codenum_backing_value(
 		player: Player,
 		record: PlayerRecord,
@@ -842,13 +949,19 @@ local function new(dependencies: Dependencies?): Controller
 				warn("[PlayerData]", player.Name, "rejected invalid CodeNum value for", key)
 				return
 			end
+			if record.State ~= "active" or closing_records[record] then
+				restoring = true
+				backing_value.Value = last_valid_serialized
+				restoring = false
+				return
+			end
 			if normalized ~= serialized_value then
 				restoring = true
 				backing_value.Value = normalized
 				restoring = false
 			end
 			last_valid_serialized = normalized
-			if record.State == "active" then queue_value_change(record, key, normalized, true) end
+			queue_value_change(record, key, normalized, true)
 		end)
 		return backing_value
 	end
@@ -972,10 +1085,8 @@ local function new(dependencies: Dependencies?): Controller
 
 				backing_value.Changed:Connect(function(new_value: number)
 					display_value.Value = number_formatter.format(new_value, format_options)
-					if record.State == "active" then
-						queue_value_change(record, definition.key, new_value)
-					end
 				end)
+				connect_persistent_value(record, definition.key, backing_value, stored_value)
 
 				display_value.Parent = leaderstats
 				backing_value.Parent = value_folder
@@ -989,11 +1100,7 @@ local function new(dependencies: Dependencies?): Controller
 				local value = new_int_value()
 				value.Name = definition.name
 				value.Value = stored_value
-				value.Changed:Connect(function(new_value)
-					if record.State == "active" then
-						queue_value_change(record, definition.key, new_value)
-					end
-				end)
+				connect_persistent_value(record, definition.key, value, stored_value)
 				value.Parent = leaderstats
 
 			elseif field.class_name == "NumberValue" then
@@ -1003,11 +1110,7 @@ local function new(dependencies: Dependencies?): Controller
 				local value = new_number_value()
 				value.Name = definition.name
 				value.Value = stored_value
-				value.Changed:Connect(function(new_value)
-					if record.State == "active" then
-						queue_value_change(record, definition.key, new_value)
-					end
-				end)
+				connect_persistent_value(record, definition.key, value, stored_value)
 				value.Parent = leaderstats
 
 			elseif field.class_name == "IntegerInfinityValue" then
@@ -1022,11 +1125,7 @@ local function new(dependencies: Dependencies?): Controller
 				if not value:IsA("NumberValue") then
 					error("IntegerInfinityValue factory must return a NumberValue")
 				end
-				value.Changed:Connect(function(new_value)
-					if record.State == "active" then
-						queue_value_change(record, definition.key, new_value)
-					end
-				end)
+				connect_persistent_value(record, definition.key, value, stored_value)
 				value.Parent = leaderstats
 
 			elseif field.class_name == "StringValue" then
@@ -1036,11 +1135,7 @@ local function new(dependencies: Dependencies?): Controller
 				local value = new_string_value()
 				value.Name = definition.name
 				value.Value = stored_value
-				value.Changed:Connect(function(new_value)
-					if record.State == "active" then
-						queue_value_change(record, definition.key, new_value)
-					end
-				end)
+				connect_persistent_value(record, definition.key, value, stored_value)
 				value.Parent = leaderstats
 
 			elseif field.class_name == "BoolValue" then
@@ -1050,11 +1145,7 @@ local function new(dependencies: Dependencies?): Controller
 				local value = new_bool_value()
 				value.Name = definition.name
 				value.Value = stored_value
-				value.Changed:Connect(function(new_value)
-					if record.State == "active" then
-						queue_value_change(record, definition.key, new_value)
-					end
-				end)
+				connect_persistent_value(record, definition.key, value, stored_value)
 				value.Parent = leaderstats
 			end
 		end
@@ -1267,6 +1358,121 @@ local function new(dependencies: Dependencies?): Controller
 		end
 	end
 
+	local function deferred_close_is_terminal(state: string): boolean
+		return state == "fenced" or state == "corrupt" or state == "future"
+			or state == "closed" or state == "tombstoned"
+	end
+
+	local function finish_deferred_close(record: PlayerRecord, discard_pending: boolean, reason: string?)
+		local deferred = deferred_close_records[record]
+		if deferred == nil then return end
+		local pending = pending_changes[record]
+		if discard_pending and pending ~= nil and next(pending) ~= nil then
+			warn("[PlayerData]", record.Key,
+				"queued PlayerData changes cannot be persisted safely after ownership became unavailable",
+				tostring(record.State), reason or "")
+		end
+		pending_changes[record] = nil
+		deferred_close_records[record] = nil
+		deferred_close_requested[record] = nil
+		recovery_flush_requested[record] = nil
+		if record.State ~= "closed" then
+			close_record(deferred.player, record)
+		end
+		closing_records[record] = nil
+		removing[deferred.player] = nil
+	end
+
+	start_deferred_close = function(record: PlayerRecord)
+		local deferred = deferred_close_records[record]
+		if deferred == nil then return end
+		if shutting_down and os.clock() >= deferred.deadline then
+			if not deferred.warned_timeout then
+				warn("[PlayerData]", deferred.player.Name,
+					"shutdown deadline expired with unresolved PlayerData changes; retaining the record and queued values rather than issuing an unsafe close")
+				deferred.warned_timeout = true
+			end
+			deferred_close_requested[record] = nil
+			removing[deferred.player] = nil
+			return
+		end
+		if deferred_close_running[record] then
+			deferred_close_requested[record] = true
+			return
+		end
+		deferred_close_running[record] = true
+		scheduler.spawn(function()
+			local retry_delay = 0.25
+			while deferred_close_records[record] ~= nil do
+				deferred = deferred_close_records[record]
+				if deferred == nil then break end
+				if shutting_down and os.clock() >= deferred.deadline then
+					removing[deferred.player] = nil
+					break
+				end
+				local state = record.State
+				if state == "unknown" then
+					break
+				elseif deferred_close_is_terminal(state) then
+					finish_deferred_close(record, true, "record entered a terminal non-owned state")
+					break
+				elseif state ~= "active" then
+					if shutting_down and os.clock() >= deferred.deadline then
+						break
+					end
+					scheduler.wait(0.05)
+				else
+					local pending = pending_changes[record]
+					if pending == nil or next(pending) == nil then
+						finish_deferred_close(record, false, nil)
+						break
+					end
+					local attempt_deadline = os.clock() + CONFIG.operation_deadline
+					if shutting_down then
+						attempt_deadline = math.min(attempt_deadline, deferred.deadline)
+					end
+					if attempt_deadline <= os.clock() then
+						break
+					end
+					local flushed, result, message = flush_pending_changes(record, attempt_deadline)
+					local remaining = pending_changes[record]
+					if (flushed or remaining == nil or next(remaining) == nil) and record.State == "active" then
+						finish_deferred_close(record, false, nil)
+						break
+					elseif record.State == "unknown" then
+						break
+					elseif deferred_close_is_terminal(record.State) then
+						finish_deferred_close(record, true, message or tostring(result))
+						break
+					elseif shutting_down and os.clock() >= deferred.deadline then
+						break
+					else
+						scheduler.wait(retry_delay)
+						retry_delay = math.min(5, retry_delay * 2)
+					end
+				end
+			end
+			deferred_close_running[record] = nil
+			deferred = deferred_close_records[record]
+			if deferred ~= nil and shutting_down and os.clock() >= deferred.deadline then
+				if not deferred.warned_timeout then
+					warn("[PlayerData]", deferred.player.Name,
+						"shutdown deadline expired with unresolved PlayerData changes; retaining the record and queued values rather than issuing an unsafe close")
+					deferred.warned_timeout = true
+				end
+				removing[deferred.player] = nil
+			end
+			if deferred ~= nil and deferred_close_requested[record] then
+				deferred_close_requested[record] = nil
+				if record.State ~= "unknown"
+					and not (shutting_down and os.clock() >= deferred.deadline)
+				then
+					scheduler.defer(function() start_deferred_close(record) end)
+				end
+			end
+		end)
+	end
+
 	local function setup_player(player: Player)
 		if shutting_down or departed_players[player] or loading[player] or sessions[player] ~= nil then
 			return
@@ -1275,6 +1481,7 @@ local function new(dependencies: Dependencies?): Controller
 		loading[player] = true
 		set_load_status(player, "Loading")
 
+		local event_record: PlayerRecord? = nil
 		local create_ok, record_or_error = pcall(function()
 			return record_store.new(CONFIG.store_name, CONFIG.scope, resolve_key(player), {
 				schema_version = CONFIG.schema_version,
@@ -1291,6 +1498,19 @@ local function new(dependencies: Dependencies?): Controller
 					return validate_player_data(value, code_num_value_factory)
 				end,
 				on_event = function(event, key, result, message)
+					local observed_record = event_record
+					if observed_record ~= nil and deferred_close_records[observed_record] ~= nil then
+						scheduler.defer(function()
+							start_deferred_close(observed_record)
+						end)
+					elseif event == "reconcile" and result == "success" and observed_record ~= nil then
+						scheduler.defer(function()
+							local pending = pending_changes[observed_record]
+						if pending ~= nil and next(pending) ~= nil then
+							request_recovery_flush(observed_record)
+						end
+						end)
+					end
 					if should_warn_result(result) then
 						warn("[RecordStore]", event, key, result, message or "")
 					end
@@ -1309,6 +1529,7 @@ local function new(dependencies: Dependencies?): Controller
 		end
 
 		local record: PlayerRecord = record_or_error :: PlayerRecord
+		event_record = record
 		local open_result: RecordStore.ResultCode = "unknown"
 		local open_message: string? = nil
 		local open_succeeded = false
@@ -1533,45 +1754,43 @@ local function new(dependencies: Dependencies?): Controller
 			scheduler.wait(0.05)
 		end
 
-		if flush_running[record] then
-			warn(
-				"[PlayerData]",
-				player.Name,
-				"an active flush exceeded its cleanup deadline; deferring record close until it settles"
-			)
-			scheduler.spawn(function()
-				while flush_running[record] do
-					scheduler.wait(0.05)
-				end
-				local deferred_deadline = os.clock() + CONFIG.operation_deadline
-				local deferred_flushed, deferred_result, deferred_message = flush_pending_changes(record, deferred_deadline)
-				if not deferred_flushed and deferred_result ~= nil then
-					warn(
-						"[PlayerData]",
-						player.Name,
-						"deferred pending changes could not be fully flushed",
-						deferred_result,
-						deferred_message or ""
-					)
-				end
-				pending_changes[record] = nil
-				close_record(player, record)
-				closing_records[record] = nil
-				removing[player] = nil
-			end)
+		local flushed, flush_result, flush_message = flush_pending_changes(record, deadline)
+		local pending = pending_changes[record]
+		if record.State == "active"
+			and (flushed or pending == nil or next(pending) == nil)
+		then
+			pending_changes[record] = nil
+			close_record(player, record)
+			closing_records[record] = nil
+			removing[player] = nil
 			return
 		end
 
-		local flushed, flush_result, flush_message = flush_pending_changes(record, deadline)
-		if not flushed and flush_result ~= nil then
-			warn("[PlayerData]", player.Name, "pending changes could not be fully flushed", flush_result, flush_message or "")
+		if deferred_close_is_terminal(record.State) then
+			if pending ~= nil and next(pending) ~= nil then
+				warn("[PlayerData]", player.Name,
+					"pending changes could not be persisted because record ownership is no longer available",
+					tostring(record.State), flush_message or tostring(flush_result))
+			end
+			pending_changes[record] = nil
+			close_record(player, record)
+			closing_records[record] = nil
+			removing[player] = nil
+			return
 		end
-		pending_changes[record] = nil
-		close_record(player, record)
-		closing_records[record] = nil
-		removing[player] = nil
-	end
 
+		if not flushed and flush_result ~= nil then
+			warn("[PlayerData]", player.Name,
+				"deferring record close until pending PlayerData changes can be flushed",
+				flush_result, flush_message or "")
+		end
+		deferred_close_records[record] = {
+			player = player,
+			deadline = deadline,
+			warned_timeout = false,
+		}
+		start_deferred_close(record)
+	end
 	local function start(): boolean
 		if started or shutting_down then
 			return false
@@ -1616,6 +1835,10 @@ local function new(dependencies: Dependencies?): Controller
 		end
 
 		local deadline = os.clock() + CONFIG.shutdown_deadline
+		for record, deferred in pairs(deferred_close_records) do
+			deferred.deadline = deadline
+			start_deferred_close(record)
+		end
 		local load_wait_deadline = math.min(deadline, os.clock() + CONFIG.operation_deadline)
 		while os.clock() < load_wait_deadline do
 			local still_loading = false
