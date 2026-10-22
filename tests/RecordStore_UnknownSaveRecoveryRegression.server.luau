@@ -30,10 +30,9 @@ do
 	local retained_data = record.Data :: { [string]: RecordStore.JsonValue }
 
 	RecordStore.Mock.set_update_commit_then_failures(1)
-	RecordStore.Mock.set_get_failures(1)
+	RecordStore.Mock.set_get_failures(100, "hold unknown state for alias-fencing assertions")
 	local save_result = record:Save("recovery-test")
 	assert(save_result == "unknown", "commit followed by read failure must expose an unresolved result")
-	RecordStore.Mock.set_get_failures(100, "hold unknown state for alias-fencing assertions")
 
 	local status = record:GetDurabilityStatus()
 	assert(status.ownership == "uncertain", "unknown save must mark ownership certainty as uncertain")
@@ -105,6 +104,56 @@ do
 	assert(durable.revision == base_revision + 1, "recovery retry must commit exactly one revision")
 	assert((durable.data :: { [string]: any }).coins == 40, "recovery retry did not persist the retained snapshot")
 	assert(record:Close() == "closed", "retried record should close normally")
+end
+
+RecordStore.Mock.reset()
+
+do
+	local record = open_test_record("mutation-during-save")
+	local update_result, update_message = record:Update(function(data)
+		(data :: { [string]: RecordStore.JsonValue }).coins = 20
+		return data
+	end)
+	assert(update_result == "success", update_message)
+
+	local injected = false
+	RecordStore.Mock.set_test_clock(function()
+		if not injected then
+			injected = true
+			local data = record.Data :: { [string]: RecordStore.JsonValue }
+			data.coins = 25
+		end
+		return os.time()
+	end)
+	RecordStore.Mock.set_update_commit_then_failures(1)
+	RecordStore.Mock.set_get_failures(100, "hold unknown state after injected in-flight mutation")
+	local save_result = record:Save("in-flight-mutation")
+	RecordStore.Mock.set_test_clock(nil)
+	assert(injected, "mock clock did not inject a direct data mutation during UpdateAsync")
+	assert(save_result == "unknown", "in-flight commit ambiguity must preserve an unknown result")
+
+	local status = record:GetDurabilityStatus()
+	assert(status.ownership == "uncertain", "in-flight mutation fixture did not enter unknown state")
+	local local_data = record:Get() :: { [string]: RecordStore.JsonValue }
+	assert(local_data.coins == 25, "direct mutation during save was lost before reconciliation")
+	assert(record:IsDirty(), "direct mutation during save must remain dirty after an unknown write")
+
+	RecordStore.Mock.set_get_failures(0)
+	local recovery_result, recovery_message = RecordStore.Mock.reconcile(record)
+	assert(recovery_result == "success", recovery_message)
+	local recovered_data = record:Get() :: { [string]: RecordStore.JsonValue }
+	assert(recovered_data.coins == 25, "reconciliation overwrote a post-snapshot direct mutation")
+	assert(record:IsDirty(), "newer direct mutation must remain dirty after confirming the older snapshot")
+	assert(record:Save("persist-in-flight-mutation") == "saved",
+		"the retained post-snapshot direct mutation must be saveable after reconciliation")
+	local durable = RecordStore.Mock.get_record_raw(
+		"RecordStore_UnknownSaveRecoveryRegression",
+		"global",
+		"mutation-during-save"
+	) :: { [string]: any }
+	assert((durable.data :: { [string]: any }).coins == 25,
+		"the retained post-snapshot mutation was not persisted by the follow-up save")
+	assert(record:Close() == "closed", "in-flight mutation recovery fixture should close")
 end
 
 RecordStore.Mock.reset()

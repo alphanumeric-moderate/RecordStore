@@ -3862,6 +3862,9 @@ local function save_internal(state: InternalState, reason: string?, operation_de
 		end
 	end
 	if confirmed == nil then
+		-- Capture direct mutations that happened while the durable write was in flight.
+		-- The pending snapshot stays immutable; these newer local changes remain dirty.
+		track_external_data_mutation(state)
 		state.busy = false
 		state.state = "unknown"
 		state.pending_operation = {
@@ -4535,8 +4538,10 @@ local function get_data(self: Record): JsonValue?
 	if state == nil then
 		return nil
 	end
-	track_external_data_mutation(state)
-	self.Data = state.data
+	if not state.public_data_detached then
+		track_external_data_mutation(state)
+	end
+	self.Data = if state.public_data_detached then copy_value(state.data) else state.data
 	return copy_value(state.data)
 end
 
@@ -4553,8 +4558,10 @@ local function is_dirty(self: Record): boolean
 	if state == nil then
 		return false
 	end
-	track_external_data_mutation(state)
-	self.Data = state.data
+	if not state.public_data_detached then
+		track_external_data_mutation(state)
+	end
+	self.Data = if state.public_data_detached then copy_value(state.data) else state.data
 	return state.change_sequence ~= state.saved_change_sequence
 end
 
@@ -6772,6 +6779,9 @@ local function renew_internal(state: InternalState): (ResultCode, string?)
 		end
 	end
 	if confirmed == nil then
+		-- A renewal doesn't replace the public snapshot, but direct edits can happen
+		-- while UpdateAsync is in flight. Preserve them as dirty before fencing.
+		track_external_data_mutation(state)
 		state.busy = false
 		state.state = "unknown"
 		state.pending_operation = {
@@ -6792,6 +6802,7 @@ local function renew_internal(state: InternalState): (ResultCode, string?)
 		observe(state, "renew", "unknown", last_error or "renewal outcome is unresolved")
 		return "unknown", last_error or "renewal outcome is unresolved"
 	end
+	track_external_data_mutation(state)
 	local was_dirty = state.change_sequence ~= state.saved_change_sequence
 	state.generation = confirmed.fencing_generation
 	state.revision = confirmed.revision
@@ -6813,6 +6824,9 @@ local function renew_internal(state: InternalState): (ResultCode, string?)
 	state.busy = false
 	state.state = "active"
 	state.next_renewal = now_local() + (state.options.lease_renewal or DEFAULT_LEASE_RENEWAL)
+	if state.change_sequence ~= state.saved_change_sequence then
+		state.next_autosave = now_local()
+	end
 	observe(state, "renew", "success", nil)
 	complete_deferred_takeover(state)
 	return "success", nil
