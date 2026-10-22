@@ -59,6 +59,7 @@ function FakeDataStore.new(options)
 		read_failures = 0,
 		update_faults = {},
 		next_replay_count = 0,
+		cache_updates_enabled = true,
 		inside_transform = false,
 		locks = {},
 		budgets = {
@@ -194,7 +195,9 @@ function FakeDataStore.new(options)
 					state.versions[identity] = history
 				end
 				table.insert(history, clone(entry))
-				cache[key] = { at = os.clock(), value = clone(entry.Value), info = clone(key_info(entry)) }
+				if state.cache_updates_enabled then
+					cache[key] = { at = os.clock(), value = clone(entry.Value), info = clone(key_info(entry)) }
+				end
 				state.locks[identity] = nil
 
 				if fault == "commit_then_error" then
@@ -266,6 +269,11 @@ function FakeDataStore.new(options)
 	function control:set_budget(name, value)
 		assert(type(value) == "number" and value >= 0, "budget must be non-negative")
 		state.budgets[name] = value
+	end
+
+	function control:set_cache_updates_enabled(enabled)
+		assert(type(enabled) == "boolean", "cache update setting must be a boolean")
+		state.cache_updates_enabled = enabled
 	end
 
 	function control:set_delay(seconds)
