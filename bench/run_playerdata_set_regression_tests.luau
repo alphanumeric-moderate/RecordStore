@@ -89,13 +89,19 @@ assert(not controller.Set(player, "kills", previous_kills + 2),
 record.State = "active"
 
 -- A coalesced change must be retried after an unknown save is reconciled.
-local pending_recovery_kills = previous_kills + 17
-kills.Value = pending_recovery_kills
-record.State = "unknown"
 task.wait(0.1)
 local saved_key = "PlayerData_Test1|global|Player_" .. tostring(player.UserId)
+local pending_recovery_kills = previous_kills + 17
+local original_record_update = record.Update
+record.Update = function(self, transform)
+	self.State = "unknown"
+	return "unknown", "injected ambiguous save outcome"
+end
+kills.Value = pending_recovery_kills
+task.wait(0.1)
 assert(saved_records[saved_key].kills == previous_kills,
 	"uncertain record must not accept a pending PlayerData flush")
+record.Update = original_record_update
 record.State = "active"
 record_options.on_event("reconcile", record.Key, "success", nil)
 task.wait(0.1)
