@@ -19,18 +19,18 @@ When a Record has change observers, `enqueue_change_observation` deep-copies bot
 
 While processing a durable message, local Record mutations remain synchronous and may be used by a handler, but nested durability operations (Save/Close/renewal) must report busy while queue processing is active. The regression exercises this invariant without introducing an undocumented blanket ban on updates. The suspected `queue_busy` guard inconsistency is not fixed unless this targeted test or source tracing proves an actual violation.
 
-## Formatter candidate
+## Formatter candidate disposition
 
-Refactor the numeric body of `NumberFormatter.format` behind a private helper that accepts already-validated decimal options. `formatScientific` can then call that helper directly instead of resolving the same options again. Public input validation and formatting output must remain identical. Keep the refactor only if equivalent CodSpeed workloads show an improvement outside measurement noise; otherwise revert it.
+The `NumberFormatter.formatScientific` candidate was not retained. Available measurements did not establish a meaningful improvement: the relevant Simulation result was effectively unchanged, while WallTime results were flagged as unreliable outside CodSpeed Macro Runners. The scientific-formatting boundary regressions remain, but production formatting code is unchanged.
 
 
-The shared scheduler benchmark workload was reduced from 256 to 128 items after the PR CI logs showed repeated scheduler selections consumed the 16-minute CodSpeed step budget on a slower runner. It still exercises all 16 owners (8 items each), all priority lanes, service classes, operation classes, fairness assertions, and the independent regression suite. Scheduler benchmark names include the item count so CodSpeed treats them as new workload identities rather than comparing unlike workloads.
+The shared scheduler benchmark workload was reduced from 256 to 128 items after the PR CI logs showed repeated scheduler selections consumed the 16-minute CodSpeed step budget on a slower runner. It still exercises all 16 owners (8 items each), all priority lanes, service classes, operation classes, fairness assertions, and the independent regression suite. Scheduler benchmark names include the item count so CodSpeed treats them as new workload identities rather than comparing unlike workloads. The paired event benchmark applies 16 single-field updates after creating a 1,000-entry archive, making the redundant whole-profile copies visible across repeated updates rather than measuring a one-time archive insertion.
 
 ## Validation
 
 1. Add regressions for truncated full-record payload isolation and queue-processing durability interleaving.
 2. Run focused RecordStore regressions and the existing full Lune CI suite.
-3. Run existing CodSpeed scenarios, with specific comparison of `large profile update and save` and `CodeNumValue format and normalization` against this baseline.
+3. Run existing CodSpeed scenarios, plus a paired sparse-change benchmark that applies 16 single-field updates to a 1,000-entry profile against the unmodified `main` RecordStore source.
 4. Review the full diff for API/data-format changes, unbounded allocations, observer isolation, queue semantics, and untested Roblox-only assumptions.
 
 ## Non-goals
