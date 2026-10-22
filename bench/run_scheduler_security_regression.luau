@@ -190,6 +190,58 @@ do
 	end
 end
 
+
+-- Direct governor admission is also a trust boundary: explicit false/invalid fields
+-- must not be converted to defaults that reduce accounting or bypass read-only mode.
+do
+	local function admission_result(name, invoke)
+		local governor = new_governor()
+		local ok, result = pcall(invoke, governor)
+		report(name, ok and type(result) == "table" and result.code == "invalid",
+			"invalid explicit admission input was not rejected; "
+				.. tostring(if ok and type(result) == "table" then result.code else result))
+	end
+
+	admission_result("false work class", function(governor)
+		return governor:Admit(false, "tracing", 1, false, false, dimensions(1024, 1))
+	end)
+	admission_result("false request kind", function(governor)
+		return governor:Admit("maintenance", false, 1, false, false, dimensions(1024, 1))
+	end)
+	admission_result("false cost", function(governor)
+		return governor:Admit("maintenance", "tracing", false, false, false, dimensions(1024, 1))
+	end)
+	admission_result("false dimensions table", function(governor)
+		return governor:Admit("maintenance", "tracing", 1, false, false, false)
+	end)
+	admission_result("false mutating type", function(governor)
+		return governor:Admit("maintenance", "tracing", 1, "false", false, dimensions(1024, 1))
+	end)
+	admission_result("false critical override type", function(governor)
+		return governor:Admit("maintenance", "tracing", 1, false, "true", dimensions(1024, 1))
+	end)
+
+	for _, field in ipairs({ "read_units", "write_units", "estimated_bytes", "handler_slots" }) do
+		admission_result("false admission dimension " .. field, function(governor)
+			local values = dimensions(1024, 1)
+			values[field] = false
+			return governor:Admit("maintenance", "tracing", 1, false, false, values)
+		end)
+	end
+
+	local read_only = new_governor()
+	local policy = read_only:Stats().policy
+	local changed = read_only:SetPolicy({ revision = policy.revision + 1, mode = "read_only" })
+	report("read-only policy fixture", changed,
+		"could not configure read-only governor policy")
+	if changed then
+		local result = read_only:Admit("interactive", "read", 1, nil, nil, dimensions(1024, 1))
+		report("implicit mutation fail-closed", result.code == "read_only",
+			"omitting mutating admitted work under read_only mode; got "
+				.. tostring(result.code) .. ": " .. tostring(result.message))
+	end
+end
+
 if #findings > 0 then
 	for _, finding in ipairs(findings) do
 		warn("[SAFETY FINDING] " .. finding)
