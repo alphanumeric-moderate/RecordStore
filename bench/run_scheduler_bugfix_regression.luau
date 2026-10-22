@@ -1,6 +1,6 @@
 --!nocheck
 -- Regression checks for previously fixed scheduler admission and policy-update bugs.
-local Scheduler = require("../src/PlayerDataInitializer/RecordStoreScheduler")
+local Scheduler = require("./RobloxShim").load_scheduler()
 
 local function new_governor()
 	return Scheduler.new({ now_ms = function() return 1_800_000_000_000 end })
