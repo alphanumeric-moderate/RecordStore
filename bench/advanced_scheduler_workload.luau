@@ -1,7 +1,7 @@
 --!nocheck
 -- Fixed synthetic workload for the server-local advanced scheduler.
 -- This measures local selection cost only, not Roblox DataStore request latency.
-local Scheduler = require("../src/PlayerDataInitializer/RecordStoreScheduler")
+local Scheduler = require("./RobloxShim").load_scheduler()
 
 local ITEM_COUNT = 256
 local OWNER_COUNT = 16
