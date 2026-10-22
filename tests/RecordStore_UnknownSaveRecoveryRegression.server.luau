@@ -33,6 +33,7 @@ do
 	RecordStore.Mock.set_get_failures(1)
 	local save_result = record:Save("recovery-test")
 	assert(save_result == "unknown", "commit followed by read failure must expose an unresolved result")
+	RecordStore.Mock.set_get_failures(100, "hold unknown state for alias-fencing assertions")
 
 	local status = record:GetDurabilityStatus()
 	assert(status.ownership == "uncertain", "unknown save must mark ownership certainty as uncertain")
@@ -58,6 +59,7 @@ do
 	end)
 	assert(blocked_result == "fenced", "ordinary mutation must be rejected while ownership is uncertain")
 
+	RecordStore.Mock.set_get_failures(0)
 	local recovery_result, recovery_message = RecordStore.Mock.reconcile(record)
 	assert(recovery_result == "success", recovery_message)
 	local durable = RecordStore.Mock.get_record_raw(
