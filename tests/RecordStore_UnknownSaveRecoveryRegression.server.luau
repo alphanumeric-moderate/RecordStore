@@ -39,6 +39,12 @@ do
 	assert(status.pending_operation_id ~= nil, "unknown save must retain the logical operation ID")
 	local operation_id = status.pending_operation_id
 	assert(status.dirty_watermark > status.durable_watermark, "unconfirmed save must retain a dirty watermark")
+
+	local exposed_data = record.Data :: { [string]: RecordStore.JsonValue }
+	exposed_data.coins = 999
+	local visible_data = record:Get() :: { [string]: RecordStore.JsonValue }
+	assert(visible_data.coins == 20,
+		"direct mutation through Record.Data must not change canonical data while durability is uncertain")
 	assert(record:GetRevision() == base_revision, "unconfirmed save must not claim a new confirmed revision")
 
 	local blocked_result = record:Update(function(data)
