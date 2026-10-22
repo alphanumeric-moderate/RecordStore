@@ -284,4 +284,76 @@ do
 end
 
 RecordStore.Mock.reset()
-print("[PASS] Unknown-save recovery retains immutable operation identity, fences public mutation, preserves in-flight edits, and never retries a stale snapshot after lease expiry.")
+
+do
+	local record = open_test_record("release-commit-then-error")
+	local updated, update_message = record:Update(function(data)
+		(data :: { [string]: RecordStore.JsonValue }).coins = 20
+		return data
+	end)
+	assert(updated == "success", update_message)
+	local base_revision = record:GetRevision()
+
+	RecordStore.Mock.set_update_commit_then_failures(1)
+	RecordStore.Mock.set_get_failures(100, "hold ambiguous release outcome")
+	local close_result = record:Close()
+	assert(close_result == "unknown", "ambiguous release must not claim a confirmed close")
+	local status = record:GetDurabilityStatus()
+	local operation_id = status.pending_operation_id
+	assert(operation_id ~= nil, "ambiguous release must retain its operation ID")
+	assert(status.ownership == "uncertain", "ambiguous release must report uncertain ownership")
+	assert(record.State == "unknown", "ambiguous release must keep the public state fenced")
+
+	RecordStore.Mock.set_get_failures(0)
+	local recovery_result, recovery_message = RecordStore.Mock.reconcile(record)
+	assert(recovery_result == "success", recovery_message)
+	assert(record.State == "closed", "reconciled committed release must not resurrect the session")
+	status = record:GetDurabilityStatus()
+	assert(status.pending_operation_id == nil, "confirmed release must clear its pending operation")
+	local durable = RecordStore.Mock.get_record_raw(
+		"RecordStore_UnknownSaveRecoveryRegression",
+		"global",
+		"release-commit-then-error"
+	) :: { [string]: any }
+	assert(durable.write_id == operation_id, "release reconciliation must confirm the original operation ID")
+	assert(durable.revision == base_revision + 1, "release reconciliation must not duplicate the release revision")
+	assert(durable.session == nil, "confirmed release must remain sessionless")
+	assert((durable.data :: { [string]: any }).coins == 20, "release reconciliation lost the captured snapshot")
+end
+
+RecordStore.Mock.reset()
+
+do
+	local record = open_test_record("release-known-not-committed")
+	local updated, update_message = record:Update(function(data)
+		(data :: { [string]: RecordStore.JsonValue }).coins = 30
+		return data
+	end)
+	assert(updated == "success", update_message)
+	local base_revision = record:GetRevision()
+
+	RecordStore.Mock.set_update_failures(1, "unknown", "injected pre-commit release failure")
+	RecordStore.Mock.set_get_failures(100, "hold release verification until retry")
+	local close_result = record:Close()
+	assert(close_result == "unknown", "unverified pre-commit release must remain unknown")
+	local status = record:GetDurabilityStatus()
+	local operation_id = status.pending_operation_id
+	assert(operation_id ~= nil, "uncommitted release must retain its logical operation ID")
+
+	RecordStore.Mock.set_get_failures(0)
+	local recovery_result, recovery_message = RecordStore.Mock.reconcile(record)
+	assert(recovery_result == "success", recovery_message)
+	assert(record.State == "closed", "reconciled release retry must close the session")
+	local durable = RecordStore.Mock.get_record_raw(
+		"RecordStore_UnknownSaveRecoveryRegression",
+		"global",
+		"release-known-not-committed"
+	) :: { [string]: any }
+	assert(durable.write_id == operation_id, "release retry must reuse the original operation ID")
+	assert(durable.revision == base_revision + 1, "release retry must commit exactly one revision")
+	assert(durable.session == nil, "release retry must relinquish the session")
+	assert((durable.data :: { [string]: any }).coins == 30, "release retry must persist its retained snapshot")
+end
+
+RecordStore.Mock.reset()
+print("[PASS] Unknown-save and release recovery retain operation identity, fence public mutation, preserve in-flight edits, and refuse stale-owner writes.")
