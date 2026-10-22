@@ -8156,22 +8156,20 @@ local function run_scheduled_record_work(record: Record, state: InternalState, n
 			retry_jitter_percent = 10,
 		}
 		if remaining_ms ~= nil then
-			local scheduler_stats = scheduler_governor:Stats()
-			local latency = scheduler_stats.latency_ewma or {}
-			local tails = scheduler_stats.latency_percentiles_by_operation or {}
-			local renewal_tail = if tails.lease_renewal ~= nil then tails.lease_renewal.p95_ms
-				elseif tails.update_async ~= nil then tails.update_async.p95_ms
-				else nil
+			local renewal_advice = scheduler_governor:LeaseRenewalAdvice()
+			local renewal_tail = if renewal_advice.lease_renewal_p95_ms ~= nil
+				then renewal_advice.lease_renewal_p95_ms
+				else renewal_advice.update_async_p95_ms
 			local observed_service_ms = math.max(
 				if math.isfinite(renewal_tail) then renewal_tail else 0,
-				latency.lease_renewal or 0,
-				latency.update_async or 0,
-				latency.service or 0
+				renewal_advice.lease_renewal_ewma_ms,
+				renewal_advice.update_async_ewma_ms,
+				renewal_advice.service_ewma_ms
 			)
 			-- Reserve a conservative service-time and current queue-delay margin from
 			-- the remaining durable lease. The deadline is advisory; the lease-token
 			-- check in renew_internal remains the ownership authority.
-			local queue_delay_ms = math.max(0, scheduler_stats.scheduler.oldest_eligible_age_ms or 0)
+			local queue_delay_ms = math.max(0, renewal_advice.oldest_eligible_age_ms)
 			local safety_margin_ms = math.max(100, observed_service_ms * 2 + queue_delay_ms)
 			local safe_slack_ms = math.max(0, remaining_ms - safety_margin_ms)
 			renewal_options.deadline_ms = now_local() * 1000 + safe_slack_ms
