@@ -53,6 +53,21 @@ local function run_case(batchable)
 	dispatcher:Close()
 end
 
+local renewal_governor = Scheduler.new({ now_ms = function() return 1_800_000_000_000 end })
+renewal_governor:Observe("lease_renewal", true, 100)
+renewal_governor:Observe("lease_renewal", true, 200)
+renewal_governor:Observe("update_async", true, 80)
+renewal_governor.latency_ewma.service = 50
+renewal_governor.Stats = function()
+	error("lease renewal timing must not build a full diagnostic Stats snapshot")
+end
+local renewal_advice = renewal_governor:LeaseRenewalAdvice()
+assert(renewal_advice.lease_renewal_p95_ms == 200, "renewal advice returned the wrong P95")
+assert(renewal_advice.update_async_p95_ms == 80, "renewal advice returned the wrong UpdateAsync P95")
+assert(renewal_advice.lease_renewal_ewma_ms == 120, "renewal advice returned the wrong renewal EWMA")
+assert(renewal_advice.service_ewma_ms == 50, "renewal advice returned the wrong service EWMA")
+assert(renewal_advice.oldest_eligible_age_ms == 0, "empty queue must have zero eligible age")
+
 run_case(false)
 run_case(true)
-print("[scheduler-hot-path] dispatch avoided full diagnostic snapshots for regular and batchable work.")
+print("[scheduler-hot-path] dispatch and renewal timing avoided full diagnostic snapshots.")
