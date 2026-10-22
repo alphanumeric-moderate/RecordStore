@@ -281,28 +281,27 @@ local function test_corrupt_existing_ordering_slot_fails_closed()
 	local initial_sequence, initial_error = mailbox:_ensure_ordering_slot(route, ordering_key)
 	assert(initial_sequence == 1 and initial_error == nil, "could not create an ordering-slot fixture")
 	local ordering_route = mailbox:_ordering_route(ordering_key)
-	local ordering = store.values[ordering_route]
-	assert(type(ordering) == "table", "ordering-slot fixture was not persisted")
+	assert(type(store.values[ordering_route]) == "table", "ordering-slot fixture was not persisted")
 
-	ordering.next_sequence = initial_sequence
+	store.values[ordering_route].next_sequence = initial_sequence
 	local reused_sequence, reuse_error = mailbox:_ensure_ordering_slot(route, ordering_key)
 	assert(reused_sequence == nil and reuse_error ~= nil,
 		"existing sequence was reused when next_sequence did not exceed it")
 
-	ordering.next_sequence = initial_sequence + 1
+	store.values[ordering_route].next_sequence = initial_sequence + 1
 	local replay_sequence, replay_error = mailbox:_reserve_replay_ordering_slot(
 		route, ordering_key, "corrupt-existing-replay-operation"
 	)
 	assert(replay_sequence == initial_sequence + 1 and replay_error == nil,
 		"could not create an idempotent replay reservation fixture")
-	ordering.next_sequence = replay_sequence
+	store.values[ordering_route].next_sequence = replay_sequence
 	local reused_replay, reused_replay_error = mailbox:_reserve_replay_ordering_slot(
 		route, ordering_key, "corrupt-existing-replay-operation"
 	)
 	assert(reused_replay == nil and reused_replay_error ~= nil,
 		"existing replay slot was reused when next_sequence did not exceed it")
 
-	ordering.next_sequence = 0 / 0
+	store.values[ordering_route].next_sequence = 0 / 0
 	local nonfinite_sequence, nonfinite_error = mailbox:_ensure_ordering_slot(route, ordering_key)
 	assert(nonfinite_sequence == nil and nonfinite_error ~= nil,
 		"existing sequence was reused with a non-finite next_sequence")
