@@ -1728,6 +1728,26 @@ local function new_governor(options)
 		return oldest_eligible_age_ms
 	end
 
+	-- Renewal scheduling needs a small bounded view, not the allocation-heavy
+	-- diagnostic snapshot that copies and sorts every operation's samples.
+	function governor:LeaseRenewalAdvice()
+		local function p95_for(operation)
+			local source = self.latency_samples_by_operation[operation]
+			if source == nil or #source == 0 then return nil end
+			local samples = copy(source)
+			table.sort(samples)
+			return samples[math.clamp(math.ceil(#samples * 0.95), 1, #samples)]
+		end
+		return {
+			lease_renewal_p95_ms = p95_for("lease_renewal"),
+			update_async_p95_ms = p95_for("update_async"),
+			lease_renewal_ewma_ms = self.latency_ewma.lease_renewal or 0,
+			update_async_ewma_ms = self.latency_ewma.update_async or 0,
+			service_ewma_ms = self.latency_ewma.service or 0,
+			oldest_eligible_age_ms = self:OldestEligibleAgeMs(),
+		}
+	end
+
 	function governor:Stats()
 		local lanes = { high = 0, normal = 0, background = 0, lease_renewal = 0 }
 		local oldest_eligible_age_ms, now = 0, now_ms()
