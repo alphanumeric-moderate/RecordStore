@@ -6,6 +6,12 @@ benchmarks:
   - name: "advanced scheduler mixed-policy smoke workload"
     exec: lune run bench/advanced_scheduler.bench.luau
 
+  - name: "lease renewal full diagnostic snapshot"
+    exec: lune run bench/lease_renewal_stats.bench.luau
+
+  - name: "lease renewal lightweight advice"
+    exec: lune run bench/lease_renewal_advice.bench.luau
+
   - name: "advanced scheduler FIFO baseline"
     exec: lune run bench/advanced_scheduler_fifo.bench.luau
 
