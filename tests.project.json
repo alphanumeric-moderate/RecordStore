@@ -7,9 +7,6 @@
       "RecordStore": {
         "$path": "src/PlayerDataInitializer/RecordStore.luau"
       },
-      "RecordStoreScheduler": {
-        "$path": "src/PlayerDataInitializer/RecordStoreScheduler.luau"
-      },
       "IntegerInfinityValue": {
         "$path": "src/PlayerDataInitializer/IntegerInfinityValue.luau"
       },
