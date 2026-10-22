@@ -1,6 +1,6 @@
 --!nocheck
 -- Paired local CPU workload for the full diagnostic snapshot and renewal-only advice.
-local Scheduler = require("../src/PlayerDataInitializer/RecordStoreScheduler")
+local Scheduler = require("./RobloxShim").load_scheduler()
 
 local SAMPLE_COUNT = 256
 local OPERATION_COUNT = 12
