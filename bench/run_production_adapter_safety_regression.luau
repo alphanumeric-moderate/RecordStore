@@ -135,6 +135,7 @@ local function test_replayed_transform_and_commit_then_error_do_not_duplicate_a_
 	assert(update_result == "success", tostring(update_message))
 	local base_revision = record:GetRevision()
 	local before = fake.control:metrics()
+	fake.control:set_cache_updates_enabled(false)
 	fake.control:replay_next_update(2)
 	fake.control:fail_next_update("commit_then_error")
 	local save_result, save_message = record:Save("ambiguous-committed-write")
@@ -149,6 +150,7 @@ local function test_replayed_transform_and_commit_then_error_do_not_duplicate_a_
 	assert(after.fresh_get_calls > before.fresh_get_calls,
 		"ambiguous write was not followed by a fresh authoritative read")
 	assert(record:GetRevision() == base_revision + 1, "local revision differs from the one confirmed durable revision")
+	fake.control:set_cache_updates_enabled(true)
 	assert(record:Close() == "closed", "commit-then-error fixture failed to close")
 end
 
