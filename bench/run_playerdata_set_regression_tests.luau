@@ -107,6 +107,11 @@ record_options.on_event("reconcile", record.Key, "success", nil)
 task.wait(0.1)
 assert(saved_records[saved_key].kills == pending_recovery_kills,
 	"successful reconciliation must reschedule retained PlayerData changes")
+success, message = controller.Set(player, "kills", previous_kills)
+assert(success, message)
+task.wait(0.1)
+assert(saved_records[saved_key].kills == previous_kills,
+	"PlayerData.Set should persist the restored baseline after recovery")
 
 -- A removed cached value must trigger a safe child lookup rather than being reused.
 local lookups_before_removed_value = get_find_first_child_calls()
