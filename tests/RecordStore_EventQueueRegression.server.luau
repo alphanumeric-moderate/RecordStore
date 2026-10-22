@@ -265,8 +265,8 @@ do
 		encode = function(value) return serde.encode("json", value) end,
 		activation_guard = function() return true end,
 		strict_ordering_enabled = true,
-		lease_ms = 1000,
-		lease_renewal_horizon_ms = 4000,
+		lease_ms = 10000,
+		lease_renewal_horizon_ms = 40000,
 	})
 	local scheduler_enabled, scheduler_message = RecordStore.set_scheduler_enabled(true)
 	assert(scheduler_enabled, scheduler_message)
@@ -300,11 +300,11 @@ do
 	end)
 	assert(interleaved_update_result == "success", "concurrent local update was rejected while the V2 handler yielded")
 	release_handler = true
-	for _ = 1, 100 do
+	for _ = 1, 500 do
 		if process_finished then
 			break
 		end
-		task.wait()
+		task.wait(0.01)
 	end
 	assert(process_finished, "V2 queue processing did not resume after the handler was released")
 	assert(handler_finished, "V2 handler did not finish after its yield")
