@@ -1,14 +1,18 @@
 --!nocheck
--- Adversarial safety probes for PR #37 scheduler admission and input validation.
--- Findings intentionally fail this workflow until the scheduler protects these invariants.
+-- Adversarial scheduling resource and public-option validation regressions.
+-- These tests must reject noncritical reserve exhaustion and malformed false values.
 
 local Scheduler = require("../src/PlayerDataInitializer/RecordStoreScheduler")
+local task = require("@lune/task")
+local now_ms = 1_800_000_000_000
 local findings = {}
 
 local function report(name, ok, detail)
-	if not ok then
-		table.insert(findings, name .. ": " .. detail)
-	end
+	if not ok then table.insert(findings, name .. ": " .. detail) end
+end
+
+local function new_governor()
+	return Scheduler.new({ now_ms = function() return now_ms end })
 end
 
 local function dimensions(bytes, handlers)
@@ -20,65 +24,169 @@ local function dimensions(bytes, handlers)
 	}
 end
 
--- Noncritical estimated bytes must not consume the entire shared budget needed
--- by critical profile persistence.
-do
-	local governor = Scheduler.new()
-	local byte_cap = 16_777_216
-	local noncritical = governor:Admit(
-		"maintenance", "read", 1, false, false, dimensions(byte_cap, 1)
-	)
-	report("byte-reserve fixture", noncritical.code == "admitted",
-		"could not admit noncritical byte-saturation fixture: " .. tostring(noncritical.code))
-	if noncritical.code == "admitted" then
-		local critical = governor:Admit(
-			"profile_save", "update_async", 1, true, false,
-			{ read_units = 1, write_units = 1, estimated_bytes = 16_384, handler_slots = 1 }
-		)
-		report("critical byte reserve", critical.code == "admitted",
-			"noncritical work consumed the entire estimated-byte budget and blocked critical profile-save admission; got "
-				.. tostring(critical.code) .. ": " .. tostring(critical.message))
-		governor:Release(noncritical)
-		if critical.code == "admitted" then governor:Release(critical) end
+local function wait_for_callback(callback_ran)
+	for _ = 1, 100 do
+		if callback_ran() then return end
+		task.wait(0.001)
 	end
 end
 
--- A caller-supplied handler-slot estimate must not consume all slots needed by
--- critical work. This is independently bounded from the dispatched item count.
+-- Noncritical estimated-byte admissions must preserve a bounded critical reserve.
 do
-	local governor = Scheduler.new()
-	local noncritical = governor:Admit(
-		"maintenance", "read", 1, false, false, dimensions(16_384, 16)
+	local governor = new_governor()
+	local policy = governor:Stats().policy
+	local byte_capacity = policy.max_estimated_bytes_in_flight
+	local byte_reserve = 4_194_304
+	report("byte reserve default", policy.estimated_bytes_critical_reserve == byte_reserve,
+		"expected a 4 MiB configured estimated-byte reserve; found "
+			.. tostring(policy.estimated_bytes_critical_reserve))
+
+	local noncritical_limit = byte_capacity - byte_reserve
+	local overflow = governor:Admit(
+		"maintenance", "tracing", 1, false, false,
+		dimensions(noncritical_limit + 1, 1)
 	)
-	report("handler-slot fixture", noncritical.code == "admitted",
-		"could not admit noncritical handler-slot fixture: " .. tostring(noncritical.code))
-	if noncritical.code == "admitted" then
-		local critical = governor:Admit(
-			"profile_save", "update_async", 1, true, false,
-			{ read_units = 1, write_units = 1, estimated_bytes = 16_384, handler_slots = 1 }
-		)
-		report("critical handler-slot reserve", critical.code == "admitted",
-			"noncritical work consumed all handler slots and blocked critical profile-save admission; got "
-				.. tostring(critical.code) .. ": " .. tostring(critical.message))
-		governor:Release(noncritical)
-		if critical.code == "admitted" then governor:Release(critical) end
+	report("byte reserve boundary", overflow.code == "backpressure",
+		"noncritical admission crossed the protected byte-reserve boundary; got "
+			.. tostring(overflow.code) .. ": " .. tostring(overflow.message))
+	if overflow.code == "admitted" then governor:Release(overflow) end
+
+	local noncritical = governor:Admit(
+		"maintenance", "tracing", 1, false, false,
+		dimensions(noncritical_limit, 1)
+	)
+	report("byte reserve exact limit", noncritical.code == "admitted",
+		"noncritical work could not use capacity up to the protected reserve; got "
+			.. tostring(noncritical.code) .. ": " .. tostring(noncritical.message))
+	local critical = governor:Admit(
+		"profile_save", "update_async", 1, true, false,
+		{ read_units = 1, write_units = 1, estimated_bytes = 16_384, handler_slots = 1 }
+	)
+	report("critical byte admission", critical.code == "admitted",
+		"critical profile-save could not use its reserved estimated-byte headroom; got "
+			.. tostring(critical.code) .. ": " .. tostring(critical.message))
+	if noncritical.code == "admitted" then governor:Release(noncritical) end
+	if critical.code == "admitted" then governor:Release(critical) end
+	report("byte ticket accounting", governor:Stats().estimated_bytes_in_flight == 0,
+		"estimated-byte usage remained after releasing all valid reservations")
+end
+
+-- Noncritical handler-slot admissions must leave at least one slot for critical work.
+do
+	local governor = new_governor()
+	local policy = governor:Stats().policy
+	local slot_capacity = policy.max_handler_slots_in_flight
+	local slot_reserve = 1
+	report("handler reserve default", policy.handler_slots_critical_reserve == slot_reserve,
+		"expected one reserved critical handler slot; found "
+			.. tostring(policy.handler_slots_critical_reserve))
+
+	local overflow = governor:Admit(
+		"maintenance", "tracing", 1, false, false,
+		dimensions(16_384, slot_capacity)
+	)
+	report("handler-slot reserve boundary", overflow.code == "backpressure",
+		"noncritical admission consumed critical handler headroom; got "
+			.. tostring(overflow.code) .. ": " .. tostring(overflow.message))
+	if overflow.code == "admitted" then governor:Release(overflow) end
+
+	local noncritical = governor:Admit(
+		"maintenance", "tracing", 1, false, false,
+		dimensions(16_384, slot_capacity - slot_reserve)
+	)
+	report("handler-slot exact limit", noncritical.code == "admitted",
+		"noncritical work could not use handler slots up to the reserve boundary; got "
+			.. tostring(noncritical.code) .. ": " .. tostring(noncritical.message))
+	local critical = governor:Admit(
+		"profile_save", "update_async", 1, true, false,
+		{ read_units = 1, write_units = 1, estimated_bytes = 16_384, handler_slots = slot_reserve }
+	)
+	report("critical handler-slot admission", critical.code == "admitted",
+		"critical profile-save could not use its reserved handler slot; got "
+			.. tostring(critical.code) .. ": " .. tostring(critical.message))
+	if noncritical.code == "admitted" then governor:Release(noncritical) end
+	if critical.code == "admitted" then governor:Release(critical) end
+	report("handler ticket accounting", governor:Stats().handler_slots_in_flight == 0,
+		"handler-slot usage remained after releasing all valid reservations")
+end
+
+-- Reserve configuration must reject negative, fractional and out-of-range values.
+do
+	local governor = new_governor()
+	local policy = governor:Stats().policy
+	local revision = policy.revision + 1
+	local invalid_patches = {
+		{ estimated_bytes_critical_reserve = -1 },
+		{ estimated_bytes_critical_reserve = 1.5 },
+		{ estimated_bytes_critical_reserve = policy.max_estimated_bytes_in_flight },
+		{ handler_slots_critical_reserve = -1 },
+		{ handler_slots_critical_reserve = 0.5 },
+		{ handler_slots_critical_reserve = policy.max_handler_slots_in_flight },
+	}
+	for index, fields in ipairs(invalid_patches) do
+		fields.revision = revision
+		local accepted = governor:SetPolicy(fields)
+		report("reserve policy validation " .. index, not accepted,
+			"invalid reserve policy patch was accepted: " .. tostring(index))
 	end
 end
 
--- Optional fields default only when absent; malformed false values should not
--- silently turn into a valid default lane.
+-- Nil means omitted. Explicit false lane/dependency/work-class values are malformed.
 do
-	local governor = Scheduler.new()
+	local governor = new_governor()
 	local result = governor:Enqueue({
 		id = "malformed-false-lane",
 		owner_id = "security-probe",
 		lane = false,
 	})
-	report("lane validation", result.code == "invalid",
+	report("governor lane validation", result.code == "invalid",
 		"lane=false was silently normalized instead of rejected; got " .. tostring(result.code))
 	if result.code == "accepted" then
 		local item = governor:TakeNext()
 		if item ~= nil then governor:MarkCompleted(item.id, "cancelled") end
+	end
+
+	local false_dependencies = governor:Enqueue({
+		id = "malformed-false-dependencies",
+		owner_id = "security-probe",
+		dependencies = false,
+	})
+	report("dependency validation", false_dependencies.code == "invalid",
+		"dependencies=false was silently normalized instead of rejected; got " .. tostring(false_dependencies.code))
+	if false_dependencies.code == "accepted" then
+		local item = governor:TakeNext()
+		if item ~= nil then governor:MarkCompleted(item.id, "cancelled") end
+	end
+end
+
+-- Exercise dispatcher Schedule, not only the governor's lower-level API.
+do
+	local cases = {
+		{ name = "dispatcher lane validation", options = { lane = false } },
+		{ name = "dispatcher work-class validation", options = { work_class = false } },
+		{ name = "dispatcher operation-class validation", options = { work_class = "valid", operation_class = false } },
+		{ name = "dispatcher dependency validation", options = { dependencies = false } },
+	}
+	for index, test_case in ipairs(cases) do
+		local dispatcher = Scheduler.new_dispatcher(new_governor(), {
+			now_ms = function() return now_ms end,
+		})
+		local callback_ran = false
+		local result = dispatcher:Schedule(
+			"security-probe",
+			"malformed-option-" .. index,
+			function()
+				callback_ran = true
+				return { code = "success" }
+			end,
+			test_case.options
+		)
+		if result.code == "accepted" then wait_for_callback(function() return callback_ran end) end
+		dispatcher:Close()
+		report(test_case.name, result.code == "invalid",
+			"malformed option was accepted or defaulted; got " .. tostring(result.code))
+		report(test_case.name .. " callback safety", not callback_ran,
+			"callback executed despite malformed scheduler options")
 	end
 end
 
@@ -89,4 +197,4 @@ if #findings > 0 then
 	error(("scheduler safety probes found %d issue(s)"):format(#findings))
 end
 
-print("[PASS] Scheduler critical-resource reserves and strict option validation.")
+print("[PASS] Scheduler reserve boundaries, policy validation, and malformed-option rejection.")
