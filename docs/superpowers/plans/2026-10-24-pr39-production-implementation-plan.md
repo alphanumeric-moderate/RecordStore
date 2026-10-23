@@ -40,9 +40,9 @@
 
 - [ ] Inventory existing behavior against sections 26.13, 27.2, 27.4, 31 and phase 0.
 - [x] Maintain a production-path fake DataStore boundary that deterministically injects fail-before-commit, commit-then-error, held verification reads, budget exhaustion, transform replay, and ownership races.
-- [ ] Add transition tests that prove they fail against the pre-fix code, then pass after the targeted implementation.
+- [x] Add targeted transition tests; the new pending-UserIds/metadata release retry regression was observed failing before the fix and passing after it.
 - [ ] Establish existing CodSpeed entries as a baseline; separate simulation, walltime, service-cost assumptions and unmeasured live Roblox behavior.
-- [ ] Keep this PR's static type check and complete Lune regression workflow green before merging.
+- [x] Luau type check and every Lune regression stage pass on the current head; benchmark-result interpretation and live Roblox release gates are tracked separately.
 
 **Acceptance:** tests control clock/fault order; each failure assertion identifies a violated persistence invariant; no test labels volatile state durable.
 
