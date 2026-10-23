@@ -1381,6 +1381,9 @@ local function new(dependencies: Dependencies?): Controller
 	end
 
 	mutation_backpressure_reason = function(record: PlayerRecord): string?
+		if CONFIG.durability_mode ~= "read_only_on_risk" then
+			return nil
+		end
 		local status_ok, status = pcall(function()
 			return record:GetDurabilityStatus()
 		end)
