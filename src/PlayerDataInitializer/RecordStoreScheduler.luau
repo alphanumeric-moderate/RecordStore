@@ -26,7 +26,7 @@ local function valid_text(value: unknown, maximum: number): boolean
 end
 
 local function bounded_integer(value: unknown, default_value: number, minimum: number, maximum: number): number
-	local selected = if finite(value) then value else default_value
+	local selected = if type(value) == "number" and math.isfinite(value) then value else default_value
 	return math.clamp(math.floor(selected), minimum, maximum)
 end
 
@@ -37,17 +37,17 @@ local function key_count(value: any): number
 end
 
 local function copy(value: any, depth: number?, seen: { [any]: boolean }?): any
-	depth = depth or 0
-	seen = seen or {}
-	if depth > 64 then error("scheduler value exceeds maximum depth", 3) end
+	local level: number = depth or 0
+	local visited: { [any]: boolean } = seen or {}
+	if level > 64 then error("scheduler value exceeds maximum depth", 3) end
 	if type(value) ~= "table" then return value end
-	if seen[value] then error("scheduler does not accept cyclic values", 3) end
-	seen[value] = true
-	local result = {}
+	if visited[value] then error("scheduler does not accept cyclic values", 3) end
+	visited[value] = true
+	local result: { [any]: any } = {}
 	for key, child in pairs(value) do
-		result[copy(key, depth + 1, seen)] = copy(child, depth + 1, seen)
+		result[copy(key, level + 1, visited)] = copy(child, level + 1, visited)
 	end
-	seen[value] = nil
+	visited[value] = nil
 	return result
 end
 
@@ -93,7 +93,7 @@ local function estimate_dimensions(item: DynamicRecord, batch_count: number?): D
 	local request_kind = if type(item.operation_class) == "string" then item.operation_class
 		elseif type(item.work_class) == "string" then item.work_class else "default"
 	local defaults = operation_dimension_defaults[request_kind] or operation_dimension_defaults.default
-	local multiplier = if item.batchable == true and finite(batch_count)
+	local multiplier: number = if item.batchable == true and type(batch_count) == "number" and math.isfinite(batch_count)
 		then math.clamp(math.floor(batch_count), 1, 16) else 1
 	return {
 		read_units = math.max(defaults.read, if finite(item.read_units) then item.read_units else 0) * multiplier,
