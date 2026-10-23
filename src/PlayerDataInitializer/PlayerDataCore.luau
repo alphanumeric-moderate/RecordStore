@@ -342,7 +342,7 @@ for key, field in pairs(CONFIG.data) do
 			error(("CONFIG.data.%s.default must be a number for IntegerInfinityValue"):format(key))
 		end
 
-		local rounding = resolve_rounding(field.rounding)
+		local rounding: IntegerInfinityRounding = resolve_rounding(field.rounding)
 		field.rounding = rounding
 		field.default = normalize_integer_infinity(default_value, rounding)
 	end
@@ -513,7 +513,7 @@ local function new(dependencies: Dependencies?): Controller
 	local integer_infinity_value_factory = injected.IntegerInfinityValue or IntegerInfinityValueFactory
 	local infinitemath_value_factory = injected.InfiniteMathValue or InfiniteMathValueFactory
 
-	local new_instance = injected.new_instance or function(class_name: string): Instance
+	local new_instance: (class_name: string) -> Instance = injected.new_instance or function(class_name: string): Instance
 		return Instance.new(class_name)
 	end
 	local scheduler = injected.task or task
@@ -678,7 +678,7 @@ local function new(dependencies: Dependencies?): Controller
 	local player_added_connection: RBXScriptConnection? = nil
 	local player_removing_connection: RBXScriptConnection? = nil
 	local sessions: {[Player]: PlayerRecord} = {}
-	local player_value_paths: { [Player]: PlayerValuePathCache } = setmetatable({}, { __mode = "k" })
+	local player_value_paths = (setmetatable({}, { __mode = "k" }) :: any) :: { [Player]: PlayerValuePathCache }
 	local loading: {[Player]: boolean} = {}
 	local cancelled_loading: {[Player]: boolean} = {}
 	local departed_players: {[Player]: boolean} = {}
@@ -1051,7 +1051,8 @@ local function new(dependencies: Dependencies?): Controller
 					end
 				end)
 				display_value.Parent = leaderstats
-				(backing_value :: Instance).Parent = value_folder
+				local backing_instance: Instance = backing_value
+				backing_instance.Parent = value_folder
 				continue
 			end
 			local format_options = definition.number_format
@@ -1106,7 +1107,8 @@ local function new(dependencies: Dependencies?): Controller
 				connect_persistent_value(record, definition.key, backing_value, stored_value)
 
 				display_value.Parent = leaderstats
-				backing_value.Parent = value_folder
+				local backing_instance: Instance = backing_value
+				backing_instance.Parent = value_folder
 				continue
 			end
 

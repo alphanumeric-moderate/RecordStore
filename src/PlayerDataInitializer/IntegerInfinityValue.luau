@@ -73,7 +73,7 @@ function IntegerInfinityValue.new(
 		error("options must be a table", 2)
 	end
 
-	local rounding = resolve_rounding(
+	local rounding: Rounding = resolve_rounding(
 		if options == nil then nil else options.rounding
 	)
 

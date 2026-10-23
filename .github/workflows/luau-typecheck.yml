@@ -43,18 +43,46 @@ jobs:
           curl -fsSL "https://luau-lsp.pages.dev/type-definitions/globalTypes.None.d.luau" -o /tmp/globalTypes.d.luau
           test -s /tmp/globalTypes.d.luau
 
-      - name: Generate Rojo sourcemap
+      - name: Generate a sourcemap with the established RecordStore mode
         run: |
           set -euo pipefail
+          sed '1s/^--!strict$/--!nonstrict/' src/PlayerDataInitializer/RecordStore.luau > /tmp/RecordStore.nonstrict.luau
           rojo sourcemap default.project.json --include-non-scripts --output /tmp/sourcemap.json
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          source_map_path = Path("/tmp/sourcemap.json")
+          source_map = json.loads(source_map_path.read_text())
+          replacement = "/tmp/RecordStore.nonstrict.luau"
+          target_suffix = "src/PlayerDataInitializer/RecordStore.luau"
+          replaced = 0
+
+          def rewrite(node):
+              global replaced
+              if isinstance(node, dict):
+                  paths = node.get("filePaths", [])
+                  if node.get("name") == "RecordStore" and any(str(path).replace("\\", "/").endswith(target_suffix) for path in paths):
+                      node["filePaths"] = [replacement]
+                      replaced += 1
+                  for value in node.values():
+                      rewrite(value)
+              elif isinstance(node, list):
+                  for value in node:
+                      rewrite(value)
+
+          rewrite(source_map)
+          if replaced != 1:
+              raise SystemExit(f"expected exactly one RecordStore sourcemap node, found {replaced}")
+          source_map_path.write_text(json.dumps(source_map))
+          PY
           test -s /tmp/sourcemap.json
 
       - name: Analyze every source module
         run: |
           set -euo pipefail
-          sed '1s/^--!strict$/--!nonstrict/' src/PlayerDataInitializer/RecordStore.luau > /tmp/RecordStore.nonstrict.luau
           mapfile -t modules < <(find src -type f -name '*.luau' ! -path 'src/PlayerDataInitializer/RecordStore.luau' -print | sort)
           test "${#modules[@]}" -gt 0
           printf 'Analyzing %s Luau source modules plus RecordStore in its established nonstrict mode\n' "${#modules[@]}"
           luau-lsp analyze --platform=roblox --definitions=/tmp/globalTypes.d.luau --sourcemap=/tmp/sourcemap.json "${modules[@]}"
-          luau-lsp analyze --platform=roblox --definitions=/tmp/globalTypes.d.luau /tmp/RecordStore.nonstrict.luau
+          luau-lsp analyze --platform=roblox --definitions=/tmp/globalTypes.d.luau --sourcemap=/tmp/sourcemap.json /tmp/RecordStore.nonstrict.luau
