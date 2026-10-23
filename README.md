@@ -392,8 +392,13 @@ RecordStore's profile path includes bounded unknown-outcome reconciliation for s
 and release operations. It retains the logical operation ID and immutable save snapshot, performs an
 authoritative uncached read, and retries only through a conditional profile-key `UpdateAsync` while
 the exact owner token, fencing generation, expected revision, and lease safety margin still match.
-If ownership or revision has changed, or the lease has expired, the old writer is fenced rather than
-revived. Same-process lease reacquisition after expiry remains unimplemented.
+If ownership or revision has changed, the old writer is fenced. `lease_recovery_enabled` defaults to
+`false`. When explicitly enabled, same-process recovery may reacquire only if an uncached authoritative
+read and the key-level `UpdateAsync` transform both confirm the exact base write ID, revision, fencing
+generation, session token, and job/place identity are unchanged and the lease is expired. Reacquisition
+uses a distinct stable operation ID and new session token, increments the fencing generation, preserves
+the durable payload/revision, and does not replay the ambiguous operation's snapshot. Any uncommitted
+local changes remain dirty for a later save. A competing owner or changed fence always wins.
 
 The separate `RecordStore.MailboxV2` API supports an opt-in strict per-key message order. Pass
 `strict_ordering_enabled = true` when constructing the mailbox before using a non-nil
@@ -410,10 +415,11 @@ sets the maximum consecutive high-priority claims before non-high work gets a se
 (default `4`, maximum `32`). These are local scheduling preferences, not ownership or durability
 guarantees.
 
-Scheduler design is governed by [PR #39](https://github.com/alphanumeric-moderate/RecordStore/pull/39), the latest durable-messaging and durable-save-recovery specification. In particular, its sections 26.13, 27.4, 29 and P0 release blockers 9-10 in section 31 govern dirty-age-aware saves, bounded unknown-outcome reconciliation, mutation backpressure, and the critical persistence reserve. The production code contains bounded save/renewal/release reconciliation and observable durability
-risk/admission states. The full PR #39 fault-injection acceptance gates, lease-safe reacquisition
-after expiry, and live Roblox Studio/server validation remain outstanding; do not treat the entire
-durability contract as release-verified. The focused regression suite runs under Lune. CodSpeed measures FIFO, weighted, deadline and DRR against the same synthetic multi-owner/work-class input in separate benchmark entries. These establish local algorithm behavior and relative cost only; they do not prove Roblox DataStore latency, quota, cross-server behavior or production rollout safety.
+Scheduler design is governed by [PR #39](https://github.com/alphanumeric-moderate/RecordStore/pull/39), the latest durable-messaging and durable-save-recovery specification. In particular, its sections 26.13, 27.4, 29 and P0 release blockers 9-10 in section 31 govern dirty-age-aware saves, bounded unknown-outcome reconciliation, mutation backpressure, and the critical persistence reserve. The production code contains bounded save/renewal/release reconciliation, observable durability
+risk/admission states, and opt-in same-process expired-lease CAS reacquisition. Automated tests cover
+successful reacquisition, response loss after the CAS commit, and a competing-owner race. The full
+PR #39 fault-injection acceptance gates and live Roblox Studio/server validation remain outstanding;
+do not treat the entire durability contract as release-verified. The focused regression suite runs under Lune. CodSpeed measures FIFO, weighted, deadline and DRR against the same synthetic multi-owner/work-class input in separate benchmark entries. These establish local algorithm behavior and relative cost only; they do not prove Roblox DataStore latency, quota, cross-server behavior or production rollout safety.
 
 ## Durability risk and mutation admission
 
@@ -425,6 +431,7 @@ local record = RecordStore.new("PlayerData", "global", "Player_123", {
     autosave_interval = 60,
     max_dirty_age_seconds = 120,
     durability_mode = "balanced",
+    lease_recovery_enabled = false,
     on_event = function(event, key, result, message)
         if event == "durability_risk" then
             warn("Persistence risk", key, result, message or "")
