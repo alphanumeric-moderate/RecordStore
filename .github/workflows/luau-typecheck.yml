@@ -109,6 +109,31 @@ jobs:
           print("Scheduler and Mailbox V2 implementations are embedded in RecordStore.luau")
           PY
 
+      - name: Require explicit types at Studio solver-sensitive boundaries
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          source = Path("src/PlayerDataInitializer/RecordStore.luau").read_text()
+          required = [
+              'local batch_size_value: number = if type(batch_size) == "number" then batch_size :: number else 4',
+              'local handler_thread: thread = coroutine.create(function()',
+              'local retry_attempts: number = current.attempts :: number',
+              'local exponent_candidate: number = retry_attempts - 1',
+              'if exponent_candidate < 0 then exponent_candidate = 0 end',
+              'local exponent: number = if exponent_candidate > 16 then 16 else exponent_candidate',
+              'local digest_value: string = digest(digest_input)',
+              'string.sub(message :: string, 1, 200)',
+          ]
+          missing = [annotation for annotation in required if source.count(annotation) != 1]
+          if missing:
+              print("Missing or duplicated solver-sensitive type boundary:")
+              print("\\n".join(missing))
+              raise SystemExit(1)
+          print("All listed solver-sensitive expressions have explicit type boundaries")
+          PY
+
       - name: Type-check all source modules using their declared modes
         run: |
           set -euo pipefail

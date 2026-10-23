@@ -1308,7 +1308,7 @@ do
 			refresh_owner_retry_cooldown(self, item.owner_id)
 			item.terminal_result = {
 				code = "cancelled",
-				message = if type(message) == "string" and message ~= "" then string.sub(message, 1, 200)
+				message = if type(message) == "string" and message ~= "" then string.sub(message :: string, 1, 200)
 					else "scheduled work was cancelled before it started",
 			}
 			return item, nil
@@ -4914,9 +4914,16 @@ do
 				next_record.dlq_placement_generation = if is_finite(current.dlq_placement_generation) then current.dlq_placement_generation else 1
 				return next_record
 			end
-			local exponent = math.min(16, math.max(0, (current.attempts :: number) - 1))
-			local delay = math.min(self.options.retry_max_ms :: number, (self.options.retry_base_ms :: number) * (2 ^ exponent))
-			local jitter = (tonumber(string.sub(digest(route .. ":" .. tostring(current.attempts)), 1, 4), 16) or 0) % math.max(1, math.floor(delay / 4))
+			local retry_attempts: number = current.attempts :: number
+			local exponent_candidate: number = retry_attempts - 1
+			if exponent_candidate < 0 then exponent_candidate = 0 end
+			local exponent: number = if exponent_candidate > 16 then 16 else exponent_candidate
+			local delay: number = math.min(self.options.retry_max_ms :: number, (self.options.retry_base_ms :: number) * (2 ^ exponent))
+			local digest_input: string = route .. ":" .. tostring(retry_attempts)
+			local digest_value: string = digest(digest_input)
+			local jitter_seed: number = tonumber(string.sub(digest_value, 1, 4), 16) or 0
+			local jitter_divisor: number = math.max(1, math.floor(delay / 4))
+			local jitter: number = jitter_seed % jitter_divisor
 			next_record.state = "ready"
 			next_record.available_at = now + delay - math.floor(delay / 8) + jitter
 			next_record.claim_token = nil
@@ -8946,7 +8953,7 @@ process_queue_internal = function(state: InternalState, max_messages: number): (
 		local handler_message: string? = nil
 		local handler_error: string? = nil
 		local handler_completed = false
-		local handler_thread = coroutine.create(function()
+		local handler_thread: thread = coroutine.create(function()
 			local ok, result, result_message = pcall(
 				handler,
 				message.type,
@@ -13861,7 +13868,8 @@ local function run_scheduled_record_work(record: Record, state: InternalState, n
 					return { code = "retryable", message = "queue poll became busy before processing started" }
 				end
 				state.queue_hint = false
-				local bounded_batch_size = if type(batch_size) == "number" then math.clamp(math.floor(batch_size), 1, 4) else 4
+				local batch_size_value: number = if type(batch_size) == "number" then batch_size :: number else 4
+				local bounded_batch_size: number = math.clamp(math.floor(batch_size_value), 1, 4)
 				local code, message = process_queue(record, bounded_batch_size)
 				sync_public(record)
 				local processed_count: number = if code == "processed" then tonumber(message) or 0 else 0
