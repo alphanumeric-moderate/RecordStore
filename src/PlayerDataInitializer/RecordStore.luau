@@ -9665,7 +9665,7 @@ local function save_internal(state: InternalState, reason: string?, operation_de
 	return "saved", nil
 end
 
-local function get_session_status_internal(
+rawset(RecordStore._internals, "get_session_status_internal", function(
 	name: string,
 	scope: string,
 	key: string,
@@ -9745,7 +9745,7 @@ local function get_session_status_internal(
 		status.LeaseAppearsAvailable = true
 	end
 	return status, "success", nil
-end
+end)
 
 function RecordStore.get_session_status_async(
 	name: string,
@@ -9753,7 +9753,8 @@ function RecordStore.get_session_status_async(
 	key: string,
 	operation_deadline: number?
 ): (SessionStatus?, ResultCode, string?)
-	return get_session_status_internal(name, scope, key, operation_deadline, false)
+	local helper = rawget(RecordStore._internals, "get_session_status_internal")
+	return helper(name, scope, key, operation_deadline, false)
 end
 
 function RecordStore.read_async(name: string, scope: string, key: string, operation_deadline: number?, legacy_decoder: LegacyDecoder?): (Snapshot?, ResultCode, string?)
@@ -14845,7 +14846,8 @@ RecordStore.Mock = (function()
 			key: string,
 			operation_deadline: number?
 		): (SessionStatus?, ResultCode, string?)
-			return get_session_status_internal(name, scope, key, operation_deadline, true)
+			local helper = rawget(RecordStore._internals, "get_session_status_internal")
+			return helper(name, scope, key, operation_deadline, true)
 		end,
 		read_async = read_async_mock,
 		claim_queue_message = mock_claim_queue_message,
