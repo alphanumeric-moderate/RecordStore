@@ -5,9 +5,9 @@ local HttpService = game:GetService("HttpService")
 local MessagingService = game:GetService("MessagingService")
 local RecordStore = {}
 
-local RecordStoreScheduler: any = require(script.Parent.RecordStoreScheduler)
+local RecordStoreScheduler = require(script.Parent.RecordStoreScheduler)
 
-local MailboxV2: any = require(script.Parent.MailboxV2)
+local MailboxV2 = require(script.Parent.MailboxV2)
 
 type MetadataValue = boolean | number | string
 export type Metadata = { [string]: MetadataValue }
@@ -7828,7 +7828,7 @@ local scheduler_governor = RecordStoreScheduler.new({
 		return { read = read_budget, write = write_budget }
 	end,
 })
-local scheduler_dispatcher: any = RecordStoreScheduler.new_dispatcher(scheduler_governor, {
+local scheduler_dispatcher = RecordStoreScheduler.new_dispatcher(scheduler_governor, {
 	now_ms = function() return now_local() * 1000 end,
 })
 local scheduler_activation = {
