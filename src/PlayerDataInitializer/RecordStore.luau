@@ -10281,26 +10281,6 @@ local function is_dirty(self: Record): boolean
 	return state.change_sequence ~= state.saved_change_sequence
 end
 
-local function mutation_backpressure_reason(state: InternalState): string?
-	if state.options.durability_mode ~= "read_only_on_risk" then
-		return nil
-	end
-	local dirty = state.change_sequence ~= state.saved_change_sequence
-	if not dirty then
-		return nil
-	end
-	local dirty_since = state.dirty_since_local
-	if dirty_since == nil then
-		return nil
-	end
-	local max_age = state.options.max_dirty_age_seconds
-		or (state.options.autosave_interval or DEFAULT_AUTOSAVE_INTERVAL) * 2
-	if now_local() - dirty_since >= max_age then
-		return "mutation rejected: oldest dirty change exceeded max_dirty_age_seconds"
-	end
-	return nil
-end
-
 local function can_mutate(self: Record): (boolean, string?)
 	local state = private[self]
 	if state == nil then
@@ -10309,7 +10289,7 @@ local function can_mutate(self: Record): (boolean, string?)
 	if state.state ~= "active" or state.token == nil then
 		return false, "record ownership is not confirmed active"
 	end
-	local backpressure = mutation_backpressure_reason(state)
+	local backpressure = RecordStore._internals.mutation_backpressure_reason(state)
 	if backpressure ~= nil then
 		return false, backpressure
 	end
@@ -10353,7 +10333,7 @@ local function get_durability_status(self: Record): { [string]: any }
 	local max_dirty_age = state.options.max_dirty_age_seconds
 		or (state.options.autosave_interval or DEFAULT_AUTOSAVE_INTERVAL) * 2
 	local slo_exceeded = dirty and dirty_age >= max_dirty_age
-	local backpressure = mutation_backpressure_reason(state)
+	local backpressure = RecordStore._internals.mutation_backpressure_reason(state)
 	return {
 		ownership = ownership,
 		durability = durability,
@@ -10440,7 +10420,7 @@ local function set_user_ids(self: Record, user_ids: { number }): (ResultCode, st
 	if state.state ~= "active" then
 		return "fenced", "record is not actively owned"
 	end
-	local backpressure = mutation_backpressure_reason(state)
+	local backpressure = RecordStore._internals.mutation_backpressure_reason(state)
 	if backpressure ~= nil then
 		return "capacity", backpressure
 	end
@@ -10517,7 +10497,7 @@ local function set_metadata(self: Record, metadata: Metadata): (ResultCode, stri
 	if state.state ~= "active" then
 		return "fenced", "record is not actively owned"
 	end
-	local backpressure = mutation_backpressure_reason(state)
+	local backpressure = RecordStore._internals.mutation_backpressure_reason(state)
 	if backpressure ~= nil then
 		return "capacity", backpressure
 	end
@@ -10557,7 +10537,7 @@ local function update_metadata(self: Record, callback: (Metadata) -> Metadata): 
 	if state.state ~= "active" then
 		return "fenced", "record is not actively owned"
 	end
-	local backpressure = mutation_backpressure_reason(state)
+	local backpressure = RecordStore._internals.mutation_backpressure_reason(state)
 	if backpressure ~= nil then
 		return "capacity", backpressure
 	end
@@ -10639,7 +10619,7 @@ local function update(self: Record, callback: (JsonValue?) -> JsonValue?): (Resu
 	if state == nil or state.state ~= "active" then
 		return "fenced", "record is not actively owned"
 	end
-	local backpressure = mutation_backpressure_reason(state)
+	local backpressure = RecordStore._internals.mutation_backpressure_reason(state)
 	if backpressure ~= nil then
 		return "capacity", backpressure
 	end
@@ -10715,7 +10695,7 @@ local function reconcile(self: Record, template: JsonValue): (ResultCode, string
 	if state == nil or state.state ~= "active" then
 		return "fenced", "record is not actively owned"
 	end
-	local backpressure = mutation_backpressure_reason(state)
+	local backpressure = RecordStore._internals.mutation_backpressure_reason(state)
 	if backpressure ~= nil then
 		return "capacity", backpressure
 	end
@@ -14218,6 +14198,26 @@ RecordStore.shutdown = function()
 end
 
 RecordStore._internals = {}
+RecordStore._internals.mutation_backpressure_reason = function(state: InternalState): string?
+	if state.options.durability_mode ~= "read_only_on_risk" then
+		return nil
+	end
+	local dirty = state.change_sequence ~= state.saved_change_sequence
+	if not dirty then
+		return nil
+	end
+	local dirty_since = state.dirty_since_local
+	if dirty_since == nil then
+		return nil
+	end
+	local max_age = state.options.max_dirty_age_seconds
+		or (state.options.autosave_interval or DEFAULT_AUTOSAVE_INTERVAL) * 2
+	if now_local() - dirty_since >= max_age then
+		return "mutation rejected: oldest dirty change exceeded max_dirty_age_seconds"
+	end
+	return nil
+end
+
 RecordStore._internals.normalize_options = function(options: Options): (Options?, string?)
 	if type(options) ~= "table" then
 		return nil, "options must be a table"
