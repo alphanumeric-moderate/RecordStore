@@ -1001,7 +1001,10 @@ local function new_governor(options: SchedulerOptions?): DynamicRecord
 		if self.high_streak >= self.policy.high_burst then
 			local has_non_high = false
 			for _, row in ipairs(eligible) do
-				if row.effective_lane ~= "high" and row.effective_lane ~= "lease_renewal" then has_non_high = true break end
+				if row.effective_lane ~= "high" and row.effective_lane ~= "lease_renewal" then
+					has_non_high = true
+					break
+				end
 			end
 			if has_non_high then
 				local filtered = {}
@@ -1064,7 +1067,10 @@ local function new_governor(options: SchedulerOptions?): DynamicRecord
 		local start_index = 1
 		if self.drr_cursor_key ~= nil then
 			for i, key in ipairs(lane_keys) do
-				if key == self.drr_cursor_key then start_index = (i % lane_count) + 1 break end
+				if key == self.drr_cursor_key then
+					start_index = (i % lane_count) + 1
+					break
+				end
 			end
 		end
 		local rounds = math.ceil(self.policy.max_item_cost / self.policy.drr_quantum) + 2
@@ -1247,7 +1253,12 @@ local function new_governor(options: SchedulerOptions?): DynamicRecord
 		for index = #self.queue, 1, -1 do
 			local item = self.queue[index]
 			local failed_dependency
-			for _, dependency in ipairs(item.dependencies or {}) do if self.failed[dependency] ~= nil then failed_dependency = dependency break end end
+			for _, dependency in ipairs(item.dependencies or {}) do
+				if self.failed[dependency] ~= nil then
+					failed_dependency = dependency
+					break
+				end
+			end
 			if failed_dependency ~= nil then
 				table.remove(self.queue, index)
 				item.queued = false
@@ -1404,11 +1415,6 @@ local function new_governor(options: SchedulerOptions?): DynamicRecord
 		end
 		self.retry_cooldown_until[item.owner_id] = next_due
 		return true, nil, next_due
-	end
-	local function rebuild_queued_due_heap(self: DynamicRecord)
-		local rebuilt = {}
-		for _, item in ipairs(self.queue) do heap_push(rebuilt, { id = item.id, due_at_ms = item.due_at_ms, item = item }) end
-		self.queued_due_heap = rebuilt
 	end
 	local function terminal_dependency_referenced(self: DynamicRecord, id: string): boolean
 		return (self.dependency_ref_counts[id] or 0) > 0
@@ -1781,7 +1787,6 @@ local function new_governor(options: SchedulerOptions?): DynamicRecord
 	return governor
 end
 
-local runtime_governors_by_record_store = setmetatable({}, { __mode = "k" })
 
 local function get_task_api(): any
 	local ok, value = pcall(function() return task end)
@@ -2155,9 +2160,6 @@ local function new_dispatcher(governor: DynamicRecord, options: DispatcherOption
 				callback_ok, callback_result = false, "scheduled callback is missing"
 			end
 			local elapsed_ms = math.max(0, now_ms() - started_at_ms)
-			local result_code = if type(callback_result) == "table" then callback_result.code
-				elseif callback_ok and (callback_result == true or callback_result == nil) then "success"
-				elseif not callback_ok then "unknown" else tostring(callback_result)
 			local operation_kind = if type(entry) == "table"
 				then entry.operation_class or entry.work_class or "default" else "scheduled_callback"
 			local outcome_class = classify_outcome(callback_result, callback_ok)
