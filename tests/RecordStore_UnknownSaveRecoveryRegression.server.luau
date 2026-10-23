@@ -761,9 +761,16 @@ do
 	fake_now += 181
 	RecordStore.Mock.set_get_failures(0)
 	RecordStore.Mock.set_update_commit_then_failures(1, "injected response loss after lease-recovery commit")
+	RecordStore.Mock.set_before_next_update(function()
+		RecordStore.Mock.set_get_failures(1, "injected unavailable verification after the lease-recovery commit")
+	end)
+	local first_recovery_result = RecordStore.Mock.reconcile(record)
+	assert(first_recovery_result == "unknown",
+		"committed lease reacquisition with failed verification must remain unknown")
+	assert(record.State == "unknown", "lease reacquisition must stay uncertain until its exact identity is confirmed")
 	local recovery_result, recovery_message = RecordStore.Mock.reconcile(record)
 	assert(recovery_result == "success",
-		"opt-in recovery should reacquire the unchanged expired owner without replaying its unsaved snapshot: "
+		"opt-in recovery should confirm the same committed lease-recovery identity without replaying its unsaved snapshot: "
 			.. tostring(recovery_message))
 	assert(record.State == "active", "confirmed same-process lease reacquisition should reactivate the record")
 	assert(record.Generation == base_generation + 1,
@@ -804,6 +811,59 @@ end
 
 RecordStore.Mock.reset()
 
+
+
+RecordStore.Mock.reset()
+do
+	local fake_now = DateTime.now().UnixTimestampMillis / 1000 + 1
+	RecordStore.Mock.set_test_clock(function()
+		return fake_now
+	end)
+	local record = RecordStore.Mock.new(
+		"RecordStore_UnknownSaveRecoveryRegression",
+		"global",
+		"expired-lease-recovery-default-disabled",
+		{
+			schema_version = 1,
+			autosave_interval = 1000,
+			lease_duration = 180,
+			lease_renewal = 60,
+			operation_deadline = 2,
+			retry_attempts = 1,
+		}
+	)
+	local open_result, open_message = record:Open({ coins = 10 })
+	assert(open_result == "created" or open_result == "loaded", open_message)
+	local before = RecordStore.Mock.get_record_raw(
+		"RecordStore_UnknownSaveRecoveryRegression", "global", "expired-lease-recovery-default-disabled"
+	) :: { [string]: any }
+	local update_result, update_message = record:Update(function(data)
+		(data :: { [string]: RecordStore.JsonValue }).coins = 11
+		return data
+	end)
+	assert(update_result == "success", update_message)
+	fake_now += 10
+	RecordStore.Mock.set_update_failures(1, "unknown", "injected pre-commit save failure")
+	RecordStore.Mock.set_get_failures(100, "hold verification until lease expiry")
+	assert(record:Save("default-disabled-lease-recovery") == "unknown",
+		"fixture must retain an unresolved save before expiry")
+	fake_now += 181
+	RecordStore.Mock.set_get_failures(0)
+	local result = RecordStore.Mock.reconcile(record)
+	assert(result == "fenced", "expired-lease reacquisition must stay disabled by default")
+	assert(record.State == "fenced", "default policy must leave unverified expired ownership fenced")
+	local after = RecordStore.Mock.get_record_raw(
+		"RecordStore_UnknownSaveRecoveryRegression", "global", "expired-lease-recovery-default-disabled"
+	) :: { [string]: any }
+	assert(after.write_id == before.write_id, "default fencing must not write a lease-recovery operation")
+	assert(after.fencing_generation == before.fencing_generation,
+		"default fencing must not advance the durable generation")
+	assert((after.data :: { [string]: any }).coins == 10,
+		"default fencing must not replay the unsaved snapshot")
+	RecordStore.Mock.set_test_clock(nil)
+end
+
+RecordStore.Mock.reset()
 
 RecordStore.Mock.reset()
 do
