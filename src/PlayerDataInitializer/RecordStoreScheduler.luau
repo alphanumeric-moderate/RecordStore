@@ -128,14 +128,14 @@ local function new_governor(options: SchedulerOptions?): DynamicRecord
 		return if type(options.now_ms) == "function" then options.now_ms() else os.clock() * 1000
 	end
 	local function operation_metric_key(self: DynamicRecord, kind: unknown): string
-		if type(kind) ~= "string" or kind == "" then kind = "default" end
-		if CORE_OPERATION_KINDS[kind] then return kind end
-		if kind == OTHER_OPERATION_KIND or kind == "service" then return OTHER_OPERATION_KIND end
-		local existing = self.operation_kind_keys[kind]
+		local operation_kind = if type(kind) == "string" and kind ~= "" then kind else "default"
+		if CORE_OPERATION_KINDS[operation_kind] then return operation_kind end
+		if operation_kind == OTHER_OPERATION_KIND or operation_kind == "service" then return OTHER_OPERATION_KIND
+		local existing = self.operation_kind_keys[operation_kind]
 		if existing ~= nil then return existing end
 		if key_count(self.operation_kind_keys) < MAX_CUSTOM_OPERATION_KIND_KEYS then
-			self.operation_kind_keys[kind] = kind
-			return kind
+			self.operation_kind_keys[operation_kind] = operation_kind
+			return operation_kind
 		end
 		return OTHER_OPERATION_KIND
 	end
