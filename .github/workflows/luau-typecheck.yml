@@ -91,7 +91,8 @@ jobs:
           timeout 180s luau-lsp analyze --platform=roblox --definitions=/tmp/globalTypes.d.luau --sourcemap=/tmp/sourcemap.json src/PlayerDataInitializer/RecordStore.luau > /tmp/RecordStore.strict.log 2>&1
           status=$?
           set -e
-          python3 - <<'PY'
+          ANALYZER_STATUS="$status" python3 - <<'PY'
+          import os
           from pathlib import Path
 
           lines = Path("/tmp/RecordStore.strict.log").read_text(errors="replace").splitlines()
@@ -104,7 +105,7 @@ jobs:
           internal = [line for line in relevant if "Internal error:" in line or "blocked-" in line]
           print(f"Strict RecordStore analyzer diagnostics: {len(relevant)}")
           print(f"Internal/blocked diagnostics: {len(internal)}")
-          print(f"Analyzer exit status: {status}")
+          print(f"Analyzer exit status: {os.environ['ANALYZER_STATUS']}")
           print("--- First 240 relevant diagnostics ---")
           for line in relevant[:240]:
               print(line)
