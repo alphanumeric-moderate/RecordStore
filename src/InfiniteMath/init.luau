@@ -92,6 +92,7 @@ local function normalize(first: number, second: number): (number, number)
 	if first == math.huge or first == -math.huge or second == math.huge or second == -math.huge then
 		error("InfiniteMath coefficient and exponent must be finite", 2)
 	end
+	if second % 1 ~= 0 then error("InfiniteMath exponent must be an integer", 2) end
 	if first == 0 then return 0, 0 end
 	local sign = if first < 0 then -1 else 1
 	local m = math.abs(first)
@@ -108,6 +109,7 @@ local function normalize2(first: number, second: number): (number, number)
 	if first == math.huge or first == -math.huge or second == math.huge or second == -math.huge then
 		error("InfiniteMath arithmetic overflow", 2)
 	end
+	if second % 1 ~= 0 then error("InfiniteMath exponent must be an integer", 2) end
 	if first == 0 then return 0, 0 end
 	local sign = if first < 0 then -1 else 1
 	local m = math.abs(first)
@@ -752,12 +754,14 @@ end
 ]=]
 function InfiniteMath.floor(Num): Number
 	Num = checkNumber(Num)
-
-	local _first, second = normalize(Num.first, Num.second)
-	if second >= 300 then return Num end -- Rounding after 1e+300 would be pointless, so don't do it.
-
-	return InfiniteMath.new(math.floor(Num:Reverse()))
+	local first, second = normalize(Num.first, Num.second)
+	if first ~= first or second ~= second then return fastNew(NaN, NaN) end
+	if first == 0 then return fastNew(0, 0) end
+	if second >= 300 then return fastNew(first, second) end
+	if second < 0 then return fastNew(if first < 0 then -1 else 0, 0) end
+	return InfiniteMath.new(math.floor(first * 10^second))
 end
+
 
 --[=[
 	@within InfiniteMath
@@ -769,15 +773,16 @@ end
 ]=]
 function InfiniteMath.round(Num): Number
 	Num = checkNumber(Num)
-
-	local _, second = normalize(Num.first, Num.second)
-	if second >= 300 then return Num end -- Rounding after 1e+300 would be pointless, so don't do it.
-
-	local r = Num:Reverse() -- finite here due to second < 300
-	local rounded = if r >= 0 then math.floor(r + 0.5) else math.ceil(r - 0.5)
-
-	return fastNew(rounded, 0)
+	local first, second = normalize(Num.first, Num.second)
+	if first ~= first or second ~= second then return fastNew(NaN, NaN) end
+	if first == 0 then return fastNew(0, 0) end
+	if second <= -2 then return fastNew(0, 0) end
+	if second >= 300 then return fastNew(first, second) end
+	local value = first * 10^second
+	local rounded = if value >= 0 then math.floor(value + 0.5) else math.ceil(value - 0.5)
+	return InfiniteMath.new(rounded)
 end
+
 
 --[=[
 	@within InfiniteMath
@@ -789,12 +794,14 @@ end
 ]=]
 function InfiniteMath.ceil(Num): Number
 	Num = checkNumber(Num)
-
-	local _first, second = normalize(Num.first, Num.second)
-	if second >= 300 then return Num end -- Rounding after 1e+300 would be pointless, so don't do it.
-
-	return fastNew(math.ceil(Num:Reverse()), 0)
+	local first, second = normalize(Num.first, Num.second)
+	if first ~= first or second ~= second then return fastNew(NaN, NaN) end
+	if first == 0 then return fastNew(0, 0) end
+	if second >= 300 then return fastNew(first, second) end
+	if second < 0 then return fastNew(if first > 0 then 1 else 0, 0) end
+	return InfiniteMath.new(math.ceil(first * 10^second))
 end
+
 
 --[=[
 	@within InfiniteMath
@@ -917,8 +924,7 @@ end
 function InfiniteMath.sign(Num): number
 	Num = checkNumber(Num)
 	local first = normalize(Num.first, Num.second)
-	first = tonumber(first)
-
+	if first ~= first then return NaN end
 	return if first > 0 then 1 elseif first < 0 then -1 else 0
 end
 
@@ -961,31 +967,16 @@ end
 ]=]
 function InfiniteMath.modf(Num): (Number, number?)
 	Num = checkNumber(Num)
-	local sign = InfiniteMath.sign(Num)
-	Num *= sign
-
 	local first, second = normalize(Num.first, Num.second)
-	local firstSplit = tostring(first):split(".")
-
-	if firstSplit[2] ~= nil then
-		first = string.sub(firstSplit[2], 1, second)
-		first = firstSplit[1].."."..first
-
-		local power = if second == 0 then 2 else second
-		local decimal
-
-		if second > 0 then
-			local a = string.sub(firstSplit[2], power + 1)
-			decimal = a / 10^#a
-		else
-			decimal = firstSplit[2] / 10^#firstSplit[2]
-		end
-
-		return fastNew(first, second) * sign, decimal
-	end
-
-	return Num
+	if first ~= first or second ~= second then return fastNew(NaN, NaN), NaN end
+	if first == 0 then return fastNew(0, 0), 0 end
+	if second >= 300 then return fastNew(first, second), 0 end
+	local value = first * 10^second
+	if second < 0 then return fastNew(0, 0), value end
+	local integral = if value >= 0 then math.floor(value) else math.ceil(value)
+	return InfiniteMath.new(integral), value - integral
 end
+
 
 --[=[
 	@within InfiniteMath
@@ -998,22 +989,22 @@ end
 ]=]
 function InfiniteMath.log(Num, Base): Number
 	Num = checkNumber(Num)
-
-	if InfiniteMath.sign(Num) == -1 then
-		return NaN  -- log of a negative number is always nan
+	local first, exponent = normalize(Num.first, Num.second)
+	if first ~= first or exponent ~= exponent then return fastNew(NaN, NaN) end
+	if first < 0 then return fastNew(NaN, NaN) end
+	if first == 0 then error("InfiniteMath.log(0) is -infinity, which InfiniteMath cannot represent", 2) end
+	if Base == nil then Base = math.exp(1) end
+	if type(Base) ~= "number" or Base ~= Base or Base <= 0 or Base == 1 or Base == math.huge or Base == -math.huge then
+		return fastNew(NaN, NaN)
 	end
-
-	if Base == nil then
-		Base = 2.7182818
-	end
-
-	local f, e = normalize(Num.first, Num.second)
-
-	-- log_base(Num) = log_base(f) + e * log_base(10)
-	local term1 = InfiniteMath.new(e) * math.log(10, Base)
-	local term2 = InfiniteMath.new(math.log(f, Base))
+	local logCoefficient = math.log(first, Base)
+	local logBase10 = math.log(10, Base)
+	if logCoefficient ~= logCoefficient or logBase10 ~= logBase10 then return fastNew(NaN, NaN) end
+	local term1 = InfiniteMath.new(exponent) * logBase10
+	local term2 = InfiniteMath.new(logCoefficient)
 	return term1 + term2
 end
+
 
 --[=[
 	@within InfiniteMath
@@ -1078,7 +1069,7 @@ function InfiniteMath.isNaN(x: any): boolean
 		return isFieldNaN(x.first) or isFieldNaN(x.second)
 	end
 	if type(x) == "string" then
-		return x == "nan"
+		return string.lower(string.gsub(x, "^%s*(.-)%s*$", "%1")) == "nan"
 	end
 	return false
 end
@@ -1110,7 +1101,8 @@ function InfiniteMath.isInf(x: any): boolean
 		return isFieldInf(x.first) or isFieldInf(x.second)
 	end
 	if type(x) == "string" then
-		return x == "inf" or x == "-inf"
+		local normalized = string.lower(string.gsub(x, "^%s*(.-)%s*$", "%1"))
+		return normalized == "inf" or normalized == "+inf" or normalized == "-inf"
 	end
 	return false
 end
@@ -1141,8 +1133,8 @@ function InfiniteMath.isZero(x: any): boolean
 		return x == 0
 	end
 	if isNumberObject(x) then
-		local f, e = normalize(x.first, x.second)
-		return f == 0 and e == 0
+		local ok, f, e = pcall(normalize, x.first, x.second)
+		return ok and f == 0 and e == 0
 	end
 	if type(x) == "string" then
 		local n = tonumber(x)
