@@ -5118,7 +5118,7 @@ local function map_mailbox_v2_result(code: unknown): ResultCode
 	return "unknown"
 end
 
-local install_mailbox_renewal_scheduler: ((Record, InternalState, MailboxV2.Mailbox) -> (boolean, string?))?
+local install_mailbox_renewal_scheduler: (Record, InternalState, MailboxV2.Mailbox) -> (boolean, string?)
 local process_queue_v2: any
 local scheduler_enabled = false
 
@@ -5468,7 +5468,7 @@ local function bind_mailbox_v2_async(self: Record, mailbox: unknown): (ResultCod
 	if state.state ~= "active" then return "fenced", "V2 mailbox binding requires an active Record" end
 	if state.takeover_requested then return "closing", "session takeover has been requested" end
 	if state.mailbox_v2 ~= nil then
-		if state.mailbox_v2 == mailbox then return "success", nil end
+		if (state.mailbox_v2 :: unknown) == mailbox then return "success", nil end
 		return "conflict", "this Record is already bound to a different V2 mailbox"
 	end
 	if state.queue_busy or state.busy or state.mailbox_v2_binding then
