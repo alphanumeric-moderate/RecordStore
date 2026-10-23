@@ -796,6 +796,7 @@ local function new(dependencies: Dependencies?): Controller
 		flush_running[record] = true
 		local last_result: RecordStore.ResultCode? = nil
 		local last_message: string? = nil
+		local drained_read_only_snapshot = false
 
 		while record.State == "active" and os.clock() < end_time do
 			local pending = pending_changes[record]
@@ -826,6 +827,11 @@ local function new(dependencies: Dependencies?): Controller
 					break
 				end
 				if status.mutation_admission == "read_only" and status.dirty == true then
+					if drained_read_only_snapshot then
+						last_result = "capacity"
+						last_message = "Record remains dirty after the bounded drain save; accepted PlayerData changes remain queued"
+						break
+					end
 					local save_ok, save_result, save_message = pcall(function()
 						return record:Save("playerdata-buffer-drain")
 					end)
@@ -834,6 +840,7 @@ local function new(dependencies: Dependencies?): Controller
 						last_message = if save_ok then save_message else tostring(save_result)
 						break
 					end
+					drained_read_only_snapshot = true
 					continue
 				end
 			end
