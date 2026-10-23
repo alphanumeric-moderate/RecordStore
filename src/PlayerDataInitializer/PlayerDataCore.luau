@@ -535,7 +535,7 @@ local function normalize_player_data(
 				field,
 				field.default,
 				integer_infinity_factory,
-				infinemath_factory
+				infinitemath_factory
 			)
 			if normalized_value == nil
 				or value_changed
@@ -545,7 +545,7 @@ local function normalize_player_data(
 			end
 			result[key] = reset_value
 		elseif normalized_value == nil then
-			result[key] = encode_field_value(field, field.default, integer_infinity_factory, infinimath_factory)
+			result[key] = encode_field_value(field, field.default, integer_infinity_factory, infinitemath_factory)
 			changed = true
 		else
 			result[key] = normalized_value
