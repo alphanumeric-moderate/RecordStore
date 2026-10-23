@@ -130,7 +130,7 @@ local function new_governor(options: SchedulerOptions?): DynamicRecord
 	local function operation_metric_key(self: DynamicRecord, kind: unknown): string
 		local operation_kind = if type(kind) == "string" and kind ~= "" then kind else "default"
 		if CORE_OPERATION_KINDS[operation_kind] then return operation_kind end
-		if operation_kind == OTHER_OPERATION_KIND or operation_kind == "service" then return OTHER_OPERATION_KIND
+		if operation_kind == OTHER_OPERATION_KIND or operation_kind == "service" then return OTHER_OPERATION_KIND end
 		local existing = self.operation_kind_keys[operation_kind]
 		if existing ~= nil then return existing end
 		if key_count(self.operation_kind_keys) < MAX_CUSTOM_OPERATION_KIND_KEYS then
