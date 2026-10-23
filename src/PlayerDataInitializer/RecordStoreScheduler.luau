@@ -340,7 +340,7 @@ local function new_governor(options: SchedulerOptions?): DynamicRecord
 		end
 		return true
 	end
-	local function admission_decision(self: DynamicRecord, work_class: any, request_kind: any, cost: any, mutating: any, critical_override: any, dimensions: any): DynamicRecord
+	local function admission_decision(self: DynamicRecord, work_class: any, request_kind: any, cost: any, mutating: any, critical_override: any, dimensions: any): (DynamicRecord, boolean, boolean)
 		if work_class == nil then work_class = "interactive" end
 		if request_kind == nil then request_kind = "default" end
 		if cost == nil then cost = 1 end
@@ -634,7 +634,7 @@ local function new_governor(options: SchedulerOptions?): DynamicRecord
 	function governor:ChooseBatchSize(requested, latency_ms, backlog, oldest_age_ms, budget_headroom)
 		return calculate_batch_size(self.policy, requested, latency_ms, backlog, oldest_age_ms, budget_headroom)
 	end
-	local function selected_batch_size(self: DynamicRecord, item: DynamicRecord): number
+	local function selected_batch_size(self: DynamicRecord, item: DynamicRecord): number?
 		if item.batchable ~= true then return nil end
 		local now = now_ms()
 		local operation_kind = operation_metric_key(self, item.operation_class or "default")
@@ -941,15 +941,15 @@ local function new_governor(options: SchedulerOptions?): DynamicRecord
 	local function lane_key(item: DynamicRecord, now: number): string
 		local instant = now or now_ms()
 		local function component(value: unknown): string
-			value = tostring(value or "default")
-			return tostring(#value) .. ":" .. value
+			local text = tostring(value or "default")
+			return tostring(#text) .. ":" .. text
 		end
 		return component(item.owner_id)
 			.. component(item.work_class or "default")
 			.. component(scheduled_lane(item, instant))
 			.. component(item.service_class or "best_effort")
 	end
-	local function choose_index(self: DynamicRecord, algorithm: any, renewal_mode: any): number?
+	local function choose_index(self: DynamicRecord, algorithm: any, renewal_mode: any): (number?, boolean)
 		local now, eligible = now_ms(), {}
 		local urgent_fallback = self.urgent_streak >= self.policy.urgent_deadline_burst
 		for _, dependent in ipairs(self.queue) do
@@ -1201,7 +1201,7 @@ local function new_governor(options: SchedulerOptions?): DynamicRecord
 		table.insert(self.queue, value)
 		heap_push(self.queued_due_heap, { id = value.id, due_at_ms = value.due_at_ms, item = value })
 		index_item_wake_events(self, value)
-		inherit_ready_prerequisites(self, value)
+		inherit_ready_prerequisites(self, value, now_ms())
 		if #self.queued_due_heap > self.policy.queue_capacity * 2 then
 			local rebuilt = {}
 			for _, queued in ipairs(self.queue) do heap_push(rebuilt, { id = queued.id, due_at_ms = queued.due_at_ms, item = queued }) end
@@ -1294,8 +1294,10 @@ local function new_governor(options: SchedulerOptions?): DynamicRecord
 			if (self.stats.scheduled_selected + 1) % interval == 0 then self:ShadowDecision(renewal_mode) end
 		end
 		local selected_item = self.queue[index]
+		if selected_item == nil then return nil, "empty" end
 		local selected_count = selected_batch_size(self, selected_item)
 		local item = table.remove(self.queue, index)
+		if item == nil then return nil, "empty" end
 		item.admission_batch_size = selected_count
 		item.admission_cost = effective_cost(item, selected_count)
 		item.queued = false
@@ -1415,7 +1417,7 @@ local function new_governor(options: SchedulerOptions?): DynamicRecord
 		local limit = self.policy.queue_capacity * 2
 		local function prune(order: any, outcomes: any, pending: any)
 			while #order > limit do
-				local oldest = table.remove(order, 1)
+				local oldest = table.remove(order, 1) :: string
 				if terminal_dependency_referenced(self, oldest) then
 					pending[oldest] = true
 				else
@@ -1642,7 +1644,8 @@ local function new_governor(options: SchedulerOptions?): DynamicRecord
 			elseif entry.kind == "observe" then
 				self:Observe(entry.operation_kind, entry.succeeded, entry.latency_ms, entry.error_class, entry.budget)
 			elseif entry.kind == "advance" then
-				options.advance_ms(entry.ms)
+				local advance = options.advance_ms
+				if advance ~= nil then advance(entry.ms) end
 			end
 		end
 		return result
