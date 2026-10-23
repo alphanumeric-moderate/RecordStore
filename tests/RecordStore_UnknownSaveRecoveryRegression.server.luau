@@ -719,6 +719,8 @@ do
 		retry_attempts = 1,
 		max_dirty_age_seconds = 600,
 		lease_recovery_enabled = true,
+		user_ids = { 123456, 654321 },
+		metadata = { origin = "lease-recovery-regression", counter = 7 },
 	}
 	local record = RecordStore.Mock.new(
 		"RecordStore_UnknownSaveRecoveryRegression",
@@ -778,6 +780,14 @@ do
 	local status = record:GetDurabilityStatus()
 	assert(status.ownership == "owned", "reacquired session should report owned ownership")
 	assert(status.pending_operation_id == nil, "confirmed reacquisition should clear the ambiguous operation")
+	local recovered_user_ids = record:GetUserIds()
+	assert(#recovered_user_ids == 2
+		and ((recovered_user_ids[1] == 123456 and recovered_user_ids[2] == 654321)
+			or (recovered_user_ids[1] == 654321 and recovered_user_ids[2] == 123456)),
+		"lease reacquisition must preserve the profile's DataStore user-ID association")
+	local recovered_metadata = record:GetMetadata()
+	assert(recovered_metadata.origin == "lease-recovery-regression" and recovered_metadata.counter == 7,
+		"lease reacquisition must preserve application key metadata")
 	local recovered = RecordStore.Mock.get_record_raw(
 		"RecordStore_UnknownSaveRecoveryRegression",
 		"global",
@@ -949,6 +959,59 @@ do
 		"the competing owner token must remain authoritative")
 	RecordStore.Mock.set_test_clock(nil)
 end
+
+
+RecordStore.Mock.reset()
+do
+	local fake_now = DateTime.now().UnixTimestampMillis / 1000 + 1
+	RecordStore.Mock.set_test_clock(function()
+		return fake_now
+	end)
+	local record = RecordStore.Mock.new(
+		"RecordStore_UnknownSaveRecoveryRegression",
+		"global",
+		"release-expired-after-uncommitted-close",
+		{
+			schema_version = 1,
+			autosave_interval = 1000,
+			lease_duration = 180,
+			lease_renewal = 60,
+			operation_deadline = 2,
+			retry_attempts = 1,
+			max_dirty_age_seconds = 600,
+			lease_recovery_enabled = true,
+		}
+	)
+	local open_result, open_message = record:Open({ coins = 10, label = "initial" })
+	assert(open_result == "created" or open_result == "loaded", open_message)
+	local base = RecordStore.Mock.get_record_raw(
+		"RecordStore_UnknownSaveRecoveryRegression", "global", "release-expired-after-uncommitted-close"
+	) :: { [string]: any }
+	local close_generation = base.fencing_generation
+	local close_write_id = base.write_id
+	RecordStore.Mock.set_update_failures(1, "unknown", "injected pre-commit release failure")
+	RecordStore.Mock.set_get_failures(100, "hold release verification until the lease expires")
+	assert(record:Close() == "unknown", "unverified release must retain a pending close operation")
+	fake_now += 181
+	RecordStore.Mock.set_get_failures(0)
+	local result = RecordStore.Mock.reconcile(record)
+	assert(result == "fenced", "an expired pending release must fence rather than reacquire the closed session")
+	assert(record.State == "fenced", "expired release intent must not reactivate the session")
+	local after = RecordStore.Mock.get_record_raw(
+		"RecordStore_UnknownSaveRecoveryRegression", "global", "release-expired-after-uncommitted-close"
+	) :: { [string]: any }
+	assert(after.write_id == close_write_id,
+		"expired release reconciliation must not issue a new lease-reacquisition operation")
+	assert(after.fencing_generation == close_generation,
+		"expired release reconciliation must not advance the generation after close intent")
+	assert(after.session ~= nil and ((after.session :: { [string]: any }).lease_until) <= fake_now,
+		"expired uncommitted release must not fabricate a live durable lease")
+	assert((after.data :: { [string]: any }).coins == 10,
+		"expired release must not persist an uncommitted local snapshot")
+	RecordStore.Mock.set_test_clock(nil)
+end
+
+RecordStore.Mock.reset()
 
 RecordStore.Mock.reset()
 
