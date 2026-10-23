@@ -3,6 +3,7 @@
 local fs = require("@lune/fs")
 local luau = require("@lune/luau")
 local task = require("@lune/task")
+local serde = require("@lune/serde")
 
 local SOURCES = {
 	PlayerData = fs.readFile("src/PlayerDataInitializer/PlayerData.luau"),
@@ -52,10 +53,20 @@ local function cold_start(eager_infinimath_value)
 		end,
 	}
 
+	local http_service = {
+		JSONEncode = function(_self, value)
+			return serde.encode("json", value)
+		end,
+		JSONDecode = function(_self, value)
+			return serde.decode("json", value)
+		end,
+	}
+
 	local game = {
 		GetService = function(_self, name)
-			assert(name == "Players", "unexpected startup service: " .. tostring(name))
-			return players
+			if name == "Players" then return players end
+			if name == "HttpService" then return http_service end
+			error("unexpected startup service: " .. tostring(name), 2)
 		end,
 		BindToClose = function(_self, _callback) end,
 	}
