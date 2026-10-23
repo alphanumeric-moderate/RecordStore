@@ -1,0 +1,27 @@
+{
+  "name": "RecordStore-NativeFormattingRegression",
+  "tree": {
+    "$className": "DataModel",
+    "ServerScriptService": {
+      "$className": "ServerScriptService",
+      "RecordStore": {
+        "$path": "src/PlayerDataInitializer/RecordStore.luau"
+      },
+      "IntegerInfinityValue": {
+        "$path": "src/PlayerDataInitializer/IntegerInfinityValue.luau"
+      },
+      "PlayerDataCore": {
+        "$path": "src/PlayerDataInitializer/PlayerDataCore.luau"
+      },
+      "PlayerDataSetRegression": {
+        "$path": "tests/PlayerDataSetRegression.server.luau"
+      }
+    },
+    "ReplicatedStorage": {
+      "$className": "ReplicatedStorage",
+      "InfiniteMath": {
+        "$path": "src/InfiniteMath"
+      }
+    }
+  }
+}
