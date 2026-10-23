@@ -7166,7 +7166,7 @@ local function observe(state: InternalState, event: string, result: ResultCode, 
 	end
 end
 
-RecordStore._internals.refresh_durability_risk = function(state: InternalState)
+rawset(private, "__refresh_durability_risk", function(state: InternalState)
 	local reason: string? = nil
 	if state.state == "unknown" then
 		reason = "write_or_lease_outcome_unknown"
@@ -7206,7 +7206,7 @@ RecordStore._internals.refresh_durability_risk = function(state: InternalState)
 		coroutine.close(thread)
 		state.observer_errors += 1
 	end
-end
+end)
 
 local function append_change_event(events: { ChangeEvent }, path: { string | number }, old_value: JsonValue?, new_value: JsonValue?, operation_id: string, sequence: number, kind: string): boolean
 	if #events >= CHANGE_OBSERVER_CAPACITY then
@@ -9598,7 +9598,7 @@ local function save_internal(state: InternalState, reason: string?, operation_de
 		}
 		state.next_reconciliation = now_local() + 0.25
 		state.last_reconciliation_category = "save_outcome_unknown"
-		RecordStore._internals.refresh_durability_risk(state)
+		rawget(private, "__refresh_durability_risk")(state)
 		observe(state, "save", "unknown", last_error or "save outcome is unresolved")
 		return "unknown", last_error or "save outcome is unresolved"
 	end
@@ -9630,7 +9630,7 @@ local function save_internal(state: InternalState, reason: string?, operation_de
 	state.last_successful_write_local = now_local()
 	state.busy = false
 	state.state = "active"
-	RecordStore._internals.refresh_durability_risk(state)
+	rawget(private, "__refresh_durability_risk")(state)
 	state.next_autosave = now_local() + (state.options.autosave_interval or DEFAULT_AUTOSAVE_INTERVAL)
 	if state.save_requested then
 		state.next_autosave = now_local()
@@ -10282,7 +10282,7 @@ local function is_dirty(self: Record): boolean
 	return state.change_sequence ~= state.saved_change_sequence
 end
 
-RecordStore._internals.mutation_backpressure_reason = function(state: InternalState): string?
+rawset(private, "__mutation_backpressure_reason", function(state: InternalState): string?
 	if state.options.durability_mode ~= "read_only_on_risk" then
 		return nil
 	end
@@ -10300,7 +10300,7 @@ RecordStore._internals.mutation_backpressure_reason = function(state: InternalSt
 		return "mutation rejected: oldest dirty change exceeded max_dirty_age_seconds"
 	end
 	return nil
-end
+end)
 
 local function can_mutate(self: Record): (boolean, string?)
 	local state = private[self]
@@ -10310,7 +10310,7 @@ local function can_mutate(self: Record): (boolean, string?)
 	if state.state ~= "active" or state.token == nil then
 		return false, "record ownership is not confirmed active"
 	end
-	local backpressure = RecordStore._internals.mutation_backpressure_reason(state)
+	local backpressure = rawget(private, "__mutation_backpressure_reason")(state)
 	if backpressure ~= nil then
 		return false, backpressure
 	end
@@ -10354,7 +10354,7 @@ local function get_durability_status(self: Record): { [string]: any }
 	local max_dirty_age = state.options.max_dirty_age_seconds
 		or (state.options.autosave_interval or DEFAULT_AUTOSAVE_INTERVAL) * 2
 	local slo_exceeded = dirty and dirty_age >= max_dirty_age
-	local backpressure = RecordStore._internals.mutation_backpressure_reason(state)
+	local backpressure = rawget(private, "__mutation_backpressure_reason")(state)
 	return {
 		ownership = ownership,
 		durability = durability,
@@ -10441,7 +10441,7 @@ local function set_user_ids(self: Record, user_ids: { number }): (ResultCode, st
 	if state.state ~= "active" then
 		return "fenced", "record is not actively owned"
 	end
-	local backpressure = RecordStore._internals.mutation_backpressure_reason(state)
+	local backpressure = rawget(private, "__mutation_backpressure_reason")(state)
 	if backpressure ~= nil then
 		return "capacity", backpressure
 	end
@@ -10518,7 +10518,7 @@ local function set_metadata(self: Record, metadata: Metadata): (ResultCode, stri
 	if state.state ~= "active" then
 		return "fenced", "record is not actively owned"
 	end
-	local backpressure = RecordStore._internals.mutation_backpressure_reason(state)
+	local backpressure = rawget(private, "__mutation_backpressure_reason")(state)
 	if backpressure ~= nil then
 		return "capacity", backpressure
 	end
@@ -10558,7 +10558,7 @@ local function update_metadata(self: Record, callback: (Metadata) -> Metadata): 
 	if state.state ~= "active" then
 		return "fenced", "record is not actively owned"
 	end
-	local backpressure = RecordStore._internals.mutation_backpressure_reason(state)
+	local backpressure = rawget(private, "__mutation_backpressure_reason")(state)
 	if backpressure ~= nil then
 		return "capacity", backpressure
 	end
@@ -10640,7 +10640,7 @@ local function update(self: Record, callback: (JsonValue?) -> JsonValue?): (Resu
 	if state == nil or state.state ~= "active" then
 		return "fenced", "record is not actively owned"
 	end
-	local backpressure = RecordStore._internals.mutation_backpressure_reason(state)
+	local backpressure = rawget(private, "__mutation_backpressure_reason")(state)
 	if backpressure ~= nil then
 		return "capacity", backpressure
 	end
@@ -10716,7 +10716,7 @@ local function reconcile(self: Record, template: JsonValue): (ResultCode, string
 	if state == nil or state.state ~= "active" then
 		return "fenced", "record is not actively owned"
 	end
-	local backpressure = RecordStore._internals.mutation_backpressure_reason(state)
+	local backpressure = rawget(private, "__mutation_backpressure_reason")(state)
 	if backpressure ~= nil then
 		return "capacity", backpressure
 	end
@@ -12606,7 +12606,7 @@ local function renew_internal(state: InternalState): (ResultCode, string?)
 		}
 		state.next_reconciliation = now_local() + 0.25
 		state.last_reconciliation_category = "renewal_outcome_unknown"
-		RecordStore._internals.refresh_durability_risk(state)
+		rawget(private, "__refresh_durability_risk")(state)
 		observe(state, "renew", "unknown", last_error or "renewal outcome is unresolved")
 		return "unknown", last_error or "renewal outcome is unresolved"
 	end
@@ -12631,7 +12631,7 @@ local function renew_internal(state: InternalState): (ResultCode, string?)
 	state.last_successful_write_local = now_local()
 	state.busy = false
 	state.state = "active"
-	RecordStore._internals.refresh_durability_risk(state)
+	rawget(private, "__refresh_durability_risk")(state)
 	state.next_renewal = now_local() + (state.options.lease_renewal or DEFAULT_LEASE_RENEWAL)
 	if state.change_sequence ~= state.saved_change_sequence then
 		state.next_autosave = now_local()
@@ -12933,7 +12933,7 @@ local function reconcile_unknown_internal(state: InternalState): (ResultCode, st
 		state.next_reconciliation = math.huge
 		if envelope.session ~= nil and lease_remaining > required_recovery_lease_margin(state) then
 			state.state = "active"
-			RecordStore._internals.refresh_durability_risk(state)
+			rawget(private, "__refresh_durability_risk")(state)
 			state.last_reconciliation_category = nil
 			state.next_renewal = now_local() + (state.options.lease_renewal or DEFAULT_LEASE_RENEWAL)
 			state.next_autosave = if state.change_sequence ~= state.saved_change_sequence
@@ -14092,7 +14092,7 @@ local function start_scheduler()
 			for record in active_records do
 				local state = private[record]
 				if state ~= nil then
-					RecordStore._internals.refresh_durability_risk(state)
+					rawget(private, "__refresh_durability_risk")(state)
 				end
 				if state ~= nil and (state.state :: SessionState) == "active" then
 					local now = now_local()
@@ -14157,7 +14157,7 @@ local function start_scheduler()
 			for record in recovery_records do
 				local state = private[record]
 				if state ~= nil then
-					RecordStore._internals.refresh_durability_risk(state)
+					rawget(private, "__refresh_durability_risk")(state)
 				end
 				if state ~= nil and state.state == "unknown" and state.pending_operation ~= nil then
 					local now = now_local()
