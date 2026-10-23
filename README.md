@@ -433,23 +433,39 @@ local server_status = RecordStore.get_health_snapshot()
 - `durability_first` advances the next eligible autosave deadline once dirty data reaches half of
   `max_dirty_age_seconds`. Lease renewal still takes precedence when due. These thresholds do not
   guarantee that Roblox DataStoreService will accept or complete a write by a particular time.
-- `read_only_on_risk` rejects RecordStore mutation APIs after dirty data exceeds the configured age.
-  PlayerDataCore also rejects `PlayerData.Set` and restores tracked Value-object changes while that
-  admission state is active. Game code must honor returned failures; an in-process policy cannot
-  make uncommitted memory durable.
+- **read_only_on_risk** rejects RecordStore mutation APIs once the observed dirty generation reaches
+  the configured age. In PlayerDataCore, the same policy also rejects new PlayerData.Set calls and
+  restores tracked Value-object changes if either the coalesced pending-value buffer or the Record's
+  dirty generation exceeds that age. Pending values are coalesced to at most one latest value per
+  configured field. Earlier accepted pending values remain eligible for flush; read-only admission
+  must not discard them. An in-process policy cannot make uncommitted memory durable.
 
-`max_dirty_age_seconds` defaults to twice `autosave_interval` and must be positive and at most
-86,400 seconds. `GetDurabilityStatus()` reports ownership certainty separately from durability,
-confirmed revision/generation, dirty and durable watermarks, oldest dirty age, lease margin, pending
-operation identity, policy, and mutation-admission state. The existing `on_event` option receives
-edge-triggered `durability_risk` and `durability_recovered` events. The server-level
-`get_health_snapshot()` summarizes only Records known to the current server instance; a `healthy`
-result is not a global DataStore service health guarantee.
+The game-facing policy can be selected per controller instead of editing the module default:
 
-The Lune regression suite exercises risk reporting and confirmation transitions. Mock tests do not
-establish live-service latency, throttling, or cross-server guarantees. Full PR #39 acceptance still
-requires the complete failure-injection matrix and Roblox Studio/server validation.
+    local player_data = PlayerDataCore.new({
+        DurabilityMode = "read_only_on_risk",
+        MaxDirtyAgeSeconds = 120,
+    })
 
+DurabilityMode accepts balanced, durability_first, or read_only_on_risk. MaxDirtyAgeSeconds must be
+finite, positive, and at most 86,400 seconds. These controller overrides are passed to each Record
+and also govern the PlayerDataCore pending buffer.
+
+max_dirty_age_seconds defaults to twice autosave_interval and must be positive and at most
+86,400 seconds. GetDurabilityStatus() observes supported direct mutation of the public Record.Data
+table before returning status, reports ownership certainty separately from durability, and includes
+confirmed revision/generation, dirty and durable watermarks, oldest dirty age and its evidence basis,
+lease margin, pending operation identity, policy, and mutation-admission state. Direct mutable-table
+changes are timestamped when first observed, so that age is explicitly marked as a lower bound. The
+existing on_event option receives edge-triggered durability_risk and durability_recovered events.
+The server-level get_health_snapshot() summarizes only Records known to the current server instance;
+a healthy result is not a global DataStore service health guarantee.
+
+The Lune regression suite exercises direct-data status, risk reporting, unknown-write reconciliation,
+and pending-buffer backpressure. Mock tests do not establish live-service latency, throttling, or
+cross-server guarantees. Full PR #39 acceptance still requires the complete failure-injection matrix,
+Roblox Studio/server validation, and the separately gated Mailbox, transaction, saga, migration,
+operations, and erasure phases.
 ## Benchmarks
 
 Performance is tracked with [CodSpeed](https://codspeed.io). The benchmarks run `RecordStore.Mock` scenarios outside Roblox with [Lune](https://github.com/lune-org/lune), a standalone Luau runtime. `bench/RobloxShim.luau` provides the small set of Roblox APIs the mock backend needs (`HttpService`, `DateTime`, `Enum`, `task`, ...).
