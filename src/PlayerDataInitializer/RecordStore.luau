@@ -6264,6 +6264,7 @@ local mock_update_commit_then_failure_count = 0
 local mock_update_commit_then_failure_message: string? = nil
 local mock_get_failure_count = 0
 local mock_get_failure_message: string? = nil
+local mock_before_next_update: (() -> ())? = nil
 
 local close_internal: (state: InternalState, shutdown: boolean) -> (ResultCode, string?)
 local complete_deferred_takeover: (state: InternalState) -> ()
@@ -7621,6 +7622,14 @@ local function backend_update(backend: Backend, transform: UpdateTransform, dead
 		if mock_update_failure_count > 0 then
 			mock_update_failure_count -= 1
 			return nil, nil, mock_update_failure_code, mock_update_failure_message
+		end
+		local before_update_hook = mock_before_next_update
+		mock_before_next_update = nil
+		if before_update_hook ~= nil then
+			local hook_ok, hook_error = pcall(before_update_hook)
+			if not hook_ok then
+				return nil, nil, "unknown", "mock before-update hook failed: " .. tostring(hook_error)
+			end
 		end
 		local store = get_mock_store(backend.name, backend.scope)
 		local entry = store[backend.key]
@@ -15126,6 +15135,13 @@ RecordStore.Mock = (function()
 		mock_test_clock_offset = 0
 	end
 
+	local function mock_set_before_next_update(hook: (() -> ())?)
+		if hook ~= nil and type(hook) ~= "function" then
+			error("before-update hook must be a function or nil", 2)
+		end
+		mock_before_next_update = hook
+	end
+
 	local function mock_set_update_replay(retries: number, advance_seconds: number)
 		if type(retries) ~= "number"
 			or not math.isfinite(retries)
@@ -15268,6 +15284,7 @@ RecordStore.Mock = (function()
 		get_record_raw = mock_get_record_raw,
 		get_record_version_raw = mock_get_record_version_raw,
 		set_test_clock = mock_set_test_clock,
+		set_before_next_update = mock_set_before_next_update,
 		set_update_replay = mock_set_update_replay,
 		set_update_failures = mock_set_update_failures,
 		set_update_commit_then_failures = mock_set_update_commit_then_failures,
@@ -15309,6 +15326,7 @@ RecordStore.Mock = (function()
 			mock_update_replay_retries = 0
 			mock_update_replay_advance_seconds = 0
 			mock_update_failure_count = 0
+		mock_before_next_update = nil
 			mock_update_failure_code = "budget"
 			mock_update_failure_message = nil
 			mock_update_commit_then_failure_count = 0
