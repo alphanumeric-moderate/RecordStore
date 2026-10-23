@@ -1015,4 +1015,116 @@ RecordStore.Mock.reset()
 
 RecordStore.Mock.reset()
 
+
+RecordStore.Mock.reset()
+do
+	local fake_now = DateTime.now().UnixTimestampMillis / 1000 + 1
+	RecordStore.Mock.set_test_clock(function()
+		return fake_now
+	end)
+	local record = RecordStore.Mock.new(
+		"RecordStore_UnknownSaveRecoveryRegression",
+		"global",
+		"expired-renewal-reacquisition",
+		{
+			schema_version = 1,
+			autosave_interval = 1000,
+			lease_duration = 180,
+			lease_renewal = 60,
+			operation_deadline = 2,
+			retry_attempts = 1,
+			max_dirty_age_seconds = 600,
+			lease_recovery_enabled = true,
+		}
+	)
+	local open_result, open_message = record:Open({ coins = 10, label = "initial" })
+	assert(open_result == "created" or open_result == "loaded", open_message)
+	local before = RecordStore.Mock.get_record_raw(
+		"RecordStore_UnknownSaveRecoveryRegression", "global", "expired-renewal-reacquisition"
+	) :: { [string]: any }
+	local base_revision = before.revision
+	local base_generation = before.fencing_generation
+	local base_write_id = before.write_id
+
+	fake_now += 10
+	RecordStore.Mock.set_update_failures(1, "unknown", "injected pre-commit renewal failure")
+	RecordStore.Mock.set_get_failures(100, "hold renewal verification through lease expiry")
+	assert(RecordStore.Mock.renew(record) == "unknown",
+		"an unverified pre-commit renewal must enter unknown state")
+	fake_now += 181
+	RecordStore.Mock.set_get_failures(0)
+	local result, message = RecordStore.Mock.reconcile(record)
+	assert(result == "success", tostring(message))
+	assert(record.State == "active", "safe renewal reacquisition should restore active ownership")
+	assert(record.Generation == base_generation + 1,
+		"renewal reacquisition must advance the fencing generation")
+	assert(record:GetRevision() == base_revision,
+		"renewal-only reacquisition must not create a profile data revision")
+	local after = RecordStore.Mock.get_record_raw(
+		"RecordStore_UnknownSaveRecoveryRegression", "global", "expired-renewal-reacquisition"
+	) :: { [string]: any }
+	assert(after.write_id ~= base_write_id, "renewal reacquisition must use a distinct stable operation ID")
+	assert(after.revision == base_revision and (after.data :: { [string]: any }).coins == 10,
+		"renewal reacquisition must preserve the durable profile without replaying an unknown renewal")
+	assert(((after.session :: { [string]: any }).lease_until) > fake_now,
+		"renewal reacquisition must confirm a new live lease")
+	assert(record:Close() == "closed", "reacquired renewal fixture should close")
+	RecordStore.Mock.set_test_clock(nil)
+end
+
+RecordStore.Mock.reset()
+do
+	local fake_now = DateTime.now().UnixTimestampMillis / 1000 + 1
+	RecordStore.Mock.set_test_clock(function()
+		return fake_now
+	end)
+	local record = RecordStore.Mock.new(
+		"RecordStore_UnknownSaveRecoveryRegression",
+		"global",
+		"lease-reacquisition-insufficient-margin",
+		{
+			schema_version = 1,
+			autosave_interval = 1000,
+			lease_duration = 180,
+			lease_renewal = 60,
+			operation_deadline = 2,
+			retry_attempts = 1,
+			max_dirty_age_seconds = 600,
+			lease_recovery_enabled = true,
+		}
+	)
+	local open_result, open_message = record:Open({ coins = 10, label = "initial" })
+	assert(open_result == "created" or open_result == "loaded", open_message)
+	local base_generation = record.Generation
+	local updated, update_message = record:Update(function(data)
+		(data :: { [string]: RecordStore.JsonValue }).coins = 11
+		return data
+	end)
+	assert(updated == "success", update_message)
+	fake_now += 10
+	RecordStore.Mock.set_update_failures(1, "unknown", "injected pre-commit save failure")
+	RecordStore.Mock.set_get_failures(100, "hold save verification until lease expiry")
+	assert(record:Save("lease-margin-boundary") == "unknown",
+		"margin fixture must retain an unresolved save")
+	fake_now += 181
+	RecordStore.Mock.set_get_failures(0)
+	RecordStore.Mock.set_update_replay(0, 179)
+	local result = RecordStore.Mock.reconcile(record)
+	assert(result == "fenced",
+		"reacquisition with an insufficient post-update lease margin must remain fenced")
+	assert(record.State == "fenced", "insufficient post-update margin must not reactivate the record")
+	local after = RecordStore.Mock.get_record_raw(
+		"RecordStore_UnknownSaveRecoveryRegression", "global", "lease-reacquisition-insufficient-margin"
+	) :: { [string]: any }
+	assert(after.fencing_generation == base_generation + 1,
+		"the CAS operation may commit once, but the locally unsafe session must not resume")
+	assert(((after.session :: { [string]: any }).lease_until) - fake_now <= 2,
+		"the fixture must leave less than the required recovery safety margin")
+	assert((after.data :: { [string]: any }).coins == 10,
+		"insufficient-margin reacquisition must not persist the ambiguous data snapshot")
+	RecordStore.Mock.set_test_clock(nil)
+end
+
+RecordStore.Mock.reset()
+
 print("[PASS] Unknown-save recovery and durability status preserve logical write identity, fencing, and tracked direct-data mutations.")
