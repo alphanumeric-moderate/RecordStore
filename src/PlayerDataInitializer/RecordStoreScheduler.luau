@@ -4,15 +4,69 @@
 local Scheduler = {}
 
 type DynamicRecord = { [string]: any }
-type SchedulerOptions = {
+export type SchedulerOptions = {
 	now_ms: (() -> number)?,
 	get_request_budgets: (() -> any)?,
 	advance_ms: ((number) -> ())?,
 	get_record_stats: ((any) -> any)?,
 	now_unix: (() -> number)?,
 }
-type DispatcherOptions = {
+export type DispatcherOptions = {
 	now_ms: (() -> number)?,
+}
+
+export type Governor = {
+	SetPolicy: (self: Governor, patch: { [string]: unknown }) -> (boolean, string?),
+	Stats: (self: Governor) -> { [string]: any },
+	ShadowDecision: (self: Governor, renewal_mode: string?) -> any,
+	LeaseRenewalAdvice: (self: Governor) -> any,
+	Replay: (self: Governor, log: { any }) -> { any },
+}
+export type ScheduleOptions = {
+	lane: string?,
+	due_at_ms: number?,
+	available_at_ms: number?,
+	deadline_ms: number?,
+	expires_at_ms: number?,
+	service_class: string?,
+	work_class: string?,
+	operation_class: string?,
+	dependencies: unknown?,
+	read_units: number?,
+	write_units: number?,
+	estimated_bytes: number?,
+	handler_slots: number?,
+	cost: number?,
+	max_retries: number?,
+	retry_delay_ms: number?,
+	retry_jitter_percent: number?,
+	batch_window_ms: number?,
+	batchable: boolean?,
+	batch_size: number?,
+	batch_backlog: number?,
+	on_complete: ((result: any) -> ())?,
+	mutating: boolean?,
+}
+export type ScheduleResult = {
+	code: string,
+	id: string?,
+	due_at_ms: number?,
+	work_id: string?,
+	message: string?,
+}
+export type Dispatcher = {
+	CancelQueued: (self: Dispatcher, message: string) -> number,
+	Schedule: (
+		self: Dispatcher,
+		owner_id: string,
+		work_id: string,
+		callback: (...any) -> any,
+		schedule_options: ScheduleOptions?
+	) -> ScheduleResult,
+	Kick: (self: Dispatcher) -> (),
+	SetPolicy: (self: Dispatcher, policy: { [string]: unknown }) -> (string, string?),
+	Stats: (self: Dispatcher) -> { [string]: any },
+	Close: (self: Dispatcher) -> (),
 }
 local MAX_REPLAY_TRACE_EVENTS = 8192
 local MAX_REPLAY_ADVANCE_MS = 31_536_000_000
@@ -2388,7 +2442,16 @@ local function new_dispatcher(governor: DynamicRecord, options: DispatcherOption
 	return dispatcher
 end
 
-Scheduler.new = new_governor
-Scheduler.new_dispatcher = new_dispatcher
+local function create_governor(options: SchedulerOptions?): Governor
+	return (new_governor(options) :: unknown) :: Governor
+end
+
+local function create_dispatcher(governor: Governor, options: DispatcherOptions?): Dispatcher
+	local internal_governor = (governor :: unknown) :: DynamicRecord
+	return (new_dispatcher(internal_governor, options) :: unknown) :: Dispatcher
+end
+
+Scheduler.new = create_governor
+Scheduler.new_dispatcher = create_dispatcher
 
 return Scheduler
