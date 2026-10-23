@@ -719,8 +719,6 @@ do
 		retry_attempts = 1,
 		max_dirty_age_seconds = 600,
 		lease_recovery_enabled = true,
-		user_ids = { 123456, 654321 },
-		metadata = { origin = "lease-recovery-regression", counter = 7 },
 	}
 	local record = RecordStore.Mock.new(
 		"RecordStore_UnknownSaveRecoveryRegression",
@@ -730,6 +728,13 @@ do
 	)
 	local open_result, open_message = record:Open({ coins = 10, label = "initial" })
 	assert(open_result == "created" or open_result == "loaded", open_message)
+	local ids_result, ids_message = record:SetUserIds({ 123456, 654321 })
+	assert(ids_result == "success", ids_message)
+	local metadata_result, metadata_message = record:SetMetadata({
+		origin = "lease-recovery-regression",
+		counter = 7,
+	})
+	assert(metadata_result == "success", metadata_message)
 	local before = RecordStore.Mock.get_record_raw(
 		"RecordStore_UnknownSaveRecoveryRegression",
 		"global",
@@ -787,7 +792,10 @@ do
 		"lease reacquisition must preserve the profile's DataStore user-ID association")
 	local recovered_metadata = record:GetMetadata()
 	assert(recovered_metadata.origin == "lease-recovery-regression" and recovered_metadata.counter == 7,
-		"lease reacquisition must preserve application key metadata")
+		"lease reacquisition must preserve pending application key metadata in memory")
+	local durable_info_before_retry = record:GetBackendInfo()
+	assert(durable_info_before_retry.Metadata.origin == nil,
+		"lease-only reacquisition must not falsely claim uncommitted metadata is durable")
 	local recovered = RecordStore.Mock.get_record_raw(
 		"RecordStore_UnknownSaveRecoveryRegression",
 		"global",
@@ -815,6 +823,14 @@ do
 		"the unsaved mutation should commit exactly once after safe reacquisition")
 	assert((persisted.data :: { [string]: any }).coins == 11,
 		"the retained dirty mutation was lost after lease reacquisition")
+	local persisted_info = record:GetBackendInfo()
+	assert(#persisted_info.UserIds == 2
+		and ((persisted_info.UserIds[1] == 123456 and persisted_info.UserIds[2] == 654321)
+			or (persisted_info.UserIds[1] == 654321 and persisted_info.UserIds[2] == 123456)),
+		"the follow-up save lost the retained DataStore UserIds")
+	assert(persisted_info.Metadata.origin == "lease-recovery-regression"
+		and persisted_info.Metadata.counter == 7,
+		"the follow-up save lost the retained application metadata")
 	assert(record:Close() == "closed", "reacquired lease fixture should close")
 	RecordStore.Mock.set_test_clock(nil)
 end
