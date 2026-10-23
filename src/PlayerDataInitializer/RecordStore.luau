@@ -6133,6 +6133,8 @@ type InternalState = {
 	durability_risk_active: boolean?,
 	durability_risk_reason: string?,
 	dirty_since_local: number?,
+	dirty_age_is_lower_bound: boolean?,
+	next_durability_observation_local: number?,
 	last_successful_write_local: number?,
 }
 
@@ -7184,6 +7186,19 @@ end
 scheduler_activation.cohort_bucket = scheduler_rollout_bucket(scheduler_activation.salt)
 
 scheduler_activation.refresh_durability_risk = function(state: InternalState)
+	if (state.state == "active" or state.state == "saving")
+		and not state.public_data_detached
+	then
+		local now = now_local()
+		local next_observation = state.next_durability_observation_local
+		if next_observation == nil or now >= next_observation then
+			local max_age = state.options.max_dirty_age_seconds
+				or (state.options.autosave_interval or DEFAULT_AUTOSAVE_INTERVAL) * 2
+			state.next_durability_observation_local = now
+				+ math.max(0.05, math.min(1, max_age * 0.25))
+			track_external_data_mutation(state)
+		end
+	end
 	local reason: string? = nil
 	if state.state == "unknown" then
 		reason = "write_or_lease_outcome_unknown"
@@ -9633,6 +9648,7 @@ local function save_internal(state: InternalState, reason: string?, operation_de
 	if not local_changed_during_save then
 		update_local_from_envelope(state, confirmed, confirmed_info)
 		state.dirty_since_local = nil
+		state.dirty_age_is_lower_bound = false
 	else
 		if state.dirty_since_local == nil then
 			state.dirty_since_local = now_local()
@@ -10089,8 +10105,12 @@ track_external_data_mutation = function(state: InternalState)
 	if public_record_table ~= nil then
 		public_record_table.Data = state.data
 	end
+	local begins_dirty_generation = state.change_sequence == state.saved_change_sequence
 	state.change_sequence += 1
 	mark_dirty(state)
+	if begins_dirty_generation then
+		state.dirty_age_is_lower_bound = true
+	end
 	local operation_id = HttpService:GenerateGUID(false)
 	state.current_operation_id = operation_id
 	enqueue_change_observation(state, old_data, current_data, operation_id, "direct_data_mutation")
@@ -10357,6 +10377,14 @@ local function get_durability_status(self: Record): { [string]: any }
 			reconciliation_category = "record_missing",
 		}
 	end
+	if not state.public_data_detached then
+		local now = now_local()
+		local max_age = state.options.max_dirty_age_seconds
+			or (state.options.autosave_interval or DEFAULT_AUTOSAVE_INTERVAL) * 2
+		state.next_durability_observation_local = now
+			+ math.max(0.05, math.min(1, max_age * 0.25))
+		track_external_data_mutation(state)
+	end
 	local dirty = state.change_sequence ~= state.saved_change_sequence
 	local pending = state.pending_operation
 	local ownership = if state.state == "unknown" then "uncertain"
@@ -10380,6 +10408,11 @@ local function get_durability_status(self: Record): { [string]: any }
 		durability_mode = state.options.durability_mode or "balanced",
 		maximum_dirty_age_seconds = max_dirty_age,
 		dirty_age_slo_exceeded = slo_exceeded,
+		dirty_age_basis = if not dirty then "clean"
+			elseif state.dirty_age_is_lower_bound == true
+				then "lower_bound_from_direct_mutation_observation"
+			else "tracked_dirty_generation",
+		dirty_age_is_lower_bound = dirty and state.dirty_age_is_lower_bound == true,
 		mutation_admission = if state.state ~= "active" or state.token == nil
 			then "blocked" elseif backpressure ~= nil then "read_only" else "allowed",
 		risk_active = state.durability_risk_active == true or state.state == "unknown" or slo_exceeded,
@@ -12427,6 +12460,8 @@ local function open_internal(state: InternalState, default_data: JsonValue?, rec
 		state.change_sequence = 0
 		state.saved_change_sequence = 0
 		state.dirty_since_local = nil
+		state.dirty_age_is_lower_bound = false
+		state.next_durability_observation_local = nil
 		state.pending_operation = nil
 		state.next_reconciliation = math.huge
 		state.last_reconciliation_category = nil
@@ -12938,6 +12973,7 @@ local function reconcile_unknown_internal(state: InternalState): (ResultCode, st
 			if state.change_sequence == pending.captured_change_sequence then
 				update_local_from_envelope(state, envelope, info)
 				state.dirty_since_local = nil
+				state.dirty_age_is_lower_bound = false
 				state.save_requested = false
 			else
 				if state.dirty_since_local == nil then state.dirty_since_local = now_local() end
@@ -13540,6 +13576,8 @@ local function make_record(name: string, scope: string, key: string, options: Op
 		next_reconciliation = math.huge,
 		last_reconciliation_category = nil,
 		dirty_since_local = nil,
+		dirty_age_is_lower_bound = false,
+		next_durability_observation_local = nil,
 		last_successful_write_local = nil,
 	}
 	local record: Record = {
