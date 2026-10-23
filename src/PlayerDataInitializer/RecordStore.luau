@@ -8420,7 +8420,8 @@ RecordStore.shutdown = function()
 	end
 end
 
-local function normalize_options(options: Options): (Options?, string?)
+RecordStore._internals = {}
+RecordStore._internals.normalize_options = function(options: Options): (Options?, string?)
 	if type(options) ~= "table" then
 		return nil, "options must be a table"
 	end
@@ -8607,6 +8608,7 @@ local function normalize_options(options: Options): (Options?, string?)
 	return copied, nil
 end
 
+RecordStore._internals.enqueue_static = (function()
 local function enqueue_static(name: string, scope: string, key: string, message_type: string, data: JsonValue?, mock: boolean, queue_store_name: string?, operation_deadline: number?): (ResultCode, string?)
 	local valid_identity, identity_message = validate_store_identity(name, scope, key)
 	if not valid_identity then
@@ -8715,8 +8717,18 @@ local function enqueue_static(name: string, scope: string, key: string, message_
 	return "unknown", "queue append did not appear in the verified durable state"
 end
 
+return {
+	production = function(name: string, scope: string, key: string, message_type: string, data: JsonValue?, queue_store_name: string?, operation_deadline: number?): (ResultCode, string?)
+		return enqueue_static(name, scope, key, message_type, data, false, queue_store_name, operation_deadline)
+	end,
+	mock = function(name: string, scope: string, key: string, message_type: string, data: JsonValue?, queue_store_name: string?, operation_deadline: number?): (ResultCode, string?)
+		return enqueue_static(name, scope, key, message_type, data, true, queue_store_name, operation_deadline)
+	end,
+}
+end)()
+
 function RecordStore.enqueue_async(name: string, scope: string, key: string, message_type: string, data: JsonValue?, queue_store_name: string?, operation_deadline: number?): (ResultCode, string?)
-	return enqueue_static(name, scope, key, message_type, data, false, queue_store_name, operation_deadline)
+	return RecordStore._internals.enqueue_static.production(name, scope, key, message_type, data, queue_store_name, operation_deadline)
 end
 
 function RecordStore.new(name: string, scope: string, key: string, options: Options): Record
@@ -8727,7 +8739,7 @@ function RecordStore.new(name: string, scope: string, key: string, options: Opti
 	if not valid_identity then
 		error(identity_message, 2)
 	end
-	local normalized, options_message = normalize_options(options)
+	local normalized, options_message = RecordStore._internals.normalize_options(options)
 	if normalized == nil then
 		error(options_message, 2)
 	end
@@ -8749,7 +8761,7 @@ RecordStore.Mock = (function()
 		if not valid_identity then
 			error(identity_message, 2)
 		end
-		local normalized, options_message = normalize_options(options)
+		local normalized, options_message = RecordStore._internals.normalize_options(options)
 		if normalized == nil then
 			error(options_message, 2)
 		end
@@ -9040,7 +9052,7 @@ RecordStore.Mock = (function()
 		get_version_async = get_version_mock,
 		get_version_at_time_async = get_version_at_time_mock,
 		enqueue_async = function(name: string, scope: string, key: string, message_type: string, data: JsonValue?, queue_store_name: string?, operation_deadline: number?): (ResultCode, string?)
-			return enqueue_static(name, scope, key, message_type, data, true, queue_store_name, operation_deadline)
+			return RecordStore._internals.enqueue_static.mock(name, scope, key, message_type, data, queue_store_name, operation_deadline)
 		end,
 		seed_queue_raw = function(name: string, scope: string, key: string, value: unknown, queue_store_name: string?): (ResultCode, string?)
 			return mock_seed_queue_value(name, scope, key, value, false, queue_store_name)
@@ -9111,6 +9123,8 @@ RecordStore.get_diagnostic_code = get_diagnostic_code
 
 game:BindToClose(RecordStore.shutdown)
 
+table.freeze(RecordStore._internals.enqueue_static)
+table.freeze(RecordStore._internals)
 table.freeze(RecordStore)
 
 return RecordStore
