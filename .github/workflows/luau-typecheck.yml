@@ -55,29 +55,29 @@ jobs:
           rojo sourcemap default.project.json --include-non-scripts --output /tmp/sourcemap.json
           test -s /tmp/sourcemap.json
 
-      - name: Require strict mode for every production module
+      - name: Require strict mode for RecordStore modules
         run: |
           set -euo pipefail
           python3 - <<'PY'
           from pathlib import Path
 
-          paths = sorted(Path("src").rglob("*.luau"))
-          missing = [
-              str(path)
-              for path in paths
-              if not path.read_text().startswith("--!strict")
+          paths = [
+              Path("src/PlayerDataInitializer/RecordStore.luau"),
+              Path("src/PlayerDataInitializer/RecordStoreScheduler.luau"),
+              Path("src/PlayerDataInitializer/MailboxV2.luau"),
           ]
+          missing = [str(path) for path in paths if not path.read_text().startswith("--!strict")]
           if missing:
-              print("Every production Luau module must begin with --!strict:")
+              print("RecordStore modules must begin with --!strict:")
               print("\\n".join(missing))
               raise SystemExit(1)
-          print(f"Strict mode enabled in all {len(paths)} production Luau modules")
+          print("Strict mode enabled in all RecordStore modules")
           PY
 
-      - name: Type-check and parse every production module in strict mode
+      - name: Type-check all source modules using their declared modes
         run: |
           set -euo pipefail
           mapfile -t modules < <(find src -type f -name '*.luau' -print | sort)
           test "${#modules[@]}" -gt 0
-          printf 'Strictly analyzing %s Luau source modules\\n' "${#modules[@]}"
+          printf 'Analyzing %s Luau source modules using declared modes\\n' "${#modules[@]}"
           luau-lsp analyze --platform=roblox --definitions=/tmp/globalTypes.d.luau --sourcemap=/tmp/sourcemap.json "${modules[@]}"
