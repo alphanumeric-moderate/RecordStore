@@ -7223,7 +7223,7 @@ scheduler_activation.refresh_durability_risk = function(state: InternalState)
 		coroutine.close(thread)
 		state.observer_errors += 1
 	end
-end)
+end
 
 local function append_change_event(events: { ChangeEvent }, path: { string | number }, old_value: JsonValue?, new_value: JsonValue?, operation_id: string, sequence: number, kind: string): boolean
 	if #events >= CHANGE_OBSERVER_CAPACITY then
@@ -10317,7 +10317,7 @@ scheduler_activation.mutation_backpressure_reason = function(state: InternalStat
 		return "mutation rejected: oldest dirty change exceeded max_dirty_age_seconds"
 	end
 	return nil
-end)
+end
 
 local function can_mutate(self: Record): (boolean, string?)
 	local state = private[self]
