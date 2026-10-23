@@ -14206,15 +14206,29 @@ RecordStore._internals.get_session_status_internal = function(
 	return status, "success", nil
 end
 
-function RecordStore.get_session_status_async(
-	name: string,
-	scope: string,
-	key: string,
-	operation_deadline: number?
-): (SessionStatus?, ResultCode, string?)
-	local helper = rawget(RecordStore._internals, "get_session_status_internal") :: SessionStatusResolver
-	return helper(name, scope, key, operation_deadline, false)
-end
+RecordStore.get_session_status_async = (function()
+	local helper: SessionStatusResolver = RecordStore._internals.get_session_status_internal
+	return function(
+		name: string,
+		scope: string,
+		key: string,
+		operation_deadline: number?
+	): (SessionStatus?, ResultCode, string?)
+			return helper(name, scope, key, operation_deadline, false)
+		end
+end)()
+
+RecordStore._internals.get_session_status_mock_async = (function()
+	local helper: SessionStatusResolver = RecordStore._internals.get_session_status_internal
+	return function(
+		name: string,
+		scope: string,
+		key: string,
+		operation_deadline: number?
+	): (SessionStatus?, ResultCode, string?)
+		return helper(name, scope, key, operation_deadline, true)
+	end
+end)()
 
 RecordStore._internals.normalize_options = function(options: Options): (Options?, string?)
 	if type(options) ~= "table" then
@@ -14848,15 +14862,7 @@ RecordStore.Mock = (function()
 			sync_public(record)
 			return normalize_result_code(result) or "unknown", message
 		end,
-		get_session_status_async = function(
-			name: string,
-			scope: string,
-			key: string,
-			operation_deadline: number?
-		): (SessionStatus?, ResultCode, string?)
-			local helper = rawget(RecordStore._internals, "get_session_status_internal") :: SessionStatusResolver
-			return helper(name, scope, key, operation_deadline, true)
-		end,
+		get_session_status_async = RecordStore._internals.get_session_status_mock_async,
 		read_async = read_async_mock,
 		claim_queue_message = mock_claim_queue_message,
 		dead_letter_queue_message = mock_dead_letter_queue_message,
