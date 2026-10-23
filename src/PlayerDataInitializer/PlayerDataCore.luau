@@ -5,7 +5,6 @@ local Players = game:GetService("Players")
 
 local RecordStore = require(script.Parent.RecordStore)
 local IntegerInfinityValueFactory = require(script.Parent.IntegerInfinityValue)
-local NumberFormatterFactory = require(script.Parent.NumberFormatter)
 
 type Scalar = string | number | boolean
 type DataValue = Scalar
@@ -28,10 +27,15 @@ type DataField = {
 	rounding: IntegerInfinityRounding?,
 }
 
+type NumberFormatOptions = {
+	decimals: number?,
+	trim_trailing_zeros: boolean?,
+}
+
 type Leaderstat = {
 	key: string,
 	name: string,
-	number_format: NumberFormatterFactory.Options?,
+	number_format: NumberFormatOptions?,
 }
 
 type InfiniteMathValueNode = { kind: string }
@@ -39,7 +43,7 @@ type InfiniteMathValueFactoryAPI = {
 	is_value: (value: unknown) -> boolean,
 	normalize: (value: unknown) -> string,
 	is_serialized: (value: unknown) -> boolean,
-	format: (value: unknown, options: NumberFormatterFactory.Options?) -> string,
+	format: (value: unknown, options: NumberFormatOptions?) -> string,
 	new: (name: string, initial_value: unknown) -> StringValue,
 	normalize_serialized: ((value: unknown) -> (string?, InfiniteMathValueNode?))?,
 	is_unsupported_version: ((value: unknown) -> boolean)?,
@@ -51,7 +55,7 @@ local function get_infinitemath_value_factory(): InfiniteMathValueFactoryAPI
 	if cached_infinitemath_value_factory == nil then
 		cached_infinitemath_value_factory = require(script.Parent.InfiniteMathValue) :: InfiniteMathValueFactoryAPI
 	end
-	return cached_infinitemath_value_factory
+	return cached_infinitemath_value_factory :: InfiniteMathValueFactoryAPI
 end
 
 local InfiniteMathValueFactory: InfiniteMathValueFactoryAPI = table.freeze({
@@ -64,14 +68,14 @@ local InfiniteMathValueFactory: InfiniteMathValueFactoryAPI = table.freeze({
 	is_serialized = function(value: unknown): boolean
 		return get_infinitemath_value_factory().is_serialized(value)
 	end,
-	format = function(value: unknown, options: NumberFormatterFactory.Options?): string
+	format = function(value: unknown, options: NumberFormatOptions?): string
 		return get_infinitemath_value_factory().format(value, options)
 	end,
 	new = function(name: string, initial_value: unknown): StringValue
 		return get_infinitemath_value_factory().new(name, initial_value)
 	end,
 	is_unsupported_version = function(value: unknown): boolean
-		local check = get_infinimath_value_factory().is_unsupported_version
+		local check = get_infinitemath_value_factory().is_unsupported_version
 		return if check ~= nil then check(value) else false
 	end,
 	normalize_serialized = function(value: unknown): (string?, InfiniteMathValueNode?)
@@ -91,7 +95,6 @@ export type Dependencies = {
 	Players: typeof(Players)?,
 	RecordStore: typeof(RecordStore)?,
 	IntegerInfinityValue: typeof(IntegerInfinityValueFactory)?,
-	NumberFormatter: typeof(NumberFormatterFactory)?,
 	InfiniteMathValue: InfiniteMathValueFactoryAPI?,
 	new_instance: ((string) -> Instance)?,
 	task: typeof(task)?,
@@ -102,7 +105,7 @@ type PlayerRecord = RecordStore.Record
 type PlayerValuePathCache = {
 	leaderstats: Instance?,
 	player_data_values: Instance?,
-	values_by_key: { [string]: Instance },
+	values_by_key: { [string]: Instance? },
 }
 type PlayerValuePathKey = "leaderstats" | "player_data_values"
 
@@ -127,13 +130,27 @@ end
 local function define_leaderstat(
 	key: string,
 	name: string,
-	number_format: NumberFormatterFactory.Options?
+	number_format: NumberFormatOptions?
 ): Leaderstat
 	return {
 		key = key,
 		name = name,
 		number_format = number_format,
 	}
+end
+
+local function validate_number_format_options(options: NumberFormatOptions)
+	if type(options) ~= "table" then error("options must be a table", 2) end
+	local decimals = options.decimals
+	if decimals ~= nil and (
+		type(decimals) ~= "number"
+		or not math.isfinite(decimals)
+		or math.floor(decimals) ~= decimals
+		or decimals < 0
+		or decimals > 6
+	) then error("options.decimals must be an integer from 0 through 6", 2) end
+	local trim = options.trim_trailing_zeros
+	if trim ~= nil and type(trim) ~= "boolean" then error("options.trim_trailing_zeros must be a boolean", 2) end
 end
 
 local CONFIG = {
@@ -187,9 +204,9 @@ local function resolve_rounding(value: unknown): IntegerInfinityRounding
 		return "nearest"
 	end
 
-	if value == "floor" or value == "ceil" or value == "trunc" then
-		return value
-	end
+	if value == "floor" then return "floor" end
+	if value == "ceil" then return "ceil" end
+	if value == "trunc" then return "trunc" end
 
 	error('rounding must be "nearest", "floor", "ceil", or "trunc"', 3)
 end
@@ -325,7 +342,7 @@ for key, field in pairs(CONFIG.data) do
 			error(("CONFIG.data.%s.default must be a number for IntegerInfinityValue"):format(key))
 		end
 
-		local rounding = resolve_rounding(field.rounding)
+		local rounding: IntegerInfinityRounding = resolve_rounding(field.rounding)
 		field.rounding = rounding
 		field.default = normalize_integer_infinity(default_value, rounding)
 	end
@@ -383,7 +400,7 @@ for _, leaderstat in ipairs(CONFIG.leaderstats.values) do
 		end
 
 		local format_ok, format_error = pcall(function()
-			NumberFormatterFactory.format(0, leaderstat.number_format)
+			validate_number_format_options(leaderstat.number_format :: NumberFormatOptions)
 		end)
 		if not format_ok then
 			error(
@@ -418,7 +435,7 @@ local function validate_player_data(
 	infinitemath_factory: InfiniteMathValueFactoryAPI?
 ): (boolean, string?)
 	if type(value) ~= "table" then return false, "player data must be an object" end
-	for key, item in value do
+	for key, item in pairs(value) do
 		if type(key) ~= "string" then return false, "player data keys must be strings" end
 		local item_type = type(item)
 		if item_type ~= "string" and item_type ~= "number" and item_type ~= "boolean" then
@@ -426,7 +443,7 @@ local function validate_player_data(
 		end
 		local field = CONFIG.data[key]
 		if field ~= nil and field.class_name == "InfiniteMathValue" then
-			local factory = infinimath_factory or InfiniteMathValueFactory
+			local factory = infinitemath_factory or InfiniteMathValueFactory
 			local supported = item_type == "string" and factory.is_serialized(item)
 			local unsupported = item_type == "string" and factory.is_unsupported_version ~= nil
 				and factory.is_unsupported_version(item)
@@ -446,7 +463,7 @@ local function normalize_player_data(
 	if type(value) ~= "table" then return nil, false end
 	local result: PlayerData = {}
 	local changed = false
-	for key, item in value do
+	for key, item in pairs(value) do
 		if type(key) ~= "string" then return nil, false end
 		local item_type = type(item)
 		if item_type == "number" then result[key] = item
@@ -490,14 +507,13 @@ local function should_warn_result(result: RecordStore.ResultCode): boolean
 end
 
 local function new(dependencies: Dependencies?): Controller
-	local injected = dependencies or {}
+	local injected: Dependencies = dependencies or {}
 	local players = injected.Players or Players
 	local record_store = injected.RecordStore or RecordStore
 	local integer_infinity_value_factory = injected.IntegerInfinityValue or IntegerInfinityValueFactory
-	local number_formatter = injected.NumberFormatter or NumberFormatterFactory
 	local infinitemath_value_factory = injected.InfiniteMathValue or InfiniteMathValueFactory
 
-	local new_instance = injected.new_instance or function(class_name: string): Instance
+	local new_instance: (class_name: string) -> Instance = injected.new_instance or function(class_name: string): Instance
 		return Instance.new(class_name)
 	end
 	local scheduler = injected.task or task
@@ -556,7 +572,7 @@ local function new(dependencies: Dependencies?): Controller
 	end
 
 	local function is_retryable_load_result(result: RecordStore.ResultCode, operation: string): boolean
-		local check_ok, retryable = pcall(function()
+		local check_ok, retryable = pcall(function(): boolean
 			return record_store.is_retryable_result(result, operation)
 		end)
 		return check_ok and retryable == true
@@ -582,7 +598,7 @@ local function new(dependencies: Dependencies?): Controller
 		message: string?,
 		record: PlayerRecord?
 	): string
-		local code_ok, returned_code = pcall(function()
+		local code_ok, returned_code = pcall(function(): string
 			return record_store.get_diagnostic_code(phase, result)
 		end)
 		local code = if code_ok and type(returned_code) == "string" then returned_code else "RS-LOAD-UNKNOWN"
@@ -662,7 +678,7 @@ local function new(dependencies: Dependencies?): Controller
 	local player_added_connection: RBXScriptConnection? = nil
 	local player_removing_connection: RBXScriptConnection? = nil
 	local sessions: {[Player]: PlayerRecord} = {}
-	local player_value_paths: { [Player]: PlayerValuePathCache } = setmetatable({}, { __mode = "k" })
+	local player_value_paths = (setmetatable({}, { __mode = "k" }) :: any) :: { [Player]: PlayerValuePathCache }
 	local loading: {[Player]: boolean} = {}
 	local cancelled_loading: {[Player]: boolean} = {}
 	local departed_players: {[Player]: boolean} = {}
@@ -752,7 +768,7 @@ local function new(dependencies: Dependencies?): Controller
 				continue
 			end
 
-			last_result = if call_ok then result else "unknown"
+			last_result = if call_ok then result :: RecordStore.ResultCode else "unknown"
 			last_message = if call_ok then message else tostring(result)
 			merge_pending(record, batch)
 			if last_result ~= "busy" then
@@ -780,7 +796,7 @@ local function new(dependencies: Dependencies?): Controller
 			last_result = "busy"
 			last_message = "PlayerData flush deadline expired with pending changes"
 		end
-		if should_warn_result(last_result) then
+		if should_warn_result(last_result :: RecordStore.ResultCode) then
 			warn("[PlayerData]", record.Key, last_result, last_message or "")
 		end
 		return false, last_result, last_message
@@ -795,7 +811,7 @@ local function new(dependencies: Dependencies?): Controller
 		scheduler.defer(function()
 			flush_scheduled[record] = nil
 			local flushed, result, message = flush_pending_changes(record)
-			if not flushed and result ~= nil and should_warn_result(result) then
+			if not flushed and result ~= nil and should_warn_result(result :: RecordStore.ResultCode) then
 				warn("[PlayerData]", record.Key, result, message or "")
 			end
 		end)
@@ -879,10 +895,10 @@ local function new(dependencies: Dependencies?): Controller
 			if restoring then return end
 			if record.State ~= "active" or closing_records[record] then
 				restoring = true
-				local restore_ok, restore_error = pcall(assign_backing_value, instance, last_valid_value)
+				local restore_ok = pcall(assign_backing_value, instance, last_valid_value)
 				restoring = false
 				if not restore_ok then
-					warn("[PlayerData]", record.Key, "could not restore a rejected value change", key, tostring(restore_error))
+					warn("[PlayerData]", record.Key, "could not restore a rejected value change", key, "unknown error")
 				end
 				return
 			end
@@ -890,10 +906,10 @@ local function new(dependencies: Dependencies?): Controller
 			local value_type = type(new_value)
 			if value_type ~= "number" and value_type ~= "string" and value_type ~= "boolean" then
 				restoring = true
-				local restore_ok, restore_error = pcall(assign_backing_value, instance, last_valid_value)
+				local restore_ok = pcall(assign_backing_value, instance, last_valid_value)
 				restoring = false
 				if not restore_ok then
-					warn("[PlayerData]", record.Key, "could not restore an invalid value change", key, tostring(restore_error))
+					warn("[PlayerData]", record.Key, "could not restore an invalid value change", key, "unknown error")
 				end
 				return
 			end
@@ -906,10 +922,10 @@ local function new(dependencies: Dependencies?): Controller
 			)
 			if normalized_value == nil then
 				restoring = true
-				local restore_ok, restore_error = pcall(assign_backing_value, instance, last_valid_value)
+				local restore_ok = pcall(assign_backing_value, instance, last_valid_value)
 				restoring = false
 				if not restore_ok then
-					warn("[PlayerData]", record.Key, "could not restore an invalid value change", key, tostring(restore_error))
+					warn("[PlayerData]", record.Key, "could not restore an invalid value change", key, "unknown error")
 				end
 				return
 			end
@@ -917,10 +933,10 @@ local function new(dependencies: Dependencies?): Controller
 			last_valid_value = normalized_value
 			if normalized_value ~= new_value then
 				restoring = true
-				local assign_ok, assign_error = pcall(assign_backing_value, instance, normalized_value)
+				local assign_ok = pcall(assign_backing_value, instance, normalized_value)
 				restoring = false
 				if not assign_ok then
-					warn("[PlayerData]", record.Key, "could not canonicalize a value change", key, tostring(assign_error))
+					warn("[PlayerData]", record.Key, "could not canonicalize a value change", key, "unknown error")
 					return
 				end
 			end
@@ -992,9 +1008,10 @@ local function new(dependencies: Dependencies?): Controller
 				existing_values:Destroy()
 			end
 
-			player_data_values = new_folder()
-			player_data_values.Name = "PlayerDataValues"
-			player_data_values:SetAttribute("RecordStoreManaged", true)
+			local values_folder: Folder = new_folder()
+			values_folder.Name = "PlayerDataValues"
+			values_folder:SetAttribute("RecordStoreManaged", true)
+			player_data_values = values_folder
 		end
 
 		local leaderstats = new_folder()
@@ -1018,12 +1035,14 @@ local function new(dependencies: Dependencies?): Controller
 			if field.class_name == "InfiniteMathValue" then
 				local value_folder = player_data_values
 				if value_folder == nil then error("InfiniteMath leaderstats require the PlayerDataValues folder") end
-				local backing_value = create_infinitemath_backing_value(player, record, definition.key, stored_value)
+				local backing_value = create_infinitemath_backing_value(player, record, definition.key, stored_value :: string)
 				local display_value = new_string_value()
 				display_value.Name = definition.name
 				display_value.Value = infinitemath_value_factory.format(stored_value, definition.number_format)
 				display_value.Changed:Connect(function()
-					local ok, expected = pcall(infinitemath_value_factory.format, backing_value.Value, definition.number_format)
+					local ok, expected = pcall(function(): string
+					return infinitemath_value_factory.format(backing_value.Value, definition.number_format)
+				end)
 					if ok and display_value.Value ~= expected then display_value.Value = expected end
 				end)
 				backing_value.Changed:Connect(function(serialized_value: string)
@@ -1032,7 +1051,8 @@ local function new(dependencies: Dependencies?): Controller
 					end
 				end)
 				display_value.Parent = leaderstats
-				backing_value.Parent = value_folder
+				local backing_instance: Instance = backing_value
+				backing_instance.Parent = value_folder
 				continue
 			end
 			local format_options = definition.number_format
@@ -1073,21 +1093,22 @@ local function new(dependencies: Dependencies?): Controller
 
 				local display_value = new_string_value()
 				display_value.Name = definition.name
-				display_value.Value = number_formatter.format(stored_value, format_options)
+				display_value.Value = infinitemath_value_factory.format(stored_value, format_options)
 				display_value.Changed:Connect(function()
-					local expected = number_formatter.format(backing_value.Value, format_options)
+					local expected = infinitemath_value_factory.format(backing_value.Value, format_options)
 					if display_value.Value ~= expected then
 						display_value.Value = expected
 					end
 				end)
 
-				backing_value.Changed:Connect(function(new_value: number)
-					display_value.Value = number_formatter.format(new_value, format_options)
+				backing_value:GetPropertyChangedSignal("Value"):Connect(function()
+					display_value.Value = infinitemath_value_factory.format(backing_value.Value, format_options)
 				end)
 				connect_persistent_value(record, definition.key, backing_value, stored_value)
 
 				display_value.Parent = leaderstats
-				backing_value.Parent = value_folder
+				local backing_instance: Instance = backing_value
+				backing_instance.Parent = value_folder
 				continue
 			end
 
@@ -1176,7 +1197,7 @@ local function new(dependencies: Dependencies?): Controller
 		end
 		leaderstats.Parent = player
 
-		local values_by_key: { [string]: Instance } = {}
+		local values_by_key: { [string]: Instance? } = {}
 		for key, field in pairs(CONFIG.data) do
 			local definition = leaderstat_by_key[key]
 			local value_instance: Instance? = nil
@@ -1259,7 +1280,7 @@ local function new(dependencies: Dependencies?): Controller
 
 	local function normalize_set_value(field: DataField, value: unknown): DataValue?
 		if field.class_name == "InfiniteMathValue" then
-			local normalize_ok, normalized = pcall(function()
+			local normalize_ok, normalized = pcall(function(): string
 				return infinitemath_value_factory.normalize(value)
 			end)
 			if normalize_ok and type(normalized) == "string" then
@@ -1329,9 +1350,9 @@ local function new(dependencies: Dependencies?): Controller
 				return false, ("runtime value instance for PlayerData field %q is missing"):format(key)
 			end
 
-			local assign_ok, assign_error = pcall(assign_player_value, instance, normalized)
+			local assign_ok = pcall(assign_player_value, instance, normalized)
 			if not assign_ok then
-				return false, ("could not assign PlayerData field %q: %s"):format(key, tostring(assign_error))
+				return false, ("could not assign PlayerData field %q: %s"):format(key, "unknown error")
 			end
 			return true, nil
 		end
@@ -1477,7 +1498,7 @@ local function new(dependencies: Dependencies?): Controller
 		set_load_status(player, "Loading")
 
 		local event_record: PlayerRecord? = nil
-		local create_ok, record_or_error = pcall(function()
+		local create_ok, record_or_error = pcall(function(): RecordStore.Record
 			return record_store.new(CONFIG.store_name, CONFIG.scope, resolve_key(player), {
 				schema_version = CONFIG.schema_version,
 				autosave_interval = CONFIG.autosave_interval,

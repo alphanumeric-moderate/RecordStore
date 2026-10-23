@@ -14,9 +14,9 @@ local function resolve_rounding(value: unknown): Rounding
 		return "nearest"
 	end
 
-	if value == "floor" or value == "ceil" or value == "trunc" then
-		return value
-	end
+	if value == "floor" then return "floor" end
+	if value == "ceil" then return "ceil" end
+	if value == "trunc" then return "trunc" end
 
 	error('rounding must be "nearest", "floor", "ceil", or "trunc"', 3)
 end
@@ -73,7 +73,7 @@ function IntegerInfinityValue.new(
 		error("options must be a table", 2)
 	end
 
-	local rounding = resolve_rounding(
+	local rounding: Rounding = resolve_rounding(
 		if options == nil then nil else options.rounding
 	)
 

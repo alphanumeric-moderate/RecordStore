@@ -10,9 +10,6 @@
       "IntegerInfinityValue": {
         "$path": "src/PlayerDataInitializer/IntegerInfinityValue.luau"
       },
-      "NumberFormatter": {
-        "$path": "src/PlayerDataInitializer/NumberFormatter.luau"
-      },
       "PlayerDataCore": {
         "$path": "src/PlayerDataInitializer/PlayerDataCore.luau"
       },
@@ -28,8 +25,8 @@
       "IntegerInfinityValueRegression": {
         "$path": "tests/IntegerInfinityValueRegression.server.luau"
       },
-      "NumberFormatterRegression": {
-        "$path": "tests/NumberFormatterRegression.server.luau"
+      "InfiniteMathFormattingRegression": {
+        "$path": "tests/InfiniteMathFormattingRegression.server.luau"
       },
       "PlayerDataSetRegression": {
         "$path": "tests/PlayerDataSetRegression.server.luau"

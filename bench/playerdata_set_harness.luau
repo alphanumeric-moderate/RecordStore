@@ -28,6 +28,7 @@ end
 	local fs = require("@lune/fs")
 	local luau = require("@lune/luau")
 	local task = require("@lune/task")
+	local InfiniteMath = require("./infinimath_shim").load_infinitemath()
 	local builtin_typeof = typeof
 	
 	local function make_signal()
@@ -78,6 +79,13 @@ end
 	
 	function instance_methods:GetAttribute(name)
 		return self._attributes[name]
+	end
+
+	function instance_methods:GetPropertyChangedSignal(property_name)
+		if property_name == "Value" then
+			return self._signals.Changed
+		end
+		error("unsupported property-change signal: " .. tostring(property_name), 2)
 	end
 	
 	function instance_methods:Destroy()
@@ -267,9 +275,6 @@ end
 		return record
 	end
 	
-	local NumberFormatter = luau.load(fs.readFile("src/PlayerDataInitializer/NumberFormatter.luau"), {
-		debugName = "NumberFormatter",
-	})()
 	local IntegerInfinityValue = luau.load(fs.readFile("src/PlayerDataInitializer/IntegerInfinityValue.luau"), {
 		debugName = "IntegerInfinityValue",
 		environment = { Instance = Instance },
@@ -278,7 +283,9 @@ end
 		is_value = function(value) return type(value) == "string" end,
 		normalize = function(value) return tostring(value) end,
 		is_serialized = function(value) return type(value) == "string" end,
-		format = function(value) return tostring(value) end,
+		format = function(value, options)
+			return if type(value) == "number" then InfiniteMath.format(value, options) else tostring(value)
+		end,
 		new = function(name, value)
 			local backing = Instance.new("StringValue")
 			backing.Name = name
@@ -290,7 +297,6 @@ end
 	local module_tokens = {
 		RecordStore = {},
 		IntegerInfinityValue = {},
-		NumberFormatter = {},
 		InfiniteMathValue = {},
 	}
 	local module_script = {
@@ -308,7 +314,6 @@ end
 	local function mock_require(target)
 		if target == module_tokens.RecordStore then return RecordStore end
 		if target == module_tokens.IntegerInfinityValue then return IntegerInfinityValue end
-		if target == module_tokens.NumberFormatter then return NumberFormatter end
 		if target == module_tokens.InfiniteMathValue then
 			module_require_counts.InfiniteMathValue += 1
 			return InfiniteMathValue
@@ -368,7 +373,6 @@ end
 		Players = Players,
 		RecordStore = RecordStore,
 		IntegerInfinityValue = IntegerInfinityValue,
-		NumberFormatter = NumberFormatter,
 		InfiniteMathValue = InfiniteMathValue,
 		new_instance = function(class_name) return Instance.new(class_name) end,
 		task = task,
