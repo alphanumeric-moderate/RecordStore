@@ -49,112 +49,35 @@ jobs:
           rojo build tests-native-formatting.project.json -o /tmp/RecordStore-NativeFormattingRegression.rbxlx
           test -s /tmp/RecordStore-NativeFormattingRegression.rbxlx
 
-      - name: Generate a sourcemap with the established RecordStore mode
+      - name: Generate a Rojo sourcemap
         run: |
           set -euo pipefail
-          sed '1s/^--!strict$/--!nonstrict/' src/PlayerDataInitializer/RecordStore.luau > /tmp/RecordStore.nonstrict.luau
           rojo sourcemap default.project.json --include-non-scripts --output /tmp/sourcemap.json
-          cp /tmp/sourcemap.json /tmp/sourcemap-strict.json
-          python3 - <<'PY'
-          import json
-          from pathlib import Path
-
-          source_map_path = Path("/tmp/sourcemap.json")
-          source_map = json.loads(source_map_path.read_text())
-          replacement = "/tmp/RecordStore.nonstrict.luau"
-          target_suffix = "src/PlayerDataInitializer/RecordStore.luau"
-          replaced = 0
-
-          def rewrite(node):
-              global replaced
-              if isinstance(node, dict):
-                  paths = node.get("filePaths", [])
-                  if node.get("name") == "RecordStore" and any(str(path).replace("\\", "/").endswith(target_suffix) for path in paths):
-                      node["filePaths"] = [replacement]
-                      replaced += 1
-                  for value in node.values():
-                      rewrite(value)
-              elif isinstance(node, list):
-                  for value in node:
-                      rewrite(value)
-
-          rewrite(source_map)
-          if replaced != 1:
-              raise SystemExit(f"expected exactly one RecordStore sourcemap node, found {replaced}")
-          source_map_path.write_text(json.dumps(source_map))
-          PY
           test -s /tmp/sourcemap.json
 
-      - name: Capture strict RecordStore diagnostics
-        continue-on-error: true
-        run: |
-          set +e
-          timeout 180s luau-lsp analyze --platform=roblox --definitions=/tmp/globalTypes.d.luau --sourcemap=/tmp/sourcemap-strict.json \
-            src/PlayerDataInitializer/RecordStore.luau \
-            src/PlayerDataInitializer/RecordStoreScheduler.luau \
-            src/PlayerDataInitializer/MailboxV2.luau > /tmp/RecordStore.strict.log 2>&1
-          status=$?
-          set -e
-          ANALYZER_STATUS="$status" python3 - <<'PY'
-          import collections
-          import os
-          import re
-          from pathlib import Path
-
-          lines = Path("/tmp/RecordStore.strict.log").read_text(errors="replace").splitlines()
-          relevant = [
-              line for line in lines
-              if "TypeError:" in line
-              or "Internal error:" in line
-              or "Code is too complex to typecheck" in line
-          ]
-          internal = [line for line in relevant if "Internal error:" in line or "blocked-" in line]
-          paths = ("RecordStore.luau", "RecordStoreScheduler.luau", "MailboxV2.luau")
-          by_module = {path: [] for path in paths}
-          for line in relevant:
-              matched = next((path for path in paths if path in line), None)
-              if matched is not None:
-                  by_module[matched].append(line)
-
-          categories = collections.Counter()
-          for line in relevant:
-              match = re.search(r"(?:TypeError|Internal error): (.*)", line)
-              if match is None:
-                  continue
-              message = match.group(1)
-              if message.startswith("Key '"):
-                  category = "Missing field/key"
-              elif message.startswith("Unknown type used in "):
-                  category = "Unknown operand type"
-              elif message.startswith("Expected this to be"):
-                  category = "Type mismatch"
-              elif message.startswith("Table type"):
-                  category = "Table shape mismatch"
-              elif message.startswith("Argument count mismatch"):
-                  category = "Argument count mismatch"
-              elif message.startswith("Value of type"):
-                  category = "Nilability mismatch"
-              else:
-                  category = message[:110]
-              categories[category] += 1
-
-          print(f"Strict RecordStore-family diagnostics: {len(relevant)}")
-          print(f"Internal/blocked diagnostics: {len(internal)}")
-          print(f"Analyzer exit status: {os.environ['ANALYZER_STATUS']}")
-          for name, items in by_module.items():
-              print(f"--- {name}: {len(items)} diagnostics; first 10 ---")
-              for line in items[:10]:
-                  print(line)
-          print("--- Most common diagnostic shapes ---")
-          for category, count in categories.most_common(20):
-              print(f"{count}: {category}")
-          PY
-
-      - name: Analyze every source module
+      - name: Require strict mode for every production module
         run: |
           set -euo pipefail
-          mapfile -t modules < <(find src -type f -name '*.luau' ! -path 'src/PlayerDataInitializer/RecordStore.luau' -print | sort)
+          python3 - <<'PY'
+          from pathlib import Path
+
+          paths = sorted(Path("src").rglob("*.luau"))
+          missing = [
+              str(path)
+              for path in paths
+              if not path.read_text().startswith("--!strict")
+          ]
+          if missing:
+              print("Every production Luau module must begin with --!strict:")
+              print("\\n".join(missing))
+              raise SystemExit(1)
+          print(f"Strict mode enabled in all {len(paths)} production Luau modules")
+          PY
+
+      - name: Type-check and parse every production module in strict mode
+        run: |
+          set -euo pipefail
+          mapfile -t modules < <(find src -type f -name '*.luau' -print | sort)
           test "${#modules[@]}" -gt 0
-          printf 'Analyzing %s Luau source modules plus RecordStore in its established nonstrict mode\n' "${#modules[@]}"
+          printf 'Strictly analyzing %s Luau source modules\\n' "${#modules[@]}"
           luau-lsp analyze --platform=roblox --definitions=/tmp/globalTypes.d.luau --sourcemap=/tmp/sourcemap.json "${modules[@]}"
-          luau-lsp analyze --platform=roblox --definitions=/tmp/globalTypes.d.luau --sourcemap=/tmp/sourcemap.json /tmp/RecordStore.nonstrict.luau
