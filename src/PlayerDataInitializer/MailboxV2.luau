@@ -3057,7 +3057,8 @@ function MockStore.new(): MockStoreState
 		advance_time = nil,
 		replay_next_update = 0,
 	}
-	return setmetatable(state, MockStore)
+	setmetatable(state, MockStore)
+	return state
 end
 
 function MockStore.GetAsync(self: MockStoreState, key: string): unknown
