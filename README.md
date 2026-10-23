@@ -462,6 +462,7 @@ The game-facing policy can be selected per controller instead of editing the mod
     local player_data = PlayerDataCore.new({
         DurabilityMode = "read_only_on_risk",
         MaxDirtyAgeSeconds = 120,
+        LeaseRecoveryEnabled = false,
     })
 
 DurabilityMode accepts balanced, durability_first, or read_only_on_risk. MaxDirtyAgeSeconds must be
