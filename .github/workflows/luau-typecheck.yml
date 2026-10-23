@@ -92,7 +92,9 @@ jobs:
           status=$?
           set -e
           ANALYZER_STATUS="$status" python3 - <<'PY'
+          import collections
           import os
+          import re
           from pathlib import Path
 
           lines = Path("/tmp/RecordStore.strict.log").read_text(errors="replace").splitlines()
@@ -103,12 +105,42 @@ jobs:
               or "Code is too complex to typecheck" in line
           ]
           internal = [line for line in relevant if "Internal error:" in line or "blocked-" in line]
+          regions = {
+              "scheduler (1-2388)": [],
+              "mailbox (2389-5495)": [],
+              "RecordStore core (5496+)": [],
+          }
+          categories = collections.Counter()
+          for line in relevant:
+              match = re.search(r"RecordStore\\.luau\\((\\d+),\\d+\\): (?:TypeError|Internal error): (.*)", line)
+              if match is None:
+                  continue
+              source_line = int(match.group(1))
+              message = match.group(2)
+              if source_line <= 2388:
+                  region = "scheduler (1-2388)"
+              elif source_line <= 5495:
+                  region = "mailbox (2389-5495)"
+              else:
+                  region = "RecordStore core (5496+)"
+              regions[region].append(line)
+              category = re.sub(r"^Key '.*", "Missing field/key", message)
+              category = re.sub(r"^Unknown type used in .*", "Unknown operand type", category)
+              category = re.sub(r"^Expected this to be .*", "Type mismatch", category)
+              category = re.sub(r"^Table type .*", "Table shape mismatch", category)
+              category = re.sub(r"^Argument count mismatch.*", "Argument count mismatch", category)
+              categories[category] += 1
+
           print(f"Strict RecordStore analyzer diagnostics: {len(relevant)}")
           print(f"Internal/blocked diagnostics: {len(internal)}")
           print(f"Analyzer exit status: {os.environ['ANALYZER_STATUS']}")
-          print("--- First 240 relevant diagnostics ---")
-          for line in relevant[:240]:
-              print(line)
+          for name, items in regions.items():
+              print(f"--- {name}: {len(items)} diagnostics; first 12 ---")
+              for line in items[:12]:
+                  print(line)
+          print("--- Most common diagnostic shapes ---")
+          for category, count in categories.most_common(25):
+              print(f"{count}: {category}")
           PY
 
       - name: Analyze every source module
