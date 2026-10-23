@@ -488,4 +488,32 @@ do
 end
 
 RecordStore.Mock.reset()
-print("[PASS] Unknown-save recovery preserves write identity and fencing; durability risk is observable, bounded, and cleared only after confirmed recovery.")
+do
+	local record = open_test_record("status-detects-direct-data-mutation")
+	local before = record:GetDurabilityStatus()
+	assert(before.dirty == false, "newly opened record should be clean before direct mutation")
+
+	local data = record.Data :: { [string]: RecordStore.JsonValue }
+	data.coins = 15
+
+	local status = record:GetDurabilityStatus()
+	assert(status.dirty == true,
+		"durability status must detect supported direct Record.Data mutation before reporting clean")
+	assert(status.dirty_watermark > status.durable_watermark,
+		"direct Record.Data mutation must advance the dirty watermark before status returns")
+	assert(status.oldest_dirty_age >= 0, "dirty age must remain a valid non-negative duration")
+
+	local save_result, save_message = record:Save("direct-data-status-regression")
+	assert(save_result == "saved", save_message)
+	local durable = RecordStore.Mock.get_record_raw(
+		"RecordStore_UnknownSaveRecoveryRegression",
+		"global",
+		"status-detects-direct-data-mutation"
+	) :: { [string]: any }
+	assert((durable.data :: { [string]: any }).coins == 15,
+		"status observation must not discard a valid direct Record.Data mutation")
+	assert(record:Close() == "closed", "direct-data status regression record should close")
+end
+
+RecordStore.Mock.reset()
+print("[PASS] Unknown-save recovery and durability status preserve logical write identity, fencing, and tracked direct-data mutations.")
