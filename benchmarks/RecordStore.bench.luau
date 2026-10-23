@@ -48,14 +48,14 @@ local mailbox_module_token = {}
 globals.script = {
 	Parent = {
 		RecordStoreScheduler = scheduler_module_token,
-		RecordStoreMailboxV2 = mailbox_module_token,
+		MailboxV2 = mailbox_module_token,
 	},
 }
 globals.require = function(target)
 	if target == scheduler_module_token then
 		return original_require("../src/PlayerDataInitializer/RecordStoreScheduler")
 	elseif target == mailbox_module_token then
-		return original_require("../src/PlayerDataInitializer/RecordStoreMailboxV2")
+		return original_require("../src/PlayerDataInitializer/MailboxV2")
 	end
 	return original_require(target)
 end
