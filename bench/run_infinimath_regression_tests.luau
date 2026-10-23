@@ -37,7 +37,8 @@ local large_minus_small = InfiniteMath.new(1) - above_native
 assert(large_minus_small.first < 0 and large_minus_small.second == 1000, "subtraction with a much larger right operand lost the negative sign")
 local nan = InfiniteMath.new(-1) ^ 0.5
 assert(not (nan == nan), "NaN compared equal to itself")
-assert(not (nan < 1) and not (nan <= 1) and not (1 < nan) and not (1 <= nan), "NaN comparisons must all be false")
+local one = InfiniteMath.new(1)
+assert(not (nan < one) and not (nan <= one) and not (one < nan) and not (one <= nan), "NaN comparisons must all be false")
 local tiny = InfiniteMath.new("1,-1000")
 assert(tiny:ScientificNotation(nil, false) == "1e-1000", "negative exponent notation is malformed")
 assert(tostring(tiny) == "1e-1000", "tiny values underflowed to zero when formatted")
