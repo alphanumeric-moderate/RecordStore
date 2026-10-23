@@ -2401,6 +2401,7 @@ type ActiveRecordLike = {
 }
 type StoreAdapter = {
 	GetAsync: (self: StoreAdapter, key: string) -> unknown,
+	GetAsyncFresh: ((self: StoreAdapter, key: string) -> unknown)?,
 	UpdateAsync: (self: StoreAdapter, key: string, transform: (unknown, unknown?) -> (unknown, { number }?, Dict?)) -> unknown,
 	RemoveAsync: ((self: StoreAdapter, key: string) -> ())?,
 }
@@ -2520,6 +2521,10 @@ local function is_finite(value: unknown): boolean
 	return type(value) == "number" and value == value and value ~= math.huge and value ~= -math.huge
 end
 
+local function valid_text(value: unknown, maximum: number): boolean
+	return type(value) == "string" and value ~= "" and #value <= maximum
+end
+
 local function as_dict(value: unknown): Dict?
 	if type(value) == "table" then
 		return value :: Dict
@@ -2535,17 +2540,18 @@ local function clone_json(value: unknown, depth: number?): unknown
 	if type(value) ~= "table" then
 		return value
 	end
-	local result: Dict = {}
-	for key, child in value :: Dict do
+	local result: { [string | number]: unknown } = {}
+	for key, child in value :: any do
 		if type(key) ~= "string" and (type(key) ~= "number" or not is_finite(key)) then
 			error("JSON object keys must be strings and array keys must be finite numbers", 2)
 		end
-		result[key] = clone_json(child, level + 1)
+		local result_key: string | number = if type(key) == "string" then key else key :: number
+		result[result_key] = clone_json(child, level + 1)
 	end
 	return result
 end
 
-local function canonical(value: unknown, stack: { [table]: boolean }?, depth: number?): string
+local function canonical(value: unknown, stack: { [any]: boolean }?, depth: number?): string
 	local active = stack or {}
 	local level = depth or 0
 	if level > 64 then
@@ -2557,17 +2563,17 @@ local function canonical(value: unknown, stack: { [table]: boolean }?, depth: nu
 	elseif kind == "boolean" then
 		return if value then "b1" else "b0"
 	elseif kind == "number" then
-		if not is_finite(value) then
-			error("non-finite numbers are not valid mailbox payloads", 2)
-		end
-		return "d" .. (if value == 0 then "0" else string.format("%.17g", value))
+		local number_value = value :: number
+		if not is_finite(number_value) then error("non-finite numbers are not valid mailbox payloads", 2) end
+		return "d" .. (if number_value == 0 then "0" else string.format("%.17g", number_value))
 	elseif kind == "string" then
-		return "s" .. tostring(#value) .. ":" .. value
+		local string_value = value :: string
+		return "s" .. tostring(#string_value) .. ":" .. string_value
 	elseif kind ~= "table" then
 		error("mailbox values must contain only JSON-compatible scalars and tables", 2)
 	end
 
-	local table_value = value :: table
+	local table_value = value :: { [string | number]: unknown }
 	if active[table_value] then
 		error("cyclic tables are not valid mailbox payloads", 2)
 	end
@@ -2885,7 +2891,7 @@ function MailboxV2._get(self: Mailbox, key: string): (unknown, string?)
 end
 
 function MailboxV2._get_fresh(self: Mailbox, key: string): (unknown, string?)
-	local fresh_get = (self.store :: Dict).GetAsyncFresh
+	local fresh_get = self.store.GetAsyncFresh
 	if type(fresh_get) ~= "function" then
 		return nil, "store does not provide an authoritative uncached read"
 	end
@@ -5537,6 +5543,9 @@ export type ResultCode =
 | "retry_exhausted"
 | "invalid"
 | "not_found"
+| "duplicate"
+| "capacity"
+| "disabled"
 
 export type DiagnosticPhase =
 	"create"
@@ -6319,7 +6328,7 @@ local function validate_value_shape(value: unknown, max_depth: number?, max_node
 	local node_limit = max_nodes or 100000
 	local string_limit = max_string_length or 4_000_000
 	local node_count = 0
-	local active_tables: { [table]: boolean } = {}
+	local active_tables: { [any]: boolean } = {}
 
 	local function visit(current: unknown, depth: number): (boolean, string?)
 		node_count += 1
@@ -6350,7 +6359,7 @@ local function validate_value_shape(value: unknown, max_depth: number?, max_node
 		if type(current) ~= "table" then
 			return false, "value contains an unsupported type: " .. type(current)
 		end
-		local table_value = current :: table
+		local table_value = current :: { [string | number]: unknown }
 		if active_tables[table_value] then
 			return false, "value contains a cyclic table"
 		end
@@ -6444,7 +6453,7 @@ copy_value = function(value: unknown): JsonValue?
 		return nil
 	end
 
-	local active_tables: { [table]: boolean } = {}
+	local active_tables: { [any]: boolean } = {}
 
 	local function clone(current: unknown, depth: number): JsonValue?
 		if current == nil then
@@ -6469,7 +6478,7 @@ copy_value = function(value: unknown): JsonValue?
 			error("value contains an unsupported type")
 		end
 
-		local table_value = current :: table
+		local table_value = current :: any
 		if active_tables[table_value] then
 			error("value contains a cyclic table")
 		end
@@ -6479,7 +6488,7 @@ copy_value = function(value: unknown): JsonValue?
 		local result_dictionary: { [string]: JsonValue }? = nil
 		local result_array: { JsonValue }? = nil
 
-		for key, child in current do
+		for key, child in table_value do
 			local key_type = type(key)
 			if key_type == "string" then
 				if has_number_key then
@@ -6493,10 +6502,9 @@ copy_value = function(value: unknown): JsonValue?
 					active_tables[table_value] = nil
 					error("value contains an invalid nil child")
 				end
-				if result_dictionary == nil then
-					result_dictionary = {}
-				end
-				result_dictionary[dictionary_key] = copied
+				if result_dictionary == nil then result_dictionary = {} end
+				local dictionary_result = result_dictionary :: { [string]: JsonValue }
+				dictionary_result[dictionary_key] = copied :: JsonValue
 			elseif key_type == "number" then
 				if has_string_key then
 					active_tables[table_value] = nil
@@ -6516,10 +6524,9 @@ copy_value = function(value: unknown): JsonValue?
 					active_tables[table_value] = nil
 					error("value contains an invalid nil child")
 				end
-				if result_array == nil then
-					result_array = {}
-				end
-				result_array[numeric_key] = copied
+				if result_array == nil then result_array = {} end
+				local array_result = result_array :: { JsonValue }
+				array_result[numeric_key] = copied :: JsonValue
 			else
 				active_tables[table_value] = nil
 				error("value contains an unsupported table key")
@@ -6574,9 +6581,9 @@ local function encode_non_finite_numbers(
 			return current, false
 		end
 
-		local source = current :: { [string | number]: JsonValue }
+		local source: any = current
 		local dictionary: boolean? = nil
-		local result: { [string | number]: JsonValue }? = nil
+		local result: any = nil
 
 		for key, child in source do
 			local key_type = type(key)
@@ -6608,7 +6615,7 @@ local function encode_non_finite_numbers(
 		if result == nil then
 			return current, false
 		end
-		return result, true
+		return result :: JsonValue, true
 	end
 
 	local encoded, _changed = encode(value, 1)
@@ -6755,7 +6762,7 @@ local function restore_non_finite_numbers(
 	return result, nil
 end
 
-local prepared_envelope_cache: {[table]: JsonValue} = setmetatable({}, { __mode = "k" })
+local prepared_envelope_cache: any = setmetatable({}, { __mode = "k" })
 
 local function encode_envelope_for_storage(envelope: Envelope): JsonValue
 	local stored: { [string]: JsonValue } = {
@@ -7456,10 +7463,8 @@ local function backend_update(backend: Backend, transform: UpdateTransform, dead
 	return result, backend_info_from_key_info(key_info), nil, nil
 end
 local function get_string_field(value: unknown, key: string): unknown
-	if type(value) ~= "table" then
-		return nil
-	end
-	return rawget(value, key)
+	if type(value) ~= "table" then return nil end
+	return rawget(value :: any, key)
 end
 local function parse_envelope(raw: unknown): (Envelope?, string?, boolean)
 	if raw == nil then
@@ -7671,7 +7676,7 @@ local function parse_envelope(raw: unknown): (Envelope?, string?, boolean)
 	end
 	if type(fencing_generation) ~= "number" then
 		local key_names: { string } = {}
-		for child_key in raw do
+		for child_key in raw :: any do
 			if type(child_key) == "string" then
 				key_names[#key_names + 1] = child_key
 			end
@@ -7852,7 +7857,8 @@ local function update_local_from_envelope(state: InternalState, envelope: Envelo
 	state.data = copy_value(envelope.data)
 	state.public_data_source = copy_value(state.data)
 	if state.public_record ~= nil then
-		state.public_record.Data = state.data
+		local public_record: any = state.public_record
+		public_record.Data = state.data
 	end
 	state.generation = envelope.fencing_generation
 	state.revision = envelope.revision
@@ -8863,7 +8869,7 @@ local function disconnect_message_subscription(state: InternalState)
 	pcall(function()
 		connection:Disconnect()
 	end)
-	if state.state == "active" then
+	if (state.state :: SessionState) == "active" then
 		state.next_message_subscribe = now_local() + MESSAGE_SUBSCRIBE_RETRY
 	else
 		state.next_message_subscribe = math.huge
@@ -9319,7 +9325,7 @@ local function save_internal(state: InternalState, reason: string?, operation_de
 			decision = result_code
 			decision_message = result_message
 		end
-		if state.retired or state.state ~= "saving" then
+		if state.retired or (state.state :: SessionState) ~= "saving" then
 			state.busy = false
 			return "closing", "save was invalidated before its result could be applied"
 		end
@@ -9756,8 +9762,8 @@ local function data_values_equal(left: JsonValue?, right: JsonValue?, depth: num
 	if type(left) ~= "table" then
 		return left == right
 	end
-	local left_table = left :: { [string | number]: JsonValue }
-	local right_table = right :: { [string | number]: JsonValue }
+	local left_table: any = left
+	local right_table: any = right
 	for key, child in left_table do
 		local other = right_table[key]
 		if other == nil or not data_values_equal(child, other, current_depth + 1) then
@@ -9789,8 +9795,9 @@ track_external_data_mutation = function(state: InternalState)
 	local public_data: unknown = state.data
 	local public_record_table: { Data: unknown }? = nil
 	if type(public_record) == "table" then
-		public_record_table = public_record :: { Data: unknown }
-		public_data = public_record_table.Data
+		local validated_public_record = public_record :: { Data: unknown }
+		public_record_table = validated_public_record
+		public_data = validated_public_record.Data
 	end
 	local candidate = public_data :: JsonValue?
 	if data_values_equal(candidate, state.public_data_source) then
@@ -9898,7 +9905,7 @@ local function sync_public(record: Record, skip_external_mutation_check: boolean
 		end
 		record.Data = if state.data ~= nil then copy_value(state.data) else nil
 	end
-	if state.state == "active" then
+	if (state.state :: SessionState) == "active" then
 		active_records[record] = true
 	else
 		active_records[record] = nil
@@ -10419,60 +10426,43 @@ local function reconcile(self: Record, template: JsonValue): (ResultCode, string
 		key: string | number,
 		value: JsonValue
 	): (JsonValue, boolean)
-		if type(target) ~= "table" then
-			return target, false
-		end
+		if type(target) ~= "table" then return target, false end
+		local target_table: any = target
 		if type(key) == "string" then
-			for child_key in target do
-				if type(child_key) ~= "string" then
-					return target, false
-				end
+			for child_key in target_table do
+				if type(child_key) ~= "string" then return target, false end
 			end
-			local target_table = target :: { [string]: JsonValue }
 			target_table[key] = value
 			return target, true
 		end
-		for child_key in target do
-			if type(child_key) ~= "number"
-				or not math.isfinite(child_key)
-				or math.floor(child_key) ~= child_key
-				or child_key < 1
-			then
+		for child_key in target_table do
+			if type(child_key) ~= "number" or not math.isfinite(child_key)
+				or math.floor(child_key) ~= child_key or child_key < 1 then
 				return target, false
 			end
 		end
-		local target_table = target :: { [number]: JsonValue }
 		target_table[key] = value
 		return target, true
 	end
 
 	local function reconcile_value(target: JsonValue, target_template: JsonValue): (JsonValue, boolean)
-		if type(target) ~= "table" or type(target_template) ~= "table" then
-			return target, false
-		end
-		local result = target
+		if type(target) ~= "table" or type(target_template) ~= "table" then return target, false end
+		local result: any = target
+		local template_table: any = target_template
 		local changed = false
-		for key, template_child in target_template do
-			if type(key) ~= "string" and type(key) ~= "number" then
-				return target, false
-			end
-			local current = (result :: { [string | number]: JsonValue })[key]
+		for key, template_child in template_table do
+			if type(key) ~= "string" and type(key) ~= "number" then return target, false end
+			local current = result[key]
 			if current == nil then
 				local updated, updated_ok = set_table_child(result, key, template_child)
-				if updated_ok then
-					result = updated
-					changed = true
-				end
+				if updated_ok then result = updated; changed = true end
 			elseif type(current) == "table" and type(template_child) == "table" then
 				local _, nested_changed = reconcile_value(current, template_child)
-				if nested_changed then
-					changed = true
-				end
+				if nested_changed then changed = true end
 			end
 		end
-		return result, changed
+		return result :: JsonValue, changed
 	end
-
 	local next_value, changed = reconcile_value(copied, template_copy)
 	if next_value == nil then
 		return "validation", "reconciliation returned nil"
@@ -10762,10 +10752,11 @@ local function enqueue(self: Record, message_type: string, data: JsonValue?, enq
 		if not call_ok or type(result) ~= "table" or type(result.code) ~= "string" then
 			return "unknown", if call_ok then "V2 mailbox returned no structured enqueue result" else tostring(result)
 		end
-		if result.code == "accepted" then observe(state, "v2_enqueue", "success", message_type); return "enqueued", nil end
-		if result.code == "duplicate" then observe(state, "v2_enqueue", "duplicate", message_type); return "duplicate", nil end
-		local message = if type(result.error) == "string" then result.error else "V2 mailbox enqueue returned " .. result.code
-		return map_mailbox_v2_result(result.code), message
+		local result_table: any = result
+		if result_table.code == "accepted" then observe(state, "v2_enqueue", "success", message_type); return "enqueued", nil end
+		if result_table.code == "duplicate" then observe(state, "v2_enqueue", "duplicate", message_type); return "duplicate", nil end
+		local message = if type(result_table.error) == "string" then result_table.error else "V2 mailbox enqueue returned " .. result_table.code
+		return map_mailbox_v2_result(result_table.code), message
 	end
 	if enqueue_options ~= nil then return "invalid", "enqueue_options require a bound V2 mailbox" end
 	return enqueue_internal(state, message_type, data)
@@ -10936,14 +10927,15 @@ local function bind_mailbox_v2_async(self: Record, mailbox: unknown): (ResultCod
 	if state.options.durable_queue_enabled == false then
 		return "invalid", "safe V2 binding requires the legacy queue to be enabled so pending messages can be checked"
 	end
-	if type(mailbox) ~= "table" or type(mailbox.GetOwner) ~= "function"
-		or type(mailbox.GetActiveRecord) ~= "function" or type(mailbox.EnqueueAsync) ~= "function"
-		or type(mailbox.ProcessNextAsync) ~= "function" or type(mailbox.SetLeaseRenewalScheduler) ~= "function"
+	local mailbox_api: any = mailbox
+	if type(mailbox_api) ~= "table" or type(mailbox_api.GetOwner) ~= "function"
+		or type(mailbox_api.GetActiveRecord) ~= "function" or type(mailbox_api.EnqueueAsync) ~= "function"
+		or type(mailbox_api.ProcessNextAsync) ~= "function" or type(mailbox_api.SetLeaseRenewalScheduler) ~= "function"
 	then
 		return "invalid", "mailbox must expose the V2 owner, enqueue, processing and lease-renewal APIs"
 	end
-	local owner_ok, owner = pcall(function() return mailbox:GetOwner() end)
-	local active_ok, active_record = pcall(function() return mailbox:GetActiveRecord() end)
+	local owner_ok, owner = pcall(function() return mailbox_api:GetOwner() end)
+	local active_ok, active_record = pcall(function() return mailbox_api:GetActiveRecord() end)
 	if not owner_ok or type(owner) ~= "table" then return "invalid", "V2 mailbox owner identity could not be read" end
 	if not active_ok or active_record ~= self then
 		return "conflict", "V2 mailbox must be bound to this exact active Record instance"
@@ -10974,7 +10966,7 @@ local function bind_mailbox_v2_async(self: Record, mailbox: unknown): (ResultCod
 	end
 	state.mailbox_v2 = mailbox
 	state.mailbox_v2_binding = false
-	local configured, configure_error = install_mailbox_renewal_scheduler(self, state, mailbox)
+	local configured, configure_error = install_mailbox_renewal_scheduler(self, state, mailbox_api)
 	if not configured then
 		state.mailbox_v2 = nil
 		return "invalid", configure_error or "failed to install V2 mailbox lease-renewal scheduling"
@@ -11438,7 +11430,7 @@ local function delete_record(self: Record): (ResultCode, string?)
 			decision = result_code
 			decision_message = result_message
 		end
-		if state.retired or state.state ~= "releasing" then
+		if state.retired or (state.state :: SessionState) ~= "releasing" then
 			state.busy = false
 			return "closing", "delete was invalidated before its result could be applied"
 		end
@@ -11677,7 +11669,7 @@ local function open_internal(state: InternalState, default_data: JsonValue?, rec
 	if closing then
 		return "closing", "server is shutting down"
 	end
-	if state.state == "active" then
+	if (state.state :: SessionState) == "active" then
 		return "already_open", nil
 	end
 	if state.busy or state.state == "acquiring" or state.state == "releasing" then
@@ -11926,7 +11918,7 @@ local function open_internal(state: InternalState, default_data: JsonValue?, rec
 			decision = result_code
 			decision_message = result_message
 		end
-		if state.retired or state.state ~= "acquiring" then
+		if state.retired or (state.state :: SessionState) ~= "acquiring" then
 			state.busy = false
 			disconnect_message_subscription(state)
 			return "closing", "open was invalidated before its result could be applied"
@@ -12235,7 +12227,7 @@ local function renew_internal(state: InternalState): (ResultCode, string?)
 			decision = result_code
 			decision_message = result_message
 		end
-		if state.retired or state.state ~= "saving" then
+		if state.retired or (state.state :: SessionState) ~= "saving" then
 			state.busy = false
 			return "closing", "renewal was invalidated before its result could be applied"
 		end
@@ -12552,7 +12544,7 @@ local function reconcile_unknown_internal(state: InternalState): (ResultCode, st
 	if state.retired then return "invalid", "record has been retired" end
 	if closing and not state.shutdown then return "closing", "server is shutting down" end
 	if state.state ~= "unknown" then
-		return if state.state == "active" then "success" else "fenced", "record is not awaiting reconciliation"
+		return if (state.state :: SessionState) == "active" then "success" else "fenced", "record is not awaiting reconciliation"
 	end
 	local pending = state.pending_operation
 	if pending == nil then
@@ -13318,7 +13310,7 @@ local function apply_scheduler_activation()
 	end
 end
 
-local scheduler_state: { [InternalState]: any } = setmetatable({}, { __mode = "k" })
+local scheduler_state: any = setmetatable({}, { __mode = "k" })
 
 local function scheduler_owner_id(state: InternalState): string
 	local function component(value: string): string
@@ -13369,11 +13361,11 @@ local function enqueue_state_work(
 				state.next_queue_poll = math.min(state.next_queue_poll, retry_at)
 			end
 		end
-		if kind == "lease_renewal" and type(result) == "table" and result.code == "retry_exhausted" and state.state == "active" then
+		if kind == "lease_renewal" and type(result) == "table" and result.code == "retry_exhausted" and (state.state :: SessionState) == "active" then
 			state.next_renewal = math.min(state.next_renewal, now_local())
-		elseif kind == "autosave" and type(result) == "table" and result.code == "retry_exhausted" and state.state == "active" then
+		elseif kind == "autosave" and type(result) == "table" and result.code == "retry_exhausted" and (state.state :: SessionState) == "active" then
 			state.next_autosave = math.min(state.next_autosave, now_local())
-		elseif kind == "queue_poll" and type(result) == "table" and result.code == "retry_exhausted" and state.state == "active" then
+		elseif kind == "queue_poll" and type(result) == "table" and result.code == "retry_exhausted" and (state.state :: SessionState) == "active" then
 			state.next_queue_poll = math.min(state.next_queue_poll, now_local())
 		end
 		if type(caller_on_complete) == "function" then pcall(caller_on_complete, result) end
@@ -13761,7 +13753,7 @@ local function start_scheduler()
 		while not closing do
 			for record in active_records do
 				local state = private[record]
-				if state ~= nil and state.state == "active" then
+				if state ~= nil and (state.state :: SessionState) == "active" then
 					local now = now_local()
 					if scheduler_enabled then
 						run_scheduled_record_work(record, state, now)

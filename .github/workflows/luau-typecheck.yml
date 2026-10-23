@@ -1,0 +1,41 @@
+name: Luau Type Check
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: Analyze RecordStore.luau
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Luau LSP
+        env:
+          LUAU_LSP_VERSION: 1.70.1
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSL -o /tmp/luau-lsp.zip "https://github.com/JohnnyMorganz/luau-lsp/releases/download/${LUAU_LSP_VERSION}/luau-lsp-linux-x86_64.zip"
+          unzip -o /tmp/luau-lsp.zip -d "$HOME/.local/bin"
+          chmod +x "$HOME/.local/bin/luau-lsp"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Fetch Roblox API definitions
+        run: |
+          set -euo pipefail
+          curl -fsSL "https://luau-lsp.pages.dev/type-definitions/globalTypes.None.d.luau" -o /tmp/globalTypes.d.luau
+          test -s /tmp/globalTypes.d.luau
+
+      - name: Analyze nonstrict mode
+        run: |
+          set -euo pipefail
+          sed '1s/^--!strict$/--!nonstrict/' src/PlayerDataInitializer/RecordStore.luau > /tmp/RecordStore.nonstrict.luau
+          luau-lsp analyze --platform=roblox --definitions=/tmp/globalTypes.d.luau /tmp/RecordStore.nonstrict.luau
