@@ -13167,7 +13167,7 @@ local function reconcile_unknown_internal(state: InternalState): (ResultCode, st
 			end
 			local current_session = envelope.session :: SessionEnvelope
 			if current_session.lease_until > transform_time then
-				decision = "retryable"
+				decision = "busy"
 				decision_message = "lease had not expired when the conditional update ran"
 				return nil, nil, nil
 			end
