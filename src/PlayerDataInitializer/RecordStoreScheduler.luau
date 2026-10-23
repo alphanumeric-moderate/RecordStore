@@ -2,29 +2,41 @@
 --!optimize 2
 
 local Scheduler = {}
+
+type DynamicRecord = { [string]: any }
+type SchedulerOptions = {
+	now_ms: (() -> number)?,
+	get_request_budgets: (() -> any)?,
+	advance_ms: ((number) -> ())?,
+	get_record_stats: ((any) -> any)?,
+	now_unix: (() -> number)?,
+}
+type DispatcherOptions = {
+	now_ms: (() -> number)?,
+}
 local MAX_REPLAY_TRACE_EVENTS = 8192
 local MAX_REPLAY_ADVANCE_MS = 31_536_000_000
 
-local function finite(value)
+local function finite(value: unknown): boolean
 	return type(value) == "number" and math.isfinite(value)
 end
 
-local function valid_text(value, maximum)
+local function valid_text(value: unknown, maximum: number): boolean
 	return type(value) == "string" and value ~= "" and #value <= maximum
 end
 
-local function bounded_integer(value, default_value, minimum, maximum)
+local function bounded_integer(value: unknown, default_value: number, minimum: number, maximum: number): number
 	local selected = if finite(value) then value else default_value
 	return math.clamp(math.floor(selected), minimum, maximum)
 end
 
-local function key_count(value)
+local function key_count(value: any): number
 	local count = 0
 	for _ in pairs(value) do count += 1 end
 	return count
 end
 
-local function copy(value, depth, seen)
+local function copy(value: any, depth: number?, seen: { [any]: boolean }?): any
 	depth = depth or 0
 	seen = seen or {}
 	if depth > 64 then error("scheduler value exceeds maximum depth", 3) end
@@ -41,10 +53,10 @@ end
 
 local MAX_SCHEDULER_COPY_NODES = 4096
 
-local function copy_bounded(value, maximum_nodes)
+local function copy_bounded(value: any, maximum_nodes: number): any
 	local seen = {}
 	local nodes = 0
-	local function visit(current, depth)
+	local function visit(current: any, depth: number): any
 		nodes += 1
 		if nodes > maximum_nodes then error("scheduler value exceeds maximum node count", 3) end
 		if depth > 64 then error("scheduler value exceeds maximum depth", 3) end
@@ -63,7 +75,7 @@ end
 
 local dirty_seen = setmetatable({}, { __mode = "k" })
 
-local operation_dimension_defaults = {
+local operation_dimension_defaults: { [string]: DynamicRecord } = {
 	default = { read = 1, write = 1, bytes = 16384, handlers = 1 },
 	read = { read = 1, write = 0, bytes = 16384, handlers = 1 },
 	update_async = { read = 1, write = 1, bytes = 16384, handlers = 1 },
@@ -77,7 +89,7 @@ local operation_dimension_defaults = {
 	batch = { read = 1, write = 1, bytes = 65536, handlers = 1 },
 }
 
-local function estimate_dimensions(item, batch_count)
+local function estimate_dimensions(item: DynamicRecord, batch_count: number?): DynamicRecord
 	local request_kind = if type(item.operation_class) == "string" then item.operation_class
 		elseif type(item.work_class) == "string" then item.work_class else "default"
 	local defaults = operation_dimension_defaults[request_kind] or operation_dimension_defaults.default
@@ -93,29 +105,29 @@ end
 
 local MAX_CUSTOM_OPERATION_KIND_KEYS = 19
 local OTHER_OPERATION_KIND = "__other__"
-local CORE_OPERATION_KINDS = {
+local CORE_OPERATION_KINDS: { [string]: boolean } = {
 	default = true, read = true, update_async = true, mailbox_claim = true,
 	lease_renewal = true, profile_release = true, outbox_dispatch = true, maintenance = true,
 	migration = true, projection = true, tracing = true, batch = true,
 }
 
-local function uses_critical_reserve(item)
+local function uses_critical_reserve(item: DynamicRecord): boolean
 	return item.lane == "lease_renewal" or item.service_class == "critical"
 end
 
-local function noncritical_queue_capacity(queue_capacity)
+local function noncritical_queue_capacity(queue_capacity: number): number
 	if queue_capacity <= 1 then return queue_capacity end
 	local protected_slots = math.min(64, math.max(1, math.floor(queue_capacity / 16)), queue_capacity - 1)
 	return queue_capacity - protected_slots
 end
 
-local function new_governor(options)
+local function new_governor(options: SchedulerOptions?): DynamicRecord
 	if options == nil then options = {} end
 	if type(options) ~= "table" then error("scheduler options must be a table", 2) end
 	local function now_ms()
 		return if type(options.now_ms) == "function" then options.now_ms() else os.clock() * 1000
 	end
-	local function operation_metric_key(self, kind)
+	local function operation_metric_key(self: DynamicRecord, kind: unknown): string
 		if type(kind) ~= "string" or kind == "" then kind = "default" end
 		if CORE_OPERATION_KINDS[kind] then return kind end
 		if kind == OTHER_OPERATION_KIND or kind == "service" then return OTHER_OPERATION_KIND end
@@ -127,7 +139,7 @@ local function new_governor(options)
 		end
 		return OTHER_OPERATION_KIND
 	end
-	local governor = {
+	local governor: DynamicRecord = {
 		policy = {
 			revision = 1, mode = "normal", max_in_flight = 32, critical_reserve = 4,
 			queue_capacity = 1024, max_batch = 16, batch_window_ms = 5,
@@ -161,7 +173,7 @@ local function new_governor(options)
 		scheduler_metrics = { by_lane = {}, wait_ms = {}, wait_by_lane_class = {}, last_shadow = nil },
 	}
 	local limits = { critical = 32, profile_save = 32, profile_release = 32, interactive = 24, messaging = 20, migration = 4, maintenance = 8, tracing = 1 }
-	local function policy_valid(policy)
+	local function policy_valid(policy: DynamicRecord): (boolean, string?)
 		if type(policy) ~= "table" then return false, "policy must be a table" end
 		local fields = {
 			"revision", "max_in_flight", "critical_reserve", "queue_capacity", "max_batch",
@@ -328,7 +340,7 @@ local function new_governor(options)
 		end
 		return true
 	end
-	local function admission_decision(self, work_class, request_kind, cost, mutating, critical_override, dimensions)
+	local function admission_decision(self: DynamicRecord, work_class: any, request_kind: any, cost: any, mutating: any, critical_override: any, dimensions: any): DynamicRecord
 		if work_class == nil then work_class = "interactive" end
 		if request_kind == nil then request_kind = "default" end
 		if cost == nil then cost = 1 end
@@ -603,7 +615,7 @@ local function new_governor(options)
 		if not ok or type(budgets) ~= "table" then return false end
 		return self:ObserveRequestBudgets(budgets.read, budgets.write)
 	end
-	local function calculate_batch_size(policy, requested, latency_ms, backlog, oldest_age_ms, budget_headroom)
+	local function calculate_batch_size(policy: DynamicRecord, requested: any, latency_ms: any, backlog: any, oldest_age_ms: any, budget_headroom: any): number
 		local maximum = math.min(bounded_integer(requested, policy.max_batch, 1, 16), policy.max_batch)
 		if finite(backlog) then
 			maximum = math.min(maximum, bounded_integer(backlog, 1, 1, policy.queue_capacity))
@@ -622,7 +634,7 @@ local function new_governor(options)
 	function governor:ChooseBatchSize(requested, latency_ms, backlog, oldest_age_ms, budget_headroom)
 		return calculate_batch_size(self.policy, requested, latency_ms, backlog, oldest_age_ms, budget_headroom)
 	end
-	local function selected_batch_size(self, item)
+	local function selected_batch_size(self: DynamicRecord, item: DynamicRecord): number
 		if item.batchable ~= true then return nil end
 		local now = now_ms()
 		local operation_kind = operation_metric_key(self, item.operation_class or "default")
@@ -670,12 +682,12 @@ local function new_governor(options)
 		end
 		return math.clamp(math.floor(count), 1, self.policy.max_batch)
 	end
-	local function heap_less(left, right)
+	local function heap_less(left: any, right: any): boolean
 		if left.due_at_ms ~= right.due_at_ms then return left.due_at_ms < right.due_at_ms end
 		if left.id ~= right.id then return left.id < right.id end
 		return (left.sequence or 0) < (right.sequence or 0)
 	end
-	local function heap_push(heap, value)
+	local function heap_push(heap: any, value: any)
 		local index = #heap + 1
 		heap[index] = value
 		while index > 1 do
@@ -685,7 +697,7 @@ local function new_governor(options)
 			index = parent
 		end
 	end
-	local function heap_pop(heap)
+	local function heap_pop(heap: any): any
 		if #heap == 0 then return nil end
 		local first, last = heap[1], table.remove(heap)
 		if #heap > 0 then
@@ -703,7 +715,7 @@ local function new_governor(options)
 		return first
 	end
 	local rebuild_queue_wake_heap
-	local function push_wake_event(self, item, kind, due_at_ms)
+	local function push_wake_event(self: DynamicRecord, item: DynamicRecord, kind: string, due_at_ms: number)
 		self.wake_sequence += 1
 		item.wake_tokens = item.wake_tokens or {}
 		item.wake_tokens[kind] = self.wake_sequence
@@ -730,7 +742,7 @@ local function new_governor(options)
 			end
 		end
 	end
-	local function index_item_wake_events(self, item)
+	local function index_item_wake_events(self: DynamicRecord, item: DynamicRecord)
 		local now = now_ms()
 		if finite(item.due_at_ms) and item.due_at_ms > now then
 			push_wake_event(self, item, "due", item.due_at_ms)
@@ -787,18 +799,18 @@ local function new_governor(options)
 			else return item.due_at_ms end
 		end
 	end
-	local function dependencies_ready(self, item)
+	local function dependencies_ready(self: DynamicRecord, item: DynamicRecord): boolean
 		for _, dependency in ipairs(item.dependencies or {}) do
 			if not self.completed[dependency] then return false end
 		end
 		return true
 	end
-	local function retain_dependencies(self, item)
+	local function retain_dependencies(self: DynamicRecord, item: DynamicRecord)
 		for _, dependency in ipairs(item.dependencies or {}) do
 			self.dependency_ref_counts[dependency] = (self.dependency_ref_counts[dependency] or 0) + 1
 		end
 	end
-	local function release_dependencies(self, item)
+	local function release_dependencies(self: DynamicRecord, item: DynamicRecord)
 		for _, dependency in ipairs(item.dependencies or {}) do
 			local count = self.dependency_ref_counts[dependency]
 			if count ~= nil then
@@ -819,17 +831,17 @@ local function new_governor(options)
 			end
 		end
 	end
-	local function scheduled_lane(item, now)
+	local function scheduled_lane(item: DynamicRecord, now: number): string
 		if item.inherited_lane ~= nil and finite(item.inherited_until_ms) and item.inherited_until_ms > now then
 			return item.inherited_lane
 		end
 		return item.lane
 	end
-	local function item_priority(item)
+	local function item_priority(item: DynamicRecord): number
 		return if item.service_class == "critical" then 0 elseif item.service_class == "interactive" then 1
 			elseif item.service_class == "normal" then 2 elseif item.service_class == "bulk" then 3 else 4
 	end
-	local function record_wait_sample(self, item, age_ms)
+	local function record_wait_sample(self: DynamicRecord, item: DynamicRecord, age_ms: number)
 		local lane = if item.lane == nil then "normal" else item.lane
 		local work_class = item.work_class or "default"
 		local service_class = item.service_class or "best_effort"
@@ -860,7 +872,7 @@ local function new_governor(options)
 		bucket.samples[#bucket.samples + 1] = age_ms
 		if #bucket.samples > 256 then table.remove(bucket.samples, 1) end
 	end
-	local function inherit_ready_prerequisites(self, dependent, instant)
+	local function inherit_ready_prerequisites(self: DynamicRecord, dependent: DynamicRecord, instant: number)
 		if dependent.lane ~= "high" then return end
 		if not finite(dependent.deadline_ms)
 			and dependent.service_class ~= "interactive"
@@ -887,7 +899,7 @@ local function new_governor(options)
 			end
 		end
 	end
-	local function item_precedes(left, right, now)
+	local function item_precedes(left: DynamicRecord, right: DynamicRecord, now: number): boolean
 		local left_service, right_service = item_priority(left), item_priority(right)
 		if left_service ~= right_service then return left_service < right_service end
 		local left_slack = if finite(left.deadline_ms) then left.deadline_ms - now else math.huge
@@ -899,7 +911,7 @@ local function new_governor(options)
 		if left_slack ~= right_slack then return left_slack < right_slack end
 		return (left.enqueued_at_ms or 0) < (right.enqueued_at_ms or 0)
 	end
-	local function estimated_service_time_ms(self, item, cache)
+	local function estimated_service_time_ms(self: DynamicRecord, item: DynamicRecord, cache: any): number
 		local operation_kind = if type(item.operation_class) == "string" then item.operation_class else "default"
 		local metric_kind = operation_metric_key(self, operation_kind)
 		local cached = cache[metric_kind]
@@ -914,7 +926,7 @@ local function new_governor(options)
 		cache[metric_kind] = estimate
 		return estimate
 	end
-	local function effective_cost(item, batch_count)
+	local function effective_cost(item: DynamicRecord, batch_count: number?): number
 		local default_batch_count = if item.batchable == true
 			then math.min(item.batch_size or 1, item.batch_backlog or item.batch_size or 1) else nil
 		local dimensions = estimate_dimensions(item, if batch_count ~= nil then batch_count else default_batch_count)
@@ -926,9 +938,9 @@ local function new_governor(options)
 		if finite(item.requested_cost) then estimated = math.max(estimated, math.floor(item.requested_cost)) end
 		return math.clamp(math.ceil(estimated), 1, 256)
 	end
-	local function lane_key(item, now)
+	local function lane_key(item: DynamicRecord, now: number): string
 		local instant = now or now_ms()
-		local function component(value)
+		local function component(value: unknown): string
 			value = tostring(value or "default")
 			return tostring(#value) .. ":" .. value
 		end
@@ -937,7 +949,7 @@ local function new_governor(options)
 			.. component(scheduled_lane(item, instant))
 			.. component(item.service_class or "best_effort")
 	end
-	local function choose_index(self, algorithm, renewal_mode)
+	local function choose_index(self: DynamicRecord, algorithm: any, renewal_mode: any): number?
 		local now, eligible = now_ms(), {}
 		local urgent_fallback = self.urgent_streak >= self.policy.urgent_deadline_burst
 		for _, dependent in ipairs(self.queue) do
@@ -1198,7 +1210,7 @@ local function new_governor(options)
 		return { code = "accepted", count = #self.queue }
 	end
 	local remember_terminal
-	local function refresh_owner_retry_cooldown(self, owner_id)
+	local function refresh_owner_retry_cooldown(self: DynamicRecord, owner_id: string)
 		local latest_due = nil
 		for _, queued in ipairs(self.queue) do
 			if queued.owner_id == owner_id and queued.is_retry == true then
@@ -1391,17 +1403,17 @@ local function new_governor(options)
 		self.retry_cooldown_until[item.owner_id] = next_due
 		return true, nil, next_due
 	end
-	local function rebuild_queued_due_heap(self)
+	local function rebuild_queued_due_heap(self: DynamicRecord)
 		local rebuilt = {}
 		for _, item in ipairs(self.queue) do heap_push(rebuilt, { id = item.id, due_at_ms = item.due_at_ms, item = item }) end
 		self.queued_due_heap = rebuilt
 	end
-	local function terminal_dependency_referenced(self, id)
+	local function terminal_dependency_referenced(self: DynamicRecord, id: string): boolean
 		return (self.dependency_ref_counts[id] or 0) > 0
 	end
-	local function prune_terminal_history(self)
+	local function prune_terminal_history(self: DynamicRecord)
 		local limit = self.policy.queue_capacity * 2
-		local function prune(order, outcomes, pending)
+		local function prune(order: any, outcomes: any, pending: any)
 			while #order > limit do
 				local oldest = table.remove(order, 1)
 				if terminal_dependency_referenced(self, oldest) then
@@ -1420,7 +1432,7 @@ local function new_governor(options)
 		self.failed_order[#self.failed_order + 1] = id
 		prune_terminal_history(self)
 	end
-	local function make_shadow_state(self)
+	local function make_shadow_state(self: DynamicRecord): DynamicRecord
 		local queue = copy(self.queue)
 		local queued_by_id = {}
 		for _, item in ipairs(queue) do
@@ -1543,7 +1555,7 @@ local function new_governor(options)
 		return copy(summary)
 	end
 	function governor:Replay(log)
-		local function invalid_trace(message)
+		local function invalid_trace(message: string)
 			return { code = "invalid", message = message }
 		end
 		if type(log) ~= "table" then return invalid_trace("scheduler trace must be an array") end
@@ -1635,7 +1647,7 @@ local function new_governor(options)
 		end
 		return result
 	end
-	local function read_record_stats(record)
+	local function read_record_stats(record: any): DynamicRecord
 		if type(options.get_record_stats) ~= "function" then return {} end
 		local ok, value = pcall(options.get_record_stats, record)
 		return if ok and type(value) == "table" then value else {}
@@ -1685,7 +1697,7 @@ local function new_governor(options)
 	end
 
 	function governor:LeaseRenewalAdvice()
-		local function p95_for(operation)
+		local function p95_for(operation: string): number?
 			local source = self.latency_samples_by_operation[operation]
 			if source == nil or #source == 0 then return nil end
 			local samples = copy(source)
@@ -1715,7 +1727,7 @@ local function new_governor(options)
 		end
 		local waits = copy(self.scheduler_metrics.wait_ms)
 		table.sort(waits)
-		local function percentile(values, p)
+		local function percentile(values: any, p: number): number
 			if #values == 0 then return 0 end
 			return values[math.clamp(math.ceil(#values * p), 1, #values)]
 		end
@@ -1768,7 +1780,7 @@ end
 
 local runtime_governors_by_record_store = setmetatable({}, { __mode = "k" })
 
-local function get_task_api()
+local function get_task_api(): any
 	local ok, value = pcall(function() return task end)
 	if ok and type(value) == "table" and type(value.spawn) == "function" then
 		return value
@@ -1780,18 +1792,18 @@ local function get_task_api()
 	return nil
 end
 
-local function spawn_scheduled(callback)
+local function spawn_scheduled(callback: () -> ())
 	local api = get_task_api()
 	if api ~= nil then api.spawn(callback) else callback() end
 end
 
-local function delay_scheduled(seconds, callback)
+local function delay_scheduled(seconds: number, callback: () -> ()): thread?
 	local api = get_task_api()
 	if api == nil or type(api.delay) ~= "function" then return nil end
 	return api.delay(seconds, callback)
 end
 
-local function cancel_scheduled(thread_to_cancel)
+local function cancel_scheduled(thread_to_cancel: thread?)
 	if thread_to_cancel == nil then return end
 	local api = get_task_api()
 	if api ~= nil and type(api.cancel) == "function" then
@@ -1799,11 +1811,11 @@ local function cancel_scheduled(thread_to_cancel)
 	end
 end
 
-local function new_dispatcher(governor, options)
+local function new_dispatcher(governor: DynamicRecord, options: DispatcherOptions?): DynamicRecord
 	options = options or {}
 	assert(type(governor) == "table" and type(governor.Enqueue) == "function"
 		and type(governor.TakeNext) == "function", "a scheduler governor is required")
-	local dispatcher = {
+	local dispatcher: DynamicRecord = {
 		governor = governor,
 		callbacks = {},
 		sequence = 0,
@@ -1828,7 +1840,7 @@ local function new_dispatcher(governor, options)
 		return if type(options.now_ms) == "function" then options.now_ms() else os.clock() * 1000
 	end
 	local kick_dispatcher
-	local function schedule_wake_at(due_at_ms)
+	local function schedule_wake_at(due_at_ms: number)
 		if dispatcher.closed or not finite(due_at_ms) then return end
 		local current = dispatcher.wake_due_ms
 		if current ~= nil and current <= due_at_ms then return end
@@ -1856,7 +1868,7 @@ local function new_dispatcher(governor, options)
 			dispatcher.wake_due_ms = nil
 		end
 	end
-	local function safe_result_copy(result)
+	local function safe_result_copy(result: any): any
 		local ok, copied = pcall(copy_bounded, result, MAX_SCHEDULER_COPY_NODES)
 		if ok then return copied end
 		return {
@@ -1864,7 +1876,7 @@ local function new_dispatcher(governor, options)
 			message = "scheduled callback returned a cyclic or excessively deep result",
 		}
 	end
-	local function invoke_completion(entry, result)
+	local function invoke_completion(entry: any, result: any)
 		if type(entry) ~= "table" or type(entry.on_complete) ~= "function" then return end
 		local ok, message = pcall(entry.on_complete, safe_result_copy(result))
 		if not ok then
@@ -1873,7 +1885,7 @@ local function new_dispatcher(governor, options)
 		end
 	end
 	local retry_classes = { transient = true, throttled = true, conflict = true }
-	local function classify_outcome(result, callback_ok)
+	local function classify_outcome(result: any, callback_ok: boolean): string
 		if not callback_ok or type(result) ~= "table" then
 			if not callback_ok then return "unknown" end
 			local simple_code = if result == true or result == nil then "success" else tostring(result)
@@ -1902,13 +1914,13 @@ local function new_dispatcher(governor, options)
 		if code == "busy" or code == "backpressure" or code == "capacity" or code == "circuit_open" then return "transient" end
 		return "permanent"
 	end
-	local function record_outcome(result, callback_ok)
+	local function record_outcome(result: any, callback_ok: boolean): string
 		local class = classify_outcome(result, callback_ok)
 		dispatcher.metrics.outcome_classes[class] = (dispatcher.metrics.outcome_classes[class] or 0) + 1
 		dispatcher.metrics.last_outcome_class = class
 		return class
 	end
-	local function retry_due(item, entry, result)
+	local function retry_due(item: any, entry: any, result: any): (boolean, DynamicRecord?)
 		local retry_class = if type(result) == "table" and type(result.retry_class) == "string"
 			then result.retry_class else "transient"
 		if retry_classes[retry_class] ~= true then
@@ -1950,14 +1962,14 @@ local function new_dispatcher(governor, options)
 		schedule_wake_at(due_at_ms)
 		return true, nil
 	end
-	local function terminal_result(item, status)
+	local function terminal_result(item: any, status: string): DynamicRecord
 		local result = if type(item.terminal_result) == "table" then copy(item.terminal_result)
 			else { code = status, message = "scheduled item reached a terminal scheduler state" }
 		if status == "expired" then dispatcher.metrics.expired += 1 end
 		if status == "dependency_failed" then dispatcher.metrics.dependency_failed += 1 end
 		return result
 	end
-	local function finish_scheduled_item(item, status, entry, callback_ok, callback_result, counted_in_flight)
+	local function finish_scheduled_item(item: any, status: string, entry: any, callback_ok: boolean, callback_result: any, counted_in_flight: boolean)
 		local admission_ticket = if type(entry) == "table" and entry.admission_ticket ~= nil
 			then entry.admission_ticket else item.admission_ticket
 		if admission_ticket ~= nil then governor:Release(admission_ticket) end
@@ -2058,7 +2070,7 @@ local function new_dispatcher(governor, options)
 		return cancelled_count
 	end
 
-	local function dispatch_one(item, status)
+	local function dispatch_one(item: any, status: any)
 		local entry = dispatcher.callbacks[item.id]
 		if status ~= "success" then
 			finish_scheduled_item(item, status, entry, true, nil, false)
@@ -2338,7 +2350,7 @@ local function new_dispatcher(governor, options)
 		local utilization = snapshot.batch_utilization_samples
 		snapshot.batch_utilization_samples = nil
 		table.sort(utilization)
-		local function percentile(p)
+		local function percentile(p: number): number
 			if #utilization == 0 then return 0 end
 			return utilization[math.clamp(math.ceil(#utilization * p), 1, #utilization)]
 		end
