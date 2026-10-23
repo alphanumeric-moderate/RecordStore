@@ -59,6 +59,7 @@ seed_record("expired", {
 	lease_until = 900,
 })
 seed_record("unleased", nil)
+seed_record("tombstoned", nil, { deleted_at = 950, generation = 2 })
 
 local status, result, message = Mock.get_session_status_async("SessionStatusTest", "global", "active")
 assert(result == "success", tostring(message))
@@ -84,6 +85,12 @@ assert(unleased_result == "success", tostring(unleased_message))
 assert(unleased.Observation == "no_session")
 assert(unleased.LeaseAppearsAvailable == true)
 
+local tombstoned, tombstoned_result, tombstoned_message =
+	Mock.get_session_status_async("SessionStatusTest", "global", "tombstoned")
+assert(tombstoned_result == "success", tostring(tombstoned_message))
+assert(tombstoned.Observation == "tombstoned")
+assert(tombstoned.LeaseAppearsAvailable == false, "tombstones must not be reported as available")
+
 local missing, missing_result = Mock.get_session_status_async("SessionStatusTest", "global", "missing")
 assert(missing_result == "not_found")
 assert(missing.Observation == "not_found")
@@ -91,6 +98,10 @@ assert(missing.LeaseAppearsAvailable == true)
 
 local invalid, invalid_result = Mock.get_session_status_async("", "global", "active")
 assert(invalid == nil and invalid_result == "invalid")
+
+Mock.set_get_failures(1, "injected read failure")
+local unreadable, unreadable_result = Mock.get_session_status_async("SessionStatusTest", "global", "active")
+assert(unreadable == nil and unreadable_result == "unknown", "read failures must not look like an unowned profile")
 
 local store = MailboxV2.MockStore()
 local mailbox = MailboxV2.new(store, {
