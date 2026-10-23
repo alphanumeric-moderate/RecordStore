@@ -112,7 +112,7 @@ jobs:
           }
           categories = collections.Counter()
           for line in relevant:
-              match = re.search(r"\\((\\d+),\\d+\\): (?:TypeError|Internal error): (.*)", line)
+              match = re.search(r"\((\d+),\d+\): (?:TypeError|Internal error): (.*)", line)
               if match is None:
                   continue
               source_line = int(match.group(1))
