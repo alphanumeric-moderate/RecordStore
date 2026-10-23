@@ -177,8 +177,9 @@ local function test_release_commit_then_error_reconciles_without_duplicate_revis
 		"durable release failed to save the captured profile snapshot")
 
 	fake.control:fail_next_get(0)
-	local reconcile_result, reconcile_message = record:Reconcile()
-	assert(reconcile_result == "success", tostring(reconcile_message))
+	wait_for(function()
+		return record.State == "closed"
+	end, 4, "commit-then-error release reconciliation")
 	assert(record.State == "closed", "confirmed release reconciliation must close the local record")
 	local resolved = fake.control:get_raw(STORE, SCOPE, key)
 	assert(resolved.write_id == pending, "release reconciliation generated a second operation")
@@ -214,8 +215,9 @@ local function test_release_before_commit_retries_original_snapshot_and_identity
 		"before-commit release persisted an uncommitted local snapshot")
 
 	fake.control:fail_next_get(0)
-	local reconcile_result, reconcile_message = record:Reconcile()
-	assert(reconcile_result == "success", tostring(reconcile_message))
+	wait_for(function()
+		return record.State == "closed"
+	end, 4, "before-commit release retry")
 	assert(record.State == "closed", "successful release retry did not close the local session")
 	local resolved = fake.control:get_raw(STORE, SCOPE, key)
 	assert(resolved.write_id == pending, "release retry did not reuse the original operation ID")
