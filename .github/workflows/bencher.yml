@@ -1,0 +1,122 @@
+name: Bencher Continuous Benchmarks
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  checks: write
+  pull-requests: write
+
+concurrency:
+  group: bencher-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  LUNE_VERSION: "0.11.0"
+  BENCHER_PROJECT: ${{ vars.BENCHER_PROJECT }}
+  BENCHER_API_KEY: ${{ secrets.BENCHER_API_KEY }}
+  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  BENCHER_BRANCH: ${{ github.head_ref || github.ref_name }}
+  BENCHER_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+  BENCHER_BASE_BRANCH: ${{ github.base_ref }}
+  BENCHER_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+
+jobs:
+  benchmarks:
+    name: Track Lune benchmark performance
+    if: ${{ vars.BENCHER_PROJECT != '' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Skip until Bencher API key is configured
+        if: ${{ env.BENCHER_API_KEY == '' }}
+        run: echo "::notice::Bencher benchmarks skipped; configure the BENCHER_API_KEY repository secret."
+
+      - name: Check out source
+        if: ${{ env.BENCHER_API_KEY != '' }}
+        uses: actions/checkout@v6
+
+      - name: Install Lune
+        if: ${{ env.BENCHER_API_KEY != '' }}
+        timeout-minutes: 2
+        run: |
+          curl -fsSL -o lune.zip "https://github.com/lune-org/lune/releases/download/v${LUNE_VERSION}/lune-${LUNE_VERSION}-linux-x86_64.zip"
+          mkdir -p "$HOME/.local/bin"
+          unzip -o lune.zip -d "$HOME/.local/bin"
+          chmod +x "$HOME/.local/bin/lune"
+          rm lune.zip
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install Hyperfine
+        if: ${{ env.BENCHER_API_KEY != '' }}
+        timeout-minutes: 5
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes hyperfine
+
+      - name: Install Bencher CLI
+        if: ${{ env.BENCHER_API_KEY != '' }}
+        uses: bencherdev/bencher@v0.6.13
+
+      - name: Publish benchmark results
+        if: ${{ env.BENCHER_API_KEY != '' }}
+        shell: bash
+        run: |
+          args=(
+            --project "$BENCHER_PROJECT"
+            --key "$BENCHER_API_KEY"
+            --branch "$BENCHER_BRANCH"
+            --hash "$BENCHER_SHA"
+            --testbed ubuntu-24.04
+            --adapter shell_hyperfine
+            --average median
+            --file bencher-results.json
+            --github-actions "$GITHUB_TOKEN"
+          )
+
+          if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
+            args+=(
+              --start-point "$BENCHER_BASE_BRANCH"
+              --start-point-hash "$BENCHER_BASE_SHA"
+              --start-point-clone-thresholds
+              --start-point-reset
+              --error-on-alert
+            )
+          else
+            args+=(
+              --threshold-measure latency
+              --threshold-test t_test
+              --threshold-max-sample-size 64
+              --threshold-upper-boundary 0.99
+              --thresholds-reset
+            )
+          fi
+
+          bencher run "${args[@]}" -- hyperfine \
+            --warmup 1 \
+            --runs 5 \
+            --export-json bencher-results.json \
+            --command-name scheduler-mixed-128 "lune run bench/advanced_scheduler.bench.luau" \
+            --command-name scheduler-fifo-128 "lune run bench/advanced_scheduler_fifo.bench.luau" \
+            --command-name scheduler-weighted-128 "lune run bench/advanced_scheduler_weighted.bench.luau" \
+            --command-name scheduler-deadline-128 "lune run bench/advanced_scheduler_deadline.bench.luau" \
+            --command-name scheduler-drr-128 "lune run bench/advanced_scheduler_drr.bench.luau" \
+            --command-name lease-renewal-snapshot "lune run bench/lease_renewal_stats.bench.luau" \
+            --command-name lease-renewal-advice "lune run bench/lease_renewal_advice.bench.luau" \
+            --command-name scheduler-disabled "lune run bench/scheduler_disabled_overhead.bench.luau" \
+            --command-name scheduler-enabled "lune run bench/scheduler_enabled_overhead.bench.luau" \
+            --command-name session-lifecycle "lune run bench/session_lifecycle.bench.luau" \
+            --command-name large-profile-update-save "lune run bench/large_profile.bench.luau" \
+            --command-name wide-profile-change-diff "lune run bench/change_diff.bench.luau" \
+            --command-name legacy-migration-history "lune run bench/legacy_migration.bench.luau" \
+            --command-name read-version-history "lune run bench/read_history.bench.luau" \
+            --command-name infinimath-arithmetic "lune run bench/infinimath.bench.luau" \
+            --command-name infinimathvalue-format "lune run bench/infinimathvalue.bench.luau" \
+            --command-name playerdata-startup-eager "lune run bench/playerdata_startup_eager.bench.luau" \
+            --command-name playerdata-startup-lazy "lune run bench/playerdata_startup_lazy.bench.luau" \
+            --command-name playerdata-set-paths "lune run bench/playerdata_set_paths.bench.luau"
