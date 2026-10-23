@@ -128,6 +128,16 @@ display-only `StringValue`.
 `Set` is server-side. Do not use it as a client-authoritative economy or permission boundary; validate
 gameplay actions and authorization on the server before changing protected fields.
 
+### Reset-on-join data fields
+
+Pass `"ResetOnJoin"` as the third argument to `define_data_field` to restore that field to its configured default whenever its record is successfully loaded:
+
+```luau
+equipped = define_data_field("StringValue", "Default", "ResetOnJoin")
+```
+
+The reset is applied during post-load normalization and written through the active RecordStore session before the player is marked loaded. Only fields explicitly configured this way are reset; other saved fields remain unchanged. A field that already equals its default does not trigger a redundant normalization write. Changes made during the active session remain persistent normally, but the selected field is reset again on the next join. The third argument accepts either one rounding mode (`"nearest"`, `"floor"`, `"ceil"`, or `"trunc"`) or `"ResetOnJoin"`.
+
 ### Number formatting
 
 InfiniteMath owns the shared number-abbreviation path. Use its static formatter for native Luau numbers or pass a constructed value for ranges beyond native numbers:

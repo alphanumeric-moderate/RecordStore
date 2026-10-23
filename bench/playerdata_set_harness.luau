@@ -1,6 +1,6 @@
 --!nocheck
 -- Shared mock PlayerDataCore harness for regression and CodSpeed path benchmarks.
-return function(use_cached_paths)
+return function(use_cached_paths, initial_saved_data)
 
 local function replace_source_once(source, old_text, new_text)
 	local start_index, end_index = string.find(source, old_text, 1, true)
@@ -204,7 +204,12 @@ end
 		end
 		return result
 	end
-	
+
+	if initial_saved_data ~= nil then
+		local seeded_key = "PlayerData_Test1|global|Player_" .. tostring(player.UserId)
+		saved_records[seeded_key] = clone_data(initial_saved_data)
+	end
+
 	local RecordStore = {}
 	function RecordStore.is_retryable_result()
 		return false
@@ -220,6 +225,7 @@ end
 			State = "new",
 			_options = options,
 			_storage_key = storage_key,
+			_update_calls = 0,
 		}
 		captured_record = record
 	
@@ -242,6 +248,7 @@ end
 		end
 	
 		function record:Update(transform)
+			self._update_calls += 1
 			if self.State ~= "active" then
 				return "fenced", "record is not active"
 			end

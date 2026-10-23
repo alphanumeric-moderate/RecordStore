@@ -13,6 +13,7 @@ type PlayerData = {
 }
 
 type IntegerInfinityRounding = "nearest" | "floor" | "ceil" | "trunc"
+type DataFieldOption = IntegerInfinityRounding | "ResetOnJoin"
 type ValueClass =
 	"IntValue"
 	| "NumberValue"
@@ -25,6 +26,7 @@ type DataField = {
 	class_name: ValueClass,
 	default: DataValue,
 	rounding: IntegerInfinityRounding?,
+	reset_on_join: boolean,
 }
 
 type NumberFormatOptions = {
@@ -150,12 +152,24 @@ export type Controller = {
 local function define_data_field(
 	class_name: ValueClass,
 	default: DataValue,
-	rounding: IntegerInfinityRounding?
+	option: DataFieldOption?
 ): DataField
+	local rounding: IntegerInfinityRounding? = nil
+	local reset_on_join = false
+
+	if option == "ResetOnJoin" then
+		reset_on_join = true
+	elseif option == "nearest" or option == "floor" or option == "ceil" or option == "trunc" then
+		rounding = option :: IntegerInfinityRounding
+	elseif option ~= nil then
+		error('data field option must be a rounding mode or "ResetOnJoin"', 2)
+	end
+
 	return {
 		class_name = class_name,
 		default = default,
 		rounding = rounding,
+		reset_on_join = reset_on_join,
 	}
 end
 
@@ -208,7 +222,7 @@ local CONFIG = {
 
 	data = {
 		kills = define_data_field("IntegerInfinityValue", 0, "nearest"),
-		equipped = define_data_field("StringValue", "Default"),
+		equipped = define_data_field("StringValue", "Default", "ResetOnJoin"),
 		admin = define_data_field("BoolValue", false),
 
 	},
@@ -253,6 +267,13 @@ end
 
 local function numeric_values_equal(left: number, right: number): boolean
 	return left == right or (math.isnan(left) and math.isnan(right))
+end
+
+local function data_values_equal(left: DataValue?, right: DataValue): boolean
+	if type(left) == "number" and type(right) == "number" then
+		return numeric_values_equal(left, right)
+	end
+	return left == right
 end
 
 local function field_value_is_valid(
@@ -509,7 +530,21 @@ local function normalize_player_data(
 			integer_infinity_factory,
 			infinitemath_factory
 		)
-		if normalized_value == nil then
+		if field.reset_on_join then
+			local reset_value = encode_field_value(
+				field,
+				field.default,
+				integer_infinity_factory,
+				infinitemath_factory
+			)
+			if normalized_value == nil
+				or value_changed
+				or not data_values_equal(normalized_value, reset_value)
+			then
+				changed = true
+			end
+			result[key] = reset_value
+		elseif normalized_value == nil then
 			result[key] = encode_field_value(field, field.default, integer_infinity_factory, infinitemath_factory)
 			changed = true
 		else

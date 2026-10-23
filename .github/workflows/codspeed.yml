@@ -50,6 +50,10 @@ jobs:
         timeout-minutes: 2
         run: timeout --signal=TERM --kill-after=5s 60s lune run bench/run_playerdata_set_regression_tests.luau
 
+      - name: Regression - PlayerData ResetOnJoin
+        timeout-minutes: 2
+        run: timeout --signal=TERM --kill-after=5s 60s lune run bench/run_playerdata_reset_on_join_regression.luau
+
       - name: Regression - Advanced scheduler
         timeout-minutes: 2
         run: timeout --signal=TERM --kill-after=5s 60s lune run bench/run_advanced_scheduler_regression.luau
