@@ -13067,6 +13067,12 @@ local function reconcile_unknown_internal(state: InternalState): (ResultCode, st
 		state.token = recovered_session.token
 		state.durable_lease_until = recovered_session.lease_until
 		update_state_metadata_from_info(state, candidate_info)
+		if pending.user_ids ~= nil then
+			state.user_ids = clone_user_ids(pending.user_ids)
+		end
+		if pending.metadata ~= nil then
+			state.metadata = clone_metadata(pending.metadata)
+		end
 		state.last_saved = make_durable_snapshot(candidate, candidate_info, "lease_reacquisition")
 		state.pending_operation = nil
 		state.busy = false
