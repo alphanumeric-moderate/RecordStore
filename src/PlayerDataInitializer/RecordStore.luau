@@ -3415,7 +3415,7 @@ end
 
 publish_record_message = function(state: InternalState, kind: string, message_type: string?, data: JsonValue?, generation: number?, target_job_id: string?, target_token: string?, request_id: string?, handoff_status: HandoffStatus?, requester_job_id: string?): (boolean, string?)
 	local stable_request_id = request_id or HttpService:GenerateGUID(false)
-	local payload = {
+	local payload: { [string]: unknown } = {
 		protocol_version = 1,
 		kind = kind,
 		name = state.name,
