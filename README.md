@@ -170,13 +170,21 @@ Build the standard production place, including `PlayerDataInitializer`:
 rojo build default.project.json -o RecordStore.rbxlx
 ```
 
-Build the isolated regression-test place:
+Build the full isolated regression-test place:
 
 ```sh
 rojo build tests.project.json -o RecordStore-CompatibilityTests.rbxlx
 ```
 
-Open the test place in Roblox Studio and run a server playtest. Regression scripts use `RecordStore.Mock`; they do not read or write live DataStore records.
+To test default numeric leaderstats without the persistence adapter installed, build the dedicated integration place:
+
+```sh
+rojo build tests-native-formatting.project.json -o RecordStore-NativeFormattingRegression.rbxlx
+```
+
+This project intentionally omits `ServerScriptService.InfiniteMathValue` while keeping the real `ReplicatedStorage.InfiniteMath` module. Open the resulting place in Roblox Studio and run a server playtest. The mapped `PlayerDataSetRegression` must initialize the player, update the formatted `Kills` display, and complete its persistence assertions without requiring `InfiniteMathValue`.
+
+Regression scripts use `RecordStore.Mock`; they do not read or write live DataStore records.
 
 ## Advanced server-local scheduler
 
