@@ -7622,8 +7622,9 @@ local function backend_update(backend: Backend, transform: UpdateTransform, dead
 			mock_update_failure_count -= 1
 			return nil, nil, mock_update_failure_code, mock_update_failure_message
 		end
-		local before_update_hook = RecordStore._internals.mock_before_next_update
-		RecordStore._internals.mock_before_next_update = nil
+		local mock_state = mock_database :: any
+		local before_update_hook = mock_state.__recordstore_before_next_update
+		mock_state.__recordstore_before_next_update = nil
 		if before_update_hook ~= nil then
 			local hook_ok = pcall(before_update_hook)
 			if not hook_ok then
@@ -15138,7 +15139,8 @@ RecordStore.Mock = (function()
 		if hook ~= nil and type(hook) ~= "function" then
 			error("before-update hook must be a function or nil", 2)
 		end
-		RecordStore._internals.mock_before_next_update = hook
+		local mock_state = mock_database :: any
+		mock_state.__recordstore_before_next_update = hook
 	end
 
 	local function mock_set_update_replay(retries: number, advance_seconds: number)
@@ -15325,7 +15327,6 @@ RecordStore.Mock = (function()
 			mock_update_replay_retries = 0
 			mock_update_replay_advance_seconds = 0
 			mock_update_failure_count = 0
-		RecordStore._internals.mock_before_next_update = nil
 			mock_update_failure_code = "budget"
 			mock_update_failure_message = nil
 			mock_update_commit_then_failure_count = 0
