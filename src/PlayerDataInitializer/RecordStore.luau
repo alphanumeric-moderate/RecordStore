@@ -13928,6 +13928,21 @@ function RecordStore.replay_scheduler_trace(
 	return replay:Replay(trace)
 end
 
+local function scheduled_autosave_priority(state: InternalState, now: number): string
+	if state.options.durability_mode ~= "durability_first"
+		or state.change_sequence == state.saved_change_sequence
+		or state.dirty_since_local == nil
+	then
+		return "normal"
+	end
+	local max_dirty_age = state.options.max_dirty_age_seconds
+		or (state.options.autosave_interval or DEFAULT_AUTOSAVE_INTERVAL) * 2
+	if now - (state.dirty_since_local :: number) >= max_dirty_age * 0.5 then
+		return "high"
+	end
+	return "normal"
+end
+
 local function run_scheduled_record_work(record: Record, state: InternalState, now: number)
 	local slot = scheduled_state_slot(state)
 	if state.takeover_requested then
@@ -13989,13 +14004,7 @@ local function run_scheduled_record_work(record: Record, state: InternalState, n
 		and slot.pending.autosave ~= true
 	then
 		local next_autosave = now + (state.options.autosave_interval or DEFAULT_AUTOSAVE_INTERVAL) * (0.9 + math.random() * 0.2)
-		local result = enqueue_state_work(record, state, "autosave",
-			if state.options.durability_mode == "durability_first"
-				and state.change_sequence ~= state.saved_change_sequence
-				and state.dirty_since_local ~= nil
-				and now - state.dirty_since_local >= (state.options.max_dirty_age_seconds
-					or (state.options.autosave_interval or DEFAULT_AUTOSAVE_INTERVAL) * 2) * 0.5
-			then "high" else "normal",
+		local result = enqueue_state_work(record, state, "autosave", scheduled_autosave_priority(state, now),
 			"profile_autosave", "update_async", function()
 			if state.busy or state.queue_busy then
 				return { code = "retryable", message = "record became busy before autosave started" }
