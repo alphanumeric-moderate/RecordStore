@@ -8382,7 +8382,7 @@ local function start_scheduler()
 	end)
 end
 
-local function shutdown()
+RecordStore.shutdown = function()
 	if shutdown_started then
 		return
 	end
@@ -9108,9 +9108,8 @@ end)()
 RecordStore.MailboxV2 = MailboxV2
 RecordStore.is_retryable_result = is_retryable_result
 RecordStore.get_diagnostic_code = get_diagnostic_code
-RecordStore.shutdown = shutdown
 
-game:BindToClose(shutdown)
+game:BindToClose(RecordStore.shutdown)
 
 table.freeze(RecordStore)
 
