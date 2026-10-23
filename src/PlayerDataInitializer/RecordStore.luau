@@ -9665,98 +9665,6 @@ local function save_internal(state: InternalState, reason: string?, operation_de
 	return "saved", nil
 end
 
-rawset(RecordStore._internals, "get_session_status_internal", function(
-	name: string,
-	scope: string,
-	key: string,
-	operation_deadline: number?,
-	mock: boolean
-): (SessionStatus?, ResultCode, string?)
-	local valid_identity, identity_message = validate_store_identity(name, scope, key)
-	if not valid_identity then
-		return nil, "invalid", identity_message
-	end
-	local deadline, deadline_error = resolve_operation_deadline(operation_deadline)
-	if deadline == nil then
-		return nil, "invalid", deadline_error
-	end
-	local backend = make_backend(name, scope, key, mock)
-	local raw, _, read_result, read_message = backend_get(backend, false, deadline)
-	if read_result ~= nil then
-		return nil, normalize_result_code(read_result) or "unknown", read_message
-	end
-
-	local observed_at = session_now_unix(mock)
-	local status: SessionStatus = {
-		StoreName = name,
-		Scope = scope,
-		ProfileKey = key,
-		Observation = "not_found",
-		ObservedAt = observed_at,
-		Generation = nil,
-		Revision = nil,
-		OwnerJobId = nil,
-		OwnerPlaceId = nil,
-		AcquiredAt = nil,
-		LeaseUntil = nil,
-		LeaseRemainingSeconds = nil,
-		LeaseAppearsAvailable = true,
-		IsAuthoritativeOwnershipDecision = false,
-	}
-	if raw == nil then
-		return status, "not_found", "record does not exist"
-	end
-
-	local envelope, parse_error, current_format = parse_envelope(raw)
-	if not current_format then
-		local result: ResultCode = if parse_error == "legacy payload" then "legacy"
-			elseif parse_error == "future implementation version" then "future_schema" else "corrupt"
-		return nil, result, parse_error or "durable envelope is invalid"
-	end
-	if envelope == nil then
-		return nil, "corrupt", parse_error or "durable envelope is missing"
-	end
-
-	status.Generation = envelope.fencing_generation
-	status.Revision = envelope.revision
-	if envelope.tombstone ~= nil then
-		status.Observation = "tombstoned"
-		status.LeaseAppearsAvailable = false
-		return status, "success", nil
-	end
-
-	local session = envelope.session
-	if session == nil then
-		status.Observation = "no_session"
-		return status, "success", nil
-	end
-
-	local remaining = session.lease_until - observed_at
-	status.OwnerJobId = session.job_id
-	status.OwnerPlaceId = session.place_id
-	status.AcquiredAt = session.acquired_at
-	status.LeaseUntil = session.lease_until
-	status.LeaseRemainingSeconds = math.max(0, remaining)
-	if remaining > 0 then
-		status.Observation = "active_lease_observed"
-		status.LeaseAppearsAvailable = false
-	else
-		status.Observation = "expired_lease_observed"
-		status.LeaseAppearsAvailable = true
-	end
-	return status, "success", nil
-end)
-
-function RecordStore.get_session_status_async(
-	name: string,
-	scope: string,
-	key: string,
-	operation_deadline: number?
-): (SessionStatus?, ResultCode, string?)
-	local helper = rawget(RecordStore._internals, "get_session_status_internal")
-	return helper(name, scope, key, operation_deadline, false)
-end
-
 function RecordStore.read_async(name: string, scope: string, key: string, operation_deadline: number?, legacy_decoder: LegacyDecoder?): (Snapshot?, ResultCode, string?)
 	local valid_identity, identity_message = validate_store_identity(name, scope, key)
 	if not valid_identity then
@@ -14208,6 +14116,98 @@ RecordStore.shutdown = function()
 end
 
 RecordStore._internals = {}
+RecordStore._internals.get_session_status_internal = function(
+	name: string,
+	scope: string,
+	key: string,
+	operation_deadline: number?,
+	mock: boolean
+): (SessionStatus?, ResultCode, string?)
+	local valid_identity, identity_message = validate_store_identity(name, scope, key)
+	if not valid_identity then
+		return nil, "invalid", identity_message
+	end
+	local deadline, deadline_error = resolve_operation_deadline(operation_deadline)
+	if deadline == nil then
+		return nil, "invalid", deadline_error
+	end
+	local backend = make_backend(name, scope, key, mock)
+	local raw, _, read_result, read_message = backend_get(backend, false, deadline)
+	if read_result ~= nil then
+		return nil, normalize_result_code(read_result) or "unknown", read_message
+	end
+
+	local observed_at = session_now_unix(mock)
+	local status: SessionStatus = {
+		StoreName = name,
+		Scope = scope,
+		ProfileKey = key,
+		Observation = "not_found",
+		ObservedAt = observed_at,
+		Generation = nil,
+		Revision = nil,
+		OwnerJobId = nil,
+		OwnerPlaceId = nil,
+		AcquiredAt = nil,
+		LeaseUntil = nil,
+		LeaseRemainingSeconds = nil,
+		LeaseAppearsAvailable = true,
+		IsAuthoritativeOwnershipDecision = false,
+	}
+	if raw == nil then
+		return status, "not_found", "record does not exist"
+	end
+
+	local envelope, parse_error, current_format = parse_envelope(raw)
+	if not current_format then
+		local result: ResultCode = if parse_error == "legacy payload" then "legacy"
+			elseif parse_error == "future implementation version" then "future_schema" else "corrupt"
+		return nil, result, parse_error or "durable envelope is invalid"
+	end
+	if envelope == nil then
+		return nil, "corrupt", parse_error or "durable envelope is missing"
+	end
+
+	status.Generation = envelope.fencing_generation
+	status.Revision = envelope.revision
+	if envelope.tombstone ~= nil then
+		status.Observation = "tombstoned"
+		status.LeaseAppearsAvailable = false
+		return status, "success", nil
+	end
+
+	local session = envelope.session
+	if session == nil then
+		status.Observation = "no_session"
+		return status, "success", nil
+	end
+
+	local remaining = session.lease_until - observed_at
+	status.OwnerJobId = session.job_id
+	status.OwnerPlaceId = session.place_id
+	status.AcquiredAt = session.acquired_at
+	status.LeaseUntil = session.lease_until
+	status.LeaseRemainingSeconds = math.max(0, remaining)
+	if remaining > 0 then
+		status.Observation = "active_lease_observed"
+		status.LeaseAppearsAvailable = false
+	else
+		status.Observation = "expired_lease_observed"
+		status.LeaseAppearsAvailable = true
+	end
+	return status, "success", nil
+end
+
+function RecordStore.get_session_status_async(
+	name: string,
+	scope: string,
+	key: string,
+	operation_deadline: number?
+): (SessionStatus?, ResultCode, string?)
+	local helper = rawget(RecordStore._internals, "get_session_status_internal")
+	return helper(name, scope, key, operation_deadline, false)
+end
+
 RecordStore._internals.normalize_options = function(options: Options): (Options?, string?)
 	if type(options) ~= "table" then
 		return nil, "options must be a table"
