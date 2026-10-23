@@ -2401,6 +2401,7 @@ type ActiveRecordLike = {
 }
 type StoreAdapter = {
 	GetAsync: (self: StoreAdapter, key: string) -> unknown,
+	GetAsyncFresh: ((self: StoreAdapter, key: string) -> unknown)?,
 	UpdateAsync: (self: StoreAdapter, key: string, transform: (unknown, unknown?) -> (unknown, { number }?, Dict?)) -> unknown,
 	RemoveAsync: ((self: StoreAdapter, key: string) -> ())?,
 }
@@ -2520,6 +2521,10 @@ local function is_finite(value: unknown): boolean
 	return type(value) == "number" and value == value and value ~= math.huge and value ~= -math.huge
 end
 
+local function valid_text(value: unknown, maximum: number): boolean
+	return type(value) == "string" and value ~= "" and #value <= maximum
+end
+
 local function as_dict(value: unknown): Dict?
 	if type(value) == "table" then
 		return value :: Dict
@@ -2535,17 +2540,18 @@ local function clone_json(value: unknown, depth: number?): unknown
 	if type(value) ~= "table" then
 		return value
 	end
-	local result: Dict = {}
-	for key, child in value :: Dict do
+	local result: { [string | number]: unknown } = {}
+	for key, child in value :: any do
 		if type(key) ~= "string" and (type(key) ~= "number" or not is_finite(key)) then
 			error("JSON object keys must be strings and array keys must be finite numbers", 2)
 		end
-		result[key] = clone_json(child, level + 1)
+		local result_key: string | number = if type(key) == "string" then key else key :: number
+		result[result_key] = clone_json(child, level + 1)
 	end
 	return result
 end
 
-local function canonical(value: unknown, stack: { [table]: boolean }?, depth: number?): string
+local function canonical(value: unknown, stack: { [any]: boolean }?, depth: number?): string
 	local active = stack or {}
 	local level = depth or 0
 	if level > 64 then
@@ -2557,17 +2563,17 @@ local function canonical(value: unknown, stack: { [table]: boolean }?, depth: nu
 	elseif kind == "boolean" then
 		return if value then "b1" else "b0"
 	elseif kind == "number" then
-		if not is_finite(value) then
-			error("non-finite numbers are not valid mailbox payloads", 2)
-		end
-		return "d" .. (if value == 0 then "0" else string.format("%.17g", value))
+		local number_value = value :: number
+		if not is_finite(number_value) then error("non-finite numbers are not valid mailbox payloads", 2) end
+		return "d" .. (if number_value == 0 then "0" else string.format("%.17g", number_value))
 	elseif kind == "string" then
-		return "s" .. tostring(#value) .. ":" .. value
+		local string_value = value :: string
+		return "s" .. tostring(#string_value) .. ":" .. string_value
 	elseif kind ~= "table" then
 		error("mailbox values must contain only JSON-compatible scalars and tables", 2)
 	end
 
-	local table_value = value :: table
+	local table_value = value :: { [string | number]: unknown }
 	if active[table_value] then
 		error("cyclic tables are not valid mailbox payloads", 2)
 	end
@@ -2885,7 +2891,7 @@ function MailboxV2._get(self: Mailbox, key: string): (unknown, string?)
 end
 
 function MailboxV2._get_fresh(self: Mailbox, key: string): (unknown, string?)
-	local fresh_get = (self.store :: Dict).GetAsyncFresh
+	local fresh_get = self.store.GetAsyncFresh
 	if type(fresh_get) ~= "function" then
 		return nil, "store does not provide an authoritative uncached read"
 	end
@@ -6319,7 +6325,7 @@ local function validate_value_shape(value: unknown, max_depth: number?, max_node
 	local node_limit = max_nodes or 100000
 	local string_limit = max_string_length or 4_000_000
 	local node_count = 0
-	local active_tables: { [table]: boolean } = {}
+	local active_tables: { [any]: boolean } = {}
 
 	local function visit(current: unknown, depth: number): (boolean, string?)
 		node_count += 1
@@ -6350,7 +6356,7 @@ local function validate_value_shape(value: unknown, max_depth: number?, max_node
 		if type(current) ~= "table" then
 			return false, "value contains an unsupported type: " .. type(current)
 		end
-		local table_value = current :: table
+		local table_value = current :: { [string | number]: unknown }
 		if active_tables[table_value] then
 			return false, "value contains a cyclic table"
 		end
@@ -6444,7 +6450,7 @@ copy_value = function(value: unknown): JsonValue?
 		return nil
 	end
 
-	local active_tables: { [table]: boolean } = {}
+	local active_tables: { [any]: boolean } = {}
 
 	local function clone(current: unknown, depth: number): JsonValue?
 		if current == nil then
@@ -6469,7 +6475,7 @@ copy_value = function(value: unknown): JsonValue?
 			error("value contains an unsupported type")
 		end
 
-		local table_value = current :: table
+		local table_value = current :: any
 		if active_tables[table_value] then
 			error("value contains a cyclic table")
 		end
@@ -6496,7 +6502,7 @@ copy_value = function(value: unknown): JsonValue?
 				if result_dictionary == nil then
 					result_dictionary = {}
 				end
-				result_dictionary[dictionary_key] = copied
+				result_dictionary[dictionary_key] = copied :: JsonValue
 			elseif key_type == "number" then
 				if has_string_key then
 					active_tables[table_value] = nil
@@ -6519,7 +6525,7 @@ copy_value = function(value: unknown): JsonValue?
 				if result_array == nil then
 					result_array = {}
 				end
-				result_array[numeric_key] = copied
+				result_array[numeric_key] = copied :: JsonValue
 			else
 				active_tables[table_value] = nil
 				error("value contains an unsupported table key")
@@ -6755,7 +6761,7 @@ local function restore_non_finite_numbers(
 	return result, nil
 end
 
-local prepared_envelope_cache: {[table]: JsonValue} = setmetatable({}, { __mode = "k" })
+local prepared_envelope_cache: { [any]: JsonValue } = setmetatable({}, { __mode = "k" })
 
 local function encode_envelope_for_storage(envelope: Envelope): JsonValue
 	local stored: { [string]: JsonValue } = {
@@ -7456,10 +7462,8 @@ local function backend_update(backend: Backend, transform: UpdateTransform, dead
 	return result, backend_info_from_key_info(key_info), nil, nil
 end
 local function get_string_field(value: unknown, key: string): unknown
-	if type(value) ~= "table" then
-		return nil
-	end
-	return rawget(value, key)
+	if type(value) ~= "table" then return nil end
+	return rawget(value :: any, key)
 end
 local function parse_envelope(raw: unknown): (Envelope?, string?, boolean)
 	if raw == nil then
@@ -7671,7 +7675,7 @@ local function parse_envelope(raw: unknown): (Envelope?, string?, boolean)
 	end
 	if type(fencing_generation) ~= "number" then
 		local key_names: { string } = {}
-		for child_key in raw do
+		for child_key in raw :: any do
 			if type(child_key) == "string" then
 				key_names[#key_names + 1] = child_key
 			end
