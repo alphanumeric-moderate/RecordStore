@@ -350,23 +350,6 @@ local function normalize_runtime_field_value(
 	return nil
 end
 
-local function encode_player_data(
-	data: PlayerData,
-	integer_infinity_factory: typeof(IntegerInfinityValueFactory)?,
-	infinitemath_factory: InfiniteMathValueFactoryAPI?
-): PlayerData
-	local result: PlayerData = table.clone(data)
-
-	for key, field in pairs(CONFIG.data) do
-		local value = result[key]
-		if value ~= nil then
-			result[key] = encode_field_value(field, value, integer_infinity_factory, infinitemath_factory)
-		end
-	end
-
-	return result
-end
-
 for key, field in pairs(CONFIG.data) do
 	if field.class_name == "IntegerInfinityValue" then
 		local default_value = field.default
