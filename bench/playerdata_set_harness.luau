@@ -80,6 +80,13 @@ end
 	function instance_methods:GetAttribute(name)
 		return self._attributes[name]
 	end
+
+	function instance_methods:GetPropertyChangedSignal(property_name)
+		if property_name == "Value" then
+			return self._signals.Changed
+		end
+		error("unsupported property-change signal: " .. tostring(property_name), 2)
+	end
 	
 	function instance_methods:Destroy()
 		if self._destroyed then
