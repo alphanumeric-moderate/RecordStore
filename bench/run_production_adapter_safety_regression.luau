@@ -125,6 +125,106 @@ local function test_durable_round_trip_preserves_metadata_and_user_ids()
 	assert(record:Close() == "closed", "metadata fixture failed its final close")
 end
 
+
+local function configure_key_associations(record)
+	local ids_result, ids_message = record:SetUserIds({ 123456, 654321 })
+	assert(ids_result == "success", tostring(ids_message))
+	local metadata_result, metadata_message = record:SetMetadata({
+		origin = "release-recovery-regression",
+		counter = 17,
+	})
+	assert(metadata_result == "success", tostring(metadata_message))
+end
+
+local function assert_key_associations(key, label)
+	local info = fake.control:get_key_info(STORE, SCOPE, key)
+	assert(info ~= nil, label .. ": key metadata disappeared")
+	local ids = info:GetUserIds()
+	assert(#ids == 2 and ids[1] == 123456 and ids[2] == 654321,
+		label .. ": release did not preserve DataStore user IDs")
+	local metadata = info:GetMetadata()
+	assert(metadata.origin == "release-recovery-regression" and metadata.counter == 17,
+		label .. ": release did not preserve application key metadata")
+end
+
+local function test_release_commit_then_error_reconciles_without_duplicate_revision()
+	local key = "release-commit-then-error"
+	local record = new_record(key)
+	assert_open(record, "created", "release commit-then-error open")
+	local update_result, update_message = record:Update(function(data)
+		data.coins = 31
+		return data
+	end)
+	assert(update_result == "success", tostring(update_message))
+	configure_key_associations(record)
+	local base_revision = record:GetRevision()
+
+	fake.control:fail_next_update("commit_then_error")
+	fake.control:fail_next_get(1)
+	local close_result = record:Close()
+	assert(close_result == "unknown",
+		"release commit with an unavailable verification read must remain unresolved")
+	local pending = record:GetDurabilityStatus().pending_operation_id
+	assert(pending ~= nil, "unknown production release lost its operation ID")
+	local committed_before_reconcile = fake.control:get_raw(STORE, SCOPE, key)
+	assert(committed_before_reconcile.write_id == pending,
+		"commit-then-error release did not retain the original durable operation ID")
+	assert(committed_before_reconcile.revision == base_revision + 1,
+		"release commit must increment profile revision exactly once")
+	assert(committed_before_reconcile.session == nil,
+		"durable release should remove the session even while local confirmation is unknown")
+	assert(committed_before_reconcile.data.coins == 31,
+		"durable release failed to save the captured profile snapshot")
+
+	fake.control:fail_next_get(0)
+	local reconcile_result, reconcile_message = record:Reconcile()
+	assert(reconcile_result == "success", tostring(reconcile_message))
+	assert(record.State == "closed", "confirmed release reconciliation must close the local record")
+	local resolved = fake.control:get_raw(STORE, SCOPE, key)
+	assert(resolved.write_id == pending, "release reconciliation generated a second operation")
+	assert(resolved.revision == base_revision + 1, "release reconciliation duplicated the profile revision")
+	assert_key_associations(key, "commit-then-error release")
+end
+
+local function test_release_before_commit_retries_original_snapshot_and_identity()
+	local key = "release-before-commit"
+	local record = new_record(key)
+	assert_open(record, "created", "release before-commit open")
+	local update_result, update_message = record:Update(function(data)
+		data.coins = 41
+		return data
+	end)
+	assert(update_result == "success", tostring(update_message))
+	configure_key_associations(record)
+	local base_revision = record:GetRevision()
+	local base = fake.control:get_raw(STORE, SCOPE, key)
+
+	fake.control:fail_next_update("before_commit")
+	fake.control:fail_next_get(1)
+	local close_result = record:Close()
+	assert(close_result == "unknown",
+		"release failure before commit with unavailable verification must stay unresolved")
+	local pending = record:GetDurabilityStatus().pending_operation_id
+	assert(pending ~= nil, "uncommitted production release lost its operation ID")
+	local unchanged = fake.control:get_raw(STORE, SCOPE, key)
+	assert(unchanged.write_id == base.write_id, "before-commit release changed the durable write identity")
+	assert(unchanged.revision == base_revision, "before-commit release incremented the durable revision")
+	assert(unchanged.session ~= nil, "before-commit release unexpectedly removed the durable session")
+	assert(unchanged.data.coins == 10,
+		"before-commit release persisted an uncommitted local snapshot")
+
+	fake.control:fail_next_get(0)
+	local reconcile_result, reconcile_message = record:Reconcile()
+	assert(reconcile_result == "success", tostring(reconcile_message))
+	assert(record.State == "closed", "successful release retry did not close the local session")
+	local resolved = fake.control:get_raw(STORE, SCOPE, key)
+	assert(resolved.write_id == pending, "release retry did not reuse the original operation ID")
+	assert(resolved.revision == base_revision + 1, "release retry did not commit exactly one revision")
+	assert(resolved.session == nil, "release retry did not relinquish the session")
+	assert(resolved.data.coins == 41, "release retry lost its retained snapshot")
+	assert_key_associations(key, "before-commit release")
+end
+
 local function test_replayed_transform_and_commit_then_error_do_not_duplicate_a_revision()
 	local record = new_record("commit-then-error")
 	assert_open(record, "created", "commit-then-error open")
@@ -368,6 +468,8 @@ end
 local suite_ok, suite_error = pcall(function()
 	test_budget_exhaustion_never_reaches_the_backend()
 	test_durable_round_trip_preserves_metadata_and_user_ids()
+	test_release_commit_then_error_reconciles_without_duplicate_revision()
+	test_release_before_commit_retries_original_snapshot_and_identity()
 	test_replayed_transform_and_commit_then_error_do_not_duplicate_a_revision()
 	test_unknown_commit_is_fenced_then_reconciled_without_data_loss()
 	test_uncommitted_unknown_write_retries_the_original_operation()
