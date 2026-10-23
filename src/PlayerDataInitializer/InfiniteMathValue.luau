@@ -280,41 +280,25 @@ local function serialize_value(value)
 	return serialized
 end
 
-local function decode_serialized(serialized)
-	if type(serialized) ~= "string" or #serialized > MAX_SERIALIZED_LENGTH then
-		return nil
-	end
-
-	local ok, envelope = pcall(function()
-		return HttpService:JSONDecode(serialized)
-	end)
-	if not ok or type(envelope) ~= "table" then
-		return nil
-	end
-
+local function decode_serialized_impl(serialized)
+	if type(serialized) ~= "string" or #serialized > MAX_SERIALIZED_LENGTH then return nil end
+	local ok, envelope = pcall(function() return HttpService:JSONDecode(serialized) end)
+	if not ok or type(envelope) ~= "table" then return nil end
 	if envelope.schema == SCHEMA then
-		if envelope.version ~= InfiniteMathValue.FORMAT_VERSION or type(envelope.value) ~= "table" then
-			return nil
-		end
+		if envelope.version ~= InfiniteMathValue.FORMAT_VERSION or type(envelope.value) ~= "table" then return nil end
 		local value = envelope.value
 		if value.kind == "special" then
-			if value.name ~= "nan" and value.name ~= "+infinity" and value.name ~= "-infinity" then
-				return nil
-			end
+			if value.name ~= "nan" and value.name ~= "+infinity" and value.name ~= "-infinity" then return nil end
 			local decoded = special_value(value.name)
 			return decoded, serialize_value(decoded)
 		elseif value.kind == "number" then
-			if not is_finite(value.first) or not is_finite(value.second) then
-				return nil
-			end
+			if not is_finite(value.first) or not is_finite(value.second) then return nil end
 			local decoded = resolve_api().new({ value.first, value.second })
 			return decoded, serialize_value(decoded)
 		end
 		return nil
 	elseif envelope.schema == LEGACY_SCHEMA then
-		if envelope.version ~= 2 or type(envelope.value) ~= "table" then
-			return nil
-		end
+		if envelope.version ~= 2 or type(envelope.value) ~= "table" then return nil end
 		local decoded = legacy_node_to_value(envelope.value, 0)
 		if decoded == nil then
 			decoded = { kind = "legacy", raw = serialized, node = envelope.value }
@@ -322,9 +306,23 @@ local function decode_serialized(serialized)
 		end
 		return decoded, serialize_value(decoded)
 	end
-
 	return nil
 end
+
+local function decode_serialized(serialized)
+	local ok, decoded, canonical = pcall(decode_serialized_impl, serialized)
+	if not ok then return nil end
+	return decoded, canonical
+end
+
+function InfiniteMathValue.is_unsupported_version(value)
+	if type(value) ~= "string" or #value > MAX_SERIALIZED_LENGTH then return false end
+	local ok, envelope = pcall(function() return HttpService:JSONDecode(value) end)
+	return ok and type(envelope) == "table" and envelope.schema == SCHEMA
+		and type(envelope.version) == "number" and is_finite(envelope.version)
+		and envelope.version > InfiniteMathValue.FORMAT_VERSION
+end
+
 
 function InfiniteMathValue.normalize_serialized(value)
 	local decoded, canonical = decode_serialized(value)

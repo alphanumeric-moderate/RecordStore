@@ -46,8 +46,9 @@ assert(string.find(InfiniteMathValue.format(legacy_symbolic), "↑{100}", 1, tru
 local previous = backing.Value
 assert(not pcall(function() InfiniteMathValue.set(backing, {}) end), "invalid value was accepted")
 assert(backing.Value == previous, "invalid assignment changed the previous valid payload")
-assert(not InfiniteMathValue.is_serialized('{"schema":"InfiniteMathValue","version":99,"value":{}}'),
-	"future codec version was accepted")
+local future_payload = '{"schema":"InfiniteMathValue","version":99,"value":{"kind":"number","first":1,"second":1000}}'
+assert(not InfiniteMathValue.is_serialized(future_payload), "future codec version was accepted as supported")
+assert(InfiniteMathValue.is_unsupported_version(future_payload), "future codec version was not detected")
 assert(not InfiniteMathValue.is_value({}), "unsupported input table was accepted")
 backing:Destroy()
 

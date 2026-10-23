@@ -147,7 +147,7 @@ local current = InfiniteMathValue.get(cash)
 InfiniteMathValue.set(cash, current + InfiniteMath.new("100"))
 ```
 
-InfiniteMath Revised represents a value using a native floating-point significand and exponent. Its representable upper range is substantially above the native `1e308` limit, while significant-digit precision remains approximate. This is a range upgrade, not arbitrary-precision decimal arithmetic; operations can round small terms away when magnitudes differ greatly.
+InfiniteMath Revised represents values using IEEE-754 double-precision floating-point significands and exponents. It extends representable range far beyond native `1e308`, but it is not arbitrary-precision arithmetic: values retain roughly 15–17 significant decimal digits, exponent increments can become unresolvable once the exponent magnitude exceeds `2^53`, and addition/subtraction deliberately discard terms more than 16 decimal orders below the larger operand. These precision and range limits are covered by regression tests; exact large-integer arithmetic requires a separate arbitrary-precision representation.
 
 New values use the `InfiniteMathValue` JSON format version 1. InfiniteMath Revised is vendored from `imezx/InfiniteMath` at upstream commit `7a846efdd1f63c6f38ccf2cbd0afda382ffc5ccf`; its MIT license is included in `THIRD_PARTY_NOTICES/InfiniteMath-MIT.txt`. Existing version-2 CodeNum payloads that fit InfiniteMath are normalized into the new format. Legacy symbolic values that cannot be represented by InfiniteMath are preserved verbatim and remain displayable rather than being silently replaced with defaults. Such preserved legacy values cannot be used as ordinary InfiniteMath numbers until explicitly converted to a representable value.
 

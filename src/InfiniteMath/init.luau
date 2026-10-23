@@ -87,91 +87,47 @@ local function isInt(x: number): boolean
 end
 
 local function normalize(first: number, second: number): (number, number)
-	if first == 0 then
-		return 0, 0
+	if type(first) ~= "number" or type(second) ~= "number" then error("InfiniteMath coefficient and exponent must be numbers", 2) end
+	if first ~= first or second ~= second then return NaN, NaN end
+	if first == math.huge or first == -math.huge or second == math.huge or second == -math.huge then
+		error("InfiniteMath coefficient and exponent must be finite", 2)
 	end
+	if first == 0 then return 0, 0 end
 	local sign = if first < 0 then -1 else 1
 	local m = math.abs(first)
-
-	-- m is always a finite double here. cuz log10(m) is in [-308..308]
 	local k = math.floor(math.log10(m))
-	if k ~= 0 then
-		m /= pow10(k)
-		second += k
-	end
-	if m >= 10 then
-		m /= 10
-		second += 1
-	elseif m < 1 then
-		m *= 10
-		second -= 1
-	end
+	if k < -308 then m = (m / 1e-308) * pow10(-k - 308) else m /= pow10(k) end
+	second += k
+	if m >= 10 then m /= 10; second += 1 elseif m < 1 then m *= 10; second -= 1 end
+	if second == math.huge or second == -math.huge then error("InfiniteMath exponent overflow", 2) end
 	return m * sign, second
 end
 
 local function normalize2(first: number, second: number): (number, number)
-	if first == 0 then
-		return 0, 0
+	if first ~= first or second ~= second then return NaN, NaN end
+	if first == math.huge or first == -math.huge or second == math.huge or second == -math.huge then
+		error("InfiniteMath arithmetic overflow", 2)
 	end
-
+	if first == 0 then return 0, 0 end
 	local sign = if first < 0 then -1 else 1
 	local m = math.abs(first)
-
 	if m >= 10 then
-		m /= 10
-		second += 1
-		if m >= 10 then
-			m /= 10
-			second += 1
-		end
+		m /= 10; second += 1
+		if m >= 10 then m /= 10; second += 1 end
 	elseif m < 1 then
-		m *= 10
-		second -= 1
-		if m < 1 then
-			m *= 10
-			second -= 1
-		end
+		m *= 10; second -= 1
+		if m < 1 then m *= 10; second -= 1 end
 	end
-
-	if m >= 10 or m < 1 then
-		return normalize(sign * m, second)
-	end
-
+	if m >= 10 or m < 1 then return normalize(sign * m, second) end
+	if second == math.huge or second == -math.huge then error("InfiniteMath exponent overflow", 2) end
 	return sign * m, second
 end
 
 local function convert(number: number): (number, number)
-	if type(number) ~= "number" then
-		error('Type is not a "number".')
-	end
-
-	if number ~= number then
-		error("NaN is not supported.")
-	end
-	if number == math.huge or number == -math.huge then
-		error('INF is not supported as a number input. Use "1,1000" or "1e+1000".')
-	end
-
-	if number == 0 then
-		return 0, 0
-	end
-
-	local sign = if number < 0 then -1 else 1
-	number = math.abs(number)
-
-	-- exponent guess
-	local e = math.floor(math.log10(number))
-	-- scale into ~[1,10)
-	local m = number / (10 ^ e)
-
-	if m >= 10 then
-		m /= 10
-		e += 1
-	elseif m < 1 then
-		m *= 10
-		e -= 1
-	end
-	return m * sign, e
+	if type(number) ~= "number" then error('Type is not a "number".', 2) end
+	if number ~= number then error("NaN is not supported.", 2) end
+	if number == math.huge or number == -math.huge then error('INF is not supported as a number input. Use "1,1000" or "1e+1000".', 2) end
+	return normalize(number, 0)
 end
 
 local function coerce(x: any): Number
@@ -209,27 +165,23 @@ local function checkNumber(a): Number
 	return coerce(a)
 end
 
+local function isNaNNumber(value: Number): boolean
+	return value.first ~= value.first or value.second ~= value.second
+end
+
 local function cmp(a: Number, b: Number): number
-	local f1, e1 = a.first, a.second
-	local f2, e2 = b.first, b.second
-
+	if isNaNNumber(a) or isNaNNumber(b) then return NaN end
+	local f1, e1 = normalize(a.first, a.second)
+	local f2, e2 = normalize(b.first, b.second)
+	if f1 ~= f1 or e1 ~= e1 or f2 ~= f2 or e2 ~= e2 then return NaN end
 	local s1, s2 = math.sign(f1), math.sign(f2)
-	if s1 ~= s2 then
-		return (s1 < s2) and -1 or 1
-	end
+	if s1 ~= s2 then return (s1 < s2) and -1 or 1 end
 	if s1 == 0 then return 0 end
-
-	-- magnitude
 	if e1 ~= e2 then
-		if s1 > 0 then
-			return (e1 < e2) and -1 or 1
-		end
-		return (e1 > e2) and -1 or 1 -- inverted for negatives
+		if s1 > 0 then return (e1 < e2) and -1 or 1 end
+		return (e1 > e2) and -1 or 1
 	end
-
-	if f1 ~= f2 then
-		return (f1 < f2) and -1 or 1
-	end
+	if f1 ~= f2 then return (f1 < f2) and -1 or 1 end
 	return 0
 end
 
@@ -245,55 +197,65 @@ end
 -- math metamethods:
 function Number.__add(a, b)
 	a, b = coerce(a), coerce(b)
-
-	local first1, second1 = a.first, a.second
-	local first2, second2 = b.first, b.second
+	local first1, second1 = normalize(a.first, a.second)
+	local first2, second2 = normalize(b.first, b.second)
+	if first1 ~= first1 or second1 ~= second1 or first2 ~= first2 or second2 ~= second2 then return fastNew(NaN, NaN) end
 	local difference = second1 - second2
-
-	if math.abs(difference) > THRESHOLD then -- Check if difference in exponents is greater than threshold
-		if math.max(second1, second2) == second1 then
-			return fastNew(first1, second1)
-		end
-		return fastNew(first2, second2)
+	if difference > THRESHOLD then return fastNew(first1, second1) end
+	if difference < -THRESHOLD then return fastNew(first2, second2) end
+	if difference >= 0 then
+		first2 *= smallPow10(-difference)
+		first1, second1 = normalize(first1 + first2, second1)
+	else
+		first1 *= smallPow10(difference)
+		first1, second1 = normalize(first1 + first2, second2)
 	end
-
-	first2 *= smallPow10(-difference)
-	first1, second1 = normalize(first1 + first2, second1)
-
-	return fastNew(first1 , second1)
+	return fastNew(first1, second1)
 end
 
 function Number.__sub(a, b)
 	a, b = coerce(a), coerce(b)
-
-	local first1, second1 = a.first, a.second
-	local first2, second2 = b.first, b.second
+	local first1, second1 = normalize(a.first, a.second)
+	local first2, second2 = normalize(b.first, b.second)
+	if first1 ~= first1 or second1 ~= second1 or first2 ~= first2 or second2 ~= second2 then return fastNew(NaN, NaN) end
 	local difference = second1 - second2
-
-	if math.abs(difference) > THRESHOLD then -- Check if difference in exponents is greater than threshold
-		if math.max(second1, second2) == second1 then
-			return fastNew(first1 ,second1)
-		end
-		return fastNew(first2, second2)
+	if difference > THRESHOLD then return fastNew(first1, second1) end
+	if difference < -THRESHOLD then return fastNew(-first2, second2) end
+	if difference >= 0 then
+		first2 *= smallPow10(-difference)
+		first1, second1 = normalize(first1 - first2, second1)
+	else
+		first1 *= smallPow10(difference)
+		first1, second1 = normalize(first1 - first2, second2)
 	end
-
-	first2 *= smallPow10(-difference)
-	first1, second1 = normalize(first1 - first2, second1)
-
-	return fastNew(first1 , second1)
+	return fastNew(first1, second1)
 end
 
 function Number.__mul(a, b)
-	a = coerce(a); b = coerce(b)
-	local rf, re = normalize2(a.first * b.first, a.second + b.second)
+	a, b = coerce(a), coerce(b)
+	if isNaNNumber(a) or isNaNNumber(b) then return fastNew(NaN, NaN) end
+	local exponent = a.second + b.second
+	if exponent == math.huge or exponent == -math.huge then
+		if a.first == 0 or b.first == 0 then return fastNew(0, 0) end
+		error("InfiniteMath multiplication result exponent overflow", 2)
+	end
+	local rf, re = normalize2(a.first * b.first, exponent)
 	return fastNew(rf, re)
 end
 
 function Number.__div(a, b)
-	a = coerce(a); b = coerce(b)
-	local rf, re = normalize2(a.first / b.first, a.second - b.second)
+	a, b = coerce(a), coerce(b)
+	if isNaNNumber(a) or isNaNNumber(b) then return fastNew(NaN, NaN) end
+	if b.first == 0 then error("InfiniteMath division by zero", 2) end
+	local exponent = a.second - b.second
+	if exponent == math.huge or exponent == -math.huge then
+		if a.first == 0 then return fastNew(0, 0) end
+		error("InfiniteMath division result exponent overflow", 2)
+	end
+	local rf, re = normalize2(a.first / b.first, exponent)
 	return fastNew(rf, re)
 end
+
 
 function Number.__pow(a, power)
 	a = coerce(a)
@@ -304,7 +266,7 @@ function Number.__pow(a, power)
 		power = power:Reverse()
 	end
 
-	if power == math.huge or power ~= power or type(power) ~= "number" then
+	if power == math.huge or power == -math.huge or power ~= power or type(power) ~= "number" then
 		error(`'{power}' is not a valid power. If power is 'inf' you must keep it below 10^308.`)
 		return
 	end
@@ -355,20 +317,9 @@ function Number.__pow(a, power)
 end
 
 function Number.__mod(a, b)
-	a, b = coerce(a), coerce(b)
-	local sign = InfiniteMath.sign(a)
-
-	local divided
-
-	if sign == 1 then
-		divided = InfiniteMath.floor(a / b)
-	else
-		divided = InfiniteMath.round(a / b)
-	end
-	local nextNum = b * divided
-
-	return a - nextNum
+	return InfiniteMath.fmod(a, b)
 end
+
 
 function Number.__eq(a, b)
 	a, b = coerce(a), coerce(b)
@@ -432,51 +383,43 @@ end
 ]=]
 function InfiniteMath.new(val : number | string | {} | Number) : Number
 	local first, second
-
 	if type(val) == "table" then
-		if val.first ~= nil and val.second ~= nil then
-			if getmetatable(val) ~= Number then
-				return setmetatable(val, Number)
+		if val.first ~= nil or val.second ~= nil then
+			if type(val.first) ~= "number" or type(val.second) ~= "number" then error("InfiniteMath table must contain numeric first and second fields", 2) end
+			local first_nan, second_nan = val.first ~= val.first, val.second ~= val.second
+			if first_nan or second_nan then
+				if first_nan and second_nan and getmetatable(val) == Number then return val end
+				error("InfiniteMath table contains an invalid NaN representation", 2)
 			end
-
-			return val
+			if val.first == math.huge or val.first == -math.huge or val.second == math.huge or val.second == -math.huge then error("InfiniteMath table fields must be finite", 2) end
+			first, second = normalize(val.first, val.second)
+			val.first, val.second = first, second
+			return setmetatable(val, Number)
 		end
-
-		first = val[1]
-		second = val[2]
+		first, second = val[1], val[2]
+		if type(first) ~= "number" or type(second) ~= "number" or first ~= first or second ~= second
+			or first == math.huge or first == -math.huge or second == math.huge or second == -math.huge then
+			error("InfiniteMath tuple must contain finite numeric coefficient and exponent", 2)
+		end
+		first, second = normalize(first, second)
 	elseif type(val) == "string" then
 		local mantStr, expStr = parseExpString(val)
-		if mantStr and expStr then
-			first, second = normalize(mantStr, expStr)
-		else
+		if mantStr and expStr then first, second = normalize(mantStr, expStr) else
 			local n = tonumber(val)
-			if n == nil then
-				error('string is not a valid number format. Use "1,0" or "1e+3" etc.')
-			end
-			if n == math.huge or n == -math.huge then
-				error('String overflows to INF. Use explicit exponent like "1e+1000" (supported) or "1,1000".')
-			end
+			if n == nil then error('string is not a valid number format. Use "1,0" or "1e+3" etc.', 2) end
+			if n == math.huge or n == -math.huge then error('String overflows to INF. Use explicit exponent like "1e+1000" (supported) or "1,1000".', 2) end
 			first, second = convert(n)
 		end
-	elseif type(val) == 'number' then
-		if val ~= val then
-			error("NaN is not allowed.")
-		end
-		if val == math.huge or val == -math.huge then
-			error('INF number is not allowed. Please use "string" or "table" instead of "number" to go above INF (e.g. "1,1000" or "1e+1000").')
-		end
-
+	elseif type(val) == "number" then
+		if val ~= val then error("NaN is not allowed.", 2) end
+		if val == math.huge or val == -math.huge then error('INF number is not allowed. Please use "string" or "table" instead of "number" to go above INF (e.g. "1,1000" or "1e+1000").', 2) end
 		first, second = convert(val)
 	else
-		error(`'{type(val)}' is not a valid type. Please only use "number", "string", "table", or constructed numbers.`)
-		return
+		error(('"%s" is not a valid type. Please only use "number", "string", "table", or constructed numbers.'):format(type(val)), 2)
 	end
-
-	return setmetatable({
-		first = first,
-		second = second
-	}, Number)
+	return setmetatable({ first = first, second = second }, Number)
 end
+
 
 --[=[
 	@within Number
@@ -548,6 +491,8 @@ function Number:GetSuffix(abbreviation: boolean?): string
 	end
 
 	local first, second = normalize(self.first, self.second)
+	if first ~= first or second ~= second then return "NaN" end
+	if second < -308 then return self:ScientificNotation(abbreviation, false) end
 
 	if second < 3 then
 		local result = `{self:Reverse()}`
@@ -635,24 +580,20 @@ end
 ]=]
 function Number:ScientificNotation(abbreviation: boolean?, secondAbbreviation: boolean?): string
 	local first, second = normalize(self.first, self.second)
-
+	if first ~= first or second ~= second then return "NaN" end
 	local dp = InfiniteMath.DECIMALPOINTS
 	local scale = pow10(dp)
-	local str = math.floor(first * scale) / scale -- The * 10 / 10 controls decimal precision, more zeros = more decimals
-
-	if secondAbbreviation == false then
-		second = tostring(second)
+	local str = math.floor(first * scale) / scale
+	if secondAbbreviation == false then second = tostring(second)
 	elseif second > 1e+6 then
 		second = fastNew(second, 0)
-		if abbreviation ~= false then
-			second = second:GetSuffix(true)
-		else
-			second = second:ScientificNotation(nil, false)
-		end
+		if abbreviation ~= false then second = second:GetSuffix(true) else second = second:ScientificNotation(nil, false) end
 	end
-
-	return `{str}e+{second}`
+	local exponent_text = tostring(second)
+	if string.sub(exponent_text, 1, 1) ~= "-" and string.sub(exponent_text, 1, 1) ~= "+" then exponent_text = "+" .. exponent_text end
+	return str .. "e" .. exponent_text
 end
+
 
 --[=[
 	@within Number

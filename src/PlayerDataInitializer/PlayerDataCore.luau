@@ -42,6 +42,7 @@ type InfiniteMathValueFactoryAPI = {
 	format: (value: unknown, options: NumberFormatterFactory.Options?) -> string,
 	new: (name: string, initial_value: unknown) -> StringValue,
 	normalize_serialized: ((value: unknown) -> (string?, InfiniteMathValueNode?))?,
+	is_unsupported_version: ((value: unknown) -> boolean)?,
 }
 
 local cached_infinitemath_value_factory: InfiniteMathValueFactoryAPI? = nil
@@ -68,6 +69,10 @@ local InfiniteMathValueFactory: InfiniteMathValueFactoryAPI = table.freeze({
 	end,
 	new = function(name: string, initial_value: unknown): StringValue
 		return get_infinitemath_value_factory().new(name, initial_value)
+	end,
+	is_unsupported_version = function(value: unknown): boolean
+		local check = get_infinimath_value_factory().is_unsupported_version
+		return if check ~= nil then check(value) else false
 	end,
 	normalize_serialized = function(value: unknown): (string?, InfiniteMathValueNode?)
 		local factory = get_infinitemath_value_factory()
@@ -260,6 +265,9 @@ local function decode_stored_field_value(
 	if field.class_name == "InfiniteMathValue" then
 		local factory = infinitemath_factory or InfiniteMathValueFactory
 		if type(value) ~= "string" then return nil, false end
+		if factory.is_unsupported_version ~= nil and factory.is_unsupported_version(value) then
+			error("stored InfiniteMathValue uses a newer codec version; refusing to overwrite it with a default", 2)
+		end
 		local normalized = normalize_serialized_infinitemath(factory, value)
 		if normalized == nil then return nil, false end
 		return normalized, normalized ~= value
@@ -418,7 +426,11 @@ local function validate_player_data(
 		end
 		local field = CONFIG.data[key]
 		if field ~= nil and field.class_name == "InfiniteMathValue" then
-			if item_type ~= "string" or not (infinitemath_factory or InfiniteMathValueFactory).is_serialized(item) then
+			local factory = infinimath_factory or InfiniteMathValueFactory
+			local supported = item_type == "string" and factory.is_serialized(item)
+			local future = item_type == "string" and factory.is_unsupported_version ~= nil
+				and factory.is_unsupported_version(item)
+			if not supported and not future then
 				return false, ("player data.%s must contain a valid serialized InfiniteMath value"):format(key)
 			end
 		end

@@ -28,14 +28,16 @@ local function assertEndian(endian: string)
 end
 
 local function assertBytes(bytes: { number })
-	if type(bytes) ~= "table" then
-		error("bytes must be an array/table of integers 0..255")
+	if type(bytes) ~= "table" then error("bytes must be an array/table of integers 0..255", 2) end
+	local count = 0
+	for key in pairs(bytes) do
+		if type(key) ~= "number" or key % 1 ~= 0 or key < 1 then error("bytes must contain only positive integer array indices", 2) end
+		count += 1
 	end
+	if count ~= #bytes then error("bytes must be a contiguous array", 2) end
 	for i = 1, #bytes do
 		local b = bytes[i]
-		if type(b) ~= "number" or b % 1 ~= 0 or b < 0 or b > 255 then
-			error(("bytes[%d] is not a valid byte (0..255 integer). Got: %s"):format(i, b))
-		end
+		if type(b) ~= "number" or b % 1 ~= 0 or b < 0 or b > 255 then error(("bytes[%d] is not a valid byte (0..255 integer). Got: %s"):format(i, tostring(b)), 2) end
 	end
 end
 
@@ -147,6 +149,25 @@ local function leBytesFromLimbs(limbs: { number }): { number }
 	return out
 end
 
+local function assertValidInt(value: any)
+	if type(value) ~= "table" or getmetatable(value) ~= Int then error("value is not an InfiniteMath.Int", 3) end
+	if value.sign ~= -1 and value.sign ~= 0 and value.sign ~= 1 then error("InfiniteMath.Int sign must be -1, 0, or 1", 3) end
+	if type(value.limbs) ~= "table" then error("InfiniteMath.Int limbs must be a table", 3) end
+	local count = 0
+	for key in pairs(value.limbs) do
+		if type(key) ~= "number" or key % 1 ~= 0 or key < 1 then error("InfiniteMath.Int limbs must use contiguous positive integer indices", 3) end
+		count += 1
+	end
+	if count ~= #value.limbs then error("InfiniteMath.Int limbs must be contiguous", 3) end
+	for i = 1, #value.limbs do
+		local limb = value.limbs[i]
+		if type(limb) ~= "number" or limb ~= limb or limb % 1 ~= 0 or limb < 0 or limb >= 4294967296 then error(("InfiniteMath.Int limb %d is invalid"):format(i), 3) end
+	end
+	if value.sign == 0 then
+		if #value.limbs ~= 0 then error("zero InfiniteMath.Int must not contain limbs", 3) end
+	elseif #value.limbs == 0 or value.limbs[#value.limbs] == 0 then error("non-zero InfiniteMath.Int must have normalized limbs", 3) end
+end
+
 return function(InfiniteMath): typeof(Int)
 	function Int.is(value: any): boolean
 		return typeof(value) == "table" and getmetatable(value) == Int
@@ -188,6 +209,7 @@ return function(InfiniteMath): typeof(Int)
 
 	function Int:ToRawBytes(endian: string, minBytes: number?, signed: boolean?): { number }
 		assertEndian(endian)
+		assertValidInt(self)
 
 		if minBytes ~= nil then
 			if type(minBytes) ~= "number" or minBytes % 1 ~= 0 or minBytes < 0 then
@@ -214,13 +236,19 @@ return function(InfiniteMath): typeof(Int)
 				end
 				return fromLEBytes(endian, magLE)
 			end
+			local needs_extra_byte = magLE[#magLE] > 128
+			if magLE[#magLE] == 128 then
+				for i = 1, #magLE - 1 do
+					if magLE[i] ~= 0 then needs_extra_byte = true; break end
+				end
+			end
 			local length = minBytes or #magLE
-			if length < #magLE then
-				error("minBytes too small to represent this value")
+			if length < #magLE or (length == #magLE and needs_extra_byte) then
+				if minBytes ~= nil then error("minBytes too small to represent this value", 2) end
+				length = #magLE + 1
 			end
-			while #magLE < length do
-				magLE[#magLE + 1] = 0
-			end
+			while #magLE < length do magLE[#magLE + 1] = 0 end
+
 			local twosLE = magnitudeToTwosComplementLE(magLE, length)
 			return fromLEBytes(endian, twosLE)
 		end
@@ -240,6 +268,7 @@ return function(InfiniteMath): typeof(Int)
 	end
 
 	function Int:ToNumber()
+		assertValidInt(self)
 		if self.sign == 0 or #self.limbs == 0 then
 			return InfiniteMath.new(0)
 		end
@@ -252,7 +281,9 @@ return function(InfiniteMath): typeof(Int)
 
 		-- log10(value) ~= ((n-1)*32 + log2(msw)) * log10(2)
 		local LOG10_2 = math.log(2) / math.log(10)
-		local log2 = (n - 1) * 32 + (math.log(msw) / math.log(2))
+		local leading = msw
+		if n > 1 then leading += self.limbs[n - 1] / 4294967296 end
+		local log2 = (n - 1) * 32 + (math.log(leading) / math.log(2))
 		local log10 = log2 * LOG10_2
 
 		local exp10 = math.floor(log10)
