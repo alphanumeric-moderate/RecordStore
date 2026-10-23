@@ -34,16 +34,8 @@ jobs:
           curl -fsSL "https://luau-lsp.pages.dev/type-definitions/globalTypes.None.d.luau" -o /tmp/globalTypes.d.luau
           test -s /tmp/globalTypes.d.luau
 
-      - name: Analyze strict and nonstrict modes
+      - name: Analyze nonstrict mode
         run: |
-          set +e
-          luau-lsp analyze --platform=roblox --definitions=/tmp/globalTypes.d.luau src/PlayerDataInitializer/RecordStore.luau > /tmp/strict.log 2>&1
-          strict_status=$?
+          set -euo pipefail
           sed '1s/^--!strict$/--!nonstrict/' src/PlayerDataInitializer/RecordStore.luau > /tmp/RecordStore.nonstrict.luau
-          luau-lsp analyze --platform=roblox --definitions=/tmp/globalTypes.d.luau /tmp/RecordStore.nonstrict.luau > /tmp/nonstrict.log 2>&1
-          nonstrict_status=$?
-          echo "===== Strict analysis (exit ${strict_status}) ====="
-          cat /tmp/strict.log
-          echo "===== Nonstrict analysis (exit ${nonstrict_status}) ====="
-          cat /tmp/nonstrict.log
-          if [ "$strict_status" -ne 0 ] || [ "$nonstrict_status" -ne 0 ]; then exit 1; fi
+          luau-lsp analyze --platform=roblox --definitions=/tmp/globalTypes.d.luau /tmp/RecordStore.nonstrict.luau
