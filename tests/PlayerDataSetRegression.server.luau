@@ -132,6 +132,22 @@ local test_ok, test_error = pcall(function()
 	local close_result, close_message = verification_record:Close()
 	assert(close_result == "closed" or close_result == "fenced", close_message)
 
+	local legacy_record = RecordStore.Mock.get_record_raw(
+		"PlayerData_Test1",
+		"global",
+		"Player_" .. tostring(player.UserId)
+	) :: { [string]: any }
+	local legacy_data = legacy_record.data :: { [string]: any }
+	legacy_data.admin = nil
+	legacy_record.data = legacy_data
+	local seed_result, seed_message = RecordStore.Mock.seed_record_raw(
+		"PlayerData_Test1",
+		"global",
+		"Player_" .. tostring(player.UserId),
+		legacy_record
+	)
+	assert(seed_result == "success", seed_message)
+
 	local deferred_callbacks: { () -> () } = {}
 	local controlled_task: any = {
 		spawn = task.spawn,
@@ -200,6 +216,8 @@ local test_ok, test_error = pcall(function()
 	local pressure_persisted = pressure_verification:Get() :: { [string]: RecordStore.JsonValue }
 	assert(pressure_persisted.kills == pressure_baseline + 1,
 		"backpressure must preserve and flush the earlier accepted pending mutation")
+	assert(pressure_persisted.admin == false,
+		"read-only flush must first persist the already-accepted dirty schema-normalization snapshot")
 	local pressure_close_result, pressure_close_message = pressure_verification:Close()
 	assert(pressure_close_result == "closed" or pressure_close_result == "fenced", pressure_close_message)
 end)
