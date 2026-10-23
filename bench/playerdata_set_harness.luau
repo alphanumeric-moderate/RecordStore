@@ -283,8 +283,11 @@ end
 		is_value = function(value) return type(value) == "string" end,
 		normalize = function(value) return tostring(value) end,
 		is_serialized = function(value) return type(value) == "string" end,
-		format = function(value, options)
-			return if type(value) == "number" then InfiniteMath.format(value, options) else tostring(value)
+		format = function(value, _options)
+			if type(value) == "number" then
+				error("native-number formatting must not use the InfiniteMathValue persistence adapter", 2)
+			end
+			return tostring(value)
 		end,
 		new = function(name, value)
 			local backing = Instance.new("StringValue")
