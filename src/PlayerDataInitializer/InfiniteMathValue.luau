@@ -72,7 +72,7 @@ local function normalize_special_name(value)
 		return nil
 	end
 
-	local name = string.lower(string.gsub(value, "%s", ""))
+	local name = string.lower((string.gsub(value, "%s", "")))
 	if name == "nan" or name == "+nan" or name == "-nan" then
 		return "nan"
 	elseif name == "inf" or name == "+inf" or name == "infinity" or name == "+infinity" then
@@ -178,7 +178,9 @@ local function legacy_node_to_value(node, depth)
 		local digits = string.gsub(node.digits, "^0+", "")
 		if digits == "" then return api.new(0) end
 		local leading = string.sub(digits, 1, math.min(15, #digits))
-		local mantissa = tonumber(leading) / math.pow(10, #leading - 1)
+		local leading_number = tonumber(leading)
+		if leading_number == nil then return nil end
+		local mantissa = leading_number / math.pow(10, #leading - 1)
 		return api.new({ node.sign * mantissa, #digits - 1 })
 	elseif kind == "scientific" then
 		if (node.sign ~= 1 and node.sign ~= -1)

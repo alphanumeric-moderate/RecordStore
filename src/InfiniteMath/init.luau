@@ -397,24 +397,32 @@ end
 function InfiniteMath.new(val : number | string | {} | Number) : Number
 	local first, second
 	if type(val) == "table" then
-		if val.first ~= nil or val.second ~= nil then
-			if type(val.first) ~= "number" or type(val.second) ~= "number" then error("InfiniteMath table must contain numeric first and second fields", 2) end
-			local first_nan, second_nan = val.first ~= val.first, val.second ~= val.second
+		local table_value: any = val
+		if table_value.first ~= nil or table_value.second ~= nil then
+			if type(table_value.first) ~= "number" or type(table_value.second) ~= "number" then
+				error("InfiniteMath table must contain numeric first and second fields", 2)
+			end
+			local first_nan, second_nan = table_value.first ~= table_value.first, table_value.second ~= table_value.second
 			if first_nan or second_nan then
-				if first_nan and second_nan and getmetatable(val) == Number then return val end
+				if first_nan and second_nan and getmetatable(table_value) == Number then return table_value :: Number end
 				error("InfiniteMath table contains an invalid NaN representation", 2)
 			end
-			if val.first == math.huge or val.first == -math.huge or val.second == math.huge or val.second == -math.huge then error("InfiniteMath table fields must be finite", 2) end
-			first, second = normalize(val.first, val.second)
-			val.first, val.second = first, second
-			return setmetatable(val, Number)
+			if table_value.first == math.huge or table_value.first == -math.huge
+				or table_value.second == math.huge or table_value.second == -math.huge
+			then
+				error("InfiniteMath table fields must be finite", 2)
+			end
+			first, second = normalize(table_value.first, table_value.second)
+			table_value.first, table_value.second = first, second
+			return setmetatable(table_value, Number) :: Number
 		end
-		first, second = val[1], val[2]
+		first, second = table_value[1], table_value[2]
 		if type(first) ~= "number" or type(second) ~= "number" or first ~= first or second ~= second
 			or first == math.huge or first == -math.huge or second == math.huge or second == -math.huge then
 			error("InfiniteMath tuple must contain finite numeric coefficient and exponent", 2)
 		end
 		first, second = normalize(first, second)
+
 	elseif type(val) == "string" then
 		local mantStr, expStr = parseExpString(val)
 		if mantStr and expStr then first, second = normalize(mantStr, expStr) else
@@ -855,30 +863,31 @@ end
 	@param Max number | string | table | Number
 	@return Number
 ]=]
-function InfiniteMath.clamp<T, A, B>(Num: T, Min: A, Max: B): T
-	Num = checkNumber(Num)
-	local first, second = normalize(Num.first, Num.second)
-	Num = fastNew(first, second)
+function InfiniteMath.clamp(Num: any, Min: any?, Max: any?): Number
+	local number_value: Number = checkNumber(Num)
+	local min_value: Number
+	local max_value: Number
+
+	local first, second = normalize(number_value.first, number_value.second)
+	number_value = fastNew(first, second)
 
 	if Min ~= nil then
-		Min = checkNumber(Min)
-		local firstMin, secondMin = normalize(Min.first, Min.second)
-		Min = fastNew(firstMin, secondMin)
+		local minimum: Number = checkNumber(Min)
+		local first_min, second_min = normalize(minimum.first, minimum.second)
+		min_value = fastNew(first_min, second_min)
 	else
-		Min = fastNew(0, 0)
+		min_value = fastNew(0, 0)
 	end
 
 	if Max ~= nil then
-		Max = checkNumber(Max)
-		local firstMax, secondMax = normalize(Max.first, Max.second)
-		Max = fastNew(firstMax, secondMax)
+		local maximum: Number = checkNumber(Max)
+		local first_max, second_max = normalize(maximum.first, maximum.second)
+		max_value = fastNew(first_max, second_max)
 	else
-		Max = fastNew(1, 1e+308)
+		max_value = fastNew(1, 1e+308)
 	end
 
-	Num = if Num < Min then Min elseif Num > Max then Max else Num
-
-	return Num
+	return if number_value < min_value then min_value elseif number_value > max_value then max_value else number_value
 end
 
 --[=[
@@ -1096,7 +1105,7 @@ function InfiniteMath.isNaN(x: any): boolean
 		return isFieldNaN(x.first) or isFieldNaN(x.second)
 	end
 	if type(x) == "string" then
-		return string.lower(string.gsub(x, "^%s*(.-)%s*$", "%1")) == "nan"
+		return string.lower((string.gsub(x, "^%s*(.-)%s*$", "%1"))) == "nan"
 	end
 	return false
 end
@@ -1128,7 +1137,7 @@ function InfiniteMath.isInf(x: any): boolean
 		return isFieldInf(x.first) or isFieldInf(x.second)
 	end
 	if type(x) == "string" then
-		local normalized = string.lower(string.gsub(x, "^%s*(.-)%s*$", "%1"))
+		local normalized = string.lower((string.gsub(x, "^%s*(.-)%s*$", "%1")))
 		return normalized == "inf" or normalized == "+inf" or normalized == "-inf"
 	end
 	return false
@@ -1182,7 +1191,7 @@ function InfiniteMath.format(value: any, options: FormatOptions?): string
 		if value == math.huge then return "∞" end
 		if value == -math.huge then return "-∞" end
 	elseif type(value) == "string" then
-		local token = string.lower(string.gsub(value, "%s", ""))
+		local token = string.lower((string.gsub(value, "%s", "")))
 		if token == "nan" or token == "+nan" or token == "-nan" then return "NaN" end
 		if token == "inf" or token == "+inf" or token == "infinity" or token == "+infinity" then return "∞" end
 		if token == "-inf" or token == "-infinity" then return "-∞" end

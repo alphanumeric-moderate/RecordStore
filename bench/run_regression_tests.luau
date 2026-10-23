@@ -45,7 +45,7 @@ assert(math.isnan(IntegerInfinityValue.normalize(0 / 0, "nearest")), "NaN was no
 assert(IntegerInfinityValue.normalize(17.4, "nearest") == 17, "finite rounding changed")
 assert(IntegerInfinityValue.normalize(-17.6, "nearest") == -18, "negative finite rounding changed")
 
-local InfiniteMath = Shim.load_infinimath()
+local InfiniteMath = require("./infinimath_shim").load_infinimath()
 assert(InfiniteMath.format(999) == "999")
 assert(InfiniteMath.format(1000) == "1K")
 assert(InfiniteMath.format(1250) == "1.25K")
