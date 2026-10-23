@@ -6,13 +6,13 @@ RecordStore is a server-side Roblox Luau persistence module.
 
 ## Install in Roblox Studio
 
-The Rojo projects map `src/PlayerDataInitializer` to a Script named `ServerScriptService.PlayerDataInitializer`. Its child ModuleScripts are `PlayerData`, `PlayerDataCore`, `RecordStore`, `IntegerInfinityValue`, `NumberFormatter`, and `CodeNumValue`. The separate `ReplicatedStorage.CodeNum` module is included for CodeNum-backed fields.
+The Rojo projects map `src/PlayerDataInitializer` to a Script named `ServerScriptService.PlayerDataInitializer`. Its child ModuleScripts include `PlayerData`, `PlayerDataCore`, `RecordStore`, `IntegerInfinityValue`, `NumberFormatter`, and `InfiniteMathValue`. InfiniteMath Revised is vendored at `src/InfiniteMath` and mapped to `ReplicatedStorage.InfiniteMath`.
 
-**`CodeNum` must be a ModuleScript at `ReplicatedStorage.CodeNum`.** It is intentionally outside `PlayerDataInitializer` because `CodeNumValue` resolves it from `ReplicatedStorage`. Do not move `CodeNum` into `PlayerDataInitializer`.
+**`InfiniteMath` must be a ModuleScript at `ReplicatedStorage.InfiniteMath`.** The vendored InfiniteMath Revised module is outside `PlayerDataInitializer` because `InfiniteMathValue` resolves it from `ReplicatedStorage`. Do not move `InfiniteMath` into `PlayerDataInitializer`.
 
 Use `default.project.json` for the standard setup. The initializer starts the shared controller and registers `BindToClose` shutdown handling. Use exactly one initializer.
 
-For manual Studio installation, create a normal server `Script` named `PlayerDataInitializer` in `ServerScriptService`; place `init.server.luau` there as the Script source and make the six data modules its direct children. Put `CodeNum` in `ReplicatedStorage` as `ReplicatedStorage.CodeNum`, not under the initializer. Use a separate test place or Studio session for compatibility testing.
+For manual Studio installation, create a normal server `Script` named `PlayerDataInitializer` in `ServerScriptService`; place `init.server.luau` there as the Script source and make the data modules its direct children. Install the `src/InfiniteMath` hierarchy as `ReplicatedStorage.InfiniteMath`. Use a separate test place or Studio session for compatibility testing.
 
 ## Non-finite numeric values
 
@@ -52,7 +52,7 @@ The repository also includes:
 - `src/PlayerDataInitializer/RecordStore.luau`: the underlying persistence, session ownership, versioning, and recovery API.
 - `src/PlayerDataInitializer/IntegerInfinityValue.luau`: a `NumberValue` factory that rounds finite values to integers while preserving positive infinity, negative infinity, and NaN. The default `kills` field uses this type so non-finite values are not silently replaced with zero.
 - `src/PlayerDataInitializer/NumberFormatter.luau`: a display formatter for native Luau numbers. Formatting never changes stored values.
-- `src/PlayerDataInitializer/CodeNumValue.luau`: an adapter for your CodeNum module. It persists CodeNum's own versioned `encode`/`decode` JSON format and provides `get`/`set` helpers for a replicated StringValue backing instance. With the default schema, this adapter is not required during startup; `PlayerDataCore` loads it only when a `CodeNumValue` field is configured or used.
+- `src/PlayerDataInitializer/InfiniteMathValue.luau`: an adapter for the vendored InfiniteMath Revised module. It persists the number's normalized `first`/`second` pair inside a versioned JSON envelope and provides `get`/`set` helpers for a replicated StringValue backing instance. With the default schema, this adapter is not required during startup; `PlayerDataCore` loads it only when a `InfiniteMathValue` field is configured or used.
 - `src/PlayerDataInitializer/init.server.luau`: a standard Script that starts the controller and shuts it down from `BindToClose`.
 
 ### PlayerData.Set API
@@ -98,9 +98,9 @@ DataStore write has completed synchronously.
 
 Numeric fields are normalized according to their configured Value type. For example, `kills` uses
 `IntegerInfinityValue`, so fractional input is rounded using the field's configured rounding rule.
-CodeNum fields accept a CodeNum value (or a supported input accepted by `CodeNumValue.normalize`)
-and serialize it without coercing it to a native `number`. To use CodeNum, enable a field in
-`CONFIG.data`, for example `cash = define_data_field("CodeNumValue", 0)`. CodeNum values retain
+InfiniteMath fields accept an InfiniteMath value (or a supported input accepted by `InfiniteMathValue.normalize`)
+and serialize it without coercing it to a native `number`. To use InfiniteMath, enable a field in
+`CONFIG.data`, for example `cash = define_data_field("InfiniteMathValue", 0)`. InfiniteMath values retain
 their exact serialized representation in `PlayerDataValues`; the leaderboard remains a formatted,
 display-only `StringValue`.
 
@@ -132,43 +132,26 @@ rojo build examples.project.json -o RecordStore-PlayerDataExample.rbxlx
 
 The included `PlayerDataCore` example uses the store name `PlayerData_Test1`. Change `CONFIG.store_name` in `src/PlayerDataInitializer/PlayerDataCore.luau` before using it for a live production dataset. Review the config's keys, defaults, schema version, and leaderboard values before publishing.
 
-### CodeNum support
+### InfiniteMath support
 
-`ReplicatedStorage.CodeNum` is a required location contract for CodeNum-backed data; the module is not part of the `PlayerDataInitializer` child-module bundle. `CodeNumValue` looks it up from `ReplicatedStorage` on first use and caches its API.
+`ReplicatedStorage.InfiniteMath` exposes the vendored InfiniteMath Revised library. Configure large-number fields with `define_data_field("InfiniteMathValue", 0)`. The `InfiniteMathValue` adapter stores a versioned JSON envelope in the profile and a replicated `StringValue`, then reconstructs an InfiniteMath number when read.
 
-PlayerDataCore's optional `CodeNumValue` field stores values in your CodeNum module's canonical `encode` / `decode` JSON format (format version 2 in the supplied module). Exact decimal integers, scientific values, special values, hyperoperations, unevaluated expressions, and unary calls are serialized without coercion to native numbers.
-
-The repository includes CodeNum 0.2.0-preview.1 at `src/CodeNum.luau`. Both `default.project.json` and `tests.project.json` map it to `ReplicatedStorage.CodeNum`, so the Rojo projects no longer require a separate CodeNum ModuleScript. The public codec API is `encode(value)`, `decode(serialized)`, and `toString(value)`.
-
-Configure a field and optional leaderboard entry in `src/PlayerDataInitializer/PlayerDataCore.luau`:
-
-```lua
--- In CONFIG.data:
-cash = define_data_field("CodeNumValue", 0),
-
--- In CONFIG.leaderstats.values:
-define_leaderstat("cash", "Cash", { decimals = 2 }),
-```
-
-The leaderboard uses a display-only `StringValue`; its serialized backing value is `player.PlayerDataValues.cash`. Update it on the server:
-
-```lua
+```luau
 local ServerScriptService = game:GetService("ServerScriptService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local CodeNumValue = require(ServerScriptService:WaitForChild("PlayerDataInitializer"):WaitForChild("CodeNumValue"))
-local CodeNum = require(ReplicatedStorage:WaitForChild("CodeNum"))
+local InfiniteMathValue = require(ServerScriptService:WaitForChild("PlayerDataInitializer"):WaitForChild("InfiniteMathValue"))
+local InfiniteMath = require(ReplicatedStorage:WaitForChild("InfiniteMath"))
 
-local cash = player.PlayerDataValues:WaitForChild("cash")
-local current = CodeNumValue.get(cash)
-CodeNumValue.set(cash, CodeNum.add(current, CodeNum.integer("100")))
+local cash = player.PlayerDataValues.cash
+local current = InfiniteMathValue.get(cash)
+InfiniteMathValue.set(cash, current + InfiniteMath.new("100"))
 ```
 
-RecordStore persists CodeNum's serialized JSON string, not a metatable-backed node or an EternityNum triplet. The StringValue transport uses a conservative 199,999-byte payload limit. Exact integers and scientific nodes use NumberFormatter's custom suffix sequence; hyperoperations/expressions fall back to `CodeNum.toString()` because their decimal magnitude may not be provable. Exact integer multiplication is capped at a 4,096-digit combined operand budget; larger products stay symbolic to avoid unbounded quadratic work.
+InfiniteMath Revised represents a value using a native floating-point significand and exponent. Its representable upper range is substantially above the native `1e308` limit, while significant-digit precision remains approximate. This is a range upgrade, not arbitrary-precision decimal arithmetic; operations can round small terms away when magnitudes differ greatly.
 
-### Number formatting
+New values use the `InfiniteMathValue` JSON format version 1. Existing version-2 CodeNum payloads that fit InfiniteMath are normalized into the new format. Legacy symbolic values that cannot be represented by InfiniteMath are preserved verbatim and remain displayable rather than being silently replaced with defaults. Such preserved legacy values cannot be used as ordinary InfiniteMath numbers until explicitly converted to a representable value.
 
-The 202-entry sequence is `K, M, B, T`, followed by the `first`, `second`, `third`, and `mult` suffix groups. For example, `1e12` formats as `1T`, `1e15` as `1Qa`, and `1e36` as `1Ud`. Exact CodeNum integer/scientific values use this sequence without converting the entire value to binary64. Once the suffix table runs out, values display in scientific notation.
-
+The StringValue transport retains a conservative 199,999-byte payload limit. InfiniteMath's built-in suffix formatting is used for its supported suffix range, with scientific notation for larger exponents.
 ## Rojo
 
 Build the standard production place, including `PlayerDataInitializer`:

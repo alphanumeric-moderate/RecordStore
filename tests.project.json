@@ -13,9 +13,6 @@
       "NumberFormatter": {
         "$path": "src/PlayerDataInitializer/NumberFormatter.luau"
       },
-      "CodeNumValue": {
-        "$path": "src/PlayerDataInitializer/CodeNumValue.luau"
-      },
       "PlayerDataCore": {
         "$path": "src/PlayerDataInitializer/PlayerDataCore.luau"
       },
@@ -34,20 +31,23 @@
       "NumberFormatterRegression": {
         "$path": "tests/NumberFormatterRegression.server.luau"
       },
-      "CodeNumValueRegression": {
-        "$path": "tests/CodeNumValueRegression.server.luau"
-      },
-      "RecordStoreCodeNumRegression": {
-        "$path": "tests/RecordStore_CodeNumRegression.server.luau"
-      },
       "PlayerDataSetRegression": {
         "$path": "tests/PlayerDataSetRegression.server.luau"
+      },
+      "InfiniteMathValue": {
+        "$path": "src/PlayerDataInitializer/InfiniteMathValue.luau"
+      },
+      "InfiniteMathValueRegression": {
+        "$path": "tests/InfiniteMathValueRegression.server.luau"
+      },
+      "RecordStoreLegacyPayloadRegression": {
+        "$path": "tests/RecordStore_LegacyPayloadRegression.server.luau"
       }
     },
     "ReplicatedStorage": {
       "$className": "ReplicatedStorage",
-      "CodeNum": {
-        "$path": "src/CodeNum.luau"
+      "InfiniteMath": {
+        "$path": "src/InfiniteMath"
       }
     }
   }

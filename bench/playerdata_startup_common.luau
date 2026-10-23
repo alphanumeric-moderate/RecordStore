@@ -9,7 +9,7 @@ local SOURCES = {
 	PlayerDataCore = fs.readFile("src/PlayerDataInitializer/PlayerDataCore.luau"),
 	IntegerInfinityValue = fs.readFile("src/PlayerDataInitializer/IntegerInfinityValue.luau"),
 	NumberFormatter = fs.readFile("src/PlayerDataInitializer/NumberFormatter.luau"),
-	CodeNumValue = fs.readFile("src/PlayerDataInitializer/CodeNumValue.luau"),
+	InfiniteMathValue = fs.readFile("src/PlayerDataInitializer/InfiniteMathValue.luau"),
 	Initializer = fs.readFile("src/PlayerDataInitializer/init.server.luau"),
 }
 
@@ -19,7 +19,7 @@ local MODULE_PATHS = {
 	PlayerDataCore = "src/PlayerDataInitializer/PlayerDataCore.luau",
 	IntegerInfinityValue = "src/PlayerDataInitializer/IntegerInfinityValue.luau",
 	NumberFormatter = "src/PlayerDataInitializer/NumberFormatter.luau",
-	CodeNumValue = "src/PlayerDataInitializer/CodeNumValue.luau",
+	InfiniteMathValue = "src/PlayerDataInitializer/InfiniteMathValue.luau",
 }
 
 local function make_signal()
@@ -32,7 +32,7 @@ local function make_signal()
 	return signal
 end
 
-local function cold_start(eager_code_num)
+local function cold_start(eager_infinimath_value)
 	local parent = {}
 	local modules = {}
 
@@ -66,17 +66,17 @@ local function cold_start(eager_code_num)
 		end,
 	}
 
-	local require_counts = { CodeNumValue = 0 }
+	local require_counts = { InfiniteMathValue = 0 }
 	local cache = {}
 	local core_source = SOURCES.PlayerDataCore
 
-	if eager_code_num then
+	if eager_infinimath_value then
 		local needle = 'local NumberFormatterFactory = require(script.Parent.NumberFormatter)\n'
 		local index = string.find(core_source, needle, 1, true)
 		assert(index ~= nil, "could not find PlayerDataCore's formatter dependency")
 		local insert_at = index + #needle
 		core_source = string.sub(core_source, 1, insert_at - 1)
-			.. 'local _legacy_eager_code_num_value_factory = require(script.Parent.CodeNumValue)\n'
+			.. 'local _legacy_eager_infinitemath_value_factory = require(script.Parent.InfiniteMathValue)\n'
 			.. string.sub(SOURCES.PlayerDataCore, insert_at)
 	end
 
@@ -97,8 +97,8 @@ local function cold_start(eager_code_num)
 
 		assert(MODULE_PATHS[module.Name] ~= nil, "unexpected module: " .. module.Name)
 
-		if module.Name == "CodeNumValue" then
-			require_counts.CodeNumValue += 1
+		if module.Name == "InfiniteMathValue" then
+			require_counts.InfiniteMathValue += 1
 		end
 
 		local source = if module.Name == "PlayerDataCore" then core_source else SOURCES[module.Name]
@@ -131,19 +131,19 @@ local function cold_start(eager_code_num)
 	initializer()
 
 	assert(
-		require_counts.CodeNumValue == (eager_code_num and 1 or 0),
-		"optional CodeNumValue module-load count does not match the selected startup path"
+		require_counts.InfiniteMathValue == (eager_infinimath_value and 1 or 0),
+		"optional InfiniteMathValue module-load count does not match the selected startup path"
 	)
 end
 
-return function(eager_code_num)
+return function(eager_infinimath_value)
 	local ITERATIONS = 25
 
 	for _ = 1, ITERATIONS do
-		cold_start(eager_code_num)
+		cold_start(eager_infinimath_value)
 	end
 
-	print(if eager_code_num
-		then "[PlayerData startup] legacy eager CodeNumValue dependency passed"
-		else "[PlayerData startup] lazy optional CodeNumValue dependency passed")
+	print(if eager_infinimath_value
+		then "[PlayerData startup] legacy eager InfiniteMathValue dependency passed"
+		else "[PlayerData startup] lazy optional InfiniteMathValue dependency passed")
 end
