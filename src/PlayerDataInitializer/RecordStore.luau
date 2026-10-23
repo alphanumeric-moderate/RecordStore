@@ -10721,6 +10721,10 @@ local function reconcile(self: Record, template: JsonValue): (ResultCode, string
 	if state == nil or state.state ~= "active" then
 		return "fenced", "record is not actively owned"
 	end
+	local backpressure = mutation_backpressure_reason(state)
+	if backpressure ~= nil then
+		return "capacity", backpressure
+	end
 	if state.takeover_requested then
 		return "closing", "session takeover has been requested"
 	end
@@ -14088,6 +14092,16 @@ local function start_scheduler()
 				end
 				if state ~= nil and (state.state :: SessionState) == "active" then
 					local now = now_local()
+					if state.options.durability_mode == "durability_first"
+						and state.change_sequence ~= state.saved_change_sequence
+						and state.dirty_since_local ~= nil
+						and not state.busy and not state.queue_busy
+					then
+						local max_dirty_age = state.options.max_dirty_age_seconds
+							or (state.options.autosave_interval or DEFAULT_AUTOSAVE_INTERVAL) * 2
+						local urgent_save_at = state.dirty_since_local + max_dirty_age * 0.5
+						state.next_autosave = math.min(state.next_autosave, urgent_save_at)
+					end
 					if scheduler_enabled then
 						run_scheduled_record_work(record, state, now)
 					else
