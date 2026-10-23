@@ -12,7 +12,28 @@ The Rojo projects map `src/PlayerDataInitializer` to a Script named `ServerScrip
 
 Use `default.project.json` for the standard setup. The initializer starts the shared controller and registers `BindToClose` shutdown handling. Use exactly one initializer.
 
-For manual Studio installation, create a normal server `Script` named `PlayerDataInitializer` in `ServerScriptService`; place `init.server.luau` there as the Script source and make the data modules its direct children. Install the `src/InfiniteMath` hierarchy as `ReplicatedStorage.InfiniteMath`. Use a separate test place or Studio session for compatibility testing.
+For manual Studio installation, preserve the hierarchy below. Create each `.luau` source as a `ModuleScript`, except `init.server.luau`, which is the source of the normal server `Script` named `PlayerDataInitializer`.
+
+```text
+ServerScriptService
+└── PlayerDataInitializer (Script; source: init.server.luau)
+    ├── PlayerData (ModuleScript; PlayerData.luau)
+    ├── PlayerDataCore (ModuleScript; PlayerDataCore.luau)
+    ├── RecordStore (ModuleScript; RecordStore.luau)
+    ├── IntegerInfinityValue (ModuleScript; IntegerInfinityValue.luau)
+    └── InfiniteMathValue (ModuleScript; InfiniteMathValue.luau)
+
+ReplicatedStorage
+└── InfiniteMath (ModuleScript; source: src/InfiniteMath/init.luau)
+    ├── Int (ModuleScript; Int.luau)
+    └── Values (Folder)
+        ├── FullNames (ModuleScript; FullNames.luau)
+        └── Suffixes (ModuleScript; Suffixes.luau)
+```
+
+Do not put `InfiniteMath` inside `PlayerDataInitializer`. Its module must be named exactly `ReplicatedStorage.InfiniteMath`, including its `Int` and `Values` children. Use exactly one `PlayerDataInitializer` Script. Use a separate test place or Studio session for compatibility testing.
+
+**Recommended setup with Rojo:** from the repository root, run `rojo serve default.project.json`, open the place in Studio, connect using the Rojo Studio plugin, and sync. The existing project file already maps `src/PlayerDataInitializer` and `src/InfiniteMath` into the hierarchy shown above. To produce a place/model file instead, run `rojo build default.project.json -o RecordStore.rbxlx`.
 
 ## Non-finite numeric values
 
@@ -149,13 +170,21 @@ Build the standard production place, including `PlayerDataInitializer`:
 rojo build default.project.json -o RecordStore.rbxlx
 ```
 
-Build the isolated regression-test place:
+Build the full isolated regression-test place:
 
 ```sh
 rojo build tests.project.json -o RecordStore-CompatibilityTests.rbxlx
 ```
 
-Open the test place in Roblox Studio and run a server playtest. Regression scripts use `RecordStore.Mock`; they do not read or write live DataStore records.
+To test default numeric leaderstats without the persistence adapter installed, build the dedicated integration place:
+
+```sh
+rojo build tests-native-formatting.project.json -o RecordStore-NativeFormattingRegression.rbxlx
+```
+
+This project intentionally omits `ServerScriptService.InfiniteMathValue` while keeping the real `ReplicatedStorage.InfiniteMath` module. Open the resulting place in Roblox Studio and run a server playtest. The mapped `PlayerDataSetRegression` must initialize the player, update the formatted `Kills` display, and complete its persistence assertions without requiring `InfiniteMathValue`.
+
+Regression scripts use `RecordStore.Mock`; they do not read or write live DataStore records.
 
 ## Advanced server-local scheduler
 

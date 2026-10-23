@@ -43,6 +43,12 @@ jobs:
           curl -fsSL "https://luau-lsp.pages.dev/type-definitions/globalTypes.None.d.luau" -o /tmp/globalTypes.d.luau
           test -s /tmp/globalTypes.d.luau
 
+      - name: Validate adapter-free native-formatting regression project
+        run: |
+          set -euo pipefail
+          rojo build tests-native-formatting.project.json -o /tmp/RecordStore-NativeFormattingRegression.rbxlx
+          test -s /tmp/RecordStore-NativeFormattingRegression.rbxlx
+
       - name: Generate a sourcemap with the established RecordStore mode
         run: |
           set -euo pipefail
