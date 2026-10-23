@@ -420,7 +420,6 @@ lune run bench/run_regression_tests.luau
 codspeed run --mode simulation
 ```
 
-
 ### Bencher.dev
 
 Bencher runs alongside CodSpeed and tracks the same Lune workload benchmarks through Hyperfine. It reports median process wall time from the `ubuntu-24.04` GitHub-hosted runner; these timings include Lune startup and are not directly comparable to CodSpeed's simulated measurements.
@@ -431,6 +430,6 @@ To enable it:
 2. Add the project slug as the repository Actions variable `BENCHER_PROJECT`.
 3. Add the project API key as the repository Actions secret `BENCHER_API_KEY`.
 
-The workflow publishes a baseline on pushes to `main` and compares pull requests against their base branch. Pull-request runs fail on a Bencher alert once the configured statistical threshold has enough baseline samples. If `BENCHER_PROJECT` or `BENCHER_API_KEY` is not configured, the Bencher job is skipped without affecting CodSpeed or the regression checks.
+The workflow publishes a baseline on pushes to `main` and compares pull requests against their base branch. Pull-request runs fail on a Bencher alert once the configured statistical threshold has enough baseline samples. If `BENCHER_PROJECT` is not configured, the Bencher job is skipped. If `BENCHER_API_KEY` is missing, its benchmark and reporting steps are skipped without affecting CodSpeed or the regression checks.
 
 References: [Bencher GitHub Actions](https://bencher.dev/docs/how-to/github-actions/) · [Hyperfine adapter](https://bencher.dev/docs/explanation/adapters/#-shell-hyperfine).
