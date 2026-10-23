@@ -531,8 +531,16 @@ local function normalize_player_data(
 			infinitemath_factory
 		)
 		if field.reset_on_join then
-			local reset_value = encode_field_value(field, field.default, integer_infinity_factory, infinimath_factory)
-			if normalized_value == nil or value_changed or not data_values_equal(normalized_value, reset_value) then
+			local reset_value = encode_field_value(
+				field,
+				field.default,
+				integer_infinity_factory,
+				infinemath_factory
+			)
+			if normalized_value == nil
+				or value_changed
+				or not data_values_equal(normalized_value, reset_value)
+			then
 				changed = true
 			end
 			result[key] = reset_value
