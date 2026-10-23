@@ -405,8 +405,6 @@ end
 		and os.clock() < deadline do
 		task.wait(0.01)
 	end
-		task.wait(0.01)
-	end
 	assert(
 		player:GetAttribute("PlayerDataLoadStatus") == "Loaded",
 		("player session did not load (status=%s, kick=%s)"):format(
