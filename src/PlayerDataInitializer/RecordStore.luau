@@ -3278,7 +3278,7 @@ process_queue_internal = function(state: InternalState, max_messages: number): (
 			ownership_lost = true
 			break
 		end
-		local message, claim_result, claim_error = claim_queue_message(state)
+		local message: QueueItem?, claim_result: ResultCode, claim_error: string? = claim_queue_message(state)
 		if claim_result == "empty" then
 			break
 		end
@@ -3336,7 +3336,7 @@ process_queue_internal = function(state: InternalState, max_messages: number): (
 		if attempt_failure ~= nil then
 			observe(state, "queue_process", attempt_failure_result, attempt_failure)
 			if message.attempts >= max_attempts then
-				local dead_letter_result, dead_letter_message = dead_letter_queue_message(state, message.id, lock_token, attempt_failure)
+				local dead_letter_result: ResultCode, dead_letter_message: string? = dead_letter_queue_message(state, message.id, lock_token, attempt_failure)
 				if dead_letter_result == "success" then
 					processed += 1
 					observe(state, "queue_dead_letter", "success", message.id)
@@ -3354,7 +3354,7 @@ process_queue_internal = function(state: InternalState, max_messages: number): (
 			ownership_lost = true
 			break
 		end
-		local ack_result, ack_message = acknowledge_queue_message(state, message.id, lock_token)
+		local ack_result: ResultCode, ack_message: string? = acknowledge_queue_message(state, message.id, lock_token)
 		if ack_result ~= "success" then
 			failure_result = ack_result
 			failure_message = ack_message
@@ -3415,7 +3415,7 @@ end
 
 publish_record_message = function(state: InternalState, kind: string, message_type: string?, data: JsonValue?, generation: number?, target_job_id: string?, target_token: string?, request_id: string?, handoff_status: HandoffStatus?, requester_job_id: string?): (boolean, string?)
 	local stable_request_id = request_id or HttpService:GenerateGUID(false)
-	local payload = {
+	local payload: { [string]: unknown } = {
 		protocol_version = 1,
 		kind = kind,
 		name = state.name,
