@@ -13928,7 +13928,7 @@ function RecordStore.replay_scheduler_trace(
 	return replay:Replay(trace)
 end
 
-local function scheduled_autosave_priority(state: InternalState, now: number): string
+scheduler_activation.scheduled_autosave_priority = function(state: InternalState, now: number): string
 	if state.options.durability_mode ~= "durability_first"
 		or state.change_sequence == state.saved_change_sequence
 		or state.dirty_since_local == nil
@@ -14004,7 +14004,7 @@ local function run_scheduled_record_work(record: Record, state: InternalState, n
 		and slot.pending.autosave ~= true
 	then
 		local next_autosave = now + (state.options.autosave_interval or DEFAULT_AUTOSAVE_INTERVAL) * (0.9 + math.random() * 0.2)
-		local result = enqueue_state_work(record, state, "autosave", scheduled_autosave_priority(state, now),
+		local result = enqueue_state_work(record, state, "autosave", scheduler_activation.scheduled_autosave_priority(state, now),
 			"profile_autosave", "update_async", function()
 			if state.busy or state.queue_busy then
 				return { code = "retryable", message = "record became busy before autosave started" }
@@ -14095,7 +14095,7 @@ local function run_scheduled_recovery(record: Record, state: InternalState, now:
 	end
 end
 
-local function run_unscheduled_takeover(record: Record, state: InternalState): boolean
+scheduler_activation.run_unscheduled_takeover = function(record: Record, state: InternalState): boolean
 	if not state.takeover_requested or state.busy or state.queue_busy then
 		return false
 	end
@@ -14104,7 +14104,7 @@ local function run_unscheduled_takeover(record: Record, state: InternalState): b
 	return true
 end
 
-local function run_unscheduled_renewal(record: Record, state: InternalState, now: number): boolean
+scheduler_activation.run_unscheduled_renewal = function(record: Record, state: InternalState, now: number): boolean
 	if state.state ~= "active"
 		or state.busy or state.queue_busy or now < state.next_renewal
 	then
@@ -14118,7 +14118,7 @@ local function run_unscheduled_renewal(record: Record, state: InternalState, now
 	return true
 end
 
-local function run_unscheduled_autosave(record: Record, state: InternalState, now: number)
+scheduler_activation.run_unscheduled_autosave = function(record: Record, state: InternalState, now: number)
 	if state.state ~= "active"
 		or state.busy or state.queue_busy or now < state.next_autosave
 	then
@@ -14132,7 +14132,7 @@ local function run_unscheduled_autosave(record: Record, state: InternalState, no
 	end)
 end
 
-local function run_unscheduled_messaging(state: InternalState, now: number)
+scheduler_activation.run_unscheduled_messaging = function(state: InternalState, now: number)
 	if state.state == "active"
 		and state.options.on_message ~= nil
 		and messaging_enabled(state)
@@ -14143,7 +14143,7 @@ local function run_unscheduled_messaging(state: InternalState, now: number)
 	end
 end
 
-local function run_unscheduled_queue_poll(record: Record, state: InternalState, now: number)
+scheduler_activation.run_unscheduled_queue_poll = function(record: Record, state: InternalState, now: number)
 	if state.state ~= "active"
 		or state.options.durable_queue_enabled == false
 		or state.options.on_queue_message == nil
@@ -14160,15 +14160,17 @@ local function run_unscheduled_queue_poll(record: Record, state: InternalState, 
 	end)
 end
 
-local function run_unscheduled_record_work(record: Record, state: InternalState, now: number)
-	local takeover_handled = run_unscheduled_takeover(record, state)
-	if not takeover_handled and not run_unscheduled_renewal(record, state, now) then
-		run_unscheduled_autosave(record, state, now)
+scheduler_activation.run_unscheduled_record_work = function(record: Record, state: InternalState, now: number)
+	local takeover_handled = scheduler_activation.run_unscheduled_takeover(record, state)
+	if not takeover_handled
+		and not scheduler_activation.run_unscheduled_renewal(record, state, now)
+	then
+		scheduler_activation.run_unscheduled_autosave(record, state, now)
 	end
-	run_unscheduled_messaging(state, now)
-	run_unscheduled_queue_poll(record, state, now)
+	scheduler_activation.run_unscheduled_messaging(state, now)
+	scheduler_activation.run_unscheduled_queue_poll(record, state, now)
 end
-local function prepare_durability_first_deadline(state: InternalState, now: number)
+scheduler_activation.prepare_durability_first_deadline = function(state: InternalState, now: number)
 	if state.options.durability_mode ~= "durability_first"
 		or state.change_sequence == state.saved_change_sequence
 		or state.dirty_since_local == nil
@@ -14183,21 +14185,21 @@ local function prepare_durability_first_deadline(state: InternalState, now: numb
 	state.next_autosave = math.min(state.next_autosave, urgent_save_at)
 end
 
-local function process_active_record(record: Record, state: InternalState)
+scheduler_activation.process_active_record = function(record: Record, state: InternalState)
 	scheduler_activation.refresh_durability_risk(state)
 	if state.state ~= "active" then
 		return
 	end
 	local now = now_local()
-	prepare_durability_first_deadline(state, now)
+	scheduler_activation.prepare_durability_first_deadline(state, now)
 	if scheduler_enabled then
 		run_scheduled_record_work(record, state, now)
 	else
-		run_unscheduled_record_work(record, state, now)
+		scheduler_activation.run_unscheduled_record_work(record, state, now)
 	end
 end
 
-local function process_recovery_record(record: Record, state: InternalState)
+scheduler_activation.process_recovery_record = function(record: Record, state: InternalState)
 	scheduler_activation.refresh_durability_risk(state)
 	if state.state ~= "unknown" or state.pending_operation == nil then
 		return
@@ -14226,13 +14228,13 @@ local function start_scheduler()
 			for record in active_records do
 				local state = private[record]
 				if state ~= nil then
-					process_active_record(record, state)
+					scheduler_activation.process_active_record(record, state)
 				end
 			end
 			for record in recovery_records do
 				local state = private[record]
 				if state ~= nil then
-					process_recovery_record(record, state)
+					scheduler_activation.process_recovery_record(record, state)
 				end
 			end
 			if scheduler_enabled then
