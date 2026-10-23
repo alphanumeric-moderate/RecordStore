@@ -12636,6 +12636,7 @@ local function renew_internal(state: InternalState): (ResultCode, string?)
 	state.last_successful_write_local = now_local()
 	state.busy = false
 	state.state = "active"
+	refresh_durability_risk(state)
 	state.next_renewal = now_local() + (state.options.lease_renewal or DEFAULT_LEASE_RENEWAL)
 	if state.change_sequence ~= state.saved_change_sequence then
 		state.next_autosave = now_local()
@@ -12937,6 +12938,7 @@ local function reconcile_unknown_internal(state: InternalState): (ResultCode, st
 		state.next_reconciliation = math.huge
 		if envelope.session ~= nil and lease_remaining > required_recovery_lease_margin(state) then
 			state.state = "active"
+			refresh_durability_risk(state)
 			state.last_reconciliation_category = nil
 			state.next_renewal = now_local() + (state.options.lease_renewal or DEFAULT_LEASE_RENEWAL)
 			state.next_autosave = if state.change_sequence ~= state.saved_change_sequence
