@@ -50,12 +50,12 @@
 
 **Files:** `src/PlayerDataInitializer/RecordStore.luau`, `src/PlayerDataInitializer/PlayerDataCore.luau`, focused regressions and README.
 
-- [ ] Validate `max_dirty_age_seconds` and `durability_mode`; preserve compatibility defaults.
-- [ ] Expose confirmed revision/generation, dirty/durable watermark, oldest dirty age, last confirmed write, pending operation ID, lease margin, current classification and observation quality.
-- [ ] Make risk signals edge-triggered/coalesced and bounded; declare health snapshot scope.
-- [ ] Implement deadline-aware saves and critical-operation reserve without starvation by optional work.
-- [ ] Make PlayerDataCore choose explicit bounded buffering or visible backpressure; the default implementation must never silently accept unbounded unsaved progress.
-- [ ] Test direct table mutation tracking, dirty-age boundary, unknown-write status, read-only admission, restoration of tracked Value objects, and recovery clearing risk only after confirmation.
+- [x] Validate `max_dirty_age_seconds` and `durability_mode`; preserve compatibility defaults.
+- [x] Expose confirmed revision/generation, dirty/durable watermark, oldest dirty age, last confirmed write, pending operation ID, lease margin, current classification and observation quality.
+- [x] Make risk signals edge-triggered/coalesced and bounded; declare health snapshot scope.
+- [x] Implement deadline-aware saves and critical-operation reserve without starvation by optional work.
+- [x] Make PlayerDataCore choose explicit bounded buffering or visible backpressure; the default implementation must never silently accept unbounded unsaved progress.
+- [x] Test direct table mutation tracking, dirty-age boundary, unknown-write status, read-only admission, restoration of tracked Value objects, and recovery clearing risk only after confirmation.
 
 **Acceptance:** no-op save cannot infer clean state from incomplete tracking; unhealthy persistence is observable; no claim that in-memory dirty changes survive process death.
 
@@ -63,12 +63,12 @@
 
 **Files:** RecordStore save/renew/release state machine, scheduler admission and fault-injection tests.
 
-- [ ] Retain immutable logical operation ID/snapshot, dirty watermark, base/target revisions, exact session token/generation and reason across ambiguous outcomes.
-- [ ] Confirm commit only when the authoritative uncached envelope matches the operation ID, target revision, ownership fence and lease requirements.
-- [ ] Retry only a known non-commit using the same operation ID/snapshot and exact base revision/fence inside UpdateAsync.
-- [ ] On competing revision/owner, schema mismatch, corruption, tombstone or expiry, fence instead of writing stale state.
-- [ ] Implement same-process lease CAS reacquisition only behind an off-by-default option, or leave it unavailable with a safe visible fenced state; do not partially enable it.
-- [ ] Add failure-before-commit and commit-then-error coverage for save, renewal and release; race reconciliation against a new owner; test held verification crossing the lease-margin boundary, process-interruption boundaries, bounded backoff, metadata preservation and correct dirty-watermark progression.
+- [x] Retain immutable logical operation ID/snapshot, dirty watermark, base/target revisions, exact session token/generation and reason across ambiguous outcomes.
+- [x] Confirm commit only when the authoritative uncached envelope matches the operation ID, target revision, ownership fence and lease requirements.
+- [x] Retry only a known non-commit using the same operation ID/snapshot and exact base revision/fence inside UpdateAsync.
+- [x] On competing revision/owner, schema mismatch, corruption, tombstone or expiry, fence instead of writing stale state.
+- [x] Implement same-process lease CAS reacquisition only behind an off-by-default option, with exact base-write/revision/generation/session checks and a new fencing generation.
+- [ ] Finish the complete failure-before-commit and commit-then-error matrix for save, renewal and release, including process-interruption boundaries and lease-margin transitions across real Roblox services.
 
 **Acceptance:** commit-then-error is recognized without duplicate revision; retries reuse exact identity and do not cross changed revision/fence; new owner always wins; continued outages remain bounded and degraded.
 
