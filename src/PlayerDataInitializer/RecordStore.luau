@@ -8727,11 +8727,16 @@ return {
 }
 end)()
 
-function RecordStore.enqueue_async(name: string, scope: string, key: string, message_type: string, data: JsonValue?, queue_store_name: string?, operation_deadline: number?): (ResultCode, string?)
-	return RecordStore._internals.enqueue_static.production(name, scope, key, message_type, data, queue_store_name, operation_deadline)
-end
+RecordStore.enqueue_async = (function()
+	local enqueue_production = RecordStore._internals.enqueue_static.production
+	return function(name: string, scope: string, key: string, message_type: string, data: JsonValue?, queue_store_name: string?, operation_deadline: number?): (ResultCode, string?)
+		return enqueue_production(name, scope, key, message_type, data, queue_store_name, operation_deadline)
+	end
+end)()
 
-function RecordStore.new(name: string, scope: string, key: string, options: Options): Record
+RecordStore.new = (function()
+	local normalize_options = RecordStore._internals.normalize_options
+	return function(name: string, scope: string, key: string, options: Options): Record
 	if closing then
 		error("RecordStore is shutting down", 2)
 	end
@@ -8739,7 +8744,7 @@ function RecordStore.new(name: string, scope: string, key: string, options: Opti
 	if not valid_identity then
 		error(identity_message, 2)
 	end
-	local normalized, options_message = RecordStore._internals.normalize_options(options)
+	local normalized, options_message = normalize_options(options)
 	if normalized == nil then
 		error(options_message, 2)
 	end
@@ -8750,9 +8755,12 @@ function RecordStore.new(name: string, scope: string, key: string, options: Opti
 	local record = make_record(name, scope, key, valid_options, false)
 	start_scheduler()
 	return record
-end
+	end
+end)()
 
 RecordStore.Mock = (function()
+	local normalize_options = RecordStore._internals.normalize_options
+	local enqueue_mock = RecordStore._internals.enqueue_static.mock
 	local function mock_new(name: string, scope: string, key: string, options: Options): Record
 		if closing then
 			error("RecordStore is shutting down", 2)
@@ -8761,7 +8769,7 @@ RecordStore.Mock = (function()
 		if not valid_identity then
 			error(identity_message, 2)
 		end
-		local normalized, options_message = RecordStore._internals.normalize_options(options)
+		local normalized, options_message = normalize_options(options)
 		if normalized == nil then
 			error(options_message, 2)
 		end
@@ -9052,7 +9060,7 @@ RecordStore.Mock = (function()
 		get_version_async = get_version_mock,
 		get_version_at_time_async = get_version_at_time_mock,
 		enqueue_async = function(name: string, scope: string, key: string, message_type: string, data: JsonValue?, queue_store_name: string?, operation_deadline: number?): (ResultCode, string?)
-			return RecordStore._internals.enqueue_static.mock(name, scope, key, message_type, data, queue_store_name, operation_deadline)
+			return enqueue_mock(name, scope, key, message_type, data, queue_store_name, operation_deadline)
 		end,
 		seed_queue_raw = function(name: string, scope: string, key: string, value: unknown, queue_store_name: string?): (ResultCode, string?)
 			return mock_seed_queue_value(name, scope, key, value, false, queue_store_name)
@@ -9125,6 +9133,7 @@ game:BindToClose(RecordStore.shutdown)
 
 table.freeze(RecordStore._internals.enqueue_static)
 table.freeze(RecordStore._internals)
+rawset(RecordStore, "_internals", nil)
 table.freeze(RecordStore)
 
 return RecordStore
