@@ -7165,48 +7165,6 @@ local function observe(state: InternalState, event: string, result: ResultCode, 
 	end
 end
 
-local function refresh_durability_risk(state: InternalState)
-	local reason: string? = nil
-	if state.state == "unknown" then
-		reason = "write_or_lease_outcome_unknown"
-	else
-		local dirty = state.change_sequence ~= state.saved_change_sequence
-		local dirty_since = state.dirty_since_local
-		local max_age = state.options.max_dirty_age_seconds
-			or (state.options.autosave_interval or DEFAULT_AUTOSAVE_INTERVAL) * 2
-		if dirty and dirty_since ~= nil and now_local() - dirty_since >= max_age then
-			reason = "maximum_dirty_age_exceeded"
-		end
-	end
-	local active = reason ~= nil
-	local was_active = state.durability_risk_active == true
-	if active == was_active then
-		if active then
-			state.durability_risk_reason = reason
-		end
-		return
-	end
-	local previous_reason = state.durability_risk_reason
-	state.durability_risk_active = active
-	state.durability_risk_reason = reason
-
-	local observer = state.options.on_event
-	if observer == nil then
-		return
-	end
-	local event_name = if active then "durability_risk" else "durability_recovered"
-	local result: ResultCode = if active then "unknown" else "success"
-	local message = if active then reason else "durability risk cleared: " .. tostring(previous_reason or "resolved")
-	local thread = coroutine.create(function()
-		observer(event_name, state.key, result, message)
-	end)
-	local resumed = coroutine.resume(thread)
-	if not resumed or coroutine.status(thread) ~= "dead" then
-		coroutine.close(thread)
-		state.observer_errors += 1
-	end
-end
-
 local function append_change_event(events: { ChangeEvent }, path: { string | number }, old_value: JsonValue?, new_value: JsonValue?, operation_id: string, sequence: number, kind: string): boolean
 	if #events >= CHANGE_OBSERVER_CAPACITY then
 		return false
@@ -9597,7 +9555,7 @@ local function save_internal(state: InternalState, reason: string?, operation_de
 		}
 		state.next_reconciliation = now_local() + 0.25
 		state.last_reconciliation_category = "save_outcome_unknown"
-		refresh_durability_risk(state)
+		RecordStore._internals.refresh_durability_risk(state)
 		observe(state, "save", "unknown", last_error or "save outcome is unresolved")
 		return "unknown", last_error or "save outcome is unresolved"
 	end
@@ -9629,7 +9587,7 @@ local function save_internal(state: InternalState, reason: string?, operation_de
 	state.last_successful_write_local = now_local()
 	state.busy = false
 	state.state = "active"
-	refresh_durability_risk(state)
+	RecordStore._internals.refresh_durability_risk(state)
 	state.next_autosave = now_local() + (state.options.autosave_interval or DEFAULT_AUTOSAVE_INTERVAL)
 	if state.save_requested then
 		state.next_autosave = now_local()
@@ -12585,7 +12543,7 @@ local function renew_internal(state: InternalState): (ResultCode, string?)
 		}
 		state.next_reconciliation = now_local() + 0.25
 		state.last_reconciliation_category = "renewal_outcome_unknown"
-		refresh_durability_risk(state)
+		RecordStore._internals.refresh_durability_risk(state)
 		observe(state, "renew", "unknown", last_error or "renewal outcome is unresolved")
 		return "unknown", last_error or "renewal outcome is unresolved"
 	end
@@ -12610,7 +12568,7 @@ local function renew_internal(state: InternalState): (ResultCode, string?)
 	state.last_successful_write_local = now_local()
 	state.busy = false
 	state.state = "active"
-	refresh_durability_risk(state)
+	RecordStore._internals.refresh_durability_risk(state)
 	state.next_renewal = now_local() + (state.options.lease_renewal or DEFAULT_LEASE_RENEWAL)
 	if state.change_sequence ~= state.saved_change_sequence then
 		state.next_autosave = now_local()
@@ -12912,7 +12870,7 @@ local function reconcile_unknown_internal(state: InternalState): (ResultCode, st
 		state.next_reconciliation = math.huge
 		if envelope.session ~= nil and lease_remaining > required_recovery_lease_margin(state) then
 			state.state = "active"
-			refresh_durability_risk(state)
+			RecordStore._internals.refresh_durability_risk(state)
 			state.last_reconciliation_category = nil
 			state.next_renewal = now_local() + (state.options.lease_renewal or DEFAULT_LEASE_RENEWAL)
 			state.next_autosave = if state.change_sequence ~= state.saved_change_sequence
@@ -14071,7 +14029,7 @@ local function start_scheduler()
 			for record in active_records do
 				local state = private[record]
 				if state ~= nil then
-					refresh_durability_risk(state)
+					RecordStore._internals.refresh_durability_risk(state)
 				end
 				if state ~= nil and (state.state :: SessionState) == "active" then
 					local now = now_local()
@@ -14136,7 +14094,7 @@ local function start_scheduler()
 			for record in recovery_records do
 				local state = private[record]
 				if state ~= nil then
-					refresh_durability_risk(state)
+					RecordStore._internals.refresh_durability_risk(state)
 				end
 				if state ~= nil and state.state == "unknown" and state.pending_operation ~= nil then
 					local now = now_local()
@@ -14198,6 +14156,48 @@ RecordStore.shutdown = function()
 end
 
 RecordStore._internals = {}
+RecordStore._internals.refresh_durability_risk = function(state: InternalState)
+	local reason: string? = nil
+	if state.state == "unknown" then
+		reason = "write_or_lease_outcome_unknown"
+	else
+		local dirty = state.change_sequence ~= state.saved_change_sequence
+		local dirty_since = state.dirty_since_local
+		local max_age = state.options.max_dirty_age_seconds
+			or (state.options.autosave_interval or DEFAULT_AUTOSAVE_INTERVAL) * 2
+		if dirty and dirty_since ~= nil and now_local() - dirty_since >= max_age then
+			reason = "maximum_dirty_age_exceeded"
+		end
+	end
+	local active = reason ~= nil
+	local was_active = state.durability_risk_active == true
+	if active == was_active then
+		if active then
+			state.durability_risk_reason = reason
+		end
+		return
+	end
+	local previous_reason = state.durability_risk_reason
+	state.durability_risk_active = active
+	state.durability_risk_reason = reason
+
+	local observer = state.options.on_event
+	if observer == nil then
+		return
+	end
+	local event_name = if active then "durability_risk" else "durability_recovered"
+	local result: ResultCode = if active then "unknown" else "success"
+	local message = if active then reason else "durability risk cleared: " .. tostring(previous_reason or "resolved")
+	local thread = coroutine.create(function()
+		observer(event_name, state.key, result, message)
+	end)
+	local resumed = coroutine.resume(thread)
+	if not resumed or coroutine.status(thread) ~= "dead" then
+		coroutine.close(thread)
+		state.observer_errors += 1
+	end
+end
+
 RecordStore._internals.mutation_backpressure_reason = function(state: InternalState): string?
 	if state.options.durability_mode ~= "read_only_on_risk" then
 		return nil
