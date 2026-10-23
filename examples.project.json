@@ -10,8 +10,8 @@
     },
     "ReplicatedStorage": {
       "$className": "ReplicatedStorage",
-      "CodeNum": {
-        "$path": "src/CodeNum.luau"
+      "InfiniteMath": {
+        "$path": "src/InfiniteMath"
       }
     }
   }

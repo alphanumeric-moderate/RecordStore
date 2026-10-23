@@ -48,17 +48,23 @@ benchmarks:
   - name: "compatibility regression suite"
     exec: lune run bench/run_compatibility_regression_tests.luau
 
-  - name: "CodeNum arithmetic and codec round-trips"
-    exec: lune run bench/codenum.bench.luau
+  - name: "InfiniteMath high-range arithmetic and reconstruction"
+    exec: lune run bench/infinimath.bench.luau
 
-  - name: "CodeNumValue format and normalization"
-    exec: lune run bench/codenumvalue.bench.luau
+  - name: "InfiniteMathValue format and normalization"
+    exec: lune run bench/infinimathvalue.bench.luau
 
-  - name: "PlayerData startup with legacy eager CodeNumValue load"
+  - name: "PlayerData startup with legacy eager InfiniteMathValue load"
     exec: lune run bench/playerdata_startup_eager.bench.luau
 
-  - name: "PlayerData startup with lazy optional CodeNumValue load"
+  - name: "PlayerData startup with lazy optional InfiniteMathValue load"
     exec: lune run bench/playerdata_startup_lazy.bench.luau
 
   - name: "PlayerData.Set path lookup"
     exec: lune run bench/playerdata_set_paths.bench.luau
+
+  - name: "InfiniteMath range regressions"
+    exec: lune run bench/run_infinimath_regression_tests.luau
+
+  - name: "InfiniteMathValue persistence regressions"
+    exec: lune run bench/run_infinimathvalue_regression_tests.luau

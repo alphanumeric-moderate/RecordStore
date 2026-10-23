@@ -20,7 +20,7 @@ type ValueClass =
 	| "StringValue"
 	| "BoolValue"
 	| "IntegerInfinityValue"
-	| "CodeNumValue"
+	| "InfiniteMathValue"
 
 type DataField = {
 	class_name: ValueClass,
@@ -34,43 +34,48 @@ type Leaderstat = {
 	number_format: NumberFormatterFactory.Options?,
 }
 
-type CodeNumValueNode = { kind: string }
-type CodeNumValueFactoryAPI = {
+type InfiniteMathValueNode = { kind: string }
+type InfiniteMathValueFactoryAPI = {
 	is_value: (value: unknown) -> boolean,
 	normalize: (value: unknown) -> string,
 	is_serialized: (value: unknown) -> boolean,
 	format: (value: unknown, options: NumberFormatterFactory.Options?) -> string,
 	new: (name: string, initial_value: unknown) -> StringValue,
-	normalize_serialized: ((value: unknown) -> (string?, CodeNumValueNode?))?,
+	normalize_serialized: ((value: unknown) -> (string?, InfiniteMathValueNode?))?,
+	is_unsupported_version: ((value: unknown) -> boolean)?,
 }
 
-local cached_code_num_value_factory: CodeNumValueFactoryAPI? = nil
+local cached_infinitemath_value_factory: InfiniteMathValueFactoryAPI? = nil
 
-local function get_code_num_value_factory(): CodeNumValueFactoryAPI
-	if cached_code_num_value_factory == nil then
-		cached_code_num_value_factory = require(script.Parent.CodeNumValue) :: CodeNumValueFactoryAPI
+local function get_infinitemath_value_factory(): InfiniteMathValueFactoryAPI
+	if cached_infinitemath_value_factory == nil then
+		cached_infinitemath_value_factory = require(script.Parent.InfiniteMathValue) :: InfiniteMathValueFactoryAPI
 	end
-	return cached_code_num_value_factory
+	return cached_infinitemath_value_factory
 end
 
-local CodeNumValueFactory: CodeNumValueFactoryAPI = table.freeze({
+local InfiniteMathValueFactory: InfiniteMathValueFactoryAPI = table.freeze({
 	is_value = function(value: unknown): boolean
-		return get_code_num_value_factory().is_value(value)
+		return get_infinitemath_value_factory().is_value(value)
 	end,
 	normalize = function(value: unknown): string
-		return get_code_num_value_factory().normalize(value)
+		return get_infinitemath_value_factory().normalize(value)
 	end,
 	is_serialized = function(value: unknown): boolean
-		return get_code_num_value_factory().is_serialized(value)
+		return get_infinitemath_value_factory().is_serialized(value)
 	end,
 	format = function(value: unknown, options: NumberFormatterFactory.Options?): string
-		return get_code_num_value_factory().format(value, options)
+		return get_infinitemath_value_factory().format(value, options)
 	end,
 	new = function(name: string, initial_value: unknown): StringValue
-		return get_code_num_value_factory().new(name, initial_value)
+		return get_infinitemath_value_factory().new(name, initial_value)
 	end,
-	normalize_serialized = function(value: unknown): (string?, CodeNumValueNode?)
-		local factory = get_code_num_value_factory()
+	is_unsupported_version = function(value: unknown): boolean
+		local check = get_infinimath_value_factory().is_unsupported_version
+		return if check ~= nil then check(value) else false
+	end,
+	normalize_serialized = function(value: unknown): (string?, InfiniteMathValueNode?)
+		local factory = get_infinitemath_value_factory()
 		local normalize = factory.normalize_serialized
 		if normalize ~= nil then
 			return normalize(value)
@@ -87,7 +92,7 @@ export type Dependencies = {
 	RecordStore: typeof(RecordStore)?,
 	IntegerInfinityValue: typeof(IntegerInfinityValueFactory)?,
 	NumberFormatter: typeof(NumberFormatterFactory)?,
-	CodeNumValue: CodeNumValueFactoryAPI?,
+	InfiniteMathValue: InfiniteMathValueFactoryAPI?,
 	new_instance: ((string) -> Instance)?,
 	task: typeof(task)?,
 }
@@ -169,10 +174,10 @@ local CONFIG = {
 	},
 }
 
-local uses_codenum_values = false
+local uses_infinitemath_values = false
 for _, field in pairs(CONFIG.data) do
-	if field.class_name == "CodeNumValue" then
-		uses_codenum_values = true
+	if field.class_name == "InfiniteMathValue" then
+		uses_infinitemath_values = true
 		break
 	end
 end
@@ -204,7 +209,7 @@ end
 local function field_value_is_valid(
 	field: DataField,
 	value: DataValue?,
-	code_num_factory: CodeNumValueFactoryAPI?
+	infinitemath_factory: InfiniteMathValueFactoryAPI?
 ): boolean
 	if field.class_name == "IntValue" then
 		return type(value) == "number" and math.isfinite(value) and math.floor(value) == value
@@ -216,8 +221,8 @@ local function field_value_is_valid(
 		return type(value) == "boolean"
 	elseif field.class_name == "IntegerInfinityValue" then
 		return type(value) == "number" and (math.isnan(value) or math.isinf(value) or math.floor(value) == value)
-	elseif field.class_name == "CodeNumValue" then
-		return (code_num_factory or CodeNumValueFactory).is_value(value)
+	elseif field.class_name == "InfiniteMathValue" then
+		return (infinitemath_factory or InfiniteMathValueFactory).is_value(value)
 	end
 	return false
 end
@@ -226,18 +231,18 @@ local function encode_field_value(
 	field: DataField,
 	value: DataValue,
 	integer_infinity_factory: typeof(IntegerInfinityValueFactory)?,
-	code_num_factory: CodeNumValueFactoryAPI?
+	infinitemath_factory: InfiniteMathValueFactoryAPI?
 ): DataValue
 	if field.class_name == "IntegerInfinityValue" and type(value) == "number" then
 		return normalize_integer_infinity(value, field.rounding or "nearest", integer_infinity_factory)
-	elseif field.class_name == "CodeNumValue" then
-		return (code_num_factory or CodeNumValueFactory).normalize(value)
+	elseif field.class_name == "InfiniteMathValue" then
+		return (infinitemath_factory or InfiniteMathValueFactory).normalize(value)
 	end
 	return value
 end
 
-local function normalize_serialized_code_num(
-    factory: CodeNumValueFactoryAPI,
+local function normalize_serialized_infinitemath(
+    factory: InfiniteMathValueFactoryAPI,
     value: string
 ): string?
     local normalizer = factory.normalize_serialized
@@ -255,12 +260,15 @@ local function decode_stored_field_value(
 	field: DataField,
 	value: DataValue?,
 	integer_infinity_factory: typeof(IntegerInfinityValueFactory)?,
-	code_num_factory: CodeNumValueFactoryAPI?
+	infinitemath_factory: InfiniteMathValueFactoryAPI?
 ): (DataValue?, boolean)
-	if field.class_name == "CodeNumValue" then
-		local factory = code_num_factory or CodeNumValueFactory
+	if field.class_name == "InfiniteMathValue" then
+		local factory = infinitemath_factory or InfiniteMathValueFactory
 		if type(value) ~= "string" then return nil, false end
-		local normalized = normalize_serialized_code_num(factory, value)
+		if factory.is_unsupported_version ~= nil and factory.is_unsupported_version(value) then
+			error("stored InfiniteMathValue uses an unsupported codec version; refusing to overwrite it with a default", 2)
+		end
+		local normalized = normalize_serialized_infinitemath(factory, value)
 		if normalized == nil then return nil, false end
 		return normalized, normalized ~= value
 	end
@@ -278,12 +286,12 @@ local function normalize_runtime_field_value(
 	field: DataField,
 	value: DataValue?,
 	integer_infinity_factory: typeof(IntegerInfinityValueFactory)?,
-	code_num_factory: CodeNumValueFactoryAPI?
+	infinitemath_factory: InfiniteMathValueFactoryAPI?
 ): DataValue?
-	if field.class_name == "CodeNumValue" then
-		local factory = code_num_factory or CodeNumValueFactory
+	if field.class_name == "InfiniteMathValue" then
+		local factory = infinitemath_factory or InfiniteMathValueFactory
 		if type(value) ~= "string" then return nil end
-		return normalize_serialized_code_num(factory, value)
+		return normalize_serialized_infinitemath(factory, value)
 	end
 	if field.class_name == "IntegerInfinityValue" then
 		if type(value) ~= "number" then return nil end
@@ -296,14 +304,14 @@ end
 local function encode_player_data(
 	data: PlayerData,
 	integer_infinity_factory: typeof(IntegerInfinityValueFactory)?,
-	code_num_factory: CodeNumValueFactoryAPI?
+	infinitemath_factory: InfiniteMathValueFactoryAPI?
 ): PlayerData
 	local result: PlayerData = table.clone(data)
 
 	for key, field in pairs(CONFIG.data) do
 		local value = result[key]
 		if value ~= nil then
-			result[key] = encode_field_value(field, value, integer_infinity_factory, code_num_factory)
+			result[key] = encode_field_value(field, value, integer_infinity_factory, infinitemath_factory)
 		end
 	end
 
@@ -365,7 +373,7 @@ for _, leaderstat in ipairs(CONFIG.leaderstats.values) do
 		if field.class_name ~= "IntValue"
 			and field.class_name ~= "NumberValue"
 			and field.class_name ~= "IntegerInfinityValue"
-			and field.class_name ~= "CodeNumValue"
+			and field.class_name ~= "InfiniteMathValue"
 		then
 			error(
 				("leaderstats value %q requests number formatting but is not numeric"):format(
@@ -407,7 +415,7 @@ end
 
 local function validate_player_data(
 	value: RecordStore.JsonValue,
-	code_num_factory: CodeNumValueFactoryAPI?
+	infinitemath_factory: InfiniteMathValueFactoryAPI?
 ): (boolean, string?)
 	if type(value) ~= "table" then return false, "player data must be an object" end
 	for key, item in value do
@@ -417,9 +425,13 @@ local function validate_player_data(
 			return false, ("player data.%s has an unsupported type"):format(key)
 		end
 		local field = CONFIG.data[key]
-		if field ~= nil and field.class_name == "CodeNumValue" then
-			if item_type ~= "string" or not (code_num_factory or CodeNumValueFactory).is_serialized(item) then
-				return false, ("player data.%s must contain a valid serialized CodeNum value"):format(key)
+		if field ~= nil and field.class_name == "InfiniteMathValue" then
+			local factory = infinimath_factory or InfiniteMathValueFactory
+			local supported = item_type == "string" and factory.is_serialized(item)
+			local unsupported = item_type == "string" and factory.is_unsupported_version ~= nil
+				and factory.is_unsupported_version(item)
+			if not supported and not unsupported then
+				return false, ("player data.%s must contain a valid serialized InfiniteMath value"):format(key)
 			end
 		end
 	end
@@ -429,7 +441,7 @@ end
 local function normalize_player_data(
 	value: RecordStore.JsonValue?,
 	integer_infinity_factory: typeof(IntegerInfinityValueFactory)?,
-	code_num_factory: CodeNumValueFactoryAPI?
+	infinitemath_factory: InfiniteMathValueFactoryAPI?
 ): (PlayerData?, boolean)
 	if type(value) ~= "table" then return nil, false end
 	local result: PlayerData = {}
@@ -446,10 +458,10 @@ local function normalize_player_data(
 			field,
 			result[key],
 			integer_infinity_factory,
-			code_num_factory
+			infinitemath_factory
 		)
 		if normalized_value == nil then
-			result[key] = encode_field_value(field, field.default, integer_infinity_factory, code_num_factory)
+			result[key] = encode_field_value(field, field.default, integer_infinity_factory, infinitemath_factory)
 			changed = true
 		else
 			result[key] = normalized_value
@@ -483,7 +495,7 @@ local function new(dependencies: Dependencies?): Controller
 	local record_store = injected.RecordStore or RecordStore
 	local integer_infinity_value_factory = injected.IntegerInfinityValue or IntegerInfinityValueFactory
 	local number_formatter = injected.NumberFormatter or NumberFormatterFactory
-	local code_num_value_factory = injected.CodeNumValue or CodeNumValueFactory
+	local infinitemath_value_factory = injected.InfiniteMathValue or InfiniteMathValueFactory
 
 	local new_instance = injected.new_instance or function(class_name: string): Instance
 		return Instance.new(class_name)
@@ -815,10 +827,10 @@ local function new(dependencies: Dependencies?): Controller
 		end
 
 		local normalized_value = if already_normalized == true
-			and field.class_name == "CodeNumValue"
+			and field.class_name == "InfiniteMathValue"
 			and type(value) == "string"
 			then value
-			else normalize_runtime_field_value(field, value, integer_infinity_value_factory, code_num_value_factory)
+			else normalize_runtime_field_value(field, value, integer_infinity_value_factory, infinitemath_value_factory)
 		if normalized_value == nil then
 			warn("[PlayerData]", record.Key, "rejected an invalid value change", key)
 			return
@@ -890,7 +902,7 @@ local function new(dependencies: Dependencies?): Controller
 				field,
 				new_value :: DataValue,
 				integer_infinity_value_factory,
-				code_num_value_factory
+				infinitemath_value_factory
 			)
 			if normalized_value == nil then
 				restoring = true
@@ -916,23 +928,23 @@ local function new(dependencies: Dependencies?): Controller
 		end)
 	end
 
-	local function create_codenum_backing_value(
+	local function create_infinitemath_backing_value(
 		player: Player,
 		record: PlayerRecord,
 		key: string,
 		initial_value: string
 	): StringValue
-		local backing_value = code_num_value_factory.new(key, initial_value)
+		local backing_value = infinitemath_value_factory.new(key, initial_value)
 		local last_valid_serialized = initial_value
 		local restoring = false
 		backing_value.Changed:Connect(function(serialized_value: string)
 			if restoring then return end
-			local normalized = normalize_serialized_code_num(code_num_value_factory, serialized_value)
+			local normalized = normalize_serialized_infinitemath(infinitemath_value_factory, serialized_value)
 			if normalized == nil then
 				restoring = true
 				backing_value.Value = last_valid_serialized
 				restoring = false
-				warn("[PlayerData]", player.Name, "rejected invalid CodeNum value for", key)
+				warn("[PlayerData]", player.Name, "rejected invalid InfiniteMath value for", key)
 				return
 			end
 			if record.State ~= "active" or closing_records[record] then
@@ -962,7 +974,7 @@ local function new(dependencies: Dependencies?): Controller
 			existing:Destroy()
 		end
 
-		local has_player_data_values = uses_codenum_values
+		local has_player_data_values = uses_infinitemath_values
 		for _, definition in ipairs(CONFIG.leaderstats.values) do
 			if definition.number_format ~= nil then
 				has_player_data_values = true
@@ -975,7 +987,7 @@ local function new(dependencies: Dependencies?): Controller
 			local existing_values = player:FindFirstChild("PlayerDataValues")
 			if existing_values ~= nil then
 				if existing_values:GetAttribute("RecordStoreManaged") ~= true then
-					error("PlayerDataValues is reserved for RecordStore-managed formatted or CodeNum values")
+					error("PlayerDataValues is reserved for RecordStore-managed formatted or InfiniteMath values")
 				end
 				existing_values:Destroy()
 			end
@@ -995,28 +1007,28 @@ local function new(dependencies: Dependencies?): Controller
 			end
 
 			local stored_value = data[definition.key]
-			if field.class_name == "CodeNumValue" then
-				if type(stored_value) ~= "string" or not code_num_value_factory.is_serialized(stored_value) then
+			if field.class_name == "InfiniteMathValue" then
+				if type(stored_value) ~= "string" or not infinitemath_value_factory.is_serialized(stored_value) then
 					continue
 				end
-			elseif not field_value_is_valid(field, stored_value, code_num_value_factory) then
+			elseif not field_value_is_valid(field, stored_value, infinitemath_value_factory) then
 				continue
 			end
 
-			if field.class_name == "CodeNumValue" then
+			if field.class_name == "InfiniteMathValue" then
 				local value_folder = player_data_values
-				if value_folder == nil then error("CodeNum leaderstats require the PlayerDataValues folder") end
-				local backing_value = create_codenum_backing_value(player, record, definition.key, stored_value)
+				if value_folder == nil then error("InfiniteMath leaderstats require the PlayerDataValues folder") end
+				local backing_value = create_infinitemath_backing_value(player, record, definition.key, stored_value)
 				local display_value = new_string_value()
 				display_value.Name = definition.name
-				display_value.Value = code_num_value_factory.format(stored_value, definition.number_format)
+				display_value.Value = infinitemath_value_factory.format(stored_value, definition.number_format)
 				display_value.Changed:Connect(function()
-					local ok, expected = pcall(code_num_value_factory.format, backing_value.Value, definition.number_format)
+					local ok, expected = pcall(infinitemath_value_factory.format, backing_value.Value, definition.number_format)
 					if ok and display_value.Value ~= expected then display_value.Value = expected end
 				end)
 				backing_value.Changed:Connect(function(serialized_value: string)
-					if code_num_value_factory.is_serialized(serialized_value) then
-						display_value.Value = code_num_value_factory.format(serialized_value, definition.number_format)
+					if infinitemath_value_factory.is_serialized(serialized_value) then
+						display_value.Value = infinitemath_value_factory.format(serialized_value, definition.number_format)
 					end
 				end)
 				display_value.Parent = leaderstats
@@ -1137,19 +1149,19 @@ local function new(dependencies: Dependencies?): Controller
 		end
 
 		if player_data_values ~= nil then
-			local displayed_codenum_keys: {[string]: boolean} = {}
+			local displayed_infinitemath_keys: {[string]: boolean} = {}
 			for _, definition in ipairs(CONFIG.leaderstats.values) do
 				local field = CONFIG.data[definition.key]
-				if field ~= nil and field.class_name == "CodeNumValue" then
-					displayed_codenum_keys[definition.key] = true
+				if field ~= nil and field.class_name == "InfiniteMathValue" then
+					displayed_infinitemath_keys[definition.key] = true
 				end
 			end
 
 			for key, field in pairs(CONFIG.data) do
-				if field.class_name == "CodeNumValue" and not displayed_codenum_keys[key] then
+				if field.class_name == "InfiniteMathValue" and not displayed_infinitemath_keys[key] then
 					local stored_value = data[key]
-					if type(stored_value) == "string" and code_num_value_factory.is_serialized(stored_value) then
-						local backing_value = create_codenum_backing_value(
+					if type(stored_value) == "string" and infinitemath_value_factory.is_serialized(stored_value) then
+						local backing_value = create_infinitemath_backing_value(
 							player,
 							record,
 							key,
@@ -1168,7 +1180,7 @@ local function new(dependencies: Dependencies?): Controller
 		for key, field in pairs(CONFIG.data) do
 			local definition = leaderstat_by_key[key]
 			local value_instance: Instance? = nil
-			if field.class_name == "CodeNumValue"
+			if field.class_name == "InfiniteMathValue"
 				or (definition ~= nil and definition.number_format ~= nil)
 			then
 				if player_data_values ~= nil then
@@ -1232,7 +1244,7 @@ local function new(dependencies: Dependencies?): Controller
 		end
 
 		local definition = leaderstat_by_key[key]
-		if field.class_name == "CodeNumValue"
+		if field.class_name == "InfiniteMathValue"
 			or (definition ~= nil and definition.number_format ~= nil)
 		then
 			return find_cached_player_child(player, "player_data_values", "PlayerDataValues", key, key)
@@ -1246,9 +1258,9 @@ local function new(dependencies: Dependencies?): Controller
 	end
 
 	local function normalize_set_value(field: DataField, value: unknown): DataValue?
-		if field.class_name == "CodeNumValue" then
+		if field.class_name == "InfiniteMathValue" then
 			local normalize_ok, normalized = pcall(function()
-				return code_num_value_factory.normalize(value)
+				return infinitemath_value_factory.normalize(value)
 			end)
 			if normalize_ok and type(normalized) == "string" then
 				return normalized
@@ -1264,7 +1276,7 @@ local function new(dependencies: Dependencies?): Controller
 			field,
 			value :: DataValue,
 			integer_infinity_value_factory,
-			code_num_value_factory
+			infinitemath_value_factory
 		)
 	end
 
@@ -1310,7 +1322,7 @@ local function new(dependencies: Dependencies?): Controller
 		end
 
 		local requires_instance = CONFIG.leaderstats.enabled
-			and (leaderstat_by_key[key] ~= nil or field.class_name == "CodeNumValue")
+			and (leaderstat_by_key[key] ~= nil or field.class_name == "InfiniteMathValue")
 		if requires_instance then
 			local instance = find_player_value_instance(player, key, field)
 			if instance == nil then
@@ -1478,7 +1490,7 @@ local function new(dependencies: Dependencies?): Controller
 				budget_wait = CONFIG.budget_wait,
 				user_ids = { player.UserId },
 				validator = function(value: RecordStore.JsonValue): (boolean, string?)
-					return validate_player_data(value, code_num_value_factory)
+					return validate_player_data(value, infinitemath_value_factory)
 				end,
 				on_event = function(event, key, result, message)
 					local observed_record = event_record
@@ -1590,7 +1602,7 @@ local function new(dependencies: Dependencies?): Controller
 		end
 
 		local normalize_call_ok, normalized_or_error, changed_or_nil = pcall(function()
-			return normalize_player_data(record:Get(), integer_infinity_value_factory, code_num_value_factory)
+			return normalize_player_data(record:Get(), integer_infinity_value_factory, infinitemath_value_factory)
 		end)
 		local normalized: PlayerData? = if normalize_call_ok then normalized_or_error :: PlayerData? else nil
 		local changed = normalize_call_ok and changed_or_nil == true

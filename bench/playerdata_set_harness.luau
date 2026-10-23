@@ -274,7 +274,7 @@ end
 		debugName = "IntegerInfinityValue",
 		environment = { Instance = Instance },
 	})()
-	local CodeNumValue = {
+	local InfiniteMathValue = {
 		is_value = function(value) return type(value) == "string" end,
 		normalize = function(value) return tostring(value) end,
 		is_serialized = function(value) return type(value) == "string" end,
@@ -291,7 +291,7 @@ end
 		RecordStore = {},
 		IntegerInfinityValue = {},
 		NumberFormatter = {},
-		CodeNumValue = {},
+		InfiniteMathValue = {},
 	}
 	local module_script = {
 		Parent = module_tokens,
@@ -303,15 +303,15 @@ end
 			return services[name]
 		end,
 	}
-	local module_require_counts = { CodeNumValue = 0 }
+	local module_require_counts = { InfiniteMathValue = 0 }
 	
 	local function mock_require(target)
 		if target == module_tokens.RecordStore then return RecordStore end
 		if target == module_tokens.IntegerInfinityValue then return IntegerInfinityValue end
 		if target == module_tokens.NumberFormatter then return NumberFormatter end
-		if target == module_tokens.CodeNumValue then
-			module_require_counts.CodeNumValue += 1
-			return CodeNumValue
+		if target == module_tokens.InfiniteMathValue then
+			module_require_counts.InfiniteMathValue += 1
+			return InfiniteMathValue
 		end
 		error("unexpected dependency passed to require")
 	end
@@ -334,7 +334,7 @@ end
 			player_data_core_source,
 			"\tlocal function find_cached_player_child(",
 			"\tlocal function normalize_set_value(",
-			"\tlocal function find_player_value_instance(player: Player, key: string, field: DataField): Instance?\n\t\tif not CONFIG.leaderstats.enabled then\n\t\t\treturn nil\n\t\tend\n\n\t\tlocal definition = leaderstat_by_key[key]\n\t\tif field.class_name == \"CodeNumValue\"\n\t\t\tor (definition ~= nil and definition.number_format ~= nil)\n\t\tthen\n\t\t\tlocal values = player:FindFirstChild(\"PlayerDataValues\")\n\t\t\treturn if values ~= nil then values:FindFirstChild(key) else nil\n\t\tend\n\n\t\tif definition ~= nil then\n\t\t\tlocal leaderstats = player:FindFirstChild(CONFIG.leaderstats.name)\n\t\t\treturn if leaderstats ~= nil then leaderstats:FindFirstChild(definition.name) else nil\n\t\tend\n\n\t\treturn nil\n\tend\n\n"
+			"\tlocal function find_player_value_instance(player: Player, key: string, field: DataField): Instance?\n\t\tif not CONFIG.leaderstats.enabled then\n\t\t\treturn nil\n\t\tend\n\n\t\tlocal definition = leaderstat_by_key[key]\n\t\tif field.class_name == \"InfiniteMathValue\"\n\t\t\tor (definition ~= nil and definition.number_format ~= nil)\n\t\tthen\n\t\t\tlocal values = player:FindFirstChild(\"PlayerDataValues\")\n\t\t\treturn if values ~= nil then values:FindFirstChild(key) else nil\n\t\tend\n\n\t\tif definition ~= nil then\n\t\t\tlocal leaderstats = player:FindFirstChild(CONFIG.leaderstats.name)\n\t\t\treturn if leaderstats ~= nil then leaderstats:FindFirstChild(definition.name) else nil\n\t\tend\n\n\t\treturn nil\n\tend\n\n"
 		)
 		player_data_core_source = replace_source_once(
 			player_data_core_source,
@@ -360,8 +360,8 @@ end
 		},
 	})()
 	assert(
-		module_require_counts.CodeNumValue == 0,
-		"PlayerDataCore eagerly required optional CodeNumValue in the default configuration"
+		module_require_counts.InfiniteMathValue == 0,
+		"PlayerDataCore eagerly required optional InfiniteMathValue in the default configuration"
 	)
 	
 	local controller = PlayerDataCore.new({
@@ -369,14 +369,14 @@ end
 		RecordStore = RecordStore,
 		IntegerInfinityValue = IntegerInfinityValue,
 		NumberFormatter = NumberFormatter,
-		CodeNumValue = CodeNumValue,
+		InfiniteMathValue = InfiniteMathValue,
 		new_instance = function(class_name) return Instance.new(class_name) end,
 		task = task,
 	})
 	
 	assert(
-		module_require_counts.CodeNumValue == 0,
-		"default PlayerData controller should not load CodeNumValue when the field is unused"
+		module_require_counts.InfiniteMathValue == 0,
+		"default PlayerData controller should not load InfiniteMathValue when the field is unused"
 	)
 	assert(controller:Start(), "controller failed to start")
 	local deadline = os.clock() + 5

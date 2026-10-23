@@ -1,9 +1,9 @@
 --!nocheck
--- CodeNum JSON payload persistence regression. Uses RecordStore.Mock only.
+-- Legacy numeric payload persistence regression. Uses RecordStore.Mock only.
 local ServerScriptService = game:GetService("ServerScriptService")
 local RecordStore = require(ServerScriptService.RecordStore)
 RecordStore.Mock.reset()
-local store_name, scope, key = "RecordStore_CodeNumRegression", "global", "cash"
+local store_name, scope, key = "RecordStore_LegacyPayloadRegression", "global", "cash"
 
 local invalid_options = {
 	{
@@ -38,7 +38,7 @@ local serialized = '{"schema":"CodeNum","version":2,"value":{"kind":"hyper","bas
 local record = RecordStore.Mock.new(store_name, scope, key, { schema_version = 1 })
 local opened, open_message = record:Open({ cash = serialized, untouched = 42 })
 assert(opened == "created", tostring(open_message))
-assert(record:Get().cash == serialized, "initial CodeNum payload changed")
+assert(record:Get().cash == serialized, "initial legacy numeric payload changed")
 local updated, update_message = record:Update(function(current)
 	current.untouched = 43
 	return current
@@ -51,7 +51,7 @@ assert(type(raw) == "table" and type(raw.data) == "table", "stored envelope miss
 assert(raw.data.cash == serialized, "raw CodeNum JSON payload changed")
 local reloaded, reload_message = record:Open({ cash = "unused", untouched = 0 })
 assert(reloaded == "loaded", tostring(reload_message))
-assert(record:Get().cash == serialized, "CodeNum payload failed close/reopen")
+assert(record:Get().cash == serialized, "legacy numeric payload failed close/reopen")
 assert(record:Get().untouched == 43, "other data changed after reload")
 local closed_again, close_again_message = record:Close()
 assert(closed_again == "closed", tostring(close_again_message))

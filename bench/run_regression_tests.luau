@@ -1,6 +1,6 @@
 --!nocheck
 -- Runs RecordStore regressions and syntax-checks the PlayerData modules under Lune.
--- Usage (from the repository root): lune run bench/run_regression_tests.luau
+-- Usage (from the repository root): lune run bench/run_regression_tests.luau; high-range adapter suites run as separate CodSpeed entries.
 local fs = require("@lune/fs")
 local luau = require("@lune/luau")
 local Shim = require("./RobloxShim")
@@ -9,12 +9,17 @@ for _, path in {
 	"src/PlayerDataInitializer/PlayerDataCore.luau",
 	"src/PlayerDataInitializer/IntegerInfinityValue.luau",
 	"src/PlayerDataInitializer/NumberFormatter.luau",
-	"src/CodeNum.luau",
-	"src/PlayerDataInitializer/CodeNumValue.luau",
+	"src/InfiniteMath/init.luau",
+	"src/InfiniteMath/Int.luau",
+	"src/InfiniteMath/Values/Suffixes.luau",
+	"src/InfiniteMath/Values/FullNames.luau",
+	"src/PlayerDataInitializer/InfiniteMathValue.luau",
+	"bench/infinimath_shim.luau",
 	"src/PlayerDataInitializer/init.server.luau",
 	"src/PlayerDataInitializer/PlayerData.luau",
 	"tests/PlayerDataSetRegression.server.luau",
 	"tests/IntegerInfinityValueRegression.server.luau",
+	"tests/InfiniteMathValueRegression.server.luau",
 	"tests/NumberFormatterRegression.server.luau",
 	"tests/RecordStore_EventQueueRegression.server.luau",
 	"bench/playerdata_set_harness.luau",
@@ -102,6 +107,6 @@ assert(not invalid_options_ok, "invalid decimal precision was accepted")
 Shim.run_script("tests/RecordStore_OpenCorrupt_CompatibilityRegression.server.luau")
 Shim.run_script("tests/RecordStore_EventQueueRegression.server.luau")
 Shim.run_script("tests/RecordStore_NonFiniteNumbersRegression.server.luau")
-Shim.run_script("tests/RecordStore_CodeNumRegression.server.luau")
+Shim.run_script("tests/RecordStore_LegacyPayloadRegression.server.luau")
 Shim.run_script("tests/RecordStore_UnknownSaveRecoveryRegression.server.luau")
 Shim.close()
