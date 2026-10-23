@@ -88,7 +88,10 @@ jobs:
         continue-on-error: true
         run: |
           set +e
-          timeout 180s luau-lsp analyze --platform=roblox --definitions=/tmp/globalTypes.d.luau --sourcemap=/tmp/sourcemap.json src/PlayerDataInitializer/RecordStore.luau > /tmp/RecordStore.strict.log 2>&1
+          timeout 180s luau-lsp analyze --platform=roblox --definitions=/tmp/globalTypes.d.luau --sourcemap=/tmp/sourcemap.json \
+            src/PlayerDataInitializer/RecordStore.luau \
+            src/PlayerDataInitializer/RecordStoreScheduler.luau \
+            src/PlayerDataInitializer/MailboxV2.luau > /tmp/RecordStore.strict.log 2>&1
           status=$?
           set -e
           ANALYZER_STATUS="$status" python3 - <<'PY'
@@ -105,41 +108,44 @@ jobs:
               or "Code is too complex to typecheck" in line
           ]
           internal = [line for line in relevant if "Internal error:" in line or "blocked-" in line]
-          regions = {
-              "scheduler (1-2388)": [],
-              "mailbox (2389-5495)": [],
-              "RecordStore core (5496+)": [],
-          }
+          paths = ("RecordStore.luau", "RecordStoreScheduler.luau", "MailboxV2.luau")
+          by_module = {path: [] for path in paths}
+          for line in relevant:
+              matched = next((path for path in paths if path in line), None)
+              if matched is not None:
+                  by_module[matched].append(line)
+
           categories = collections.Counter()
           for line in relevant:
-              match = re.search(r"\((\d+),\d+\): (?:TypeError|Internal error): (.*)", line)
+              match = re.search(r"(?:TypeError|Internal error): (.*)", line)
               if match is None:
                   continue
-              source_line = int(match.group(1))
-              message = match.group(2)
-              if source_line <= 2388:
-                  region = "scheduler (1-2388)"
-              elif source_line <= 5495:
-                  region = "mailbox (2389-5495)"
+              message = match.group(1)
+              if message.startswith("Key '"):
+                  category = "Missing field/key"
+              elif message.startswith("Unknown type used in "):
+                  category = "Unknown operand type"
+              elif message.startswith("Expected this to be"):
+                  category = "Type mismatch"
+              elif message.startswith("Table type"):
+                  category = "Table shape mismatch"
+              elif message.startswith("Argument count mismatch"):
+                  category = "Argument count mismatch"
+              elif message.startswith("Value of type"):
+                  category = "Nilability mismatch"
               else:
-                  region = "RecordStore core (5496+)"
-              regions[region].append(line)
-              category = re.sub(r"^Key '.*", "Missing field/key", message)
-              category = re.sub(r"^Unknown type used in .*", "Unknown operand type", category)
-              category = re.sub(r"^Expected this to be .*", "Type mismatch", category)
-              category = re.sub(r"^Table type .*", "Table shape mismatch", category)
-              category = re.sub(r"^Argument count mismatch.*", "Argument count mismatch", category)
+                  category = message[:110]
               categories[category] += 1
 
-          print(f"Strict RecordStore analyzer diagnostics: {len(relevant)}")
+          print(f"Strict RecordStore-family diagnostics: {len(relevant)}")
           print(f"Internal/blocked diagnostics: {len(internal)}")
           print(f"Analyzer exit status: {os.environ['ANALYZER_STATUS']}")
-          for name, items in regions.items():
-              print(f"--- {name}: {len(items)} diagnostics; first 12 ---")
-              for line in items[:12]:
+          for name, items in by_module.items():
+              print(f"--- {name}: {len(items)} diagnostics; first 10 ---")
+              for line in items[:10]:
                   print(line)
           print("--- Most common diagnostic shapes ---")
-          for category, count in categories.most_common(25):
+          for category, count in categories.most_common(20):
               print(f"{count}: {category}")
           PY
 
