@@ -5900,6 +5900,8 @@ export type Options = {
 	user_ids: { number }?,
 	metadata: Metadata?,
 	autosave_interval: number?,
+	max_dirty_age_seconds: number?,
+	durability_mode: "balanced" | "durability_first" | "read_only_on_risk"?,
 	lease_duration: number?,
 	lease_renewal: number?,
 	retry_attempts: number?,
@@ -6127,6 +6129,8 @@ type InternalState = {
 	pending_operation: PendingDurableOperation?,
 	next_reconciliation: number,
 	last_reconciliation_category: string?,
+	durability_risk_active: boolean?,
+	durability_risk_reason: string?,
 	dirty_since_local: number?,
 	last_successful_write_local: number?,
 }
@@ -7153,6 +7157,54 @@ local function observe(state: InternalState, event: string, result: ResultCode, 
 	end
 	local thread = coroutine.create(function()
 		observer(event, state.key, result, message)
+	end)
+	local resumed = coroutine.resume(thread)
+	if not resumed or coroutine.status(thread) ~= "dead" then
+		coroutine.close(thread)
+		state.observer_errors += 1
+	end
+end
+
+local function current_durability_risk_reason(state: InternalState): string?
+	if state.state == "unknown" then
+		return "write_or_lease_outcome_unknown"
+	end
+	local dirty = state.change_sequence ~= state.saved_change_sequence
+	if not dirty then
+		return nil
+	end
+	local dirty_since = state.dirty_since_local
+	if dirty_since == nil then
+		return nil
+	end
+	local max_age = state.options.max_dirty_age_seconds
+		or (state.options.autosave_interval or DEFAULT_AUTOSAVE_INTERVAL) * 2
+	if now_local() - dirty_since >= max_age then
+		return "maximum_dirty_age_exceeded"
+	end
+	return nil
+end
+
+local function refresh_durability_risk(state: InternalState)
+	local reason = current_durability_risk_reason(state)
+	local active = reason ~= nil
+	local was_active = state.durability_risk_active == true
+	if active == was_active then
+		return
+	end
+	local previous_reason = state.durability_risk_reason
+	state.durability_risk_active = active
+	state.durability_risk_reason = reason
+
+	local observer = state.options.on_event
+	if observer == nil then
+		return
+	end
+	local event_name = if active then "durability_risk" else "durability_recovered"
+	local result: ResultCode = if active then "unknown" else "success"
+	local message = if active then reason else "durability risk cleared: " .. tostring(previous_reason or "resolved")
+	local thread = coroutine.create(function()
+		observer(event_name, state.key, result, message)
 	end)
 	local resumed = coroutine.resume(thread)
 	if not resumed or coroutine.status(thread) ~= "dead" then
@@ -9551,6 +9603,7 @@ local function save_internal(state: InternalState, reason: string?, operation_de
 		}
 		state.next_reconciliation = now_local() + 0.25
 		state.last_reconciliation_category = "save_outcome_unknown"
+		refresh_durability_risk(state)
 		observe(state, "save", "unknown", last_error or "save outcome is unresolved")
 		return "unknown", last_error or "save outcome is unresolved"
 	end
@@ -9582,6 +9635,7 @@ local function save_internal(state: InternalState, reason: string?, operation_de
 	state.last_successful_write_local = now_local()
 	state.busy = false
 	state.state = "active"
+	refresh_durability_risk(state)
 	state.next_autosave = now_local() + (state.options.autosave_interval or DEFAULT_AUTOSAVE_INTERVAL)
 	if state.save_requested then
 		state.next_autosave = now_local()
@@ -10233,6 +10287,26 @@ local function is_dirty(self: Record): boolean
 	return state.change_sequence ~= state.saved_change_sequence
 end
 
+local function mutation_backpressure_reason(state: InternalState): string?
+	if state.options.durability_mode ~= "read_only_on_risk" then
+		return nil
+	end
+	local dirty = state.change_sequence ~= state.saved_change_sequence
+	if not dirty then
+		return nil
+	end
+	local dirty_since = state.dirty_since_local
+	if dirty_since == nil then
+		return nil
+	end
+	local max_age = state.options.max_dirty_age_seconds
+		or (state.options.autosave_interval or DEFAULT_AUTOSAVE_INTERVAL) * 2
+	if now_local() - dirty_since >= max_age then
+		return "mutation rejected: oldest dirty change exceeded max_dirty_age_seconds"
+	end
+	return nil
+end
+
 local function can_mutate(self: Record): (boolean, string?)
 	local state = private[self]
 	if state == nil then
@@ -10240,6 +10314,10 @@ local function can_mutate(self: Record): (boolean, string?)
 	end
 	if state.state ~= "active" or state.token == nil then
 		return false, "record ownership is not confirmed active"
+	end
+	local backpressure = mutation_backpressure_reason(state)
+	if backpressure ~= nil then
+		return false, backpressure
 	end
 	if state.takeover_requested then
 		return false, "session takeover has been requested"
@@ -10276,22 +10354,79 @@ local function get_durability_status(self: Record): { [string]: any }
 		elseif state.busy then "saving"
 		elseif dirty then "dirty"
 		else "clean"
+	local dirty_age = if dirty and state.dirty_since_local ~= nil
+		then math.max(0, now_local() - state.dirty_since_local) else 0
+	local max_dirty_age = state.options.max_dirty_age_seconds
+		or (state.options.autosave_interval or DEFAULT_AUTOSAVE_INTERVAL) * 2
+	local slo_exceeded = dirty and dirty_age >= max_dirty_age
+	local backpressure = mutation_backpressure_reason(state)
 	return {
 		ownership = ownership,
 		durability = durability,
 		unknown = state.state == "unknown",
+		dirty = dirty,
+		durability_mode = state.options.durability_mode or "balanced",
+		maximum_dirty_age_seconds = max_dirty_age,
+		dirty_age_slo_exceeded = slo_exceeded,
+		mutation_admission = if state.state ~= "active" or state.token == nil
+			then "blocked" elseif backpressure ~= nil then "read_only" else "allowed",
+		risk_active = state.durability_risk_active == true or state.state == "unknown" or slo_exceeded,
+		risk_reason = state.durability_risk_reason or (if state.state == "unknown" then "write_or_lease_outcome_unknown" elseif slo_exceeded then "maximum_dirty_age_exceeded" else nil),
+		observed_at_unix = now_unix(),
 		last_confirmed_revision = state.revision,
 		last_confirmed_generation = state.generation,
 		dirty_watermark = state.change_sequence,
 		durable_watermark = state.saved_change_sequence,
-		oldest_dirty_age = if dirty and state.dirty_since_local ~= nil
-			then math.max(0, now_local() - state.dirty_since_local) else 0,
+		oldest_dirty_age = dirty_age,
 		last_successful_write_age = if state.last_successful_write_local ~= nil
 			then math.max(0, now_local() - state.last_successful_write_local) else nil,
 		lease_margin = math.max(0, state.durable_lease_until - session_now_unix(state.backend.mock)),
 		pending_operation_id = if pending ~= nil then pending.operation_id else nil,
 		reconciliation_category = state.last_reconciliation_category,
 		reconciliation_attempts = if pending ~= nil then pending.attempts else 0,
+	}
+end
+
+RecordStore.get_health_snapshot = function(): { [string]: any }
+	local total_records = 0
+	local active_records_count = 0
+	local unknown_records_count = 0
+	local dirty_records_count = 0
+	local dirty_age_slo_exceeded_count = 0
+	local oldest_dirty_age = 0
+	local now = now_unix()
+
+	for record, state in private do
+		if not state.retired then
+			total_records += 1
+			if state.state == "active" then
+				active_records_count += 1
+			elseif state.state == "unknown" then
+				unknown_records_count += 1
+			end
+			local status = get_durability_status(record)
+			if status.dirty == true then
+				dirty_records_count += 1
+				oldest_dirty_age = math.max(oldest_dirty_age, status.oldest_dirty_age or 0)
+			end
+			if status.dirty_age_slo_exceeded == true then
+				dirty_age_slo_exceeded_count += 1
+			end
+		end
+	end
+
+	local degraded = unknown_records_count > 0 or dirty_age_slo_exceeded_count > 0
+	return {
+		observed_at_unix = now,
+		evidence_scope = "server_local_loaded_records",
+		server_state = if closing then "closing" elseif degraded then "degraded" else "healthy",
+		total_records = total_records,
+		active_records = active_records_count,
+		unknown_records = unknown_records_count,
+		dirty_records = dirty_records_count,
+		dirty_age_slo_exceeded_records = dirty_age_slo_exceeded_count,
+		oldest_dirty_age = oldest_dirty_age,
+		has_unknown_write_outcome = unknown_records_count > 0,
 	}
 end
 
@@ -10310,6 +10445,10 @@ local function set_user_ids(self: Record, user_ids: { number }): (ResultCode, st
 	end
 	if state.state ~= "active" then
 		return "fenced", "record is not actively owned"
+	end
+	local backpressure = mutation_backpressure_reason(state)
+	if backpressure ~= nil then
+		return "capacity", backpressure
 	end
 	if state.takeover_requested then
 		return "closing", "session takeover has been requested"
@@ -10384,6 +10523,10 @@ local function set_metadata(self: Record, metadata: Metadata): (ResultCode, stri
 	if state.state ~= "active" then
 		return "fenced", "record is not actively owned"
 	end
+	local backpressure = mutation_backpressure_reason(state)
+	if backpressure ~= nil then
+		return "capacity", backpressure
+	end
 	if state.takeover_requested then
 		return "closing", "session takeover has been requested"
 	end
@@ -10419,6 +10562,10 @@ local function update_metadata(self: Record, callback: (Metadata) -> Metadata): 
 	end
 	if state.state ~= "active" then
 		return "fenced", "record is not actively owned"
+	end
+	local backpressure = mutation_backpressure_reason(state)
+	if backpressure ~= nil then
+		return "capacity", backpressure
 	end
 	if state.takeover_requested then
 		return "closing", "session takeover has been requested"
@@ -10497,6 +10644,10 @@ local function update(self: Record, callback: (JsonValue?) -> JsonValue?): (Resu
 	end
 	if state == nil or state.state ~= "active" then
 		return "fenced", "record is not actively owned"
+	end
+	local backpressure = mutation_backpressure_reason(state)
+	if backpressure ~= nil then
+		return "capacity", backpressure
 	end
 	if state.takeover_requested then
 		return "closing", "session takeover has been requested"
@@ -12456,6 +12607,7 @@ local function renew_internal(state: InternalState): (ResultCode, string?)
 		}
 		state.next_reconciliation = now_local() + 0.25
 		state.last_reconciliation_category = "renewal_outcome_unknown"
+		refresh_durability_risk(state)
 		observe(state, "renew", "unknown", last_error or "renewal outcome is unresolved")
 		return "unknown", last_error or "renewal outcome is unresolved"
 	end
@@ -13931,6 +14083,9 @@ local function start_scheduler()
 		while not closing do
 			for record in active_records do
 				local state = private[record]
+				if state ~= nil then
+					refresh_durability_risk(state)
+				end
 				if state ~= nil and (state.state :: SessionState) == "active" then
 					local now = now_local()
 					if scheduler_enabled then
@@ -13983,6 +14138,9 @@ local function start_scheduler()
 			end
 			for record in recovery_records do
 				local state = private[record]
+				if state ~= nil then
+					refresh_durability_risk(state)
+				end
 				if state ~= nil and state.state == "unknown" and state.pending_operation ~= nil then
 					local now = now_local()
 					if scheduler_enabled then
@@ -14050,6 +14208,12 @@ RecordStore._internals.normalize_options = function(options: Options): (Options?
 	local copied = table.clone(options)
 	if copied.autosave_interval == nil then
 		copied.autosave_interval = DEFAULT_AUTOSAVE_INTERVAL
+	end
+	if copied.durability_mode == nil then
+		copied.durability_mode = "balanced"
+	end
+	if copied.max_dirty_age_seconds == nil then
+		copied.max_dirty_age_seconds = (copied.autosave_interval :: number) * 2
 	end
 	if copied.lease_duration == nil then
 		copied.lease_duration = DEFAULT_LEASE_DURATION
@@ -14155,6 +14319,17 @@ RecordStore._internals.normalize_options = function(options: Options): (Options?
 	end
 	if not valid_positive_number(copied.autosave_interval) then
 		return nil, "autosave_interval must be a positive finite number"
+	end
+	if copied.durability_mode ~= "balanced"
+		and copied.durability_mode ~= "durability_first"
+		and copied.durability_mode ~= "read_only_on_risk"
+	then
+		return nil, "durability_mode must be balanced, durability_first, or read_only_on_risk"
+	end
+	if not valid_positive_number(copied.max_dirty_age_seconds)
+		or (copied.max_dirty_age_seconds :: number) > 86400
+	then
+		return nil, "max_dirty_age_seconds must be positive and no greater than 86400"
 	end
 	if not valid_positive_number(copied.lease_duration) then
 		return nil, "lease_duration must be a positive finite number"
