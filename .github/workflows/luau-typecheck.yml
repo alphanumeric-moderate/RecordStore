@@ -54,6 +54,7 @@ jobs:
           set -euo pipefail
           sed '1s/^--!strict$/--!nonstrict/' src/PlayerDataInitializer/RecordStore.luau > /tmp/RecordStore.nonstrict.luau
           rojo sourcemap default.project.json --include-non-scripts --output /tmp/sourcemap.json
+          cp /tmp/sourcemap.json /tmp/sourcemap-strict.json
           python3 - <<'PY'
           import json
           from pathlib import Path
@@ -88,7 +89,7 @@ jobs:
         continue-on-error: true
         run: |
           set +e
-          timeout 180s luau-lsp analyze --platform=roblox --definitions=/tmp/globalTypes.d.luau --sourcemap=/tmp/sourcemap.json \
+          timeout 180s luau-lsp analyze --platform=roblox --definitions=/tmp/globalTypes.d.luau --sourcemap=/tmp/sourcemap-strict.json \
             src/PlayerDataInitializer/RecordStore.luau \
             src/PlayerDataInitializer/RecordStoreScheduler.luau \
             src/PlayerDataInitializer/MailboxV2.luau > /tmp/RecordStore.strict.log 2>&1
