@@ -14095,102 +14095,128 @@ local function run_scheduled_recovery(record: Record, state: InternalState, now:
 	end
 end
 
+local function run_unscheduled_record_work(record: Record, state: InternalState, now: number)
+	local handled_takeover = false
+	if state.takeover_requested and not state.busy and not state.queue_busy then
+		complete_deferred_takeover(state)
+		sync_public(record)
+		handled_takeover = true
+	end
+	if not handled_takeover and state.state == "active"
+		and not state.busy and not state.queue_busy and now >= state.next_renewal
+	then
+		state.next_renewal = now + (state.options.lease_renewal or DEFAULT_LEASE_RENEWAL)
+		task.spawn(function()
+			renew_internal(state)
+			sync_public(record)
+		end)
+	elseif not handled_takeover and state.state == "active"
+		and not state.busy and not state.queue_busy and now >= state.next_autosave
+	then
+		state.next_autosave = now + (state.options.autosave_interval or DEFAULT_AUTOSAVE_INTERVAL)
+			* (0.9 + math.random() * 0.2)
+		task.spawn(function()
+			save_internal(state, "autosave", nil, nil)
+			sync_public(record)
+		end)
+	end
+	if state.state == "active"
+		and state.options.on_message ~= nil
+		and messaging_enabled(state)
+		and state.message_subscription == nil
+		and now >= state.next_message_subscribe
+	then
+		subscribe_record(state)
+	end
+	if state.state == "active"
+		and state.options.durable_queue_enabled ~= false
+		and state.options.on_queue_message ~= nil
+		and not state.queue_busy
+		and (state.queue_hint or now >= state.next_queue_poll)
+	then
+		state.queue_hint = false
+		state.next_queue_poll = now + (state.options.queue_poll_interval or DEFAULT_QUEUE_POLL_INTERVAL)
+		task.spawn(function()
+			process_queue_internal(state, 4)
+			sync_public(record)
+		end)
+	end
+end
+
+local function prepare_durability_first_deadline(state: InternalState, now: number)
+	if state.options.durability_mode ~= "durability_first"
+		or state.change_sequence == state.saved_change_sequence
+		or state.dirty_since_local == nil
+		or state.busy
+		or state.queue_busy
+	then
+		return
+	end
+	local max_dirty_age = state.options.max_dirty_age_seconds
+		or (state.options.autosave_interval or DEFAULT_AUTOSAVE_INTERVAL) * 2
+	local urgent_save_at = state.dirty_since_local + max_dirty_age * 0.5
+	state.next_autosave = math.min(state.next_autosave, urgent_save_at)
+end
+
+local function process_active_record(record: Record, state: InternalState)
+	scheduler_activation.refresh_durability_risk(state)
+	if state.state ~= "active" then
+		return
+	end
+	local now = now_local()
+	prepare_durability_first_deadline(state, now)
+	if scheduler_enabled then
+		run_scheduled_record_work(record, state, now)
+	else
+		run_unscheduled_record_work(record, state, now)
+	end
+end
+
+local function process_recovery_record(record: Record, state: InternalState)
+	scheduler_activation.refresh_durability_risk(state)
+	if state.state ~= "unknown" or state.pending_operation == nil then
+		return
+	end
+	local now = now_local()
+	if scheduler_enabled then
+		run_scheduled_recovery(record, state, now)
+	elseif not recovery_in_flight and not state.busy and now >= state.next_reconciliation then
+		recovery_in_flight = true
+		state.next_reconciliation = now + 0.5
+		task.spawn(function()
+			reconcile_unknown_internal(state)
+			sync_public(record)
+			recovery_in_flight = false
+		end)
+	end
+end
+
 local function start_scheduler()
-	if scheduler_started then return end
+	if scheduler_started then
+		return
+	end
 	scheduler_started = true
 	task.spawn(function()
 		while not closing do
 			for record in active_records do
 				local state = private[record]
 				if state ~= nil then
-					scheduler_activation.refresh_durability_risk(state)
-				end
-				if state ~= nil and (state.state :: SessionState) == "active" then
-					local now = now_local()
-					if state.options.durability_mode == "durability_first"
-						and state.change_sequence ~= state.saved_change_sequence
-						and state.dirty_since_local ~= nil
-						and not state.busy and not state.queue_busy
-					then
-						local max_dirty_age = state.options.max_dirty_age_seconds
-							or (state.options.autosave_interval or DEFAULT_AUTOSAVE_INTERVAL) * 2
-						local urgent_save_at = state.dirty_since_local + max_dirty_age * 0.5
-						state.next_autosave = math.min(state.next_autosave, urgent_save_at)
-					end
-					if scheduler_enabled then
-						run_scheduled_record_work(record, state, now)
-					else
-						local handled_takeover = false
-						if state.takeover_requested and not state.busy and not state.queue_busy then
-							complete_deferred_takeover(state)
-							sync_public(record)
-							handled_takeover = true
-						end
-						if not handled_takeover and state.state == "active"
-							and not state.busy and not state.queue_busy and now >= state.next_renewal
-						then
-							state.next_renewal = now + (state.options.lease_renewal or DEFAULT_LEASE_RENEWAL)
-							task.spawn(function()
-								renew_internal(state)
-								sync_public(record)
-							end)
-						elseif not handled_takeover and state.state == "active"
-							and not state.busy and not state.queue_busy and now >= state.next_autosave
-						then
-							state.next_autosave = now + (state.options.autosave_interval or DEFAULT_AUTOSAVE_INTERVAL) * (0.9 + math.random() * 0.2)
-							task.spawn(function()
-								save_internal(state, "autosave", nil, nil)
-								sync_public(record)
-							end)
-						end
-						if state.state == "active"
-							and state.options.on_message ~= nil
-							and messaging_enabled(state)
-							and state.message_subscription == nil
-							and now >= state.next_message_subscribe
-						then subscribe_record(state) end
-						if state.state == "active"
-							and state.options.durable_queue_enabled ~= false
-							and state.options.on_queue_message ~= nil
-							and not state.queue_busy
-							and (state.queue_hint or now >= state.next_queue_poll)
-						then
-							state.queue_hint = false
-							state.next_queue_poll = now + (state.options.queue_poll_interval or DEFAULT_QUEUE_POLL_INTERVAL)
-							task.spawn(function()
-								process_queue_internal(state, 4)
-								sync_public(record)
-							end)
-						end
-					end
+					process_active_record(record, state)
 				end
 			end
 			for record in recovery_records do
 				local state = private[record]
 				if state ~= nil then
-					scheduler_activation.refresh_durability_risk(state)
-				end
-				if state ~= nil and state.state == "unknown" and state.pending_operation ~= nil then
-					local now = now_local()
-					if scheduler_enabled then
-						run_scheduled_recovery(record, state, now)
-					elseif not recovery_in_flight and not state.busy and now >= state.next_reconciliation then
-						recovery_in_flight = true
-						state.next_reconciliation = now + 0.5
-						task.spawn(function()
-							reconcile_unknown_internal(state)
-							sync_public(record)
-							recovery_in_flight = false
-						end)
-					end
+					process_recovery_record(record, state)
 				end
 			end
-			if scheduler_enabled then scheduler_dispatcher:Kick() end
+			if scheduler_enabled then
+				scheduler_dispatcher:Kick()
+			end
 			task.wait(SCHEDULER_STEP)
 		end
 	end)
 end
-
 RecordStore.shutdown = function()
 	if shutdown_started then
 		return
