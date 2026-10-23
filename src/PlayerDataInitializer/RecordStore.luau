@@ -6488,7 +6488,7 @@ copy_value = function(value: unknown): JsonValue?
 		local result_dictionary: { [string]: JsonValue }? = nil
 		local result_array: { JsonValue }? = nil
 
-		for key, child in current do
+		for key, child in table_value do
 			local key_type = type(key)
 			if key_type == "string" then
 				if has_number_key then
@@ -6502,10 +6502,9 @@ copy_value = function(value: unknown): JsonValue?
 					active_tables[table_value] = nil
 					error("value contains an invalid nil child")
 				end
-				if result_dictionary == nil then
-					result_dictionary = {}
-				end
-				result_dictionary[dictionary_key] = copied :: JsonValue
+				if result_dictionary == nil then result_dictionary = {} end
+				local dictionary_result = result_dictionary :: { [string]: JsonValue }
+				dictionary_result[dictionary_key] = copied :: JsonValue
 			elseif key_type == "number" then
 				if has_string_key then
 					active_tables[table_value] = nil
@@ -6525,10 +6524,9 @@ copy_value = function(value: unknown): JsonValue?
 					active_tables[table_value] = nil
 					error("value contains an invalid nil child")
 				end
-				if result_array == nil then
-					result_array = {}
-				end
-				result_array[numeric_key] = copied :: JsonValue
+				if result_array == nil then result_array = {} end
+				local array_result = result_array :: { JsonValue }
+				array_result[numeric_key] = copied :: JsonValue
 			else
 				active_tables[table_value] = nil
 				error("value contains an unsupported table key")
@@ -6764,7 +6762,7 @@ local function restore_non_finite_numbers(
 	return result, nil
 end
 
-local prepared_envelope_cache: { [any]: JsonValue } = setmetatable({}, { __mode = "k" })
+local prepared_envelope_cache: any = setmetatable({}, { __mode = "k" })
 
 local function encode_envelope_for_storage(envelope: Envelope): JsonValue
 	local stored: { [string]: JsonValue } = {
@@ -7859,7 +7857,8 @@ local function update_local_from_envelope(state: InternalState, envelope: Envelo
 	state.data = copy_value(envelope.data)
 	state.public_data_source = copy_value(state.data)
 	if state.public_record ~= nil then
-		state.public_record.Data = state.data
+		local public_record: any = state.public_record
+		public_record.Data = state.data
 	end
 	state.generation = envelope.fencing_generation
 	state.revision = envelope.revision
@@ -9763,8 +9762,8 @@ local function data_values_equal(left: JsonValue?, right: JsonValue?, depth: num
 	if type(left) ~= "table" then
 		return left == right
 	end
-	local left_table = left :: { [string | number]: JsonValue }
-	local right_table = right :: { [string | number]: JsonValue }
+	local left_table: any = left
+	local right_table: any = right
 	for key, child in left_table do
 		local other = right_table[key]
 		if other == nil or not data_values_equal(child, other, current_depth + 1) then
@@ -9794,9 +9793,11 @@ track_external_data_mutation = function(state: InternalState)
 	end
 	local public_record = state.public_record
 	local public_data: unknown = state.data
+	local public_record_table: { Data: unknown }? = nil
 	if type(public_record) == "table" then
-		local public_record_table = public_record :: { Data: unknown }
-		public_data = public_record_table.Data
+		local validated_public_record = public_record :: { Data: unknown }
+		public_record_table = validated_public_record
+		public_data = validated_public_record.Data
 	end
 	local candidate = public_data :: JsonValue?
 	if data_values_equal(candidate, state.public_data_source) then
@@ -10926,13 +10927,13 @@ local function bind_mailbox_v2_async(self: Record, mailbox: unknown): (ResultCod
 	if state.options.durable_queue_enabled == false then
 		return "invalid", "safe V2 binding requires the legacy queue to be enabled so pending messages can be checked"
 	end
-	if type(mailbox) ~= "table" or type(mailbox.GetOwner) ~= "function"
-		or type(mailbox.GetActiveRecord) ~= "function" or type(mailbox.EnqueueAsync) ~= "function"
-		or type(mailbox.ProcessNextAsync) ~= "function" or type(mailbox.SetLeaseRenewalScheduler) ~= "function"
+	local mailbox_api: any = mailbox
+	if type(mailbox_api) ~= "table" or type(mailbox_api.GetOwner) ~= "function"
+		or type(mailbox_api.GetActiveRecord) ~= "function" or type(mailbox_api.EnqueueAsync) ~= "function"
+		or type(mailbox_api.ProcessNextAsync) ~= "function" or type(mailbox_api.SetLeaseRenewalScheduler) ~= "function"
 	then
 		return "invalid", "mailbox must expose the V2 owner, enqueue, processing and lease-renewal APIs"
 	end
-	local mailbox_api: any = mailbox
 	local owner_ok, owner = pcall(function() return mailbox_api:GetOwner() end)
 	local active_ok, active_record = pcall(function() return mailbox_api:GetActiveRecord() end)
 	if not owner_ok or type(owner) ~= "table" then return "invalid", "V2 mailbox owner identity could not be read" end
