@@ -39,7 +39,7 @@
 **Files:** existing PR #39 spec, `tests/RecordStore_UnknownSaveRecoveryRegression.server.luau`, `bench/run_regression_tests.luau`, CI workflows.
 
 - [ ] Inventory existing behavior against sections 26.13, 27.2, 27.4, 31 and phase 0.
-- [ ] Add/maintain a production-path fake DataStore boundary that can deterministically inject fail-before-commit, commit-then-error, held verification reads, budget/throttle errors and ownership races.
+- [x] Maintain a production-path fake DataStore boundary that deterministically injects fail-before-commit, commit-then-error, held verification reads, budget exhaustion, transform replay, and ownership races.
 - [ ] Add transition tests that prove they fail against the pre-fix code, then pass after the targeted implementation.
 - [ ] Establish existing CodSpeed entries as a baseline; separate simulation, walltime, service-cost assumptions and unmeasured live Roblox behavior.
 - [ ] Keep this PR's static type check and complete Lune regression workflow green before merging.
@@ -68,7 +68,9 @@
 - [x] Retry only a known non-commit using the same operation ID/snapshot and exact base revision/fence inside UpdateAsync.
 - [x] On competing revision/owner, schema mismatch, corruption, tombstone or expiry, fence instead of writing stale state.
 - [x] Implement same-process lease CAS reacquisition only behind an off-by-default option, with exact base-write/revision/generation/session checks and a new fencing generation.
-- [ ] Finish the complete failure-before-commit and commit-then-error matrix for save, renewal and release, including process-interruption boundaries and lease-margin transitions across real Roblox services.
+- [x] Cover deterministic fail-before-commit and commit-then-error recovery for save, renewal and release, including stable operation identity, revision counts, release semantics, and pending UserIds/application metadata preservation.
+- [x] Test opt-in lease reacquisition after expired save and renewal, response loss during reacquisition, insufficient post-CAS lease margin, disabled-by-default behavior, and replacement-owner races.
+- [ ] Run live Roblox acceptance for actual process interruption, platform throttling/cache behavior, and multi-server lease-margin transitions.
 
 **Acceptance:** commit-then-error is recognized without duplicate revision; retries reuse exact identity and do not cross changed revision/fence; new owner always wins; continued outages remain bounded and degraded.
 
