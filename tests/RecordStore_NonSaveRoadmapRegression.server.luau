@@ -30,6 +30,7 @@ local function seed_record(key, session, tombstone)
 		created_at = 900,
 		updated_at = 950,
 		data = if tombstone ~= nil then nil else { value = 12 },
+		non_finite_numbers = {},
 		user_ids = {},
 		tombstone = tombstone,
 		write_id = "write-" .. key,
