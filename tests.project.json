@@ -22,6 +22,9 @@
       "RecordStoreCompatibilityRegression": {
         "$path": "tests/RecordStore_OpenCorrupt_CompatibilityRegression.server.luau"
       },
+      "RecordStoreEventQueueRegression": {
+        "$path": "tests/RecordStore_EventQueueRegression.server.luau"
+      },
       "RecordStoreNonFiniteNumbersRegression": {
         "$path": "tests/RecordStore_NonFiniteNumbersRegression.server.luau"
       },

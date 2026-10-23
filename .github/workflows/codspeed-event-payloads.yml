@@ -12,7 +12,7 @@ env:
 
 jobs:
   event-payloads:
-    if: github.event.pull_request.head.ref == 'perf/event-payload-copy-elision-2026-10-16'
+    if: github.event.pull_request.head.repo.full_name == 'alphanumeric-moderate/RecordStore' && (github.event.pull_request.head.ref == 'perf/event-payload-copy-elision-2026-10-16' || github.event.pull_request.head.ref == 'perf/change-event-payload-copy-main-8423b69')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

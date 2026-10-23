@@ -16,6 +16,7 @@ for _, path in {
 	"tests/PlayerDataSetRegression.server.luau",
 	"tests/IntegerInfinityValueRegression.server.luau",
 	"tests/NumberFormatterRegression.server.luau",
+	"tests/RecordStore_EventQueueRegression.server.luau",
 	"bench/playerdata_set_harness.luau",
 	"bench/playerdata_set_paths.bench.luau",
 	"bench/playerdata_startup_common.luau",
@@ -68,6 +69,18 @@ assert(
 assert(NumberFormatter.format(1e36) == "1Ud", "custom suffix sequence failed")
 assert(NumberFormatter.formatInteger("123456789012345678901234567890123456789") == "123.45Ud", "exact integer suffix failed")
 assert(NumberFormatter.formatScientific(1, 1.25, "12") == "1.25T", "scientific suffix failed")
+
+assert(
+	NumberFormatter.formatScientific(1, 1.259, "12", { decimals = 2 }) == "1.25T",
+	"scientific formatting with resolved options changed"
+)
+local huge_exponent = string.rep("9", 80)
+assert(
+	NumberFormatter.formatScientific(1, 1.25, huge_exponent, { decimals = 3, trim_trailing_zeros = false })
+		== "1.250e+" .. huge_exponent,
+	"unrepresentable scientific exponent fallback changed"
+)
+
 local invalid_scientific_mantissa = pcall(function()
 	NumberFormatter.formatScientific(1, "1.25", "12")
 end)
@@ -87,6 +100,7 @@ end)
 assert(not invalid_options_ok, "invalid decimal precision was accepted")
 
 Shim.run_script("tests/RecordStore_OpenCorrupt_CompatibilityRegression.server.luau")
+Shim.run_script("tests/RecordStore_EventQueueRegression.server.luau")
 Shim.run_script("tests/RecordStore_NonFiniteNumbersRegression.server.luau")
 Shim.run_script("tests/RecordStore_CodeNumRegression.server.luau")
 Shim.run_script("tests/RecordStore_UnknownSaveRecoveryRegression.server.luau")
