@@ -78,11 +78,11 @@ end
 	end
 	
 	function instance_methods:GetAttribute(name)
+		return self._attributes[name]
+	end
 
 	function instance_methods:Kick(message)
 		self._kick_message = message
-	end
-		return self._attributes[name]
 	end
 
 	function instance_methods:GetPropertyChangedSignal(property_name)
