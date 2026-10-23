@@ -80,7 +80,7 @@ assert(missing.LeaseAppearsAvailable == true)
 local invalid, invalid_result = Mock.get_session_status_async("", "global", "active")
 assert(invalid == nil and invalid_result == "invalid")
 
-local store = MailboxV2.MockStore.new()
+local store = MailboxV2.MockStore()
 local mailbox = MailboxV2.new(store, {
 	store_name = "PlayerData",
 	scope = "global",
