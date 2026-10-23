@@ -1477,7 +1477,9 @@ function MailboxV2._ordering_blocked(self: Mailbox, record: Dict, route: string)
 			if not TERMINAL[tostring(prior.state)] then
 				return true, "an earlier message with the same ordering_key is not terminal"
 			end
+			if type(prior_sequence) == "number" and is_finite(prior_sequence) then
 			self:_release_ordering_slot(prior_route, ordering_key, prior_sequence)
+		end
 		end
 	end
 	return false, nil
@@ -2132,7 +2134,9 @@ function MailboxV2._finish_acknowledgement(self: Mailbox, route: string, token: 
 		return ok("unknown", route, nil, "acknowledgement completion could not be verified")
 	end
 	if finished.state == "acknowledged" then
-		self:_release_ordering_slot(route, finished.ordering_key, finished.ordering_sequence)
+		if type(finished.ordering_key) == "string" and is_finite(finished.ordering_sequence) then
+			self:_release_ordering_slot(route, finished.ordering_key, finished.ordering_sequence :: number)
+		end
 		return ok("processed", route, self:_record_snapshot(finished), nil)
 	end
 	return ok("unknown", route, self:_record_snapshot(finished), "acknowledgement terminal state was not confirmed")
@@ -2188,7 +2192,9 @@ function MailboxV2._finish_dead_letter(self: Mailbox, route: string): Result
 	if terminal_error ~= nil or terminal == nil or terminal.state ~= "dead_lettered" then
 		return ok("unknown", route, terminal, terminal_error or "DLQ append committed but terminal status is unknown")
 	end
-	self:_release_ordering_slot(route, terminal.ordering_key, terminal.ordering_sequence)
+	if type(terminal.ordering_key) == "string" and is_finite(terminal.ordering_sequence) then
+		self:_release_ordering_slot(route, terminal.ordering_key, terminal.ordering_sequence :: number)
+	end
 	return ok("dead_lettered", route, self:_record_snapshot(terminal), nil)
 end
 
@@ -2293,7 +2299,9 @@ function MailboxV2._claim(self: Mailbox, route: string): (Dict?, Result)
 		return nil, self:_finish_dead_letter(route)
 	end
 	if claimed.state == "expired" then
-		self:_release_ordering_slot(route, claimed.ordering_key, claimed.ordering_sequence)
+		if type(claimed.ordering_key) == "string" and is_finite(claimed.ordering_sequence) then
+			self:_release_ordering_slot(route, claimed.ordering_key, claimed.ordering_sequence :: number)
+		end
 		return nil, ok("expired", route, self:_record_snapshot(claimed), nil)
 	end
 	if claimed.state ~= "claimed" or claimed.claim_token ~= token then
@@ -2446,7 +2454,9 @@ function MailboxV2._retry_claim(self: Mailbox, route: string, token: string, rea
 		return self:_finish_dead_letter(route)
 	end
 	if updated.state == "expired" then
-		self:_release_ordering_slot(route, updated.ordering_key, updated.ordering_sequence)
+		if type(updated.ordering_key) == "string" and is_finite(updated.ordering_sequence) then
+		self:_release_ordering_slot(route, updated.ordering_key, updated.ordering_sequence :: number)
+		end
 		return ok("expired", route, self:_record_snapshot(updated), nil)
 	end
 	if updated.state ~= "ready" then
@@ -3004,10 +3014,24 @@ function MailboxV2.ReclaimAsync(self: Mailbox): Result
 	return ok(if reclaimed_active or reclaimed_dlq then "success" else "empty", nil, nil, nil)
 end
 
+type MockStoreState = {
+	values: { [string]: unknown },
+	update_calls: number,
+	get_calls: number,
+	remove_calls: number,
+	fail_next_mode: string?,
+	fail_update_call: number?,
+	fail_update_call_mode: string?,
+	delay_next_update_ms: number,
+	delay_update_key: string?,
+	advance_time: ((number) -> ())?,
+	replay_next_update: number,
+}
+
 local MockStore = {}
 MockStore.__index = MockStore
 
-function MockStore.new()
+function MockStore.new(): MockStoreState
 	return setmetatable({
 		values = {},
 		update_calls = 0,
@@ -3020,20 +3044,20 @@ function MockStore.new()
 		delay_update_key = nil,
 		advance_time = nil,
 		replay_next_update = 0,
-	}, MockStore)
+	}, MockStore) :: MockStoreState
 end
 
-function MockStore:GetAsync(key: string): unknown
+function MockStore.GetAsync(self: MockStoreState, key: string): unknown
 	self.get_calls += 1
 	return clone_json(self.values[key])
 end
 
-function MockStore:GetAsyncFresh(key: string): unknown
+function MockStore.GetAsyncFresh(self: MockStoreState, key: string): unknown
 	self.get_calls += 1
 	return clone_json(self.values[key])
 end
 
-function MockStore:UpdateAsync(key: string, transform: (unknown, unknown?) -> (unknown, { number }?, Dict?)): unknown
+function MockStore.UpdateAsync(self: MockStoreState, key: string, transform: (unknown, unknown?) -> (unknown, { number }?, Dict?)): unknown
 	self.update_calls += 1
 	local failure_mode = nil
 	if self.fail_update_call == self.update_calls then
@@ -3071,21 +3095,21 @@ function MockStore:UpdateAsync(key: string, transform: (unknown, unknown?) -> (u
 	return result
 end
 
-function MockStore:RemoveAsync(key: string)
+function MockStore.RemoveAsync(self: MockStoreState, key: string)
 	self.remove_calls += 1
 	self.values[key] = nil
 end
 
-function MockStore:FailNextUpdate(mode: string)
+function MockStore.FailNextUpdate(self: MockStoreState, mode: string)
 	assert(mode == "before" or mode == "after", "mode must be before or after")
 	self.fail_next_mode = mode
 end
 
-function MockStore:ReplayNextUpdate()
+function MockStore.ReplayNextUpdate(self: MockStoreState)
 	self.replay_next_update += 1
 end
 
-function MockStore:FailUpdateAt(update_call: number, mode: string)
+function MockStore.FailUpdateAt(self: MockStoreState, update_call: number, mode: string)
 	assert(type(update_call) == "number" and update_call == math.floor(update_call)
 		and update_call > self.update_calls, "update_call must target a future UpdateAsync call")
 	assert(mode == "before" or mode == "after", "mode must be before or after")
