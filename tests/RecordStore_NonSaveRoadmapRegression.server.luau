@@ -1,8 +1,20 @@
 --!nocheck
+local process = require("@lune/process")
+local function assert(value, message)
+	if not value then
+		warn(message or "assertion failed")
+		process.exit(1)
+	end
+	return value
+end
+
 local Shim = require("./RobloxShim")
 local RecordStore = Shim.load()
 local Mock = RecordStore.Mock
 local MailboxV2 = RecordStore.MailboxV2
+
+assert(type(Mock.get_session_status_async) == "function", "session status diagnostic API is missing")
+assert(type(MailboxV2.MaintenanceAsync) == "function", "mailbox maintenance API is missing")
 
 Mock.reset()
 Mock.set_test_clock(function()
