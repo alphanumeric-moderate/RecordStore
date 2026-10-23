@@ -3058,7 +3058,7 @@ function MockStore.new(): MockStoreState
 		replay_next_update = 0,
 	}
 	setmetatable(state, MockStore)
-	return state
+	return (state :: unknown) :: MockStoreState
 end
 
 function MockStore.GetAsync(self: MockStoreState, key: string): unknown
