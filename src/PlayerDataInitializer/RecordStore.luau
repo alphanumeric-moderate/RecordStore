@@ -5543,6 +5543,9 @@ export type ResultCode =
 | "retry_exhausted"
 | "invalid"
 | "not_found"
+| "duplicate"
+| "capacity"
+| "disabled"
 
 export type DiagnosticPhase =
 	"create"
@@ -6580,9 +6583,9 @@ local function encode_non_finite_numbers(
 			return current, false
 		end
 
-		local source = current :: { [string | number]: JsonValue }
+		local source: any = current
 		local dictionary: boolean? = nil
-		local result: { [string | number]: JsonValue }? = nil
+		local result: any = nil
 
 		for key, child in source do
 			local key_type = type(key)
@@ -6614,7 +6617,7 @@ local function encode_non_finite_numbers(
 		if result == nil then
 			return current, false
 		end
-		return result, true
+		return result :: JsonValue, true
 	end
 
 	local encoded, _changed = encode(value, 1)
@@ -10423,60 +10426,43 @@ local function reconcile(self: Record, template: JsonValue): (ResultCode, string
 		key: string | number,
 		value: JsonValue
 	): (JsonValue, boolean)
-		if type(target) ~= "table" then
-			return target, false
-		end
+		if type(target) ~= "table" then return target, false end
+		local target_table: any = target
 		if type(key) == "string" then
-			for child_key in target do
-				if type(child_key) ~= "string" then
-					return target, false
-				end
+			for child_key in target_table do
+				if type(child_key) ~= "string" then return target, false end
 			end
-			local target_table = target :: { [string]: JsonValue }
 			target_table[key] = value
 			return target, true
 		end
-		for child_key in target do
-			if type(child_key) ~= "number"
-				or not math.isfinite(child_key)
-				or math.floor(child_key) ~= child_key
-				or child_key < 1
-			then
+		for child_key in target_table do
+			if type(child_key) ~= "number" or not math.isfinite(child_key)
+				or math.floor(child_key) ~= child_key or child_key < 1 then
 				return target, false
 			end
 		end
-		local target_table = target :: { [number]: JsonValue }
 		target_table[key] = value
 		return target, true
 	end
 
 	local function reconcile_value(target: JsonValue, target_template: JsonValue): (JsonValue, boolean)
-		if type(target) ~= "table" or type(target_template) ~= "table" then
-			return target, false
-		end
-		local result = target
+		if type(target) ~= "table" or type(target_template) ~= "table" then return target, false end
+		local result: any = target
+		local template_table: any = target_template
 		local changed = false
-		for key, template_child in target_template do
-			if type(key) ~= "string" and type(key) ~= "number" then
-				return target, false
-			end
-			local current = (result :: { [string | number]: JsonValue })[key]
+		for key, template_child in template_table do
+			if type(key) ~= "string" and type(key) ~= "number" then return target, false end
+			local current = result[key]
 			if current == nil then
 				local updated, updated_ok = set_table_child(result, key, template_child)
-				if updated_ok then
-					result = updated
-					changed = true
-				end
+				if updated_ok then result = updated; changed = true end
 			elseif type(current) == "table" and type(template_child) == "table" then
 				local _, nested_changed = reconcile_value(current, template_child)
-				if nested_changed then
-					changed = true
-				end
+				if nested_changed then changed = true end
 			end
 		end
-		return result, changed
+		return result :: JsonValue, changed
 	end
-
 	local next_value, changed = reconcile_value(copied, template_copy)
 	if next_value == nil then
 		return "validation", "reconciliation returned nil"
