@@ -136,6 +136,7 @@ export type Dependencies = {
 	task: typeof(task)?,
 	DurabilityMode: DurabilityMode?,
 	MaxDirtyAgeSeconds: number?,
+	LeaseRecoveryEnabled: boolean?,
 }
 
 type PlayerRecord = RecordStore.Record
@@ -217,6 +218,7 @@ local CONFIG = {
 	retry_attempts = 5,
 	durability_mode = ("balanced" :: DurabilityMode),
 	max_dirty_age_seconds = 180,
+	lease_recovery_enabled = false,
 	operation_deadline = 20,
 	load_retry_attempts = 4,
 	load_retry_window = 45,
@@ -588,6 +590,8 @@ local function new(dependencies: Dependencies?): Controller
 	local infinimath_formatter = injected.InfiniteMathFormatter
 	local durability_mode: DurabilityMode = injected.DurabilityMode or CONFIG.durability_mode
 	local max_dirty_age_seconds: number = injected.MaxDirtyAgeSeconds or CONFIG.max_dirty_age_seconds
+	local lease_recovery_enabled: boolean = if injected.LeaseRecoveryEnabled ~= nil
+		then injected.LeaseRecoveryEnabled else CONFIG.lease_recovery_enabled
 	if durability_mode ~= "balanced"
 		and durability_mode ~= "durability_first"
 		and durability_mode ~= "read_only_on_risk"
@@ -599,6 +603,9 @@ local function new(dependencies: Dependencies?): Controller
 		or max_dirty_age_seconds > 86400
 	then
 		error("MaxDirtyAgeSeconds must be positive and no greater than 86400")
+	end
+	if type(lease_recovery_enabled) ~= "boolean" then
+		error("LeaseRecoveryEnabled must be a boolean")
 	end
 
 	local function format_native_number(value: number, options: NumberFormatOptions?): string
@@ -1684,6 +1691,7 @@ local function new(dependencies: Dependencies?): Controller
 				autosave_interval = CONFIG.autosave_interval,
 				durability_mode = durability_mode,
 				max_dirty_age_seconds = max_dirty_age_seconds,
+				lease_recovery_enabled = lease_recovery_enabled,
 				lease_duration = CONFIG.lease_duration,
 				lease_renewal = CONFIG.lease_renewal,
 				retry_attempts = CONFIG.retry_attempts,
