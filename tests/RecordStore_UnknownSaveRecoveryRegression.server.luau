@@ -421,11 +421,13 @@ end
 
 RecordStore.Mock.reset()
 do
-	local invalid_options, invalid_message = RecordStore._internals.normalize_options({
-		schema_version = 1,
-		durability_mode = "guess",
-	})
-	assert(invalid_options == nil and string.find(tostring(invalid_message), "durability_mode", 1, true) ~= nil,
+	local invalid_ok, invalid_message = pcall(function()
+		return RecordStore.Mock.new("RecordStore_UnknownSaveRecoveryRegression", "global", "invalid-durability-policy", {
+			schema_version = 1,
+			durability_mode = "guess",
+		})
+	end)
+	assert(not invalid_ok and string.find(tostring(invalid_message), "durability_mode", 1, true) ~= nil,
 		"invalid durability policy must be rejected")
 
 	local risk_events = 0
