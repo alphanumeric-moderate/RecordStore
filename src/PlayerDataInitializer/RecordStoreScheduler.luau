@@ -124,7 +124,7 @@ end
 local function new_governor(options: SchedulerOptions?): DynamicRecord
 	if options == nil then options = {} end
 	if type(options) ~= "table" then error("scheduler options must be a table", 2) end
-	local function now_ms()
+	local function now_ms(): number
 		return if type(options.now_ms) == "function" then options.now_ms() else os.clock() * 1000
 	end
 	local function operation_metric_key(self: DynamicRecord, kind: unknown): string
@@ -1836,7 +1836,7 @@ local function new_dispatcher(governor: DynamicRecord, options: DispatcherOption
 			max_in_flight = 0, cancelled = 0, last_error = nil, last_outcome_class = nil,
 		},
 	}
-	local function now_ms()
+	local function now_ms(): number
 		return if type(options.now_ms) == "function" then options.now_ms() else os.clock() * 1000
 	end
 	local kick_dispatcher
