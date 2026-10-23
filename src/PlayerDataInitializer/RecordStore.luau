@@ -8061,7 +8061,7 @@ function RecordStore.schedule_work(
 	owner_id: string,
 	work_id: string,
 	callback: (...any) -> any,
-	schedule_options: { [string]: unknown }?
+	schedule_options: RecordStoreScheduler.ScheduleOptions?
 ): { [string]: any }
 	if closing then return { code = "closed", message = "RecordStore is shutting down" } end
 	if not scheduler_enabled then return { code = "disabled", message = "advanced scheduling is disabled" } end
