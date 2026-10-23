@@ -1815,7 +1815,7 @@ local function cancel_scheduled(thread_to_cancel: thread?)
 end
 
 local function new_dispatcher(governor: DynamicRecord, options: DispatcherOptions?): DynamicRecord
-	options = options or {}
+	local dispatcher_options: DispatcherOptions = options or {}
 	assert(type(governor) == "table" and type(governor.Enqueue) == "function"
 		and type(governor.TakeNext) == "function", "a scheduler governor is required")
 	local dispatcher: DynamicRecord = {
@@ -1840,7 +1840,8 @@ local function new_dispatcher(governor: DynamicRecord, options: DispatcherOption
 		},
 	}
 	local function now_ms(): number
-		return if type(options.now_ms) == "function" then options.now_ms() else os.clock() * 1000
+		local clock = dispatcher_options.now_ms
+		return if clock ~= nil then clock() else os.clock() * 1000
 	end
 	local kick_dispatcher
 	local function schedule_wake_at(due_at_ms: number)
@@ -2028,7 +2029,7 @@ local function new_dispatcher(governor: DynamicRecord, options: DispatcherOption
 		if not retry_scheduled then
 			if status == "success" and callback_ok then dispatcher.metrics.completed += 1 end
 			dispatcher.callbacks[item.id] = nil
-			local completion_result = if type(callback_result) == "table"
+			local completion_result: DynamicRecord = if type(callback_result) == "table"
 				then table.clone(callback_result)
 				else { code = if callback_result == true or callback_result == nil then "success" else tostring(callback_result) }
 			if item.overdue == true then
