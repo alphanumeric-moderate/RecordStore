@@ -405,7 +405,28 @@ guarantees.
 
 Scheduler design is governed by [PR #39](https://github.com/alphanumeric-moderate/RecordStore/pull/39), the latest durable-messaging and durable-save-recovery specification. In particular, its sections 26.13, 27.4, 29 and P0 release blockers 9-10 in section 31 govern dirty-age-aware saves, bounded unknown-outcome reconciliation, mutation backpressure, and the critical persistence reserve. This PR implements only the scheduler side of that contract; the production-path unknown-save/renewal reconciler and its fault-injection acceptance gates remain unimplemented and must not be treated as satisfied. The focused scheduler regression suite runs under Lune. CodSpeed measures FIFO, weighted, deadline and DRR against the same synthetic multi-owner/work-class input in separate benchmark entries. These establish local algorithm behavior and relative cost only; they do not prove Roblox DataStore latency, quota, cross-server behavior or production rollout safety.
 
-## Benchmarks
+## Non-save operational diagnostics
+
+Use `RecordStore.get_session_status_async(name, scope, key)` to inspect a profile's last-read durable session lease without opening or mutating that profile. The result distinguishes a missing record, tombstone, absent session, observed unexpired lease, and observed expired lease. This is a fresh point-in-time observation, not an ownership decision: an expired lease does not authorize a takeover or write, and callers must still use the normal fenced session-open protocol. The API does not expose the session token.
+
+```lua
+local status, result, message =
+    RecordStore.get_session_status_async("PlayerData", "global", "Player_123")
+
+if result == "success" then
+    print(status.Observation, status.LeaseRemainingSeconds)
+end
+```
+
+For an opt-in Mailbox V2 operational pass, `mailbox:MaintenanceAsync()` runs bounded recovery, safe empty-slot reclamation, and a status snapshot in that order. It returns the outcome of the first unsuccessful stage instead of reporting the entire pass as complete. Its report is explicitly bounded and non-linearizable across the separate reads; it is diagnostic and must not authorize delivery, ownership, deletion, or rollout decisions.
+
+```lua
+local report, result = mailbox:MaintenanceAsync()
+if result.code == "success" then
+    print(report.stats.ready, report.stats.preparing_reservations)
+end
+```
+
 
 Performance is tracked with [CodSpeed](https://codspeed.io). The benchmarks run `RecordStore.Mock` scenarios outside Roblox with [Lune](https://github.com/lune-org/lune), a standalone Luau runtime. `bench/RobloxShim.luau` provides the small set of Roblox APIs the mock backend needs (`HttpService`, `DateTime`, `Enum`, `task`, ...).
 
