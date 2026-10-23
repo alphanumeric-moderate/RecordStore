@@ -63,6 +63,24 @@ export type ResultCode =
 | "capacity"
 | "disabled"
 
+local RESULT_CODE_SET: { [string]: boolean } = {
+	success = true, created = true, loaded = true, saved = true, closed = true,
+	deleted = true, enqueued = true, processed = true, empty = true, locked = true,
+	already_open = true, busy = true, closing = true, fenced = true, unknown = true,
+	conflict = true, validation = true, migration = true, future_schema = true,
+	corrupt = true, tombstoned = true, legacy = true, budget = true,
+	retry_exhausted = true, invalid = true, not_found = true, duplicate = true,
+	capacity = true, disabled = true,
+}
+
+local function normalize_result_code(value: unknown): ResultCode?
+	if value == nil then return nil end
+	if type(value) == "string" and RESULT_CODE_SET[value] == true then
+		return value :: ResultCode
+	end
+	return "unknown"
+end
+
 export type DiagnosticPhase =
 	"create"
 | "open"
@@ -113,6 +131,18 @@ export type HandoffStatus =
 | "stale"
 | "not_owner"
 | "failed"
+
+local HANDOFF_STATUS_SET: { [string]: boolean } = {
+	pending = true, accepted = true, released = true, busy = true,
+	stale = true, not_owner = true, failed = true,
+}
+
+local function normalize_handoff_status(value: unknown): HandoffStatus?
+	if type(value) == "string" and HANDOFF_STATUS_SET[value] == true then
+		return value :: HandoffStatus
+	end
+	return nil
+end
 
 export type HandoffResult = {
 	RequestId: string,
@@ -1295,7 +1325,7 @@ local function encode_envelope_for_storage(envelope: Envelope): JsonValue
 	if envelope.data ~= nil then
 		local encoded_data, markers = encode_non_finite_numbers(envelope.data)
 		stored.data = encoded_data
-		stored.non_finite_numbers = markers :: JsonValue
+		stored.non_finite_numbers = (markers :: unknown) :: JsonValue
 	end
 	if envelope.user_ids ~= nil then
 		stored.user_ids = copy_value(envelope.user_ids) :: JsonValue
@@ -2240,7 +2270,8 @@ local function parse_envelope(raw: unknown): (Envelope?, string?, boolean)
 			return nil, "invalid user_ids", false
 		end
 		local candidates: { number } = {}
-		for index, value in raw_user_ids do
+		local raw_user_id_entries = raw_user_ids :: { [number]: unknown }
+		for index, value in raw_user_id_entries do
 			if type(index) ~= "number" or not math.isfinite(index) or math.floor(index) ~= index or index < 1 or type(value) ~= "number" then
 				return nil, "invalid user_ids", false
 			end
@@ -2313,7 +2344,7 @@ local function parse_envelope(raw: unknown): (Envelope?, string?, boolean)
 	local restored_data = data
 	if raw_non_finite_numbers ~= nil then
 		if data == nil then
-			if type(raw_non_finite_numbers) ~= "table" or next(raw_non_finite_numbers) ~= nil then
+			if type(raw_non_finite_numbers) ~= "table" or next(raw_non_finite_numbers :: { [any]: unknown }) ~= nil then
 				return nil, "tombstoned envelope has invalid non-finite number metadata", false
 			end
 		else
@@ -2585,7 +2616,7 @@ local function parse_queue_messages(raw: unknown, expected_version: number): ({ 
 				return nil, message or "durable queue data is invalid"
 			end
 		end
-		result[#result + 1] = {
+		result[#result + 1] = ({
 			id = id,
 			type = message_type,
 			data = copy_value(data),
@@ -2597,7 +2628,7 @@ local function parse_queue_messages(raw: unknown, expected_version: number): ({ 
 			created_at = created_at,
 			locked_until = locked_until,
 			lock_token = lock_token,
-		}
+		} :: unknown) :: QueueItem
 	end
 	if count ~= length then
 		return nil, "durable queue message list must be a dense array"
@@ -2653,9 +2684,10 @@ local function parse_queue_envelope(
 		if type(raw_dead_letters) ~= "table" then
 			return nil, "durable queue dead-letter list is invalid", false
 		end
-		local length = #raw_dead_letters
+		local dead_letter_entries = raw_dead_letters :: { [number]: unknown }
+		local length = #dead_letter_entries
 		local count = 0
-		for index, item in raw_dead_letters do
+		for index, item in dead_letter_entries do
 			if type(index) ~= "number" or not math.isfinite(index) or math.floor(index) ~= index or index < 1 or index > length then
 				return nil, "durable queue dead-letter list must be a dense array", false
 			end
@@ -2681,7 +2713,7 @@ local function parse_queue_envelope(
 				return nil, "durable queue contains a duplicate message ID", false
 			end
 			seen_ids[parsed.id] = true
-			dead_letters[#dead_letters + 1] = {
+			dead_letters[#dead_letters + 1] = ({
 				id = parsed.id,
 				type = parsed.type,
 				data = parsed.data,
@@ -2696,7 +2728,7 @@ local function parse_queue_envelope(
 				dead_lettered_at = dead_lettered_at,
 				last_error = last_error,
 				terminal_lock_token = terminal_lock_token,
-			}
+			} :: unknown) :: DeadLetterItem
 		end
 		if count ~= length then
 			return nil, "durable queue dead-letter list must be a dense array", false
@@ -2781,7 +2813,7 @@ local function ensure_legacy_queue_clear(
 	)
 	local raw, _, read_code, read_message = backend_get(legacy_backend, false, deadline, state)
 	if read_code ~= nil then
-		return read_code, read_message
+		return normalize_result_code(read_code) or "unknown", read_message
 	end
 	local messages, parse_message = parse_legacy_queue_envelope(raw)
 	if messages == nil then
@@ -2855,7 +2887,7 @@ local function claim_queue_message(state: InternalState): (QueueItem?, ResultCod
 		state
 	)
 	if migration_code ~= nil then
-		return nil, migration_code, migration_message
+		return nil, normalize_result_code(migration_code) or "unknown", migration_message
 	end
 	local token = HttpService:GenerateGUID(false)
 	local max_attempts = state.options.queue_max_attempts or DEFAULT_QUEUE_MAX_ATTEMPTS
@@ -2938,7 +2970,7 @@ local function claim_queue_message(state: InternalState): (QueueItem?, ResultCod
 		return nil, nil, nil
 	end, deadline, state)
 	if result_code ~= nil then
-		return nil, result_code, result_message
+		return nil, normalize_result_code(result_code) or "unknown", result_message
 	end
 	local queue, verify_code, verify_message = read_queue_after_update(backend, result, deadline, state, owner)
 	if queue == nil then
@@ -2973,7 +3005,7 @@ local function acknowledge_queue_message(state: InternalState, message_id: strin
 		state
 	)
 	if migration_code ~= nil then
-		return migration_code, migration_message
+		return normalize_result_code(migration_code) or "unknown", migration_message
 	end
 	local max_bytes = state.options.queue_max_bytes or DEFAULT_QUEUE_MAX_BYTES
 	local result, _, result_code, result_message = backend_update(backend, function(raw)
@@ -3002,7 +3034,7 @@ local function acknowledge_queue_message(state: InternalState, message_id: strin
 		return next_queue, nil, nil
 	end, deadline, state)
 	if result_code ~= nil then
-		return result_code, result_message
+		return normalize_result_code(result_code) or "unknown", result_message
 	end
 	local queue, verify_code, verify_message = read_queue_after_update(backend, result, deadline, state, owner)
 	if queue == nil then
@@ -3055,7 +3087,7 @@ local function enqueue_internal(state: InternalState, message_type: string, data
 		state
 	)
 	if migration_code ~= nil then
-		return migration_code, migration_message
+		return normalize_result_code(migration_code) or "unknown", migration_message
 	end
 	local message_id = HttpService:GenerateGUID(false)
 	local created_at = queue_now_unix(backend.mock)
@@ -3087,7 +3119,7 @@ local function enqueue_internal(state: InternalState, message_type: string, data
 		return next_queue, nil, nil
 	end, deadline, state)
 	if result_code ~= nil then
-		return result_code, result_message
+		return normalize_result_code(result_code) or "unknown", result_message
 	end
 	local queue, verify_code, verify_message = read_queue_after_update(backend, result, deadline, state, owner)
 	if queue == nil then
@@ -3151,7 +3183,7 @@ local function dead_letter_queue_message(
 		state
 	)
 	if migration_code ~= nil then
-		return migration_code, migration_message
+		return normalize_result_code(migration_code) or "unknown", migration_message
 	end
 	local bounded_error = normalize_queue_error(error_message)
 	local max_bytes = state.options.queue_max_bytes or DEFAULT_QUEUE_MAX_BYTES
@@ -3222,7 +3254,7 @@ local function dead_letter_queue_message(
 		return next_queue, nil, nil
 	end, deadline, state)
 	if result_code ~= nil and result_code ~= "unknown" then
-		return result_code, result_message
+		return normalize_result_code(result_code) or "unknown", result_message
 	end
 	local verified_queue, verify_code, verify_message = read_queue_after_update(backend, result, deadline, state, owner)
 	if verified_queue == nil then
@@ -3283,7 +3315,7 @@ process_queue_internal = function(state: InternalState, max_messages: number): (
 			break
 		end
 		if message == nil then
-			failure_result = claim_result
+			failure_result = normalize_result_code(claim_result) or "unknown"
 			failure_message = claim_error
 			break
 		end
@@ -3342,7 +3374,7 @@ process_queue_internal = function(state: InternalState, max_messages: number): (
 					observe(state, "queue_dead_letter", "success", message.id)
 					continue
 				end
-				failure_result = dead_letter_result
+				failure_result = normalize_result_code(dead_letter_result) or "unknown"
 				failure_message = dead_letter_message
 			else
 				failure_result = attempt_failure_result
@@ -3356,9 +3388,9 @@ process_queue_internal = function(state: InternalState, max_messages: number): (
 		end
 		local ack_result, ack_message = acknowledge_queue_message(state, message.id, lock_token)
 		if ack_result ~= "success" then
-			failure_result = ack_result
+			failure_result = normalize_result_code(ack_result) or "unknown"
 			failure_message = ack_message
-			observe(state, "queue_ack", ack_result, ack_message)
+			observe(state, "queue_ack", normalize_result_code(ack_result) or "unknown", ack_message)
 			break
 		end
 		processed += 1
@@ -3544,7 +3576,7 @@ local function handle_message(state: InternalState, message: { Data: unknown, Se
 		end
 		local cached = state.takeover_seen[request_id]
 		if cached ~= nil then
-			publish_handoff_ack(state, request_id, requester_job_id, state.generation, state.token or payload.target_token, cached)
+			publish_handoff_ack(state, request_id, requester_job_id, state.generation, state.token or payload.target_token, normalize_handoff_status(cached) or "failed")
 			return
 		end
 		if not takeover_enabled(state) then
@@ -3647,7 +3679,7 @@ local function request_takeover(state: InternalState, generation: number, target
 		while now_local() < math.min(deadline, state.handoff_deadline) do
 			local status = state.handoff_status
 			if status ~= nil and status ~= "pending" then
-				return state.handoff_request_id, status
+				return state.handoff_request_id, normalize_handoff_status(status) or "failed"
 			end
 			task.wait(0.05)
 		end
@@ -3688,7 +3720,7 @@ local function request_takeover(state: InternalState, generation: number, target
 	while now_local() < math.min(deadline, state.handoff_deadline) do
 		local status = state.handoff_status
 		if status ~= nil and status ~= "pending" then
-			return request_id, status
+			return request_id, normalize_handoff_status(status) or "failed"
 		end
 		task.wait(0.05)
 	end
@@ -3838,7 +3870,7 @@ local function save_internal(state: InternalState, reason: string?, operation_de
 			return next_envelope, state.user_ids, make_backend_metadata(state.metadata, next_envelope)
 		end, deadline, state)
 		if result_code ~= nil then
-			decision = result_code
+			decision = normalize_result_code(result_code)
 			decision_message = result_message
 		end
 		if state.retired or (state.state :: SessionState) ~= "saving" then
@@ -3955,7 +3987,7 @@ function RecordStore.read_async(name: string, scope: string, key: string, operat
 	end
 	local raw, info, result_code, result_message = backend_get(backend, false, deadline)
 	if result_code ~= nil then
-		return nil, result_code, result_message
+		return nil, normalize_result_code(result_code) or "unknown", result_message
 	end
 	if raw == nil then
 		return nil, "not_found", "record does not exist"
@@ -4195,7 +4227,7 @@ local function get_version_at_time_internal(name: string, scope: string, key: st
 	if mock then
 		local entries, list_result, list_message = list_versions_internal(name, scope, key, Enum.SortDirection.Descending, nil, timestamp_ms, 1, operation_deadline, true)
 		if list_result ~= "success" then
-			return nil, nil, list_result, list_message
+			return nil, nil, normalize_result_code(list_result) or "unknown", list_message
 		end
 		if entries == nil or #entries == 0 then
 			return nil, nil, "not_found", "no version was available at the requested time"
@@ -5222,7 +5254,7 @@ local function mailbox_store_adapter(self: Record): (any?, ResultCode, string?)
 					if user_ids == nil then user_ids = key_info:GetUserIds() end
 					if metadata == nil then metadata = key_info:GetMetadata() end
 				end
-				return next_value, user_ids, metadata
+				return next_value :: any, user_ids, metadata
 			end)
 		end)
 		release_slot()
@@ -5342,11 +5374,11 @@ local function get_queue(self: Record): ({ QueueMessage }, ResultCode, string?)
 		state
 	)
 	if migration_code ~= nil then
-		return {}, migration_code, migration_message
+		return normalize_result_code({}) or "unknown", migration_code, migration_message
 	end
 	local raw, _, result_code, result_message = backend_get(backend, false, deadline)
 	if result_code ~= nil then
-		return {}, result_code, result_message
+		return normalize_result_code({}) or "unknown", result_code, result_message
 	end
 	local owner = make_queue_owner(state.name, state.scope, state.key)
 	local queue, parse_error, owner_mismatch = parse_queue_envelope(raw, owner)
@@ -5391,19 +5423,21 @@ process_queue_v2 = function(self: Record, state: InternalState, max_messages: nu
 					return false, "V2 mailbox returned a malformed message snapshot"
 				end
 				if state.options.on_queue_message_async ~= nil then
-					return state.options.on_queue_message_async(
-						message_value.Type, payload :: JsonValue?, message_value.Attempts, message_value.Id,
-						if type(message_value.SenderJobId) == "string" then message_value.SenderJobId else "",
-						message_value.CreatedAt, context
-					)
+					local accepted, message = state.options.on_queue_message_async(
+					message_value.Type, payload :: JsonValue?, message_value.Attempts, message_value.Id,
+					if type(message_value.SenderJobId) == "string" then message_value.SenderJobId else "",
+					message_value.CreatedAt, context
+				)
+				return accepted, message or (if accepted then "" else "queue handler rejected the message")
 				end
 				local handler = state.options.on_queue_message
 				if handler == nil then return false, "on_queue_message is not configured" end
-				return handler(
+				local accepted, message = handler(
 					message_value.Type, payload :: JsonValue?, message_value.Attempts, message_value.Id,
 					if type(message_value.SenderJobId) == "string" then message_value.SenderJobId else "",
 					message_value.CreatedAt
 				)
+				return accepted, message or (if accepted then "" else "queue handler rejected the message")
 			end)
 			if type(result) ~= "table" or type(result.code) ~= "string" then
 				return "unknown" :: ResultCode, "V2 mailbox returned no structured processing result"
@@ -5419,7 +5453,7 @@ process_queue_v2 = function(self: Record, state: InternalState, max_messages: nu
 			if result.code == "expired" or result.code == "ordered" then continue end
 			return map_mailbox_v2_result(result.code), if type(result.error) == "string" then result.error else "V2 mailbox processing returned " .. result.code
 		end
-		if processed == 0 then return "empty" :: ResultCode, nil end
+		if processed == 0 then return "empty" :: ResultCode, "" end
 		return "processed" :: ResultCode, tostring(processed)
 	end)
 	state.queue_busy = false
@@ -5516,11 +5550,11 @@ local function get_dead_letters(self: Record): ({ DeadLetterMessage }, ResultCod
 		state
 	)
 	if migration_code ~= nil then
-		return {}, migration_code, migration_message
+		return normalize_result_code({}) or "unknown", migration_code, migration_message
 	end
 	local raw, _, result_code, result_message = backend_get(backend, false, deadline, state)
 	if result_code ~= nil then
-		return {}, result_code, result_message
+		return normalize_result_code({}) or "unknown", result_code, result_message
 	end
 	local owner = make_queue_owner(state.name, state.scope, state.key)
 	local queue, parse_error, owner_mismatch = parse_queue_envelope(raw, owner)
@@ -5557,7 +5591,7 @@ local function claim_dead_letter(self: Record, message_id: string): (DeadLetterM
 		state
 	)
 	if migration_code ~= nil then
-		return nil, migration_code, migration_message
+		return nil, normalize_result_code(migration_code) or "unknown", migration_message
 	end
 	local owner = make_queue_owner(state.name, state.scope, state.key)
 	local token = HttpService:GenerateGUID(false)
@@ -5620,7 +5654,7 @@ local function claim_dead_letter(self: Record, message_id: string): (DeadLetterM
 		return nil, nil, nil
 	end, deadline, state)
 	if result_code ~= nil and result_code ~= "unknown" then
-		return nil, result_code, result_message
+		return nil, normalize_result_code(result_code) or "unknown", result_message
 	end
 	local queue, verify_code, verify_message = read_queue_after_update(backend, result, deadline, state, owner)
 	if queue == nil then
@@ -5653,7 +5687,7 @@ local function replay_dead_letter(self: Record, message_id: string, lock_token: 
 	local deadline = now_local() + (state.options.operation_deadline or DEFAULT_OPERATION_DEADLINE)
 	local migration_code, migration_message = ensure_legacy_queue_clear(state.name, state.scope, state.key, state.options.queue_store_name or DEFAULT_QUEUE_STORE_NAME, state.backend.mock, deadline, state)
 	if migration_code ~= nil then
-		return migration_code, migration_message
+		return normalize_result_code(migration_code) or "unknown", migration_message
 	end
 	local owner = make_queue_owner(state.name, state.scope, state.key)
 	local max_messages = state.options.queue_max_messages or DEFAULT_QUEUE_MAX_MESSAGES
@@ -5725,7 +5759,7 @@ local function replay_dead_letter(self: Record, message_id: string, lock_token: 
 		return next_queue, nil, nil
 	end, deadline, state)
 	if result_code ~= nil and result_code ~= "unknown" then
-		return result_code, result_message
+		return normalize_result_code(result_code) or "unknown", result_message
 	end
 	local queue, verify_code, verify_message = read_queue_after_update(backend, result, deadline, state, owner)
 	if queue == nil then
@@ -5757,7 +5791,7 @@ local function discard_dead_letter(self: Record, message_id: string, lock_token:
 	local deadline = now_local() + (state.options.operation_deadline or DEFAULT_OPERATION_DEADLINE)
 	local migration_code, migration_message = ensure_legacy_queue_clear(state.name, state.scope, state.key, state.options.queue_store_name or DEFAULT_QUEUE_STORE_NAME, state.backend.mock, deadline, state)
 	if migration_code ~= nil then
-		return migration_code, migration_message
+		return normalize_result_code(migration_code) or "unknown", migration_message
 	end
 	local owner = make_queue_owner(state.name, state.scope, state.key)
 	local max_bytes = state.options.queue_max_bytes or DEFAULT_QUEUE_MAX_BYTES
@@ -5803,7 +5837,7 @@ local function discard_dead_letter(self: Record, message_id: string, lock_token:
 		return next_queue, nil, nil
 	end, deadline, state)
 	if result_code ~= nil and result_code ~= "unknown" then
-		return result_code, result_message
+		return normalize_result_code(result_code) or "unknown", result_message
 	end
 	local queue, verify_code, verify_message = read_queue_after_update(backend, result, deadline, state, owner)
 	if queue == nil then
@@ -5943,7 +5977,7 @@ local function delete_record(self: Record): (ResultCode, string?)
 			return next_envelope, state.user_ids, make_backend_metadata(state.metadata, next_envelope)
 		end, deadline, state)
 		if result_code ~= nil then
-			decision = result_code
+			decision = normalize_result_code(result_code)
 			decision_message = result_message
 		end
 		if state.retired or (state.state :: SessionState) ~= "releasing" then
@@ -6431,7 +6465,7 @@ local function open_internal(state: InternalState, default_data: JsonValue?, rec
 			return next_envelope, initial_ids, make_backend_metadata(initial_metadata, next_envelope)
 		end, deadline, state)
 		if result_code ~= nil then
-			decision = result_code
+			decision = normalize_result_code(result_code)
 			decision_message = result_message
 		end
 		if state.retired or (state.state :: SessionState) ~= "acquiring" then
@@ -6461,14 +6495,14 @@ local function open_internal(state: InternalState, default_data: JsonValue?, rec
 				state
 			)
 			if observed_read_result ~= nil then
-				if is_retryable_result(observed_read_result, "open") and attempt < attempts + 1 then
+				if is_retryable_result(normalize_result_code(observed_read_result) or "unknown", "open") and attempt < attempts + 1 then
 					recovery_checked = false
-					last_result = observed_read_result
+					last_result = normalize_result_code(observed_read_result)
 					last_error = observed_read_message
 					task.wait(math.min(retry_delay(attempt), math.max(0, deadline - now_local())))
 					continue
 				end
-				final_decision = observed_read_result
+				final_decision = normalize_result_code(observed_read_result)
 				final_decision_message = observed_read_message
 				break
 			end
@@ -6519,14 +6553,14 @@ local function open_internal(state: InternalState, default_data: JsonValue?, rec
 				final_decision_message = recovery_message
 				break
 			end
-			if is_retryable_result(recovery_result, "open") and attempt < attempts + 1 then
+			if is_retryable_result(normalize_result_code(recovery_result) or "unknown", "open") and attempt < attempts + 1 then
 				recovery_checked = false
-				last_result = recovery_result
+				last_result = normalize_result_code(recovery_result)
 				last_error = recovery_message
 				task.wait(math.min(retry_delay(attempt), math.max(0, deadline - now_local())))
 				continue
 			end
-			final_decision = recovery_result
+			final_decision = normalize_result_code(recovery_result)
 			final_decision_message = recovery_message
 			break
 		end
@@ -6561,12 +6595,12 @@ local function open_internal(state: InternalState, default_data: JsonValue?, rec
 			break
 		end
 		if result == nil and result_code ~= nil then
-			if not is_retryable_result(result_code, "open") then
-				final_decision = result_code
+			if not is_retryable_result(normalize_result_code(result_code) or "unknown", "open") then
+				final_decision = normalize_result_code(result_code)
 				final_decision_message = result_message
 				break
 			end
-			last_result = result_code
+			last_result = normalize_result_code(result_code)
 			last_error = result_message
 		end
 		local verified, envelope, info_after = verify_open_write(state, write_id, token, deadline)
@@ -6740,7 +6774,7 @@ local function renew_internal(state: InternalState): (ResultCode, string?)
 			return next_envelope, durable_user_ids, make_backend_metadata(durable_metadata, next_envelope)
 		end, deadline, state)
 		if result_code ~= nil then
-			decision = result_code
+			decision = normalize_result_code(result_code)
 			decision_message = result_message
 		end
 		if state.retired or (state.state :: SessionState) ~= "saving" then
@@ -7026,7 +7060,7 @@ local function reconcile_unknown_release_internal(state: InternalState): (Result
 		return "closing", "record was retired"
 	end
 	if result_code ~= nil then
-		decision = result_code
+		decision = normalize_result_code(result_code)
 		decision_message = result_message
 	end
 	if result ~= nil then
@@ -7264,7 +7298,7 @@ local function reconcile_unknown_internal(state: InternalState): (ResultCode, st
 		return next_envelope, user_ids, make_backend_metadata(durable_metadata, next_envelope)
 	end, deadline, state)
 	if result_code ~= nil then
-		decision = result_code
+		decision = normalize_result_code(result_code)
 		decision_message = result_message
 	end
 	if state.retired then
@@ -7464,7 +7498,7 @@ close_internal = function(state: InternalState, shutdown: boolean): (ResultCode,
 			return next_envelope, state.user_ids, make_backend_metadata(state.metadata, next_envelope)
 		end, deadline, state)
 		if result_code ~= nil then
-			decision = result_code
+			decision = normalize_result_code(result_code)
 			decision_message = result_message
 		end
 		if result ~= nil then
@@ -7781,7 +7815,7 @@ local scheduler_governor = RecordStoreScheduler.new({
 		local ok, value = pcall(function() return record:Stats() end)
 		return if ok and type(value) == "table" then value else {}
 	end,
-	get_request_budgets = function()
+	get_request_budgets = function(): { read: number, write: number }?
 		local read_ok, read_budget = pcall(function()
 			return DataStoreService:GetRequestBudgetForRequestType(Enum.DataStoreRequestType.StandardRead)
 		end)
@@ -7856,7 +7890,9 @@ local function enqueue_state_work(
 ): any
 	local slot = scheduled_state_slot(state)
 	if slot.pending[kind] == true then return { code = "already_pending" } end
-	local options = if schedule_options == nil then {} else table.clone(schedule_options)
+	local options: { [string]: any } = if type(schedule_options) == "table"
+		then table.clone(schedule_options) :: { [string]: any}
+		else {}
 	local caller_on_complete = options.on_complete
 	options.lane = lane
 	options.work_class = work_class
@@ -7953,10 +7989,14 @@ install_mailbox_renewal_scheduler = function(record: Record, state: InternalStat
 					if not callback_ok then
 						return { code = "unknown", message = "V2 lease-renewal callback raised: " .. tostring(result) }
 					end
-					if type(result) ~= "table" or type(result.code) ~= "string" then
+					if type(result) ~= "table" then
 						return { code = "unknown", message = "V2 lease-renewal callback returned no structured result" }
 					end
-					return result
+					local result_record = result :: { [string]: any }
+					if type(result_record.code) ~= "string" then
+						return { code = "unknown", message = "V2 lease-renewal callback returned no structured result" }
+					end
+					return result_record
 				end,
 				{
 					service_class = "critical",
@@ -8210,7 +8250,7 @@ local function run_scheduled_record_work(record: Record, state: InternalState, n
 				local bounded_batch_size = if type(batch_size) == "number" then math.clamp(math.floor(batch_size), 1, 4) else 4
 				local code, message = process_queue(record, bounded_batch_size)
 				sync_public(record)
-				local processed_count = if code == "processed" then tonumber(message) else 0
+				local processed_count: number = if code == "processed" then tonumber(message) or 0 else 0
 				return {
 					code = code,
 					message = message,
@@ -8502,7 +8542,10 @@ local function normalize_options(options: Options): (Options?, string?)
 	if not valid_positive_number(copied.operation_deadline) then
 		return nil, "operation_deadline must be a positive finite number"
 	end
-	if copied.lease_duration <= copied.lease_renewal + copied.operation_deadline then
+	local lease_duration = copied.lease_duration :: number
+	local lease_renewal = copied.lease_renewal :: number
+	local operation_deadline = copied.operation_deadline :: number
+	if lease_duration <= lease_renewal + operation_deadline then
 		return nil, "lease_duration must exceed lease_renewal plus operation_deadline"
 	end
 	if not valid_positive_number(copied.shutdown_deadline) then
@@ -8604,7 +8647,7 @@ local function enqueue_static(name: string, scope: string, key: string, message_
 		nil
 	)
 	if migration_code ~= nil then
-		return migration_code, migration_message
+		return normalize_result_code(migration_code) or "unknown", migration_message
 	end
 	local backend = make_backend(queue_name, scope, make_queue_key_v2(name, scope, key), mock)
 	local owner = make_queue_owner(name, scope, key)
@@ -8636,7 +8679,7 @@ local function enqueue_static(name: string, scope: string, key: string, message_
 		return next_queue, nil, nil
 	end, deadline)
 	if result_code ~= nil then
-		return result_code, result_message
+		return normalize_result_code(result_code) or "unknown", result_message
 	end
 	local queue, verify_code, verify_message = read_queue_after_update(backend, result, deadline, nil, owner)
 	if queue == nil then
@@ -8735,7 +8778,7 @@ RecordStore.Mock = (function()
 		local backend = make_backend(name, scope, key, true)
 		local raw, info, result_code, result_message = backend_get(backend, false, deadline)
 		if result_code ~= nil then
-			return nil, result_code, result_message
+			return nil, normalize_result_code(result_code) or "unknown", result_message
 		end
 		if raw == nil then
 			return nil, "not_found", "record does not exist"
