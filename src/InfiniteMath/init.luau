@@ -45,6 +45,12 @@ export type Number = typeof(setmetatable({
 	second = 0 :: number
 }, Number))
 
+export type FormatOptions = {
+	decimals: number?,
+	trim_trailing_zeros: boolean?,
+	abbreviation: boolean?,
+}
+
 --[[ Private variables ]]--
 
 local THRESHOLD = 16
@@ -492,12 +498,37 @@ end
 	@param abbreviation boolean | nil
 	@return string
 ]=]
-local function getDecimalPoints(): number
-	local decimals = InfiniteMath.DECIMALPOINTS
+local function getDecimalPoints(override: number?): number
+	local decimals = if override ~= nil then override else InfiniteMath.DECIMALPOINTS
 	if type(decimals) ~= "number" or decimals ~= decimals or decimals % 1 ~= 0 or decimals < 0 or decimals > 14 then
-		error("InfiniteMath.DECIMALPOINTS must be an integer from 0 through 14", 2)
+		error("decimal points must be an integer from 0 through 14", 2)
 	end
 	return decimals
+end
+
+local function resolveFormatOptions(options: FormatOptions?): (number, boolean, boolean)
+	if options ~= nil and type(options) ~= "table" then error("options must be a table", 3) end
+	local decimals = getDecimalPoints()
+	if options ~= nil and options.decimals ~= nil then
+		decimals = options.decimals
+		if type(decimals) ~= "number" or decimals ~= decimals or decimals == math.huge
+			or decimals == -math.huge or math.floor(decimals) ~= decimals or decimals < 0 or decimals > 6
+		then error("options.decimals must be an integer from 0 through 6", 3) end
+	end
+	local trim = if options ~= nil and options.trim_trailing_zeros ~= nil then options.trim_trailing_zeros else true
+	if type(trim) ~= "boolean" then error("options.trim_trailing_zeros must be a boolean", 3) end
+	local abbreviation = if options ~= nil and options.abbreviation ~= nil then options.abbreviation else true
+	if type(abbreviation) ~= "boolean" then error("options.abbreviation must be a boolean", 3) end
+	return decimals, trim, abbreviation
+end
+
+local function formatFixed(value: number, decimals: number, trim: boolean): string
+	local result = string.format("%." .. tostring(decimals) .. "f", value)
+	if not trim or decimals == 0 then return result end
+	local integer_part, fraction = string.match(result, "^([+-]?%d+)%.(%d+)$")
+	if integer_part == nil or fraction == nil then return result end
+	fraction = string.gsub(fraction, "0+$", "")
+	return if fraction == "" then integer_part else integer_part .. "." .. fraction
 end
 
 local function roundDecimal(value: number, decimals: number): number
@@ -507,42 +538,37 @@ local function roundDecimal(value: number, decimals: number): number
 	return math.floor(scaled + 0.5) / scale
 end
 
-function Number:GetSuffix(abbreviation: boolean?): string
+function Number:GetSuffix(
+	abbreviation: boolean?,
+	decimals_override: number?,
+	trim_trailing_zeros: boolean?
+): string
 	if type(abbreviation) ~= "boolean" then abbreviation = true end
 	local first, second = normalize(self.first, self.second)
 	if first ~= first or second ~= second then return "NaN" end
-	local decimals = getDecimalPoints()
+	local decimals = getDecimalPoints(decimals_override)
+	local trim = trim_trailing_zeros ~= false
 	if second < 3 then
-		if second < -decimals then return self:ScientificNotation(abbreviation, false) end
+		if second < -decimals then return self:ScientificNotation(abbreviation, false, decimals, trim) end
 		local value = self:Reverse()
-		if value == 0 and first ~= 0 then return self:ScientificNotation(abbreviation, false) end
-		local result = string.format("%." .. tostring(decimals) .. "f", value)
-		if decimals > 0 then
-			local integer_part, fraction = string.match(result, "^([+-]?%d+)%.(%d+)$")
-			if integer_part ~= nil and fraction ~= nil then
-				fraction = string.gsub(fraction, "0+$", "")
-				result = if fraction == "" then integer_part else integer_part .. "." .. fraction
-			end
-		end
-		return result
+		if value == 0 and first ~= 0 then return self:ScientificNotation(abbreviation, false, decimals, trim) end
+		return formatFixed(value, decimals, trim)
 	end
 	local secondRemainder = second % 3
 	first *= smallPow10(secondRemainder)
 	local suffixIndex = math.floor(second / 3)
-	local str = roundDecimal(first, decimals)
-	if math.abs(str) >= 1000 then
-		str = if str < 0 then -1 else 1
+	local rounded = roundDecimal(first, decimals)
+	if math.abs(rounded) >= 1000 then
+		rounded = if rounded < 0 then -1 else 1
 		suffixIndex += 1
 	end
 	local suffix = if abbreviation then suffixes[suffixIndex] else full_names[suffixIndex]
 	if not abbreviation and suffix ~= nil then suffix = " " .. suffix end
 	if suffixIndex > 0 then
-		if suffix ~= nil then
-			return tostring(str) .. suffix
-		end
-		return self:ScientificNotation(abbreviation)
+		if suffix ~= nil then return formatFixed(rounded, decimals, trim) .. suffix end
+		return self:ScientificNotation(abbreviation, nil, decimals, trim)
 	end
-	return tostring(str)
+	return formatFixed(rounded, decimals, trim)
 end
 
 --[=[
@@ -573,16 +599,17 @@ end
 	@param secondAbbreviation boolean | nil
 	@return string
 ]=]
-function Number:ScientificNotation(abbreviation: boolean?, secondAbbreviation: boolean?): string
+function Number:ScientificNotation(abbreviation: boolean?, secondAbbreviation: boolean?, decimals_override: number?, trim_trailing_zeros: boolean?): string
 	local first, second = normalize(self.first, self.second)
 	if first ~= first or second ~= second then return "NaN" end
-	local decimals = getDecimalPoints()
+	local decimals = getDecimalPoints(decimals_override)
+	local trim = trim_trailing_zeros ~= false
 	local rounded = roundDecimal(first, decimals)
 	if math.abs(rounded) >= 10 and second + 1 ~= second then
 		rounded /= 10
 		second += 1
 	end
-	local str = tostring(rounded)
+	local str = formatFixed(rounded, decimals, trim)
 	local exponentMagnitude = math.abs(second)
 	local exponentText
 	if secondAbbreviation == false then
@@ -596,9 +623,9 @@ function Number:ScientificNotation(abbreviation: boolean?, secondAbbreviation: b
 		if exponentMagnitude > 1e6 then
 			local exponentNumber = fastNew(exponentMagnitude, 0)
 			if abbreviation == false then
-				exponentText = exponentNumber:ScientificNotation(false, false)
+				exponentText = exponentNumber:ScientificNotation(false, false, decimals, trim)
 			else
-				exponentText = exponentNumber:GetSuffix(true)
+				exponentText = exponentNumber:GetSuffix(true, decimals, trim)
 			end
 		else
 			exponentText = tostring(exponentMagnitude)
@@ -1146,6 +1173,74 @@ function InfiniteMath.isZero(x: any): boolean
 		return a ~= nil and tonumber(a) == 0
 	end
 	return false
+end
+
+function InfiniteMath.format(value: any, options: FormatOptions?): string
+	local decimals, trim, abbreviation = resolveFormatOptions(options)
+	if type(value) == "number" then
+		if value ~= value then return "NaN" end
+		if value == math.huge then return "∞" end
+		if value == -math.huge then return "-∞" end
+	elseif type(value) == "string" then
+		local token = string.lower(string.gsub(value, "%s", ""))
+		if token == "nan" or token == "+nan" or token == "-nan" then return "NaN" end
+		if token == "inf" or token == "+inf" or token == "infinity" or token == "+infinity" then return "∞" end
+		if token == "-inf" or token == "-infinity" then return "-∞" end
+	end
+	local number_value: Number
+	if isNumberObject(value) then
+		number_value = value
+	elseif type(value) == "string" then
+		local sign, digits = string.match(value, "^([+-]?)(%d+)$")
+		if digits ~= nil then
+			digits = string.gsub(digits, "^0+", "")
+			if digits == "" then return "0" end
+			local significant_count = math.min(#digits, 16)
+			local leading_digits = tonumber(string.sub(digits, 1, significant_count))
+			if leading_digits == nil then error("integer value could not be parsed", 2) end
+			local mantissa = leading_digits / (10 ^ (significant_count - 1))
+			number_value = fastNew(if sign == "-" then -mantissa else mantissa, #digits - 1)
+		else
+			number_value = InfiniteMath.new(value)
+		end
+	else
+		number_value = InfiniteMath.new(value)
+	end
+	return number_value:GetSuffix(abbreviation, decimals, trim)
+end
+
+function InfiniteMath.formatInteger(value: string, options: FormatOptions?): string
+	if type(value) ~= "string" or not string.match(value, "^[+-]?%d+$") then
+		error("integer value must be a signed decimal integer string", 2)
+	end
+	return InfiniteMath.format(value, options)
+end
+
+function InfiniteMath.formatScientific(sign_value: number, mantissa: number, exponent: string, options: FormatOptions?): string
+	if type(sign_value) ~= "number"
+		or (sign_value ~= -1 and sign_value ~= 1)
+		or type(mantissa) ~= "number"
+		or mantissa ~= mantissa
+		or mantissa == math.huge
+		or mantissa == -math.huge
+		or mantissa < 1
+		or mantissa >= 10
+		or type(exponent) ~= "string"
+		or not string.match(exponent, "^[+-]?%d+$")
+	then error("invalid scientific value", 2) end
+	local decimals, trim = resolveFormatOptions(options)
+	local exponent_number = tonumber(exponent)
+	if exponent_number ~= nil and exponent_number == exponent_number
+		and exponent_number ~= math.huge and exponent_number ~= -math.huge
+		and math.floor(exponent_number) == exponent_number
+		and math.abs(exponent_number) <= 9007199254740991
+	then
+		return InfiniteMath.format(fastNew(sign_value * mantissa, exponent_number), options)
+	end
+	local sign = if sign_value < 0 then "-" else ""
+	local exponent_text = if string.sub(exponent, 1, 1) == "-" or string.sub(exponent, 1, 1) == "+"
+		then exponent else "+" .. exponent
+	return sign .. formatFixed(mantissa, decimals, trim) .. "e" .. exponent_text
 end
 
 InfiniteMath.Int = int(InfiniteMath)

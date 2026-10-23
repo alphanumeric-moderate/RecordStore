@@ -5,7 +5,6 @@ local Players = game:GetService("Players")
 
 local RecordStore = require(script.Parent.RecordStore)
 local IntegerInfinityValueFactory = require(script.Parent.IntegerInfinityValue)
-local NumberFormatterFactory = require(script.Parent.NumberFormatter)
 
 type Scalar = string | number | boolean
 type DataValue = Scalar
@@ -28,10 +27,15 @@ type DataField = {
 	rounding: IntegerInfinityRounding?,
 }
 
+type NumberFormatOptions = {
+	decimals: number?,
+	trim_trailing_zeros: boolean?,
+}
+
 type Leaderstat = {
 	key: string,
 	name: string,
-	number_format: NumberFormatterFactory.Options?,
+	number_format: NumberFormatOptions?,
 }
 
 type InfiniteMathValueNode = { kind: string }
@@ -39,7 +43,7 @@ type InfiniteMathValueFactoryAPI = {
 	is_value: (value: unknown) -> boolean,
 	normalize: (value: unknown) -> string,
 	is_serialized: (value: unknown) -> boolean,
-	format: (value: unknown, options: NumberFormatterFactory.Options?) -> string,
+	format: (value: unknown, options: NumberFormatOptions?) -> string,
 	new: (name: string, initial_value: unknown) -> StringValue,
 	normalize_serialized: ((value: unknown) -> (string?, InfiniteMathValueNode?))?,
 	is_unsupported_version: ((value: unknown) -> boolean)?,
@@ -64,7 +68,7 @@ local InfiniteMathValueFactory: InfiniteMathValueFactoryAPI = table.freeze({
 	is_serialized = function(value: unknown): boolean
 		return get_infinitemath_value_factory().is_serialized(value)
 	end,
-	format = function(value: unknown, options: NumberFormatterFactory.Options?): string
+	format = function(value: unknown, options: NumberFormatOptions?): string
 		return get_infinitemath_value_factory().format(value, options)
 	end,
 	new = function(name: string, initial_value: unknown): StringValue
@@ -91,7 +95,6 @@ export type Dependencies = {
 	Players: typeof(Players)?,
 	RecordStore: typeof(RecordStore)?,
 	IntegerInfinityValue: typeof(IntegerInfinityValueFactory)?,
-	NumberFormatter: typeof(NumberFormatterFactory)?,
 	InfiniteMathValue: InfiniteMathValueFactoryAPI?,
 	new_instance: ((string) -> Instance)?,
 	task: typeof(task)?,
@@ -127,13 +130,27 @@ end
 local function define_leaderstat(
 	key: string,
 	name: string,
-	number_format: NumberFormatterFactory.Options?
+	number_format: NumberFormatOptions?
 ): Leaderstat
 	return {
 		key = key,
 		name = name,
 		number_format = number_format,
 	}
+end
+
+local function validate_number_format_options(options: NumberFormatOptions)
+	if type(options) ~= "table" then error("options must be a table", 2) end
+	local decimals = options.decimals
+	if decimals ~= nil and (
+		type(decimals) ~= "number"
+		or not math.isfinite(decimals)
+		or math.floor(decimals) ~= decimals
+		or decimals < 0
+		or decimals > 6
+	) then error("options.decimals must be an integer from 0 through 6", 2) end
+	local trim = options.trim_trailing_zeros
+	if trim ~= nil and type(trim) ~= "boolean" then error("options.trim_trailing_zeros must be a boolean", 2) end
 end
 
 local CONFIG = {
@@ -383,7 +400,7 @@ for _, leaderstat in ipairs(CONFIG.leaderstats.values) do
 		end
 
 		local format_ok, format_error = pcall(function()
-			NumberFormatterFactory.format(0, leaderstat.number_format)
+			validate_number_format_options(leaderstat.number_format :: NumberFormatOptions)
 		end)
 		if not format_ok then
 			error(
@@ -494,7 +511,6 @@ local function new(dependencies: Dependencies?): Controller
 	local players = injected.Players or Players
 	local record_store = injected.RecordStore or RecordStore
 	local integer_infinity_value_factory = injected.IntegerInfinityValue or IntegerInfinityValueFactory
-	local number_formatter = injected.NumberFormatter or NumberFormatterFactory
 	local infinitemath_value_factory = injected.InfiniteMathValue or InfiniteMathValueFactory
 
 	local new_instance = injected.new_instance or function(class_name: string): Instance
@@ -1073,16 +1089,16 @@ local function new(dependencies: Dependencies?): Controller
 
 				local display_value = new_string_value()
 				display_value.Name = definition.name
-				display_value.Value = number_formatter.format(stored_value, format_options)
+				display_value.Value = infinimath_value_factory.format(stored_value, format_options)
 				display_value.Changed:Connect(function()
-					local expected = number_formatter.format(backing_value.Value, format_options)
+					local expected = infinimath_value_factory.format(backing_value.Value, format_options)
 					if display_value.Value ~= expected then
 						display_value.Value = expected
 					end
 				end)
 
 				backing_value.Changed:Connect(function(new_value: number)
-					display_value.Value = number_formatter.format(new_value, format_options)
+					display_value.Value = infinimath_value_factory.format(new_value, format_options)
 				end)
 				connect_persistent_value(record, definition.key, backing_value, stored_value)
 

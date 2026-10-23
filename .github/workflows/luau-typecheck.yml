@@ -11,9 +11,9 @@ permissions:
 
 jobs:
   analyze:
-    name: Analyze RecordStore.luau
+    name: Analyze all source modules
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 
@@ -28,14 +28,31 @@ jobs:
           chmod +x "$HOME/.local/bin/luau-lsp"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
+      - name: Install Rojo
+        env:
+          ROJO_VERSION: 7.7.1
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/rojo.zip "https://github.com/rojo-rbx/rojo/releases/download/v${ROJO_VERSION}/rojo-${ROJO_VERSION}-linux-x86_64.zip"
+          unzip -o /tmp/rojo.zip -d "$HOME/.local/bin"
+          chmod +x "$HOME/.local/bin/rojo"
+
       - name: Fetch Roblox API definitions
         run: |
           set -euo pipefail
           curl -fsSL "https://luau-lsp.pages.dev/type-definitions/globalTypes.None.d.luau" -o /tmp/globalTypes.d.luau
           test -s /tmp/globalTypes.d.luau
 
-      - name: Analyze nonstrict mode
+      - name: Generate Rojo sourcemap
         run: |
           set -euo pipefail
-          sed '1s/^--!strict$/--!nonstrict/' src/PlayerDataInitializer/RecordStore.luau > /tmp/RecordStore.nonstrict.luau
-          luau-lsp analyze --platform=roblox --definitions=/tmp/globalTypes.d.luau /tmp/RecordStore.nonstrict.luau
+          rojo sourcemap default.project.json --include-non-scripts --output /tmp/sourcemap.json
+          test -s /tmp/sourcemap.json
+
+      - name: Analyze every source module
+        run: |
+          set -euo pipefail
+          mapfile -t modules < <(find src -type f -name '*.luau' -print | sort)
+          test "${#modules[@]}" -gt 0
+          printf 'Analyzing %s Luau source modules\n' "${#modules[@]}"
+          luau-lsp analyze --platform=roblox --definitions=/tmp/globalTypes.d.luau --sourcemap=/tmp/sourcemap.json "${modules[@]}"

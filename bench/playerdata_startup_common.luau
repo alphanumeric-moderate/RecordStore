@@ -9,7 +9,6 @@ local SOURCES = {
 	PlayerData = fs.readFile("src/PlayerDataInitializer/PlayerData.luau"),
 	PlayerDataCore = fs.readFile("src/PlayerDataInitializer/PlayerDataCore.luau"),
 	IntegerInfinityValue = fs.readFile("src/PlayerDataInitializer/IntegerInfinityValue.luau"),
-	NumberFormatter = fs.readFile("src/PlayerDataInitializer/NumberFormatter.luau"),
 	InfiniteMathValue = fs.readFile("src/PlayerDataInitializer/InfiniteMathValue.luau"),
 	Initializer = fs.readFile("src/PlayerDataInitializer/init.server.luau"),
 }
@@ -19,7 +18,6 @@ local MODULE_PATHS = {
 	PlayerData = "src/PlayerDataInitializer/PlayerData.luau",
 	PlayerDataCore = "src/PlayerDataInitializer/PlayerDataCore.luau",
 	IntegerInfinityValue = "src/PlayerDataInitializer/IntegerInfinityValue.luau",
-	NumberFormatter = "src/PlayerDataInitializer/NumberFormatter.luau",
 	InfiniteMathValue = "src/PlayerDataInitializer/InfiniteMathValue.luau",
 }
 
@@ -82,9 +80,9 @@ local function cold_start(eager_infinimath_value)
 	local core_source = SOURCES.PlayerDataCore
 
 	if eager_infinimath_value then
-		local needle = 'local NumberFormatterFactory = require(script.Parent.NumberFormatter)\n'
+		local needle = 'local IntegerInfinityValueFactory = require(script.Parent.IntegerInfinityValue)\n'
 		local index = string.find(core_source, needle, 1, true)
-		assert(index ~= nil, "could not find PlayerDataCore's formatter dependency")
+		assert(index ~= nil, "could not find PlayerDataCore's dependency insertion point")
 		local insert_at = index + #needle
 		core_source = string.sub(core_source, 1, insert_at - 1)
 			.. 'local _legacy_eager_infinitemath_value_factory = require(script.Parent.InfiniteMathValue)\n'

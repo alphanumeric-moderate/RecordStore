@@ -6,7 +6,7 @@ RecordStore is a server-side Roblox Luau persistence module.
 
 ## Install in Roblox Studio
 
-The Rojo projects map `src/PlayerDataInitializer` to a Script named `ServerScriptService.PlayerDataInitializer`. Its child ModuleScripts include `PlayerData`, `PlayerDataCore`, `RecordStore`, `IntegerInfinityValue`, `NumberFormatter`, and `InfiniteMathValue`. InfiniteMath Revised is vendored at `src/InfiniteMath` and mapped to `ReplicatedStorage.InfiniteMath`.
+The Rojo projects map `src/PlayerDataInitializer` to a Script named `ServerScriptService.PlayerDataInitializer`. Its child ModuleScripts include `PlayerData`, `PlayerDataCore`, `RecordStore`, `IntegerInfinityValue` and `InfiniteMathValue`. InfiniteMath Revised is vendored at `src/InfiniteMath` and mapped to `ReplicatedStorage.InfiniteMath`.
 
 **`InfiniteMath` must be a ModuleScript at `ReplicatedStorage.InfiniteMath`.** The vendored InfiniteMath Revised module is outside `PlayerDataInitializer` because `InfiniteMathValue` resolves it from `ReplicatedStorage`. Do not move `InfiniteMath` into `PlayerDataInitializer`.
 
@@ -51,7 +51,7 @@ The repository also includes:
 - `src/PlayerDataInitializer/PlayerDataCore.luau`: a configurable player session, leaderstats, persistence, retry, and shutdown controller.
 - `src/PlayerDataInitializer/RecordStore.luau`: the underlying persistence, session ownership, versioning, and recovery API.
 - `src/PlayerDataInitializer/IntegerInfinityValue.luau`: a `NumberValue` factory that rounds finite values to integers while preserving positive infinity, negative infinity, and NaN. The default `kills` field uses this type so non-finite values are not silently replaced with zero.
-- `src/PlayerDataInitializer/NumberFormatter.luau`: a display formatter for native Luau numbers. Formatting never changes stored values.
+- `InfiniteMath.format(value, options?)`: the shared abbreviation formatter for native and InfiniteMath numbers. Formatting never changes stored values.
 - `src/PlayerDataInitializer/InfiniteMathValue.luau`: an adapter for the vendored InfiniteMath Revised module. It persists the number's normalized `first`/`second` pair inside a versioned JSON envelope and provides `get`/`set` helpers for a replicated StringValue backing instance. With the default schema, this adapter is not required during startup; `PlayerDataCore` loads it only when an `InfiniteMathValue` field is configured or used.
 - `src/PlayerDataInitializer/init.server.luau`: a standard Script that starts the controller and shuts it down from `BindToClose`.
 
@@ -109,28 +109,17 @@ gameplay actions and authorization on the server before changing protected field
 
 ### Number formatting
 
-Use the formatter directly when you only need display text:
+InfiniteMath owns the shared number-abbreviation path. Use its static formatter for native Luau numbers or pass a constructed value for ranges beyond native numbers:
 
 ```lua
-local NumberFormatter = require(game:GetService("ServerScriptService"):WaitForChild("PlayerDataInitializer"):WaitForChild("NumberFormatter"))
+local InfiniteMath = require(game:GetService("ReplicatedStorage"):WaitForChild("InfiniteMath"))
 
-print(NumberFormatter.format(1_250)) -- 1.25K
-print(NumberFormatter.format(1_000_000_000_000)) -- 1T
+print(InfiniteMath.format(1_250)) -- 1.25K
+print(InfiniteMath.format(1_000_000_000_000)) -- 1T
+print(InfiniteMath.format(InfiniteMath.new("1,1000"))) -- InfiniteMath's extended suffix range
 ```
 
-The default `PlayerDataCore` configuration abbreviates `Kills` using `define_leaderstat("kills", "Kills", { decimals = 2 })`. Large values display as `1K`, `1.25M`, `1B`, `1T`, `1Qa`, and so on. Other numeric leaderstats can opt in by passing `{ decimals = 2 }` as the third argument to `define_leaderstat` in `src/PlayerDataInitializer/PlayerDataCore.luau`.
-
-A formatted leaderboard entry is a display-only `StringValue`. Its numeric backing value is placed at `player.PlayerDataValues.kills`, and that backing value remains the value persisted by PlayerDataCore. Gameplay scripts must update `player.PlayerDataValues.kills.Value` instead of `player.leaderstats.Kills.Value`, because the leaderboard entry contains text. The `PlayerDataValues` folder name is reserved by this feature.
-
-To opt out for a particular entry, omit the third argument, for example `define_leaderstat("kills", "Kills")`.
-
-Both the default and example Rojo projects include `PlayerDataInitializer` and map its child modules. The regression-test project deliberately does not include the active initializer, preventing test-place startup from opening real player sessions. To build the separate example place:
-
-```sh
-rojo build examples.project.json -o RecordStore-PlayerDataExample.rbxlx
-```
-
-The included `PlayerDataCore` example uses the store name `PlayerData_Test1`. Change `CONFIG.store_name` in `src/PlayerDataInitializer/PlayerDataCore.luau` before using it for a live production dataset. Review the config's keys, defaults, schema version, and leaderboard values before publishing.
+The default `PlayerDataCore` configuration abbreviates `Kills` using `define_leaderstat("kills", "Kills", { decimals = 2 })`. Native numeric and `InfiniteMathValue` leaderstats share `InfiniteMath.format`, including InfiniteMath's suffix table and scientific-notation fallback. Explicit precision accepts integers from 0 through 6; `trim_trailing_zeros` controls whether fractional trailing zeros are kept. Formatting changes display text only, never persisted values.
 
 ### InfiniteMath support
 

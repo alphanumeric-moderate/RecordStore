@@ -48,10 +48,7 @@ end
 
 function Shim.load_infinitemath_value()
 	local api = Shim.load_infinitemath()
-	local number_formatter = load_module(
-		"src/PlayerDataInitializer/NumberFormatter.luau",
-		"NumberFormatter"
-	)
+
 	local http_service = {
 		JSONEncode = function(_self, value)
 			return serde.encode("json", value)
@@ -61,11 +58,7 @@ function Shim.load_infinitemath_value()
 		end,
 	}
 	local api_token = { ClassName = "ModuleScript", Name = "InfiniteMath" }
-	local formatter_token = { ClassName = "ModuleScript", Name = "NumberFormatter" }
 	function api_token:IsA(class_name)
-		return class_name == "ModuleScript"
-	end
-	function formatter_token:IsA(class_name)
 		return class_name == "ModuleScript"
 	end
 
@@ -99,13 +92,10 @@ function Shim.load_infinitemath_value()
 		end,
 	}
 	local script = {
-		Parent = {
-			NumberFormatter = formatter_token,
-		},
+		Parent = {},
 	}
 	local function shim_require(target)
 		if target == api_token then return api end
-		if target == formatter_token then return number_formatter end
 		return builtin_require(target)
 	end
 	local builtin_typeof = typeof
@@ -123,7 +113,7 @@ function Shim.load_infinitemath_value()
 		typeof = shim_typeof,
 		require = shim_require,
 	})
-	return value_factory, api, number_formatter
+	return value_factory, api
 end
 
 return Shim

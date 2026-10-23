@@ -2,7 +2,6 @@
 --!optimize 2
 
 local HttpService = game:GetService("HttpService")
-local NumberFormatterFactory = require(script.Parent.NumberFormatter)
 
 local InfiniteMathValue = {
 	VERSION = "1.0.5",
@@ -55,8 +54,13 @@ local function resolve_api()
 	if not ok then
 		error("failed to require InfiniteMath: " .. tostring(loaded), 2)
 	end
-	if type(loaded) ~= "table" or type(loaded.new) ~= "function" then
-		error("ReplicatedStorage.InfiniteMath must expose new", 2)
+	if type(loaded) ~= "table"
+		or type(loaded.new) ~= "function"
+		or type(loaded.format) ~= "function"
+		or type(loaded.formatInteger) ~= "function"
+		or type(loaded.formatScientific) ~= "function"
+	then
+		error("ReplicatedStorage.InfiniteMath must expose new and formatting functions", 2)
 	end
 
 	cached_api = loaded
@@ -374,13 +378,13 @@ local function format_legacy_node(node, options, depth)
 	end
 	local kind = node.kind
 	if kind == "finite" and type(node.value) == "number" then
-		return NumberFormatterFactory.format(node.value, options)
+		return resolve_api().format(node.value, options)
 	elseif kind == "integer" and (node.sign == 1 or node.sign == -1) and type(node.digits) == "string" then
-		return NumberFormatterFactory.formatInteger((node.sign == -1 and "-" or "") .. node.digits, options)
+		return resolve_api().formatInteger((node.sign == -1 and "-" or "") .. node.digits, options)
 	elseif kind == "scientific" and (node.sign == 1 or node.sign == -1)
 		and type(node.mantissa) == "number" and type(node.exponent) == "string"
 	then
-		return NumberFormatterFactory.formatScientific(node.sign, node.mantissa, node.exponent, options)
+		return resolve_api().formatScientific(node.sign, node.mantissa, node.exponent, options)
 	elseif kind == "special" then
 		if node.name == "nan" then return "NaN" end
 		if node.name == "+infinity" then return "∞" end
@@ -439,59 +443,7 @@ function InfiniteMathValue.format(value, options)
 	elseif is_legacy(decoded) then
 		return format_legacy_node(decoded.node, options, 0)
 	end
-
-	if options ~= nil and type(options) ~= "table" then
-		error("options must be a table", 2)
-	end
-	local api = resolve_api()
-	local decimals = if options ~= nil and options.decimals ~= nil then options.decimals else 2
-	if type(decimals) ~= "number" or not is_finite(decimals)
-		or math.floor(decimals) ~= decimals or decimals < 0 or decimals > 6
-	then
-		error("options.decimals must be an integer from 0 through 6", 2)
-	end
-	local trim = if options ~= nil and options.trim_trailing_zeros ~= nil
-		then options.trim_trailing_zeros else true
-	if type(trim) ~= "boolean" then
-		error("options.trim_trailing_zeros must be a boolean", 2)
-	end
-
-	local previous_decimals = api.DECIMALPOINTS
-	api.DECIMALPOINTS = decimals
-	local ok, formatted = pcall(function()
-		return tostring(decoded)
-	end)
-	api.DECIMALPOINTS = previous_decimals
-	if ok and type(formatted) == "string" then
-		if trim then
-			return formatted
-		end
-		local number_text, suffix = string.match(formatted, "^([+-]?%d+%.?%d*)(.*)$")
-		if number_text == nil then
-			return formatted
-		end
-		local integer_part, fraction = string.match(number_text, "^([+-]?%d+)%.(%d+)$")
-		if integer_part == nil then
-			integer_part = number_text
-			fraction = ""
-		end
-		if decimals == 0 then
-			return integer_part .. suffix
-		elseif #fraction < decimals then
-			fraction = fraction .. string.rep("0", decimals - #fraction)
-		elseif #fraction > decimals then
-			fraction = string.sub(fraction, 1, decimals)
-		end
-		return integer_part .. "." .. fraction .. suffix
-	end
-
-	local exponent = string.format("%.0f", decoded.second)
-	return NumberFormatterFactory.formatScientific(
-		decoded.first < 0 and -1 or 1,
-		math.abs(decoded.first),
-		exponent,
-		options
-	)
+	return resolve_api().format(decoded, options)
 end
 
 function InfiniteMathValue.new(name, initial_value)
