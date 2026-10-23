@@ -185,6 +185,8 @@ local function validate_number_format_options(options: NumberFormatOptions)
 	if trim ~= nil and type(trim) ~= "boolean" then error("options.trim_trailing_zeros must be a boolean", 2) end
 end
 
+type DurabilityMode = "balanced" | "durability_first" | "read_only_on_risk"
+
 local CONFIG = {
 	store_name = "PlayerData_Test1",
 	scope = "global",
@@ -197,7 +199,7 @@ local CONFIG = {
 	autosave_interval = 90,
 
 	retry_attempts = 5,
-	durability_mode = "balanced",
+	durability_mode = ("balanced" :: DurabilityMode),
 	max_dirty_age_seconds = 180,
 	operation_deadline = 20,
 	load_retry_attempts = 4,
@@ -920,6 +922,8 @@ local function new(dependencies: Dependencies?): Controller
 		end
 	end
 
+	local mutation_backpressure_reason: (record: PlayerRecord) -> string?
+
 	local function connect_persistent_value(
 		record: PlayerRecord,
 		key: string,
@@ -1376,7 +1380,7 @@ local function new(dependencies: Dependencies?): Controller
 		end
 	end
 
-	local function mutation_backpressure_reason(record: PlayerRecord): string?
+	mutation_backpressure_reason = function(record: PlayerRecord): string?
 		local status_ok, status = pcall(function()
 			return record:GetDurabilityStatus()
 		end)
