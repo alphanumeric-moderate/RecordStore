@@ -1481,7 +1481,7 @@ function MailboxV2._ordering_blocked(self: Mailbox, record: Dict, route: string)
 				return true, "an earlier message with the same ordering_key is not terminal"
 			end
 			if type(prior_sequence) == "number" and is_finite(prior_sequence) then
-			self:_release_ordering_slot(prior_route, ordering_key, prior_sequence)
+			self:_release_ordering_slot(prior_route, ordering_key, prior_sequence :: number)
 		end
 		end
 	end
@@ -1745,7 +1745,7 @@ function MailboxV2._resume_reservation(self: Mailbox, route: string, initial_ent
 	if preparing == nil or preparing.state ~= "preparing" or preparing.reservation_token ~= token then
 		return ok("unknown", route, preparing, "canonical preparing state could not be verified")
 	end
-	local patched, phase_error = self:_set_registry_entry(route, token, { phase = "canonical" })
+	local patched, phase_error = self:_set_registry_entry(route, token, ({ phase = "canonical" } :: unknown) :: Dict)
 	if phase_error ~= nil or patched == nil then
 		return ok("unknown", route, nil, phase_error or "preparation phase update is unknown")
 	end
