@@ -6047,6 +6047,8 @@ type QueueEnvelope = {
 type PendingDurableOperation = {
 	kind: "save" | "renew" | "release",
 	snapshot: JsonValue?,
+	user_ids: { number }?,
+	metadata: Metadata?,
 	captured_change_sequence: number,
 	expected_revision: number,
 	target_revision: number,
@@ -9631,6 +9633,8 @@ local function save_internal(state: InternalState, reason: string?, operation_de
 		state.pending_operation = {
 			kind = "save",
 			snapshot = copy_value(snapshot),
+			user_ids = clone_user_ids(state.user_ids),
+			metadata = clone_metadata(state.metadata),
 			captured_change_sequence = captured_change_sequence,
 			expected_revision = expected_revision,
 			target_revision = target_revision,
@@ -12872,9 +12876,11 @@ local function reconcile_unknown_release_internal(state: InternalState): (Result
 			decision_message = "durable session is missing or expired"
 			return nil, nil, nil
 		end
-		local user_ids = if current_info ~= nil then clone_user_ids(current_info.UserIds)
+		local user_ids = if pending.user_ids ~= nil then clone_user_ids(pending.user_ids)
+			elseif current_info ~= nil then clone_user_ids(current_info.UserIds)
 			elseif current.user_ids ~= nil then clone_user_ids(current.user_ids) else {}
-		local durable_metadata = if current_info ~= nil then clone_metadata(current_info.Metadata)
+		local durable_metadata = if pending.metadata ~= nil then clone_metadata(pending.metadata)
+			elseif current_info ~= nil then clone_metadata(current_info.Metadata)
 			else clone_metadata(state.metadata)
 		local next_envelope: Envelope = {
 			implementation_version = IMPLEMENTATION_VERSION,
@@ -13377,9 +13383,11 @@ local function reconcile_unknown_internal(state: InternalState): (ResultCode, st
 			decision_message = "lease safety margin is insufficient"
 			return nil, nil, nil
 		end
-		local user_ids = if current_info ~= nil then clone_user_ids(current_info.UserIds)
+		local user_ids = if pending.user_ids ~= nil then clone_user_ids(pending.user_ids)
+			elseif current_info ~= nil then clone_user_ids(current_info.UserIds)
 			elseif current.user_ids ~= nil then clone_user_ids(current.user_ids) else {}
-		local durable_metadata = if current_info ~= nil then clone_metadata(current_info.Metadata) else clone_metadata(state.metadata)
+		local durable_metadata = if pending.metadata ~= nil then clone_metadata(pending.metadata)
+			elseif current_info ~= nil then clone_metadata(current_info.Metadata) else clone_metadata(state.metadata)
 		local next_envelope: Envelope = {
 			implementation_version = IMPLEMENTATION_VERSION,
 			schema_version = if pending.kind == "save" then state.options.schema_version else current.schema_version,
@@ -13649,6 +13657,8 @@ close_internal = function(state: InternalState, shutdown: boolean): (ResultCode,
 		state.pending_operation = {
 			kind = "release",
 			snapshot = copy_value(snapshot),
+			user_ids = clone_user_ids(state.user_ids),
+			metadata = clone_metadata(state.metadata),
 			captured_change_sequence = state.change_sequence,
 			expected_revision = expected_revision,
 			target_revision = target_revision,
