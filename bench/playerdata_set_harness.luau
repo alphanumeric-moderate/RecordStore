@@ -28,7 +28,7 @@ end
 	local fs = require("@lune/fs")
 	local luau = require("@lune/luau")
 	local task = require("@lune/task")
-	local InfiniteMath = require("./infinimath_shim").load_infinimath()
+	local InfiniteMath = require("./infinimath_shim").load_infinitemath()
 	local builtin_typeof = typeof
 	
 	local function make_signal()
