@@ -116,8 +116,9 @@ local function get_infinemath_formatter(): InfiniteMathFormatterAPI
 		error("ReplicatedStorage.InfiniteMath must expose format", 2)
 	end
 
-	cached_infinemath_formatter = loaded :: InfiniteMathFormatterAPI
-	return cached_infinemath_formatter
+	local formatter = loaded :: InfiniteMathFormatterAPI
+	cached_infinemath_formatter = formatter
+	return formatter
 end
 
 
