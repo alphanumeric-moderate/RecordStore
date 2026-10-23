@@ -816,6 +816,28 @@ local function new(dependencies: Dependencies?): Controller
 				continue
 			end
 
+			if durability_mode == "read_only_on_risk" then
+				local status_ok, status = pcall(function()
+					return record:GetDurabilityStatus()
+				end)
+				if not status_ok or type(status) ~= "table" then
+					last_result = "unknown"
+					last_message = "could not verify persistence state before flushing accepted PlayerData changes"
+					break
+				end
+				if status.mutation_admission == "read_only" and status.dirty == true then
+					local save_ok, save_result, save_message = pcall(function()
+						return record:Save("playerdata-buffer-drain")
+					end)
+					if not save_ok or save_result ~= "saved" then
+						last_result = if save_ok then save_result :: RecordStore.ResultCode else "unknown"
+						last_message = if save_ok then save_message else tostring(save_result)
+						break
+					end
+					continue
+				end
+			end
+
 			local batch = table.clone(pending)
 			table.clear(pending)
 			local call_ok, result, message = pcall(function()
