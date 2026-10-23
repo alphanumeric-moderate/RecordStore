@@ -78,6 +78,10 @@ end
 	end
 	
 	function instance_methods:GetAttribute(name)
+
+	function instance_methods:Kick(message)
+		self._kick_message = message
+	end
 		return self._attributes[name]
 	end
 
@@ -279,6 +283,14 @@ end
 		debugName = "IntegerInfinityValue",
 		environment = { Instance = Instance },
 	})()
+	local native_number_format_calls = 0
+	local InfiniteMathFormatter = {
+		format = function(value, options)
+			native_number_format_calls += 1
+			return InfiniteMath.format(value, options)
+		end,
+	}
+
 	local InfiniteMathValue = {
 		is_value = function(value) return type(value) == "string" end,
 		normalize = function(value) return tostring(value) end,
@@ -377,6 +389,7 @@ end
 		RecordStore = RecordStore,
 		IntegerInfinityValue = IntegerInfinityValue,
 		InfiniteMathValue = InfiniteMathValue,
+		InfiniteMathFormatter = InfiniteMathFormatter,
 		new_instance = function(class_name) return Instance.new(class_name) end,
 		task = task,
 	})
@@ -387,10 +400,23 @@ end
 	)
 	assert(controller:Start(), "controller failed to start")
 	local deadline = os.clock() + 5
-	while player:GetAttribute("PlayerDataLoadStatus") ~= "Loaded" and os.clock() < deadline do
+	while player:GetAttribute("PlayerDataLoadStatus") ~= "Loaded"
+		and player:GetAttribute("PlayerDataLoadStatus") ~= "Failed"
+		and os.clock() < deadline do
 		task.wait(0.01)
 	end
-	assert(player:GetAttribute("PlayerDataLoadStatus") == "Loaded", "player session did not load")
+		task.wait(0.01)
+	end
+	assert(
+		player:GetAttribute("PlayerDataLoadStatus") == "Loaded",
+		("player session did not load (status=%s, kick=%s)"):format(
+			tostring(player:GetAttribute("PlayerDataLoadStatus")),
+			tostring(player._kick_message)
+		)
+	)
+	assert(native_number_format_calls > 0, "default Kills display did not use InfiniteMathFormatter")
+	assert(module_require_counts.InfiniteMathValue == 0,
+		"default native leaderstats should not load the InfiniteMathValue adapter")
 	return {
 		controller = controller,
 		player = player,
