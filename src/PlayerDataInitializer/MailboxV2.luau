@@ -1897,6 +1897,13 @@ function MailboxV2.EnqueueAsync(self: Mailbox, message_type: string, payload: un
 		return ok("invalid", nil, nil, "message_type must be 1 to 100 bytes")
 	end
 	local options: Dict = enqueue_options or ({} :: Dict)
+	local idempotency_key: string? = nil
+	if options.idempotency_key ~= nil then
+		if type(options.idempotency_key) ~= "string" then
+			return ok("invalid", nil, nil, "idempotency_key must be a string")
+		end
+		idempotency_key = options.idempotency_key
+	end
 	local ordering_key = options.ordering_key
 	if ordering_key ~= nil and (type(ordering_key) ~= "string" or ordering_key == ""
 		or #ordering_key > MAX_ORDERING_KEY_LENGTH)
@@ -1922,13 +1929,13 @@ function MailboxV2.EnqueueAsync(self: Mailbox, message_type: string, payload: un
 	if payload_size > (self.options.max_payload_bytes :: number) then
 		return ok("invalid", nil, nil, "payload exceeds the configured encoded-size cap")
 	end
-	local route, route_error = self:_route_key(options.idempotency_key)
+	local route, route_error = self:_route_key(idempotency_key)
 	if route == nil then
 		return ok("invalid", nil, nil, route_error)
 	end
 	local request: Dict = {
 		owner = clone_owner(self.owner),
-		idempotency_key = options.idempotency_key,
+		idempotency_key = idempotency_key,
 		message_type = message_type,
 		payload = clone_json(payload),
 		priority = priority,
@@ -2789,7 +2796,11 @@ function MailboxV2.RecoverAsync(self: Mailbox): Result
 			end
 		end
 	end
-	return ok("success", nil, if capacity_blocked_preparations > 0 then { capacity_blocked_preparations = capacity_blocked_preparations } else nil, nil)
+	local details: Dict? = nil
+	if capacity_blocked_preparations > 0 then
+		details = ({ capacity_blocked_preparations = capacity_blocked_preparations } :: Dict)
+	end
+	return ok("success", nil, details, nil)
 end
 
 function MailboxV2.GetDeadLettersAsync(self: Mailbox, cursor: string?, page_size: number?): ({ Dict }, string?, Result)
@@ -3036,8 +3047,8 @@ local MockStore = {}
 MockStore.__index = MockStore
 
 function MockStore.new(): MockStoreState
-	return setmetatable({
-		values = {},
+	local state: MockStoreState = {
+		values = {} :: { [string]: unknown },
 		update_calls = 0,
 		get_calls = 0,
 		remove_calls = 0,
@@ -3048,7 +3059,9 @@ function MockStore.new(): MockStoreState
 		delay_update_key = nil,
 		advance_time = nil,
 		replay_next_update = 0,
-	}, MockStore) :: MockStoreState
+	}
+	setmetatable(state, MockStore)
+	return state
 end
 
 function MockStore.GetAsync(self: MockStoreState, key: string): unknown
