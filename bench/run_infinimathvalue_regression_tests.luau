@@ -5,6 +5,11 @@ local InfiniteMathValue, InfiniteMath = Shim.load_infinitemath_value()
 local serde = require("@lune/serde")
 
 local initial = InfiniteMath.new("1,1000000000000")
+local maximum = InfiniteMath.new({ 1, 1e308 })
+local maximum_payload = InfiniteMathValue.encode(maximum)
+local maximum_restored = InfiniteMathValue.decode(maximum_payload)
+assert(maximum_restored.first == maximum.first and maximum_restored.second == 1e308,
+	"maximum finite exponent was not preserved by JSON serialization")
 local backing = InfiniteMathValue.new("Cash", initial)
 assert(backing.Name == "Cash", "new() did not set the backing name")
 assert(InfiniteMathValue.is_serialized(backing.Value), "canonical payload was rejected")
@@ -18,6 +23,8 @@ local restored = InfiniteMathValue.get(backing)
 assert(restored.second == scaled.second, "set()/get() lost the exponent")
 assert(restored.first == scaled.first, "set()/get() lost the mantissa")
 assert(type(InfiniteMathValue.format(backing.Value)) == "string", "format() did not return text")
+assert(InfiniteMathValue.format(InfiniteMath.new("1,6"), { decimals = 3, trim_trailing_zeros = false }) == "1.000M",
+	"format() did not honor trim_trailing_zeros=false")
 
 local legacy_integer = '{"schema":"CodeNum","version":2,"value":{"kind":"integer","sign":1,"digits":"123456789012345678901234567890"}}'
 local migrated = InfiniteMathValue.normalize(legacy_integer)
@@ -31,6 +38,8 @@ assert(InfiniteMathValue.is_serialized(legacy_unrepresentable), "unrepresentable
 assert(InfiniteMathValue.normalize(legacy_unrepresentable) == legacy_unrepresentable,
 	"unrepresentable legacy data was not preserved verbatim")
 assert(InfiniteMathValue.format(legacy_unrepresentable) ~= "", "legacy symbolic fallback was not displayable")
+assert(string.find(InfiniteMathValue.format(legacy_unrepresentable), "↑{100}", 1, true) ~= nil,
+	"legacy hyperoperation arrow count was misleadingly truncated")
 
 local nan_payload = InfiniteMathValue.normalize(0 / 0)
 assert(InfiniteMathValue.format(nan_payload) == "NaN", "NaN special-value round-trip failed")

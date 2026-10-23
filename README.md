@@ -52,7 +52,7 @@ The repository also includes:
 - `src/PlayerDataInitializer/RecordStore.luau`: the underlying persistence, session ownership, versioning, and recovery API.
 - `src/PlayerDataInitializer/IntegerInfinityValue.luau`: a `NumberValue` factory that rounds finite values to integers while preserving positive infinity, negative infinity, and NaN. The default `kills` field uses this type so non-finite values are not silently replaced with zero.
 - `src/PlayerDataInitializer/NumberFormatter.luau`: a display formatter for native Luau numbers. Formatting never changes stored values.
-- `src/PlayerDataInitializer/InfiniteMathValue.luau`: an adapter for the vendored InfiniteMath Revised module. It persists the number's normalized `first`/`second` pair inside a versioned JSON envelope and provides `get`/`set` helpers for a replicated StringValue backing instance. With the default schema, this adapter is not required during startup; `PlayerDataCore` loads it only when a `InfiniteMathValue` field is configured or used.
+- `src/PlayerDataInitializer/InfiniteMathValue.luau`: an adapter for the vendored InfiniteMath Revised module. It persists the number's normalized `first`/`second` pair inside a versioned JSON envelope and provides `get`/`set` helpers for a replicated StringValue backing instance. With the default schema, this adapter is not required during startup; `PlayerDataCore` loads it only when an `InfiniteMathValue` field is configured or used.
 - `src/PlayerDataInitializer/init.server.luau`: a standard Script that starts the controller and shuts it down from `BindToClose`.
 
 ### PlayerData.Set API
@@ -101,7 +101,7 @@ Numeric fields are normalized according to their configured Value type. For exam
 InfiniteMath fields accept an InfiniteMath value (or a supported input accepted by `InfiniteMathValue.normalize`)
 and serialize it without coercing it to a native `number`. To use InfiniteMath, enable a field in
 `CONFIG.data`, for example `cash = define_data_field("InfiniteMathValue", 0)`. InfiniteMath values retain
-their exact serialized representation in `PlayerDataValues`; the leaderboard remains a formatted,
+their normalized `first`/`second` serialization in `PlayerDataValues`; the leaderboard remains a formatted,
 display-only `StringValue`.
 
 `Set` is server-side. Do not use it as a client-authoritative economy or permission boundary; validate
@@ -149,7 +149,7 @@ InfiniteMathValue.set(cash, current + InfiniteMath.new("100"))
 
 InfiniteMath Revised represents a value using a native floating-point significand and exponent. Its representable upper range is substantially above the native `1e308` limit, while significant-digit precision remains approximate. This is a range upgrade, not arbitrary-precision decimal arithmetic; operations can round small terms away when magnitudes differ greatly.
 
-New values use the `InfiniteMathValue` JSON format version 1. Existing version-2 CodeNum payloads that fit InfiniteMath are normalized into the new format. Legacy symbolic values that cannot be represented by InfiniteMath are preserved verbatim and remain displayable rather than being silently replaced with defaults. Such preserved legacy values cannot be used as ordinary InfiniteMath numbers until explicitly converted to a representable value.
+New values use the `InfiniteMathValue` JSON format version 1. InfiniteMath Revised is vendored from `imezx/InfiniteMath` at upstream commit `7a846efdd1f63c6f38ccf2cbd0afda382ffc5ccf`; its MIT license is included in `THIRD_PARTY_NOTICES/InfiniteMath-MIT.txt`. Existing version-2 CodeNum payloads that fit InfiniteMath are normalized into the new format. Legacy symbolic values that cannot be represented by InfiniteMath are preserved verbatim and remain displayable rather than being silently replaced with defaults. Such preserved legacy values cannot be used as ordinary InfiniteMath numbers until explicitly converted to a representable value.
 
 The StringValue transport retains a conservative 199,999-byte payload limit. InfiniteMath's built-in suffix formatting is used for its supported suffix range, with scientific notation for larger exponents.
 ## Rojo

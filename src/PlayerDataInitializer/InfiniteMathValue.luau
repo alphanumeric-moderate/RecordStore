@@ -125,9 +125,7 @@ local function value_from_input(value)
 			or value.kind == "expression"
 			or value.kind == "call"
 		then
-			local migrated = nil
-			return migrated
-				or error("legacy CodeNum nodes must be passed as a serialized payload", 3)
+			error("legacy CodeNum nodes must be passed as a serialized payload", 3)
 		end
 		if type(value[1]) == "number" and type(value[2]) == "number" then
 			if not is_finite(value[1]) or not is_finite(value[2]) then
@@ -392,11 +390,22 @@ local function format_legacy_node(node, options, depth)
 	elseif kind == "hyper" then
 		local arrows = node.arrows
 		local arrow_text = "↑"
-		if type(arrows) == "table" then
-			if arrows.kind == "finite" and type(arrows.value) == "number" then
-				arrow_text = string.rep("↑", math.max(1, math.min(8, math.floor(arrows.value))))
-			elseif arrows.kind == "integer" and type(arrows.digits) == "string" and #arrows.digits == 1 then
-				arrow_text = string.rep("↑", math.max(1, math.min(8, tonumber(arrows.digits))))
+		if type(arrows) == "table" and arrows.kind == "finite" and type(arrows.value) == "number" then
+			local count = arrows.value
+			if count % 1 == 0 and count >= 1 and count <= 8 then
+				arrow_text = string.rep("↑", count)
+			else
+				arrow_text = "↑{" .. tostring(count) .. "}"
+			end
+		elseif type(arrows) == "table" and arrows.kind == "integer"
+			and (arrows.sign == 1 or arrows.sign == -1)
+			and type(arrows.digits) == "string" and string.match(arrows.digits, "^%d+$")
+		then
+			local count = tonumber(arrows.digits) * arrows.sign
+			if count ~= nil and count % 1 == 0 and count >= 1 and count <= 8 then
+				arrow_text = string.rep("↑", count)
+			else
+				arrow_text = "↑{" .. (arrows.sign < 0 and "-" or "") .. arrows.digits .. "}"
 			end
 		end
 		return "(" .. format_legacy_node(node.base, options, depth + 1) .. ")"
@@ -433,12 +442,20 @@ function InfiniteMathValue.format(value, options)
 		return format_legacy_node(decoded.node, options, 0)
 	end
 
+	if options ~= nil and type(options) ~= "table" then
+		error("options must be a table", 2)
+	end
 	local api = resolve_api()
 	local decimals = if options ~= nil and options.decimals ~= nil then options.decimals else 2
 	if type(decimals) ~= "number" or not is_finite(decimals)
 		or math.floor(decimals) ~= decimals or decimals < 0 or decimals > 6
 	then
 		error("options.decimals must be an integer from 0 through 6", 2)
+	end
+	local trim = if options ~= nil and options.trim_trailing_zeros ~= nil
+		then options.trim_trailing_zeros else true
+	if type(trim) ~= "boolean" then
+		error("options.trim_trailing_zeros must be a boolean", 2)
 	end
 
 	local previous_decimals = api.DECIMALPOINTS
@@ -448,7 +465,26 @@ function InfiniteMathValue.format(value, options)
 	end)
 	api.DECIMALPOINTS = previous_decimals
 	if ok and type(formatted) == "string" then
-		return formatted
+		if trim then
+			return formatted
+		end
+		local number_text, suffix = string.match(formatted, "^([+-]?%d+%.?%d*)(.*)$")
+		if number_text == nil then
+			return formatted
+		end
+		local integer_part, fraction = string.match(number_text, "^([+-]?%d+)%.(%d+)$")
+		if integer_part == nil then
+			integer_part = number_text
+			fraction = ""
+		end
+		if decimals == 0 then
+			return integer_part .. suffix
+		elseif #fraction < decimals then
+			fraction = fraction .. string.rep("0", decimals - #fraction)
+		elseif #fraction > decimals then
+			fraction = string.sub(fraction, 1, decimals)
+		end
+		return integer_part .. "." .. fraction .. suffix
 	end
 
 	local exponent = string.format("%.0f", decoded.second)

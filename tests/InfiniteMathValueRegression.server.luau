@@ -13,6 +13,9 @@ local envelope = HttpService:JSONDecode(serialized)
 assert(envelope.schema == "InfiniteMathValue" and envelope.version == 1,
 	"new values must use the InfiniteMathValue codec")
 assert(envelope.value.second == 1e100, "high exponent was not serialized")
+local maximum = InfiniteMath.new({ 1, 1e308 })
+local maximum_envelope = HttpService:JSONDecode(InfiniteMathValue.encode(maximum))
+assert(maximum_envelope.value.second == 1e308, "maximum finite exponent was not serialized")
 
 local backing = InfiniteMathValue.new("Cash", high)
 local restored = InfiniteMathValue.get(backing)
@@ -37,6 +40,8 @@ local legacy_symbolic = '{"schema":"CodeNum","version":2,"value":{"kind":"hyper"
 assert(InfiniteMathValue.normalize(legacy_symbolic) == legacy_symbolic,
 	"unrepresentable legacy symbolic data must be preserved verbatim")
 assert(InfiniteMathValue.format(legacy_symbolic) ~= "", "legacy symbolic value did not format")
+assert(string.find(InfiniteMathValue.format(legacy_symbolic), "↑{100}", 1, true) ~= nil,
+	"legacy hyperoperation arrow count was misleadingly truncated")
 
 local previous = backing.Value
 assert(not pcall(function() InfiniteMathValue.set(backing, {}) end), "invalid value was accepted")

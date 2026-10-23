@@ -7,11 +7,13 @@ local native_range = InfiniteMath.new(1e308)
 local above_native = InfiniteMath.new("1,1000")
 local very_large = InfiniteMath.new("1,1000000000000")
 local beyond_previous_limit = InfiniteMath.new({ 1, 1e100 })
+local maximum_supported_exponent = InfiniteMath.new({ 1, 1e308 })
 
 assert(native_range.first ~= 0, "native finite input was not represented")
 assert(above_native.second == 1000, "explicit exponent input was truncated")
 assert(very_large.second == 1e12, "large exponent input was truncated")
 assert(beyond_previous_limit.second == 1e100, "large numeric exponent input was truncated")
+assert(maximum_supported_exponent.second == 1e308, "maximum finite exponent was not represented")
 
 local multiplied = above_native * InfiniteMath.new(2)
 assert(multiplied.second == 1000, "large-range multiplication changed exponent")
