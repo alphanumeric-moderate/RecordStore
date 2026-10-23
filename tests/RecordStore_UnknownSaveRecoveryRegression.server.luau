@@ -244,6 +244,62 @@ do
 	RecordStore.Mock.set_test_clock(function()
 		return fake_now
 	end)
+	local record = open_test_record("renew-known-not-committed")
+	local base_revision = record:GetRevision()
+	local before = RecordStore.Mock.get_record_raw(
+		"RecordStore_UnknownSaveRecoveryRegression",
+		"global",
+		"renew-known-not-committed"
+	) :: { [string]: any }
+	local before_write_id = before.write_id
+	local before_lease = ((before.session :: { [string]: any }).lease_until) :: number
+	fake_now += 10
+
+	RecordStore.Mock.set_update_failures(1, "unknown", "injected pre-commit renewal failure")
+	RecordStore.Mock.set_get_failures(100, "hold renewal verification for bounded recovery")
+	local renew_result = RecordStore.Mock.renew(record)
+	assert(renew_result == "unknown", "unverified pre-commit renewal must remain unknown")
+	local status = record:GetDurabilityStatus()
+	local operation_id = status.pending_operation_id
+	assert(operation_id ~= nil, "uncommitted renewal must retain its operation ID")
+	assert(operation_id ~= before_write_id, "a new logical renewal must allocate one distinct operation ID")
+	assert(record.State == "unknown", "unverified renewal must fence ordinary operations")
+
+	local unchanged = RecordStore.Mock.get_record_raw(
+		"RecordStore_UnknownSaveRecoveryRegression",
+		"global",
+		"renew-known-not-committed"
+	) :: { [string]: any }
+	assert(unchanged.write_id == before_write_id, "fail-before-commit must leave the old durable write ID")
+	assert(unchanged.revision == base_revision, "failed renewal must not increment the profile revision")
+	assert(((unchanged.session :: { [string]: any }).lease_until) == before_lease,
+		"failed renewal must not falsely extend the durable lease")
+
+	RecordStore.Mock.set_get_failures(0)
+	local recovery_result, recovery_message = RecordStore.Mock.reconcile(record)
+	assert(recovery_result == "success", recovery_message)
+	local recovered = RecordStore.Mock.get_record_raw(
+		"RecordStore_UnknownSaveRecoveryRegression",
+		"global",
+		"renew-known-not-committed"
+	) :: { [string]: any }
+	assert(recovered.write_id == operation_id,
+		"reconciliation must retry the same logical renewal operation ID")
+	assert(recovered.revision == base_revision, "reconciled renewal must preserve profile revision")
+	assert(((recovered.session :: { [string]: any }).lease_until) > before_lease,
+		"reconciled renewal should extend the lease only when its retry commits")
+	assert(record:GetDurabilityStatus().ownership == "owned",
+		"confirmed retry should restore owned state")
+	assert(record:Close() == "closed", "renewal pre-commit recovery fixture should close")
+end
+
+RecordStore.Mock.reset()
+
+do
+	local fake_now = DateTime.now().UnixTimestampMillis / 1000 + 1
+	RecordStore.Mock.set_test_clock(function()
+		return fake_now
+	end)
 	local record = open_test_record("expired-lease-no-retry")
 	local base_revision = record:GetRevision()
 	local updated, update_message = record:Update(function(data)
