@@ -49,46 +49,35 @@ jobs:
           rojo build tests-native-formatting.project.json -o /tmp/RecordStore-NativeFormattingRegression.rbxlx
           test -s /tmp/RecordStore-NativeFormattingRegression.rbxlx
 
-      - name: Generate a sourcemap with the established RecordStore mode
+      - name: Generate a Rojo sourcemap
         run: |
           set -euo pipefail
-          sed '1s/^--!strict$/--!nonstrict/' src/PlayerDataInitializer/RecordStore.luau > /tmp/RecordStore.nonstrict.luau
           rojo sourcemap default.project.json --include-non-scripts --output /tmp/sourcemap.json
-          python3 - <<'PY'
-          import json
-          from pathlib import Path
-
-          source_map_path = Path("/tmp/sourcemap.json")
-          source_map = json.loads(source_map_path.read_text())
-          replacement = "/tmp/RecordStore.nonstrict.luau"
-          target_suffix = "src/PlayerDataInitializer/RecordStore.luau"
-          replaced = 0
-
-          def rewrite(node):
-              global replaced
-              if isinstance(node, dict):
-                  paths = node.get("filePaths", [])
-                  if node.get("name") == "RecordStore" and any(str(path).replace("\\", "/").endswith(target_suffix) for path in paths):
-                      node["filePaths"] = [replacement]
-                      replaced += 1
-                  for value in node.values():
-                      rewrite(value)
-              elif isinstance(node, list):
-                  for value in node:
-                      rewrite(value)
-
-          rewrite(source_map)
-          if replaced != 1:
-              raise SystemExit(f"expected exactly one RecordStore sourcemap node, found {replaced}")
-          source_map_path.write_text(json.dumps(source_map))
-          PY
           test -s /tmp/sourcemap.json
 
-      - name: Analyze every source module
+      - name: Require strict mode for RecordStore modules
         run: |
           set -euo pipefail
-          mapfile -t modules < <(find src -type f -name '*.luau' ! -path 'src/PlayerDataInitializer/RecordStore.luau' -print | sort)
+          python3 - <<'PY'
+          from pathlib import Path
+
+          paths = [
+              Path("src/PlayerDataInitializer/RecordStore.luau"),
+              Path("src/PlayerDataInitializer/RecordStoreScheduler.luau"),
+              Path("src/PlayerDataInitializer/MailboxV2.luau"),
+          ]
+          missing = [str(path) for path in paths if not path.read_text().startswith("--!strict")]
+          if missing:
+              print("RecordStore modules must begin with --!strict:")
+              print("\\n".join(missing))
+              raise SystemExit(1)
+          print("Strict mode enabled in all RecordStore modules")
+          PY
+
+      - name: Type-check all source modules using their declared modes
+        run: |
+          set -euo pipefail
+          mapfile -t modules < <(find src -type f -name '*.luau' -print | sort)
           test "${#modules[@]}" -gt 0
-          printf 'Analyzing %s Luau source modules plus RecordStore in its established nonstrict mode\n' "${#modules[@]}"
+          printf 'Analyzing %s Luau source modules using declared modes\\n' "${#modules[@]}"
           luau-lsp analyze --platform=roblox --definitions=/tmp/globalTypes.d.luau --sourcemap=/tmp/sourcemap.json "${modules[@]}"
-          luau-lsp analyze --platform=roblox --definitions=/tmp/globalTypes.d.luau --sourcemap=/tmp/sourcemap.json /tmp/RecordStore.nonstrict.luau
