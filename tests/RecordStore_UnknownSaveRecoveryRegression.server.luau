@@ -244,6 +244,113 @@ do
 	RecordStore.Mock.set_test_clock(function()
 		return fake_now
 	end)
+	local record = open_test_record("renew-known-not-committed")
+	local base_revision = record:GetRevision()
+	local before = RecordStore.Mock.get_record_raw(
+		"RecordStore_UnknownSaveRecoveryRegression",
+		"global",
+		"renew-known-not-committed"
+	) :: { [string]: any }
+	local before_write_id = before.write_id
+	local before_lease = ((before.session :: { [string]: any }).lease_until) :: number
+	fake_now += 10
+
+	RecordStore.Mock.set_update_failures(1, "unknown", "injected pre-commit renewal failure")
+	RecordStore.Mock.set_get_failures(100, "hold renewal verification for bounded recovery")
+	local renew_result = RecordStore.Mock.renew(record)
+	assert(renew_result == "unknown", "unverified pre-commit renewal must remain unknown")
+	local status = record:GetDurabilityStatus()
+	local operation_id = status.pending_operation_id
+	assert(operation_id ~= nil, "uncommitted renewal must retain its operation ID")
+	assert(operation_id ~= before_write_id, "a new logical renewal must allocate one distinct operation ID")
+	assert(record.State == "unknown", "unverified renewal must fence ordinary operations")
+
+	local unchanged = RecordStore.Mock.get_record_raw(
+		"RecordStore_UnknownSaveRecoveryRegression",
+		"global",
+		"renew-known-not-committed"
+	) :: { [string]: any }
+	assert(unchanged.write_id == before_write_id, "fail-before-commit must leave the old durable write ID")
+	assert(unchanged.revision == base_revision, "failed renewal must not increment the profile revision")
+	assert(((unchanged.session :: { [string]: any }).lease_until) == before_lease,
+		"failed renewal must not falsely extend the durable lease")
+
+	RecordStore.Mock.set_get_failures(0)
+	local recovery_result, recovery_message = RecordStore.Mock.reconcile(record)
+	assert(recovery_result == "success", recovery_message)
+	local recovered = RecordStore.Mock.get_record_raw(
+		"RecordStore_UnknownSaveRecoveryRegression",
+		"global",
+		"renew-known-not-committed"
+	) :: { [string]: any }
+	assert(recovered.write_id == operation_id,
+		"reconciliation must retry the same logical renewal operation ID")
+	assert(recovered.revision == base_revision, "reconciled renewal must preserve profile revision")
+	assert(((recovered.session :: { [string]: any }).lease_until) > before_lease,
+		"reconciled renewal should extend the lease only when its retry commits")
+	assert(record:GetDurabilityStatus().ownership == "owned",
+		"confirmed retry should restore owned state")
+	assert(record:Close() == "closed", "renewal pre-commit recovery fixture should close")
+end
+
+RecordStore.Mock.reset()
+
+do
+	local fake_now = DateTime.now().UnixTimestampMillis / 1000 + 1
+	RecordStore.Mock.set_test_clock(function()
+		return fake_now
+	end)
+	local record = open_test_record("renew-commit-expired-before-reconcile")
+	local base_revision = record:GetRevision()
+	local before = RecordStore.Mock.get_record_raw(
+		"RecordStore_UnknownSaveRecoveryRegression",
+		"global",
+		"renew-commit-expired-before-reconcile"
+	) :: { [string]: any }
+	local before_lease = ((before.session :: { [string]: any }).lease_until) :: number
+	fake_now += 10
+
+	RecordStore.Mock.set_update_commit_then_failures(1)
+	RecordStore.Mock.set_get_failures(100, "hold committed renewal verification")
+	local renew_result = RecordStore.Mock.renew(record)
+	assert(renew_result == "unknown", "committed but unverified renewal must stay unknown")
+	local operation_id = record:GetDurabilityStatus().pending_operation_id
+	assert(operation_id ~= nil, "unknown renewal must retain the operation identity")
+
+	local committed = RecordStore.Mock.get_record_raw(
+		"RecordStore_UnknownSaveRecoveryRegression",
+		"global",
+		"renew-commit-expired-before-reconcile"
+	) :: { [string]: any }
+	assert(committed.write_id == operation_id, "the ambiguous renewal should have committed under its original ID")
+	assert(((committed.session :: { [string]: any }).lease_until) > before_lease,
+		"the injected renewal should extend the durable lease before verification is released")
+
+	fake_now += 181
+	RecordStore.Mock.set_get_failures(0)
+	local recovery_result = RecordStore.Mock.reconcile(record)
+	assert(recovery_result == "fenced",
+		"an expired committed renewal must fence rather than revive the old session")
+	assert(record.State == "fenced", "expired renewal recovery must leave the record fenced")
+	local after = RecordStore.Mock.get_record_raw(
+		"RecordStore_UnknownSaveRecoveryRegression",
+		"global",
+		"renew-commit-expired-before-reconcile"
+	) :: { [string]: any }
+	assert(after.write_id == operation_id, "expired renewal recovery must not submit another write")
+	assert(after.revision == base_revision, "expired renewal recovery must not alter the data revision")
+	assert(((after.session :: { [string]: any }).lease_until) <= fake_now,
+		"expired renewal recovery must not extend an already-expired lease")
+	RecordStore.Mock.set_test_clock(nil)
+end
+
+RecordStore.Mock.reset()
+
+do
+	local fake_now = DateTime.now().UnixTimestampMillis / 1000 + 1
+	RecordStore.Mock.set_test_clock(function()
+		return fake_now
+	end)
 	local record = open_test_record("expired-lease-no-retry")
 	local base_revision = record:GetRevision()
 	local updated, update_message = record:Update(function(data)
@@ -420,4 +527,100 @@ do
 end
 
 RecordStore.Mock.reset()
-print("[PASS] Unknown-save and release recovery retain operation identity, fence public mutation, preserve in-flight edits, and refuse stale-owner writes.")
+do
+	local invalid_ok, invalid_message = pcall(function()
+		return RecordStore.Mock.new("RecordStore_UnknownSaveRecoveryRegression", "global", "invalid-durability-policy", {
+			schema_version = 1,
+			durability_mode = "guess",
+		})
+	end)
+	assert(not invalid_ok and string.find(tostring(invalid_message), "durability_mode", 1, true) ~= nil,
+		"invalid durability policy must be rejected")
+
+	local risk_events = 0
+	local recovered_events = 0
+	local record = RecordStore.Mock.new("RecordStore_UnknownSaveRecoveryRegression", "global", "durability-risk-events", {
+		schema_version = 1,
+		autosave_interval = 1000,
+		lease_duration = 180,
+		lease_renewal = 60,
+		operation_deadline = 2,
+		retry_attempts = 1,
+		max_dirty_age_seconds = 60,
+		durability_mode = "read_only_on_risk",
+		on_event = function(event)
+			if event == "durability_risk" then
+				risk_events += 1
+			elseif event == "durability_recovered" then
+				recovered_events += 1
+			end
+		end,
+	})
+	local open_result, open_message = record:Open({ coins = 10, label = "initial" })
+	assert(open_result == "created" or open_result == "loaded", open_message)
+	local status = record:GetDurabilityStatus()
+	assert(status.durability_mode == "read_only_on_risk", "durability policy was not retained")
+	assert(status.maximum_dirty_age_seconds == 60, "maximum dirty age was not retained")
+
+	local updated, update_message = record:Update(function(data)
+		(data :: { [string]: RecordStore.JsonValue }).coins = 55
+		return data
+	end)
+	assert(updated == "success", update_message)
+
+	RecordStore.Mock.set_update_failures(1, "unknown", "injected uncertain commit")
+	RecordStore.Mock.set_get_failures(100, "hold authoritative verification")
+	local save_result = record:Save("durability-risk-event")
+	assert(save_result == "unknown", "unverified write must enter unknown state")
+	status = record:GetDurabilityStatus()
+	assert(status.ownership == "uncertain", "unknown save must report uncertain ownership")
+	assert(status.durability == "degraded", "unknown save must report degraded durability")
+	assert(status.risk_active == true, "unknown save must be visible as an active durability risk")
+	assert(status.risk_reason == "write_or_lease_outcome_unknown", "unknown risk reason was not exposed")
+	assert(risk_events == 1, "durability risk must emit one edge-triggered event")
+	local health = RecordStore.get_health_snapshot()
+	assert(health.evidence_scope == "server_local_loaded_records", "health snapshot must declare its scope")
+	assert(health.server_state == "degraded", "unknown write must degrade the local health snapshot")
+	assert(health.has_unknown_write_outcome == true, "health snapshot omitted the unknown write")
+
+	RecordStore.Mock.set_get_failures(0)
+	local recovery_result, recovery_message = RecordStore.Mock.reconcile(record)
+	assert(recovery_result == "success", recovery_message)
+	status = record:GetDurabilityStatus()
+	assert(status.ownership == "owned", "confirmed recovery must restore ownership")
+	assert(status.risk_active == false, "confirmed recovery must clear the durability risk")
+	assert(risk_events == 1 and recovered_events == 1,
+		"risk notifications must be edge-triggered and emit one recovery transition")
+	assert(record:Close() == "closed", "durability risk regression record should close")
+end
+
+RecordStore.Mock.reset()
+do
+	local record = open_test_record("status-detects-direct-data-mutation")
+	local before = record:GetDurabilityStatus()
+	assert(before.dirty == false, "newly opened record should be clean before direct mutation")
+
+	local data = record.Data :: { [string]: RecordStore.JsonValue }
+	data.coins = 15
+
+	local status = record:GetDurabilityStatus()
+	assert(status.dirty == true,
+		"durability status must detect supported direct Record.Data mutation before reporting clean")
+	assert(status.dirty_watermark > status.durable_watermark,
+		"direct Record.Data mutation must advance the dirty watermark before status returns")
+	assert(status.oldest_dirty_age >= 0, "dirty age must remain a valid non-negative duration")
+
+	local save_result, save_message = record:Save("direct-data-status-regression")
+	assert(save_result == "saved", save_message)
+	local durable = RecordStore.Mock.get_record_raw(
+		"RecordStore_UnknownSaveRecoveryRegression",
+		"global",
+		"status-detects-direct-data-mutation"
+	) :: { [string]: any }
+	assert((durable.data :: { [string]: any }).coins == 15,
+		"status observation must not discard a valid direct Record.Data mutation")
+	assert(record:Close() == "closed", "direct-data status regression record should close")
+end
+
+RecordStore.Mock.reset()
+print("[PASS] Unknown-save recovery and durability status preserve logical write identity, fencing, and tracked direct-data mutations.")

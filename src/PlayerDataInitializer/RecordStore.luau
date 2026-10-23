@@ -4,6 +4,7 @@ local DataStoreService = game:GetService("DataStoreService")
 local HttpService = game:GetService("HttpService")
 local MessagingService = game:GetService("MessagingService")
 local RecordStore = {}
+RecordStore._internals = {} :: { [string]: any }
 
 
 -- BEGIN EMBEDDED SCHEDULER MODULE
@@ -5900,6 +5901,8 @@ export type Options = {
 	user_ids: { number }?,
 	metadata: Metadata?,
 	autosave_interval: number?,
+	max_dirty_age_seconds: number?,
+	durability_mode: "balanced" | "durability_first" | "read_only_on_risk"?,
 	lease_duration: number?,
 	lease_renewal: number?,
 	retry_attempts: number?,
@@ -6127,7 +6130,11 @@ type InternalState = {
 	pending_operation: PendingDurableOperation?,
 	next_reconciliation: number,
 	last_reconciliation_category: string?,
+	durability_risk_active: boolean?,
+	durability_risk_reason: string?,
 	dirty_since_local: number?,
+	dirty_age_is_lower_bound: boolean?,
+	next_durability_observation_local: number?,
 	last_successful_write_local: number?,
 }
 
@@ -7153,6 +7160,78 @@ local function observe(state: InternalState, event: string, result: ResultCode, 
 	end
 	local thread = coroutine.create(function()
 		observer(event, state.key, result, message)
+	end)
+	local resumed = coroutine.resume(thread)
+	if not resumed or coroutine.status(thread) ~= "dead" then
+		coroutine.close(thread)
+		state.observer_errors += 1
+	end
+end
+
+local scheduler_activation = {
+	requested = false,
+	revision = 1,
+	percent = 100,
+	salt = "recordstore-scheduler-v1",
+	cohort_bucket = 0,
+}
+local function scheduler_rollout_bucket(salt: string): number
+	local identity = tostring(game.PlaceId) .. ":" .. tostring(server_id) .. ":" .. salt
+	local hash = 0
+	for index = 1, #identity do
+		hash = (hash * 131 + string.byte(identity, index)) % 2147483647
+	end
+	return hash % 100
+end
+scheduler_activation.cohort_bucket = scheduler_rollout_bucket(scheduler_activation.salt)
+
+scheduler_activation.refresh_durability_risk = function(state: InternalState)
+	if (state.state == "active" or state.state == "saving")
+		and not state.public_data_detached
+	then
+		local now = now_local()
+		local next_observation = state.next_durability_observation_local
+		if next_observation == nil or now >= next_observation then
+			local max_age = state.options.max_dirty_age_seconds
+				or (state.options.autosave_interval or DEFAULT_AUTOSAVE_INTERVAL) * 2
+			state.next_durability_observation_local = now
+				+ math.max(0.05, math.min(1, max_age * 0.25))
+			track_external_data_mutation(state)
+		end
+	end
+	local reason: string? = nil
+	if state.state == "unknown" then
+		reason = "write_or_lease_outcome_unknown"
+	else
+		local dirty = state.change_sequence ~= state.saved_change_sequence
+		local dirty_since = state.dirty_since_local
+		local max_age = state.options.max_dirty_age_seconds
+			or (state.options.autosave_interval or DEFAULT_AUTOSAVE_INTERVAL) * 2
+		if dirty and dirty_since ~= nil and now_local() - dirty_since >= max_age then
+			reason = "maximum_dirty_age_exceeded"
+		end
+	end
+	local active = reason ~= nil
+	local was_active = state.durability_risk_active == true
+	if active == was_active then
+		if active then
+			state.durability_risk_reason = reason
+		end
+		return
+	end
+	local previous_reason = state.durability_risk_reason
+	state.durability_risk_active = active
+	state.durability_risk_reason = reason
+
+	local observer = state.options.on_event
+	if observer == nil then
+		return
+	end
+	local event_name = if active then "durability_risk" else "durability_recovered"
+	local result: ResultCode = if active then "unknown" else "success"
+	local message = if active then reason else "durability risk cleared: " .. tostring(previous_reason or "resolved")
+	local thread = coroutine.create(function()
+		observer(event_name, state.key, result, message)
 	end)
 	local resumed = coroutine.resume(thread)
 	if not resumed or coroutine.status(thread) ~= "dead" then
@@ -9551,6 +9630,7 @@ local function save_internal(state: InternalState, reason: string?, operation_de
 		}
 		state.next_reconciliation = now_local() + 0.25
 		state.last_reconciliation_category = "save_outcome_unknown"
+		scheduler_activation.refresh_durability_risk(state)
 		observe(state, "save", "unknown", last_error or "save outcome is unresolved")
 		return "unknown", last_error or "save outcome is unresolved"
 	end
@@ -9568,6 +9648,7 @@ local function save_internal(state: InternalState, reason: string?, operation_de
 	if not local_changed_during_save then
 		update_local_from_envelope(state, confirmed, confirmed_info)
 		state.dirty_since_local = nil
+		state.dirty_age_is_lower_bound = false
 	else
 		if state.dirty_since_local == nil then
 			state.dirty_since_local = now_local()
@@ -9582,6 +9663,7 @@ local function save_internal(state: InternalState, reason: string?, operation_de
 	state.last_successful_write_local = now_local()
 	state.busy = false
 	state.state = "active"
+	scheduler_activation.refresh_durability_risk(state)
 	state.next_autosave = now_local() + (state.options.autosave_interval or DEFAULT_AUTOSAVE_INTERVAL)
 	if state.save_requested then
 		state.next_autosave = now_local()
@@ -10023,8 +10105,12 @@ track_external_data_mutation = function(state: InternalState)
 	if public_record_table ~= nil then
 		public_record_table.Data = state.data
 	end
+	local begins_dirty_generation = state.change_sequence == state.saved_change_sequence
 	state.change_sequence += 1
 	mark_dirty(state)
+	if begins_dirty_generation then
+		state.dirty_age_is_lower_bound = true
+	end
 	local operation_id = HttpService:GenerateGUID(false)
 	state.current_operation_id = operation_id
 	enqueue_change_observation(state, old_data, current_data, operation_id, "direct_data_mutation")
@@ -10233,6 +10319,26 @@ local function is_dirty(self: Record): boolean
 	return state.change_sequence ~= state.saved_change_sequence
 end
 
+scheduler_activation.mutation_backpressure_reason = function(state: InternalState): string?
+	if state.options.durability_mode ~= "read_only_on_risk" then
+		return nil
+	end
+	local dirty = state.change_sequence ~= state.saved_change_sequence
+	if not dirty then
+		return nil
+	end
+	local dirty_since = state.dirty_since_local
+	if dirty_since == nil then
+		return nil
+	end
+	local max_age = state.options.max_dirty_age_seconds
+		or (state.options.autosave_interval or DEFAULT_AUTOSAVE_INTERVAL) * 2
+	if now_local() - dirty_since >= max_age then
+		return "mutation rejected: oldest dirty change exceeded max_dirty_age_seconds"
+	end
+	return nil
+end
+
 local function can_mutate(self: Record): (boolean, string?)
 	local state = private[self]
 	if state == nil then
@@ -10240,6 +10346,10 @@ local function can_mutate(self: Record): (boolean, string?)
 	end
 	if state.state ~= "active" or state.token == nil then
 		return false, "record ownership is not confirmed active"
+	end
+	local backpressure = scheduler_activation.mutation_backpressure_reason(state)
+	if backpressure ~= nil then
+		return false, backpressure
 	end
 	if state.takeover_requested then
 		return false, "session takeover has been requested"
@@ -10267,6 +10377,14 @@ local function get_durability_status(self: Record): { [string]: any }
 			reconciliation_category = "record_missing",
 		}
 	end
+	if not state.public_data_detached then
+		local now = now_local()
+		local max_age = state.options.max_dirty_age_seconds
+			or (state.options.autosave_interval or DEFAULT_AUTOSAVE_INTERVAL) * 2
+		state.next_durability_observation_local = now
+			+ math.max(0.05, math.min(1, max_age * 0.25))
+		track_external_data_mutation(state)
+	end
 	local dirty = state.change_sequence ~= state.saved_change_sequence
 	local pending = state.pending_operation
 	local ownership = if state.state == "unknown" then "uncertain"
@@ -10276,22 +10394,84 @@ local function get_durability_status(self: Record): { [string]: any }
 		elseif state.busy then "saving"
 		elseif dirty then "dirty"
 		else "clean"
+	local dirty_age = if dirty and state.dirty_since_local ~= nil
+		then math.max(0, now_local() - state.dirty_since_local) else 0
+	local max_dirty_age = state.options.max_dirty_age_seconds
+		or (state.options.autosave_interval or DEFAULT_AUTOSAVE_INTERVAL) * 2
+	local slo_exceeded = dirty and dirty_age >= max_dirty_age
+	local backpressure = scheduler_activation.mutation_backpressure_reason(state)
 	return {
 		ownership = ownership,
 		durability = durability,
 		unknown = state.state == "unknown",
+		dirty = dirty,
+		durability_mode = state.options.durability_mode or "balanced",
+		maximum_dirty_age_seconds = max_dirty_age,
+		dirty_age_slo_exceeded = slo_exceeded,
+		dirty_age_basis = if not dirty then "clean"
+			elseif state.dirty_age_is_lower_bound == true
+				then "lower_bound_from_direct_mutation_observation"
+			else "tracked_dirty_generation",
+		dirty_age_is_lower_bound = dirty and state.dirty_age_is_lower_bound == true,
+		mutation_admission = if state.state ~= "active" or state.token == nil
+			then "blocked" elseif backpressure ~= nil then "read_only" else "allowed",
+		risk_active = state.durability_risk_active == true or state.state == "unknown" or slo_exceeded,
+		risk_reason = state.durability_risk_reason or (if state.state == "unknown" then "write_or_lease_outcome_unknown" elseif slo_exceeded then "maximum_dirty_age_exceeded" else nil),
+		observed_at_unix = now_unix(),
 		last_confirmed_revision = state.revision,
 		last_confirmed_generation = state.generation,
 		dirty_watermark = state.change_sequence,
 		durable_watermark = state.saved_change_sequence,
-		oldest_dirty_age = if dirty and state.dirty_since_local ~= nil
-			then math.max(0, now_local() - state.dirty_since_local) else 0,
+		oldest_dirty_age = dirty_age,
 		last_successful_write_age = if state.last_successful_write_local ~= nil
 			then math.max(0, now_local() - state.last_successful_write_local) else nil,
 		lease_margin = math.max(0, state.durable_lease_until - session_now_unix(state.backend.mock)),
 		pending_operation_id = if pending ~= nil then pending.operation_id else nil,
 		reconciliation_category = state.last_reconciliation_category,
 		reconciliation_attempts = if pending ~= nil then pending.attempts else 0,
+	}
+end
+
+RecordStore.get_health_snapshot = function(): { [string]: any }
+	local total_records = 0
+	local active_records_count = 0
+	local unknown_records_count = 0
+	local dirty_records_count = 0
+	local dirty_age_slo_exceeded_count = 0
+	local oldest_dirty_age = 0
+	local now = now_unix()
+
+	for record, state in private do
+		if not state.retired then
+			total_records += 1
+			if state.state == "active" then
+				active_records_count += 1
+			elseif state.state == "unknown" then
+				unknown_records_count += 1
+			end
+			local status = get_durability_status(record)
+			if status.dirty == true then
+				dirty_records_count += 1
+				oldest_dirty_age = math.max(oldest_dirty_age, status.oldest_dirty_age or 0)
+			end
+			if status.dirty_age_slo_exceeded == true then
+				dirty_age_slo_exceeded_count += 1
+			end
+		end
+	end
+
+	local degraded = unknown_records_count > 0 or dirty_age_slo_exceeded_count > 0
+	return {
+		observed_at_unix = now,
+		evidence_scope = "server_local_loaded_records",
+		server_state = if closing then "closing" elseif degraded then "degraded" else "healthy",
+		total_records = total_records,
+		active_records = active_records_count,
+		unknown_records = unknown_records_count,
+		dirty_records = dirty_records_count,
+		dirty_age_slo_exceeded_records = dirty_age_slo_exceeded_count,
+		oldest_dirty_age = oldest_dirty_age,
+		has_unknown_write_outcome = unknown_records_count > 0,
 	}
 end
 
@@ -10310,6 +10490,10 @@ local function set_user_ids(self: Record, user_ids: { number }): (ResultCode, st
 	end
 	if state.state ~= "active" then
 		return "fenced", "record is not actively owned"
+	end
+	local backpressure = scheduler_activation.mutation_backpressure_reason(state)
+	if backpressure ~= nil then
+		return "capacity", backpressure
 	end
 	if state.takeover_requested then
 		return "closing", "session takeover has been requested"
@@ -10384,6 +10568,10 @@ local function set_metadata(self: Record, metadata: Metadata): (ResultCode, stri
 	if state.state ~= "active" then
 		return "fenced", "record is not actively owned"
 	end
+	local backpressure = scheduler_activation.mutation_backpressure_reason(state)
+	if backpressure ~= nil then
+		return "capacity", backpressure
+	end
 	if state.takeover_requested then
 		return "closing", "session takeover has been requested"
 	end
@@ -10419,6 +10607,10 @@ local function update_metadata(self: Record, callback: (Metadata) -> Metadata): 
 	end
 	if state.state ~= "active" then
 		return "fenced", "record is not actively owned"
+	end
+	local backpressure = scheduler_activation.mutation_backpressure_reason(state)
+	if backpressure ~= nil then
+		return "capacity", backpressure
 	end
 	if state.takeover_requested then
 		return "closing", "session takeover has been requested"
@@ -10498,6 +10690,10 @@ local function update(self: Record, callback: (JsonValue?) -> JsonValue?): (Resu
 	if state == nil or state.state ~= "active" then
 		return "fenced", "record is not actively owned"
 	end
+	local backpressure = scheduler_activation.mutation_backpressure_reason(state)
+	if backpressure ~= nil then
+		return "capacity", backpressure
+	end
 	if state.takeover_requested then
 		return "closing", "session takeover has been requested"
 	end
@@ -10569,6 +10765,10 @@ local function reconcile(self: Record, template: JsonValue): (ResultCode, string
 	end
 	if state == nil or state.state ~= "active" then
 		return "fenced", "record is not actively owned"
+	end
+	local backpressure = scheduler_activation.mutation_backpressure_reason(state)
+	if backpressure ~= nil then
+		return "capacity", backpressure
 	end
 	if state.takeover_requested then
 		return "closing", "session takeover has been requested"
@@ -12260,6 +12460,8 @@ local function open_internal(state: InternalState, default_data: JsonValue?, rec
 		state.change_sequence = 0
 		state.saved_change_sequence = 0
 		state.dirty_since_local = nil
+		state.dirty_age_is_lower_bound = false
+		state.next_durability_observation_local = nil
 		state.pending_operation = nil
 		state.next_reconciliation = math.huge
 		state.last_reconciliation_category = nil
@@ -12456,6 +12658,7 @@ local function renew_internal(state: InternalState): (ResultCode, string?)
 		}
 		state.next_reconciliation = now_local() + 0.25
 		state.last_reconciliation_category = "renewal_outcome_unknown"
+		scheduler_activation.refresh_durability_risk(state)
 		observe(state, "renew", "unknown", last_error or "renewal outcome is unresolved")
 		return "unknown", last_error or "renewal outcome is unresolved"
 	end
@@ -12480,6 +12683,7 @@ local function renew_internal(state: InternalState): (ResultCode, string?)
 	state.last_successful_write_local = now_local()
 	state.busy = false
 	state.state = "active"
+	scheduler_activation.refresh_durability_risk(state)
 	state.next_renewal = now_local() + (state.options.lease_renewal or DEFAULT_LEASE_RENEWAL)
 	if state.change_sequence ~= state.saved_change_sequence then
 		state.next_autosave = now_local()
@@ -12769,6 +12973,7 @@ local function reconcile_unknown_internal(state: InternalState): (ResultCode, st
 			if state.change_sequence == pending.captured_change_sequence then
 				update_local_from_envelope(state, envelope, info)
 				state.dirty_since_local = nil
+				state.dirty_age_is_lower_bound = false
 				state.save_requested = false
 			else
 				if state.dirty_since_local == nil then state.dirty_since_local = now_local() end
@@ -12781,6 +12986,7 @@ local function reconcile_unknown_internal(state: InternalState): (ResultCode, st
 		state.next_reconciliation = math.huge
 		if envelope.session ~= nil and lease_remaining > required_recovery_lease_margin(state) then
 			state.state = "active"
+			scheduler_activation.refresh_durability_risk(state)
 			state.last_reconciliation_category = nil
 			state.next_renewal = now_local() + (state.options.lease_renewal or DEFAULT_LEASE_RENEWAL)
 			state.next_autosave = if state.change_sequence ~= state.saved_change_sequence
@@ -13370,6 +13576,8 @@ local function make_record(name: string, scope: string, key: string, options: Op
 		next_reconciliation = math.huge,
 		last_reconciliation_category = nil,
 		dirty_since_local = nil,
+		dirty_age_is_lower_bound = false,
+		next_durability_observation_local = nil,
 		last_successful_write_local = nil,
 	}
 	local record: Record = {
@@ -13455,22 +13663,7 @@ local scheduler_governor = RecordStoreScheduler.new({
 local scheduler_dispatcher = RecordStoreScheduler.new_dispatcher(scheduler_governor, {
 	now_ms = function() return now_local() * 1000 end,
 })
-local scheduler_activation = {
-	requested = false,
-	revision = 1,
-	percent = 100,
-	salt = "recordstore-scheduler-v1",
-	cohort_bucket = 0,
-}
-local function scheduler_rollout_bucket(salt: string): number
-	local identity = tostring(game.PlaceId) .. ":" .. tostring(server_id) .. ":" .. salt
-	local hash = 0
-	for index = 1, #identity do
-		hash = (hash * 131 + string.byte(identity, index)) % 2147483647
-	end
-	return hash % 100
-end
-scheduler_activation.cohort_bucket = scheduler_rollout_bucket(scheduler_activation.salt)
+
 
 local function apply_scheduler_activation()
 	local cohort_included = scheduler_activation.cohort_bucket < scheduler_activation.percent
@@ -13773,6 +13966,21 @@ function RecordStore.replay_scheduler_trace(
 	return replay:Replay(trace)
 end
 
+scheduler_activation.scheduled_autosave_priority = function(state: InternalState, now: number): string
+	if state.options.durability_mode ~= "durability_first"
+		or state.change_sequence == state.saved_change_sequence
+		or state.dirty_since_local == nil
+	then
+		return "normal"
+	end
+	local max_dirty_age = state.options.max_dirty_age_seconds
+		or (state.options.autosave_interval or DEFAULT_AUTOSAVE_INTERVAL) * 2
+	if now - (state.dirty_since_local :: number) >= max_dirty_age * 0.5 then
+		return "high"
+	end
+	return "normal"
+end
+
 local function run_scheduled_record_work(record: Record, state: InternalState, now: number)
 	local slot = scheduled_state_slot(state)
 	if state.takeover_requested then
@@ -13834,7 +14042,8 @@ local function run_scheduled_record_work(record: Record, state: InternalState, n
 		and slot.pending.autosave ~= true
 	then
 		local next_autosave = now + (state.options.autosave_interval or DEFAULT_AUTOSAVE_INTERVAL) * (0.9 + math.random() * 0.2)
-		local result = enqueue_state_work(record, state, "autosave", "normal", "profile_autosave", "update_async", function()
+		local result = enqueue_state_work(record, state, "autosave", scheduler_activation.scheduled_autosave_priority(state, now),
+			"profile_autosave", "update_async", function()
 			if state.busy or state.queue_busy then
 				return { code = "retryable", message = "record became busy before autosave started" }
 			end
@@ -13924,86 +14133,155 @@ local function run_scheduled_recovery(record: Record, state: InternalState, now:
 	end
 end
 
+scheduler_activation.run_unscheduled_takeover = function(record: Record, state: InternalState): boolean
+	if not state.takeover_requested or state.busy or state.queue_busy then
+		return false
+	end
+	complete_deferred_takeover(state)
+	sync_public(record)
+	return true
+end
+
+scheduler_activation.run_unscheduled_renewal = function(record: Record, state: InternalState, now: number): boolean
+	if state.state ~= "active"
+		or state.busy or state.queue_busy or now < state.next_renewal
+	then
+		return false
+	end
+	state.next_renewal = now + (state.options.lease_renewal or DEFAULT_LEASE_RENEWAL)
+	task.spawn(function()
+		renew_internal(state)
+		sync_public(record)
+	end)
+	return true
+end
+
+scheduler_activation.run_unscheduled_autosave = function(record: Record, state: InternalState, now: number)
+	if state.state ~= "active"
+		or state.busy or state.queue_busy or now < state.next_autosave
+	then
+		return
+	end
+	state.next_autosave = now + (state.options.autosave_interval or DEFAULT_AUTOSAVE_INTERVAL)
+		* (0.9 + math.random() * 0.2)
+	task.spawn(function()
+		save_internal(state, "autosave", nil, nil)
+		sync_public(record)
+	end)
+end
+
+scheduler_activation.run_unscheduled_messaging = function(state: InternalState, now: number)
+	if state.state == "active"
+		and state.options.on_message ~= nil
+		and messaging_enabled(state)
+		and state.message_subscription == nil
+		and now >= state.next_message_subscribe
+	then
+		subscribe_record(state)
+	end
+end
+
+scheduler_activation.run_unscheduled_queue_poll = function(record: Record, state: InternalState, now: number)
+	if state.state ~= "active"
+		or state.options.durable_queue_enabled == false
+		or state.options.on_queue_message == nil
+		or state.queue_busy
+		or not (state.queue_hint or now >= state.next_queue_poll)
+	then
+		return
+	end
+	state.queue_hint = false
+	state.next_queue_poll = now + (state.options.queue_poll_interval or DEFAULT_QUEUE_POLL_INTERVAL)
+	task.spawn(function()
+		process_queue_internal(state, 4)
+		sync_public(record)
+	end)
+end
+
+scheduler_activation.run_unscheduled_record_work = function(record: Record, state: InternalState, now: number)
+	local takeover_handled = scheduler_activation.run_unscheduled_takeover(record, state)
+	if not takeover_handled
+		and not scheduler_activation.run_unscheduled_renewal(record, state, now)
+	then
+		scheduler_activation.run_unscheduled_autosave(record, state, now)
+	end
+	scheduler_activation.run_unscheduled_messaging(state, now)
+	scheduler_activation.run_unscheduled_queue_poll(record, state, now)
+end
+scheduler_activation.prepare_durability_first_deadline = function(state: InternalState, now: number)
+	if state.options.durability_mode ~= "durability_first"
+		or state.change_sequence == state.saved_change_sequence
+		or state.dirty_since_local == nil
+		or state.busy
+		or state.queue_busy
+	then
+		return
+	end
+	local max_dirty_age = state.options.max_dirty_age_seconds
+		or (state.options.autosave_interval or DEFAULT_AUTOSAVE_INTERVAL) * 2
+	local urgent_save_at = state.dirty_since_local + max_dirty_age * 0.5
+	state.next_autosave = math.min(state.next_autosave, urgent_save_at)
+end
+
+scheduler_activation.process_active_record = function(record: Record, state: InternalState)
+	scheduler_activation.refresh_durability_risk(state)
+	if state.state ~= "active" then
+		return
+	end
+	local now = now_local()
+	scheduler_activation.prepare_durability_first_deadline(state, now)
+	if scheduler_enabled then
+		run_scheduled_record_work(record, state, now)
+	else
+		scheduler_activation.run_unscheduled_record_work(record, state, now)
+	end
+end
+
+scheduler_activation.process_recovery_record = function(record: Record, state: InternalState)
+	scheduler_activation.refresh_durability_risk(state)
+	if state.state ~= "unknown" or state.pending_operation == nil then
+		return
+	end
+	local now = now_local()
+	if scheduler_enabled then
+		run_scheduled_recovery(record, state, now)
+	elseif not recovery_in_flight and not state.busy and now >= state.next_reconciliation then
+		recovery_in_flight = true
+		state.next_reconciliation = now + 0.5
+		task.spawn(function()
+			reconcile_unknown_internal(state)
+			sync_public(record)
+			recovery_in_flight = false
+		end)
+	end
+end
+
 local function start_scheduler()
-	if scheduler_started then return end
+	if scheduler_started then
+		return
+	end
 	scheduler_started = true
 	task.spawn(function()
 		while not closing do
 			for record in active_records do
 				local state = private[record]
-				if state ~= nil and (state.state :: SessionState) == "active" then
-					local now = now_local()
-					if scheduler_enabled then
-						run_scheduled_record_work(record, state, now)
-					else
-						local handled_takeover = false
-						if state.takeover_requested and not state.busy and not state.queue_busy then
-							complete_deferred_takeover(state)
-							sync_public(record)
-							handled_takeover = true
-						end
-						if not handled_takeover and state.state == "active"
-							and not state.busy and not state.queue_busy and now >= state.next_renewal
-						then
-							state.next_renewal = now + (state.options.lease_renewal or DEFAULT_LEASE_RENEWAL)
-							task.spawn(function()
-								renew_internal(state)
-								sync_public(record)
-							end)
-						elseif not handled_takeover and state.state == "active"
-							and not state.busy and not state.queue_busy and now >= state.next_autosave
-						then
-							state.next_autosave = now + (state.options.autosave_interval or DEFAULT_AUTOSAVE_INTERVAL) * (0.9 + math.random() * 0.2)
-							task.spawn(function()
-								save_internal(state, "autosave", nil, nil)
-								sync_public(record)
-							end)
-						end
-						if state.state == "active"
-							and state.options.on_message ~= nil
-							and messaging_enabled(state)
-							and state.message_subscription == nil
-							and now >= state.next_message_subscribe
-						then subscribe_record(state) end
-						if state.state == "active"
-							and state.options.durable_queue_enabled ~= false
-							and state.options.on_queue_message ~= nil
-							and not state.queue_busy
-							and (state.queue_hint or now >= state.next_queue_poll)
-						then
-							state.queue_hint = false
-							state.next_queue_poll = now + (state.options.queue_poll_interval or DEFAULT_QUEUE_POLL_INTERVAL)
-							task.spawn(function()
-								process_queue_internal(state, 4)
-								sync_public(record)
-							end)
-						end
-					end
+				if state ~= nil then
+					scheduler_activation.process_active_record(record, state)
 				end
 			end
 			for record in recovery_records do
 				local state = private[record]
-				if state ~= nil and state.state == "unknown" and state.pending_operation ~= nil then
-					local now = now_local()
-					if scheduler_enabled then
-						run_scheduled_recovery(record, state, now)
-					elseif not recovery_in_flight and not state.busy and now >= state.next_reconciliation then
-						recovery_in_flight = true
-						state.next_reconciliation = now + 0.5
-						task.spawn(function()
-							reconcile_unknown_internal(state)
-							sync_public(record)
-							recovery_in_flight = false
-						end)
-					end
+				if state ~= nil then
+					scheduler_activation.process_recovery_record(record, state)
 				end
 			end
-			if scheduler_enabled then scheduler_dispatcher:Kick() end
+			if scheduler_enabled then
+				scheduler_dispatcher:Kick()
+			end
 			task.wait(SCHEDULER_STEP)
 		end
 	end)
 end
-
 RecordStore.shutdown = function()
 	if shutdown_started then
 		return
@@ -14042,7 +14320,6 @@ RecordStore.shutdown = function()
 	end
 end
 
-RecordStore._internals = {}
 RecordStore._internals.normalize_options = function(options: Options): (Options?, string?)
 	if type(options) ~= "table" then
 		return nil, "options must be a table"
@@ -14050,6 +14327,12 @@ RecordStore._internals.normalize_options = function(options: Options): (Options?
 	local copied = table.clone(options)
 	if copied.autosave_interval == nil then
 		copied.autosave_interval = DEFAULT_AUTOSAVE_INTERVAL
+	end
+	if copied.durability_mode == nil then
+		copied.durability_mode = "balanced"
+	end
+	if copied.max_dirty_age_seconds == nil then
+		copied.max_dirty_age_seconds = (copied.autosave_interval :: number) * 2
 	end
 	if copied.lease_duration == nil then
 		copied.lease_duration = DEFAULT_LEASE_DURATION
@@ -14155,6 +14438,17 @@ RecordStore._internals.normalize_options = function(options: Options): (Options?
 	end
 	if not valid_positive_number(copied.autosave_interval) then
 		return nil, "autosave_interval must be a positive finite number"
+	end
+	if copied.durability_mode ~= "balanced"
+		and copied.durability_mode ~= "durability_first"
+		and copied.durability_mode ~= "read_only_on_risk"
+	then
+		return nil, "durability_mode must be balanced, durability_first, or read_only_on_risk"
+	end
+	if not valid_positive_number(copied.max_dirty_age_seconds)
+		or (copied.max_dirty_age_seconds :: number) > 86400
+	then
+		return nil, "max_dirty_age_seconds must be positive and no greater than 86400"
 	end
 	if not valid_positive_number(copied.lease_duration) then
 		return nil, "lease_duration must be a positive finite number"
