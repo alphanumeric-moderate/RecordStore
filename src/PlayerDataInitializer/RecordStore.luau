@@ -14095,31 +14095,44 @@ local function run_scheduled_recovery(record: Record, state: InternalState, now:
 	end
 end
 
-local function run_unscheduled_record_work(record: Record, state: InternalState, now: number)
-	local handled_takeover = false
-	if state.takeover_requested and not state.busy and not state.queue_busy then
-		complete_deferred_takeover(state)
+local function run_unscheduled_takeover(record: Record, state: InternalState): boolean
+	if not state.takeover_requested or state.busy or state.queue_busy then
+		return false
+	end
+	complete_deferred_takeover(state)
+	sync_public(record)
+	return true
+end
+
+local function run_unscheduled_renewal(record: Record, state: InternalState, now: number): boolean
+	if state.state ~= "active"
+		or state.busy or state.queue_busy or now < state.next_renewal
+	then
+		return false
+	end
+	state.next_renewal = now + (state.options.lease_renewal or DEFAULT_LEASE_RENEWAL)
+	task.spawn(function()
+		renew_internal(state)
 		sync_public(record)
-		handled_takeover = true
-	end
-	if not handled_takeover and state.state == "active"
-		and not state.busy and not state.queue_busy and now >= state.next_renewal
+	end)
+	return true
+end
+
+local function run_unscheduled_autosave(record: Record, state: InternalState, now: number)
+	if state.state ~= "active"
+		or state.busy or state.queue_busy or now < state.next_autosave
 	then
-		state.next_renewal = now + (state.options.lease_renewal or DEFAULT_LEASE_RENEWAL)
-		task.spawn(function()
-			renew_internal(state)
-			sync_public(record)
-		end)
-	elseif not handled_takeover and state.state == "active"
-		and not state.busy and not state.queue_busy and now >= state.next_autosave
-	then
-		state.next_autosave = now + (state.options.autosave_interval or DEFAULT_AUTOSAVE_INTERVAL)
-			* (0.9 + math.random() * 0.2)
-		task.spawn(function()
-			save_internal(state, "autosave", nil, nil)
-			sync_public(record)
-		end)
+		return
 	end
+	state.next_autosave = now + (state.options.autosave_interval or DEFAULT_AUTOSAVE_INTERVAL)
+		* (0.9 + math.random() * 0.2)
+	task.spawn(function()
+		save_internal(state, "autosave", nil, nil)
+		sync_public(record)
+	end)
+end
+
+local function run_unscheduled_messaging(state: InternalState, now: number)
 	if state.state == "active"
 		and state.options.on_message ~= nil
 		and messaging_enabled(state)
@@ -14128,21 +14141,33 @@ local function run_unscheduled_record_work(record: Record, state: InternalState,
 	then
 		subscribe_record(state)
 	end
-	if state.state == "active"
-		and state.options.durable_queue_enabled ~= false
-		and state.options.on_queue_message ~= nil
-		and not state.queue_busy
-		and (state.queue_hint or now >= state.next_queue_poll)
-	then
-		state.queue_hint = false
-		state.next_queue_poll = now + (state.options.queue_poll_interval or DEFAULT_QUEUE_POLL_INTERVAL)
-		task.spawn(function()
-			process_queue_internal(state, 4)
-			sync_public(record)
-		end)
-	end
 end
 
+local function run_unscheduled_queue_poll(record: Record, state: InternalState, now: number)
+	if state.state ~= "active"
+		or state.options.durable_queue_enabled == false
+		or state.options.on_queue_message == nil
+		or state.queue_busy
+		or not (state.queue_hint or now >= state.next_queue_poll)
+	then
+		return
+	end
+	state.queue_hint = false
+	state.next_queue_poll = now + (state.options.queue_poll_interval or DEFAULT_QUEUE_POLL_INTERVAL)
+	task.spawn(function()
+		process_queue_internal(state, 4)
+		sync_public(record)
+	end)
+end
+
+local function run_unscheduled_record_work(record: Record, state: InternalState, now: number)
+	local takeover_handled = run_unscheduled_takeover(record, state)
+	if not takeover_handled and not run_unscheduled_renewal(record, state, now) then
+		run_unscheduled_autosave(record, state, now)
+	end
+	run_unscheduled_messaging(state, now)
+	run_unscheduled_queue_poll(record, state, now)
+end
 local function prepare_durability_first_deadline(state: InternalState, now: number)
 	if state.options.durability_mode ~= "durability_first"
 		or state.change_sequence == state.saved_change_sequence
