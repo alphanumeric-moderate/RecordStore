@@ -1898,11 +1898,12 @@ function MailboxV2.EnqueueAsync(self: Mailbox, message_type: string, payload: un
 	end
 	local options: Dict = enqueue_options or ({} :: Dict)
 	local idempotency_key: string? = nil
-	if options.idempotency_key ~= nil then
-		if type(options.idempotency_key) ~= "string" then
+	local requested_idempotency_key = options.idempotency_key
+	if requested_idempotency_key ~= nil then
+		if type(requested_idempotency_key) ~= "string" then
 			return ok("invalid", nil, nil, "idempotency_key must be a string")
 		end
-		idempotency_key = options.idempotency_key
+		idempotency_key = requested_idempotency_key
 	end
 	local ordering_key = options.ordering_key
 	if ordering_key ~= nil and (type(ordering_key) ~= "string" or ordering_key == ""
