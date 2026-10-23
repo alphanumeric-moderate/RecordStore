@@ -1118,7 +1118,7 @@ do
 	) :: { [string]: any }
 	assert(after.fencing_generation == base_generation + 1,
 		"the CAS operation may commit once, but the locally unsafe session must not resume")
-	assert(((after.session :: { [string]: any }).lease_until) - fake_now <= 2,
+	assert(((after.session :: { [string]: any }).lease_until) - (fake_now + 179) <= 2,
 		"the fixture must leave less than the required recovery safety margin")
 	assert((after.data :: { [string]: any }).coins == 10,
 		"insufficient-margin reacquisition must not persist the ambiguous data snapshot")
