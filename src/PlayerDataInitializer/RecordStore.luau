@@ -2974,7 +2974,7 @@ local function claim_queue_message(state: InternalState): (QueueItem?, ResultCod
 	end
 	local queue, verify_code, verify_message = read_queue_after_update(backend, result, deadline, state, owner)
 	if queue == nil then
-		return nil, verify_code or "unknown", verify_message
+		return nil, normalize_result_code(verify_code) or "unknown", verify_message
 	end
 	local verification_time = queue_now_unix(backend.mock)
 	for _, item in ipairs(queue.messages) do
@@ -3038,7 +3038,7 @@ local function acknowledge_queue_message(state: InternalState, message_id: strin
 	end
 	local queue, verify_code, verify_message = read_queue_after_update(backend, result, deadline, state, owner)
 	if queue == nil then
-		return verify_code or "unknown", verify_message
+		return normalize_result_code(verify_code) or "unknown", verify_message
 	end
 	for _, item in ipairs(queue.messages) do
 		if item.id == message_id then
@@ -3123,7 +3123,7 @@ local function enqueue_internal(state: InternalState, message_type: string, data
 	end
 	local queue, verify_code, verify_message = read_queue_after_update(backend, result, deadline, state, owner)
 	if queue == nil then
-		return verify_code or "unknown", verify_message
+		return normalize_result_code(verify_code) or "unknown", verify_message
 	end
 	for _, item in ipairs(queue.messages) do
 		if item.id == message_id then
@@ -3258,7 +3258,7 @@ local function dead_letter_queue_message(
 	end
 	local verified_queue, verify_code, verify_message = read_queue_after_update(backend, result, deadline, state, owner)
 	if verified_queue == nil then
-		return verify_code or "unknown", verify_message
+		return normalize_result_code(verify_code) or "unknown", verify_message
 	end
 	for _, dead_letter in ipairs(verified_queue.dead_letters) do
 		if dead_letter.id == message_id and dead_letter.terminal_lock_token == lock_token then
@@ -4233,7 +4233,7 @@ local function get_version_at_time_internal(name: string, scope: string, key: st
 			return nil, nil, "not_found", "no version was available at the requested time"
 		end
 		local snapshot, result, message = get_version_internal(name, scope, key, entries[1].Version, operation_deadline, legacy_decoder, true)
-		return snapshot, entries[1].Version, result, message
+		return snapshot, entries[1].Version, normalize_result_code(result) or "unknown", message
 	end
 	local backend = make_backend(name, scope, key, false)
 	local store = backend.store
@@ -5295,7 +5295,7 @@ local function enqueue(self: Record, message_type: string, data: JsonValue?, enq
 	if state.takeover_requested then return "closing", "session takeover has been requested" end
 	if state.mailbox_v2 ~= nil then
 		local mailbox, bound_code, bound_message = mailbox_bound_for_state(state)
-		if mailbox == nil then return bound_code or "fenced", bound_message end
+		if mailbox == nil then return normalize_result_code(bound_code) or "fenced", bound_message end
 		local call_ok, result = pcall(function() return mailbox:EnqueueAsync(message_type, data, enqueue_options) end)
 		if not call_ok or type(result) ~= "table" or type(result.code) ~= "string" then
 			return "unknown", if call_ok then "V2 mailbox returned no structured enqueue result" else tostring(result)
@@ -5324,7 +5324,7 @@ local function get_queue(self: Record): ({ QueueMessage }, ResultCode, string?)
 	if state.mailbox_v2_binding and state.mailbox_v2 ~= nil then return {}, "busy", "V2 mailbox binding is checking the legacy queue" end
 	if state.mailbox_v2 ~= nil then
 		local mailbox, bound_code, bound_message = mailbox_bound_for_state(state)
-		if mailbox == nil then return {}, bound_code or "fenced", bound_message end
+		if mailbox == nil then return {}, normalize_result_code(bound_code) or "fenced", bound_message end
 		local call_ok, rows, result = pcall(function() return mailbox:GetQueueAsync() end)
 		if not call_ok or type(rows) ~= "table" or type(result) ~= "table" or type(result.code) ~= "string" then
 			return {}, "unknown", if call_ok then "V2 mailbox returned no structured queue result" else tostring(rows)
@@ -5374,11 +5374,11 @@ local function get_queue(self: Record): ({ QueueMessage }, ResultCode, string?)
 		state
 	)
 	if migration_code ~= nil then
-		return normalize_result_code({}) or "unknown", migration_code, migration_message
+		return {}, normalize_result_code(migration_code) or "unknown", migration_message
 	end
 	local raw, _, result_code, result_message = backend_get(backend, false, deadline)
 	if result_code ~= nil then
-		return normalize_result_code({}) or "unknown", result_code, result_message
+		return {}, normalize_result_code(result_code) or "unknown", result_message
 	end
 	local owner = make_queue_owner(state.name, state.scope, state.key)
 	local queue, parse_error, owner_mismatch = parse_queue_envelope(raw, owner)
@@ -5401,7 +5401,7 @@ process_queue_v2 = function(self: Record, state: InternalState, max_messages: nu
 		return "invalid", "max_messages must be a positive integer"
 	end
 	local mailbox, bound_code, bound_message = mailbox_bound_for_state(state)
-	if mailbox == nil then return bound_code or "fenced", bound_message end
+	if mailbox == nil then return normalize_result_code(bound_code) or "fenced", bound_message end
 	if state.options.on_queue_message_async == nil and state.options.on_queue_message == nil then
 		return "invalid", "on_queue_message_async or on_queue_message must be configured before processing a V2 mailbox"
 	end
@@ -5509,7 +5509,7 @@ local function bind_mailbox_v2_async(self: Record, mailbox: unknown): (ResultCod
 	local inspect_ok, legacy_queue, queue_code, queue_message = pcall(get_queue, self)
 	state.queue_busy = false
 	if not inspect_ok then state.mailbox_v2_binding = false; return "unknown", "could not inspect the legacy queue: " .. tostring(legacy_queue) end
-	if queue_code ~= "success" then state.mailbox_v2_binding = false; return queue_code or "unknown", queue_message or "could not verify the legacy queue" end
+	if queue_code ~= "success" then state.mailbox_v2_binding = false; return normalize_result_code(queue_code) or "unknown", queue_message or "could not verify the legacy queue" end
 	if type(legacy_queue) ~= "table" or #legacy_queue > 0 then
 		state.mailbox_v2_binding = false
 		return "busy", "legacy queue contains pending messages; drain it before binding the V2 mailbox"
@@ -5550,11 +5550,11 @@ local function get_dead_letters(self: Record): ({ DeadLetterMessage }, ResultCod
 		state
 	)
 	if migration_code ~= nil then
-		return normalize_result_code({}) or "unknown", migration_code, migration_message
+		return {}, normalize_result_code(migration_code) or "unknown", migration_message
 	end
 	local raw, _, result_code, result_message = backend_get(backend, false, deadline, state)
 	if result_code ~= nil then
-		return normalize_result_code({}) or "unknown", result_code, result_message
+		return {}, normalize_result_code(result_code) or "unknown", result_message
 	end
 	local owner = make_queue_owner(state.name, state.scope, state.key)
 	local queue, parse_error, owner_mismatch = parse_queue_envelope(raw, owner)
@@ -5658,7 +5658,7 @@ local function claim_dead_letter(self: Record, message_id: string): (DeadLetterM
 	end
 	local queue, verify_code, verify_message = read_queue_after_update(backend, result, deadline, state, owner)
 	if queue == nil then
-		return nil, verify_code or "unknown", verify_message
+		return nil, normalize_result_code(verify_code) or "unknown", verify_message
 	end
 	local verification_time = queue_now_unix(backend.mock)
 	for _, item in ipairs(queue.dead_letters) do
@@ -5763,7 +5763,7 @@ local function replay_dead_letter(self: Record, message_id: string, lock_token: 
 	end
 	local queue, verify_code, verify_message = read_queue_after_update(backend, result, deadline, state, owner)
 	if queue == nil then
-		return verify_code or "unknown", verify_message
+		return normalize_result_code(verify_code) or "unknown", verify_message
 	end
 	for _, item in ipairs(queue.messages) do
 		if item.id == message_id and item.last_replay_token == lock_token then
@@ -5841,7 +5841,7 @@ local function discard_dead_letter(self: Record, message_id: string, lock_token:
 	end
 	local queue, verify_code, verify_message = read_queue_after_update(backend, result, deadline, state, owner)
 	if queue == nil then
-		return verify_code or "unknown", verify_message
+		return normalize_result_code(verify_code) or "unknown", verify_message
 	end
 	for _, item in ipairs(queue.dead_letters) do
 		if item.id == message_id then
@@ -5861,7 +5861,7 @@ local function close_record(self: Record): (ResultCode, string?)
 	end
 	local result, message = close_internal(state, false)
 	sync_public(self)
-	return result, message
+	return normalize_result_code(result) or "unknown", message
 end
 
 local function delete_record(self: Record): (ResultCode, string?)
@@ -6115,7 +6115,7 @@ local function open_internal(state: InternalState, default_data: JsonValue?, rec
 			state.backend.mock
 		)
 		if list_result ~= "success" or entries == nil then
-			return nil, list_result, list_message or "version history could not be read"
+			return nil, normalize_result_code(list_result) or "unknown", list_message or "version history could not be read"
 		end
 
 		local current_index: number? = nil
@@ -6662,8 +6662,8 @@ local function open_internal(state: InternalState, default_data: JsonValue?, rec
 	end
 	local unresolved_result = last_result or "unknown"
 	state.state = if unresolved_result == "unknown" or unresolved_result == "retry_exhausted" then "unknown" else "closed"
-	observe(state, "open", unresolved_result, last_error or "session acquisition was not confirmed")
-	return unresolved_result, last_error or "session acquisition was not confirmed"
+	observe(state, "open", normalize_result_code(unresolved_result) or "unknown", last_error or "session acquisition was not confirmed")
+	return normalize_result_code(unresolved_result) or "unknown", last_error or "session acquisition was not confirmed"
 end
 
 local function renew_internal(state: InternalState): (ResultCode, string?)
@@ -6903,7 +6903,7 @@ local function reconcile_unknown_release_internal(state: InternalState): (Result
 		state.last_reconciliation_category = category
 		disconnect_message_subscription(state)
 		observe(state, "reconcile_release", result, message)
-		return result, message
+		return normalize_result_code(result) or "unknown", message
 	end
 	local function is_confirmed_release(envelope: Envelope): boolean
 		return envelope.write_id == pending.operation_id
@@ -7122,7 +7122,7 @@ local function reconcile_unknown_internal(state: InternalState): (ResultCode, st
 		state.last_reconciliation_category = category
 		disconnect_message_subscription(state)
 		observe(state, "reconcile", result, message)
-		return result, message
+		return normalize_result_code(result) or "unknown", message
 	end
 	local function confirm(envelope: Envelope, info: BackendInfo?): (ResultCode, string?)
 		if not backend_metadata_matches(info, envelope) then
@@ -7602,7 +7602,7 @@ local function save(self: Record, reason: string?): (ResultCode, string?)
 	end
 	local result, message = save_internal(state, reason or "manual", nil, nil)
 	sync_public(self)
-	return result, message
+	return normalize_result_code(result) or "unknown", message
 end
 
 local function stats(self: Record): { [string]: number | string? }
@@ -7646,7 +7646,7 @@ local function open(self: Record, default_data: JsonValue?, recreate: boolean?):
 	end
 	local result, message = open_internal(state, default_data, recreate)
 	sync_public(self)
-	return result, message
+	return normalize_result_code(result) or "unknown", message
 end
 
 local function make_record(name: string, scope: string, key: string, options: Options, mock: boolean): Record
@@ -8683,7 +8683,7 @@ local function enqueue_static(name: string, scope: string, key: string, message_
 	end
 	local queue, verify_code, verify_message = read_queue_after_update(backend, result, deadline, nil, owner)
 	if queue == nil then
-		return verify_code or "unknown", verify_message
+		return normalize_result_code(verify_code) or "unknown", verify_message
 	end
 	for _, item in ipairs(queue.messages) do
 		if item.id == message_id then
@@ -8985,16 +8985,16 @@ RecordStore.Mock = (function()
 		end
 		local item, result, message = claim_queue_message(state)
 		if item == nil then
-			return nil, result, message
+			return nil, normalize_result_code(result) or "unknown", message
 		end
 		if item.lock_token == nil then
 			return nil, "corrupt", "mock queue claim has no lock token"
 		end
-		return {
+		return ({
 			Id = item.id,
 			LockToken = item.lock_token,
 			LockedUntil = item.locked_until,
-		}, result, message
+		} :: unknown) :: MockQueueClaim, normalize_result_code(result) or "unknown", message
 	end
 
 	local function mock_dead_letter_queue_message(record: Record, message_id: string, lock_token: string, error_message: string): (ResultCode, string?)
@@ -9022,7 +9022,7 @@ RecordStore.Mock = (function()
 			end
 			local result, message = reconcile_unknown_internal(state)
 			sync_public(record)
-			return result, message
+			return normalize_result_code(result) or "unknown", message
 		end,
 		renew = function(record: Record): (ResultCode, string?)
 			local state = private[record]
@@ -9031,7 +9031,7 @@ RecordStore.Mock = (function()
 			end
 			local result, message = renew_internal(state)
 			sync_public(record)
-			return result, message
+			return normalize_result_code(result) or "unknown", message
 		end,
 		read_async = read_async_mock,
 		claim_queue_message = mock_claim_queue_message,
