@@ -5500,6 +5500,62 @@ do
 		return ok(if reclaimed_active or reclaimed_dlq then "success" else "empty", nil, nil, nil)
 	end
 
+	function MailboxV2.MaintenanceAsync(self: EmbeddedMailbox): (EmbeddedMailboxDict, EmbeddedMailboxResult)
+		local activation = self:_check_activation("maintenance")
+		if activation ~= nil then return {}, activation end
+
+		local report: EmbeddedMailboxDict = {
+			owner = clone_owner(self.owner),
+			observed_at = self:_now(),
+			complete = false,
+			consistency = "bounded_non_linearizable",
+		}
+		local function finish(result: EmbeddedMailboxResult): (EmbeddedMailboxDict, EmbeddedMailboxResult)
+			return report, result
+		end
+
+		local recover_ok, recovery = pcall(function()
+			return self:RecoverAsync()
+		end)
+		if not recover_ok or type(recovery) ~= "table" then
+			return finish(ok("unknown", nil, nil,
+				"mailbox recovery raised: " .. tostring(recovery)))
+		end
+		report.recovery = recovery
+		if recovery.code ~= "success" then
+			return finish(recovery)
+		end
+
+		local reclaim_ok, reclaimed = pcall(function()
+			return self:ReclaimAsync()
+		end)
+		if not reclaim_ok or type(reclaimed) ~= "table" then
+			return finish(ok("unknown", nil, nil,
+				"mailbox reclamation raised: " .. tostring(reclaimed)))
+		end
+		report.reclaim = reclaimed
+		if reclaimed.code ~= "success" and reclaimed.code ~= "empty" then
+			return finish(reclaimed)
+		end
+
+		local stats_ok, stats, stats_result = pcall(function()
+			return self:GetStatsAsync()
+		end)
+		if not stats_ok or type(stats) ~= "table" or type(stats_result) ~= "table" then
+			return finish(ok("unknown", nil, nil,
+				"mailbox status snapshot raised: " .. tostring(stats)))
+		end
+		report.stats = stats
+		report.consistency = stats.consistency or "bounded_non_linearizable"
+		if stats_result.code ~= "success" then
+			return finish(stats_result)
+		end
+
+		report.complete = true
+		report.completed_at = self:_now()
+		return finish(ok("success", nil, nil, nil))
+	end
+
 	type MockStoreState = {
 		values: { [string]: unknown },
 		update_calls: number,
@@ -5838,6 +5894,23 @@ export type Snapshot = {
 	BackendVersion: string?,
 	BackendCreatedAt: number?,
 	BackendUpdatedAt: number?,
+}
+
+export type SessionStatus = {
+	StoreName: string,
+	Scope: string,
+	ProfileKey: string,
+	Observation: "not_found" | "tombstoned" | "no_session" | "active_lease_observed" | "expired_lease_observed",
+	ObservedAt: number,
+	Generation: number?,
+	Revision: number?,
+	OwnerJobId: string?,
+	OwnerPlaceId: number?,
+	AcquiredAt: number?,
+	LeaseUntil: number?,
+	LeaseRemainingSeconds: number?,
+	LeaseAppearsAvailable: boolean,
+	IsAuthoritativeOwnershipDecision: false,
 }
 
 export type HistoryEntry = {
@@ -9590,6 +9663,97 @@ local function save_internal(state: InternalState, reason: string?, operation_de
 	observe(state, "save", "saved", reason)
 	complete_deferred_takeover(state)
 	return "saved", nil
+end
+
+local function get_session_status_internal(
+	name: string,
+	scope: string,
+	key: string,
+	operation_deadline: number?,
+	mock: boolean
+): (SessionStatus?, ResultCode, string?)
+	local valid_identity, identity_message = validate_store_identity(name, scope, key)
+	if not valid_identity then
+		return nil, "invalid", identity_message
+	end
+	local deadline, deadline_error = resolve_operation_deadline(operation_deadline)
+	if deadline == nil then
+		return nil, "invalid", deadline_error
+	end
+	local backend = make_backend(name, scope, key, mock)
+	local raw, _, read_result, read_message = backend_get(backend, false, deadline)
+	if read_result ~= nil then
+		return nil, normalize_result_code(read_result) or "unknown", read_message
+	end
+
+	local observed_at = session_now_unix(mock)
+	local status: SessionStatus = {
+		StoreName = name,
+		Scope = scope,
+		ProfileKey = key,
+		Observation = "not_found",
+		ObservedAt = observed_at,
+		Generation = nil,
+		Revision = nil,
+		OwnerJobId = nil,
+		OwnerPlaceId = nil,
+		AcquiredAt = nil,
+		LeaseUntil = nil,
+		LeaseRemainingSeconds = nil,
+		LeaseAppearsAvailable = true,
+		IsAuthoritativeOwnershipDecision = false,
+	}
+	if raw == nil then
+		return status, "not_found", "record does not exist"
+	end
+
+	local envelope, parse_error, current_format = parse_envelope(raw)
+	if not current_format then
+		local result: ResultCode = if parse_error == "legacy payload" then "legacy"
+			elseif parse_error == "future implementation version" then "future_schema" else "corrupt"
+		return nil, result, parse_error or "durable envelope is invalid"
+	end
+	if envelope == nil then
+		return nil, "corrupt", parse_error or "durable envelope is missing"
+	end
+
+	status.Generation = envelope.fencing_generation
+	status.Revision = envelope.revision
+	if envelope.tombstone ~= nil then
+		status.Observation = "tombstoned"
+		status.LeaseAppearsAvailable = false
+		return status, "success", nil
+	end
+
+	local session = envelope.session
+	if session == nil then
+		status.Observation = "no_session"
+		return status, "success", nil
+	end
+
+	local remaining = session.lease_until - observed_at
+	status.OwnerJobId = session.job_id
+	status.OwnerPlaceId = session.place_id
+	status.AcquiredAt = session.acquired_at
+	status.LeaseUntil = session.lease_until
+	status.LeaseRemainingSeconds = math.max(0, remaining)
+	if remaining > 0 then
+		status.Observation = "active_lease_observed"
+		status.LeaseAppearsAvailable = false
+	else
+		status.Observation = "expired_lease_observed"
+		status.LeaseAppearsAvailable = true
+	end
+	return status, "success", nil
+end
+
+function RecordStore.get_session_status_async(
+	name: string,
+	scope: string,
+	key: string,
+	operation_deadline: number?
+): (SessionStatus?, ResultCode, string?)
+	return get_session_status_internal(name, scope, key, operation_deadline, false)
 end
 
 function RecordStore.read_async(name: string, scope: string, key: string, operation_deadline: number?, legacy_decoder: LegacyDecoder?): (Snapshot?, ResultCode, string?)
@@ -14674,6 +14838,14 @@ RecordStore.Mock = (function()
 			local result, message = renew_internal(state)
 			sync_public(record)
 			return normalize_result_code(result) or "unknown", message
+		end,
+		get_session_status_async = function(
+			name: string,
+			scope: string,
+			key: string,
+			operation_deadline: number?
+		): (SessionStatus?, ResultCode, string?)
+			return get_session_status_internal(name, scope, key, operation_deadline, true)
 		end,
 		read_async = read_async_mock,
 		claim_queue_message = mock_claim_queue_message,
