@@ -4,6 +4,7 @@ local DataStoreService = game:GetService("DataStoreService")
 local HttpService = game:GetService("HttpService")
 local MessagingService = game:GetService("MessagingService")
 local RecordStore = {}
+RecordStore._internals = {} :: { [string]: any }
 
 
 -- BEGIN EMBEDDED SCHEDULER MODULE
@@ -7165,6 +7166,48 @@ local function observe(state: InternalState, event: string, result: ResultCode, 
 	end
 end
 
+RecordStore._internals.refresh_durability_risk = function(state: InternalState)
+	local reason: string? = nil
+	if state.state == "unknown" then
+		reason = "write_or_lease_outcome_unknown"
+	else
+		local dirty = state.change_sequence ~= state.saved_change_sequence
+		local dirty_since = state.dirty_since_local
+		local max_age = state.options.max_dirty_age_seconds
+			or (state.options.autosave_interval or DEFAULT_AUTOSAVE_INTERVAL) * 2
+		if dirty and dirty_since ~= nil and now_local() - dirty_since >= max_age then
+			reason = "maximum_dirty_age_exceeded"
+		end
+	end
+	local active = reason ~= nil
+	local was_active = state.durability_risk_active == true
+	if active == was_active then
+		if active then
+			state.durability_risk_reason = reason
+		end
+		return
+	end
+	local previous_reason = state.durability_risk_reason
+	state.durability_risk_active = active
+	state.durability_risk_reason = reason
+
+	local observer = state.options.on_event
+	if observer == nil then
+		return
+	end
+	local event_name = if active then "durability_risk" else "durability_recovered"
+	local result: ResultCode = if active then "unknown" else "success"
+	local message = if active then reason else "durability risk cleared: " .. tostring(previous_reason or "resolved")
+	local thread = coroutine.create(function()
+		observer(event_name, state.key, result, message)
+	end)
+	local resumed = coroutine.resume(thread)
+	if not resumed or coroutine.status(thread) ~= "dead" then
+		coroutine.close(thread)
+		state.observer_errors += 1
+	end
+end
+
 local function append_change_event(events: { ChangeEvent }, path: { string | number }, old_value: JsonValue?, new_value: JsonValue?, operation_id: string, sequence: number, kind: string): boolean
 	if #events >= CHANGE_OBSERVER_CAPACITY then
 		return false
@@ -10237,6 +10280,26 @@ local function is_dirty(self: Record): boolean
 	end
 	self.Data = if state.public_data_detached then copy_value(state.data) else state.data
 	return state.change_sequence ~= state.saved_change_sequence
+end
+
+RecordStore._internals.mutation_backpressure_reason = function(state: InternalState): string?
+	if state.options.durability_mode ~= "read_only_on_risk" then
+		return nil
+	end
+	local dirty = state.change_sequence ~= state.saved_change_sequence
+	if not dirty then
+		return nil
+	end
+	local dirty_since = state.dirty_since_local
+	if dirty_since == nil then
+		return nil
+	end
+	local max_age = state.options.max_dirty_age_seconds
+		or (state.options.autosave_interval or DEFAULT_AUTOSAVE_INTERVAL) * 2
+	if now_local() - dirty_since >= max_age then
+		return "mutation rejected: oldest dirty change exceeded max_dirty_age_seconds"
+	end
+	return nil
 end
 
 local function can_mutate(self: Record): (boolean, string?)
@@ -14153,69 +14216,6 @@ RecordStore.shutdown = function()
 	while remaining > 0 and now_local() < deadline do
 		task.wait(0.05)
 	end
-end
-
-RecordStore._internals = {}
-RecordStore._internals.refresh_durability_risk = function(state: InternalState)
-	local reason: string? = nil
-	if state.state == "unknown" then
-		reason = "write_or_lease_outcome_unknown"
-	else
-		local dirty = state.change_sequence ~= state.saved_change_sequence
-		local dirty_since = state.dirty_since_local
-		local max_age = state.options.max_dirty_age_seconds
-			or (state.options.autosave_interval or DEFAULT_AUTOSAVE_INTERVAL) * 2
-		if dirty and dirty_since ~= nil and now_local() - dirty_since >= max_age then
-			reason = "maximum_dirty_age_exceeded"
-		end
-	end
-	local active = reason ~= nil
-	local was_active = state.durability_risk_active == true
-	if active == was_active then
-		if active then
-			state.durability_risk_reason = reason
-		end
-		return
-	end
-	local previous_reason = state.durability_risk_reason
-	state.durability_risk_active = active
-	state.durability_risk_reason = reason
-
-	local observer = state.options.on_event
-	if observer == nil then
-		return
-	end
-	local event_name = if active then "durability_risk" else "durability_recovered"
-	local result: ResultCode = if active then "unknown" else "success"
-	local message = if active then reason else "durability risk cleared: " .. tostring(previous_reason or "resolved")
-	local thread = coroutine.create(function()
-		observer(event_name, state.key, result, message)
-	end)
-	local resumed = coroutine.resume(thread)
-	if not resumed or coroutine.status(thread) ~= "dead" then
-		coroutine.close(thread)
-		state.observer_errors += 1
-	end
-end
-
-RecordStore._internals.mutation_backpressure_reason = function(state: InternalState): string?
-	if state.options.durability_mode ~= "read_only_on_risk" then
-		return nil
-	end
-	local dirty = state.change_sequence ~= state.saved_change_sequence
-	if not dirty then
-		return nil
-	end
-	local dirty_since = state.dirty_since_local
-	if dirty_since == nil then
-		return nil
-	end
-	local max_age = state.options.max_dirty_age_seconds
-		or (state.options.autosave_interval or DEFAULT_AUTOSAVE_INTERVAL) * 2
-	if now_local() - dirty_since >= max_age then
-		return "mutation rejected: oldest dirty change exceeded max_dirty_age_seconds"
-	end
-	return nil
 end
 
 RecordStore._internals.normalize_options = function(options: Options): (Options?, string?)
