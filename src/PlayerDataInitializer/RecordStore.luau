@@ -7623,8 +7623,8 @@ local function backend_update(backend: Backend, transform: UpdateTransform, dead
 			return nil, nil, mock_update_failure_code, mock_update_failure_message
 		end
 		local mock_state = mock_database :: any
-		local before_update_hook = mock_state.__recordstore_before_next_update
-		mock_state.__recordstore_before_next_update = nil
+		local before_update_hook = mock_state[RecordStore]
+		mock_state[RecordStore] = nil
 		if before_update_hook ~= nil then
 			local hook_ok = pcall(before_update_hook)
 			if not hook_ok then
@@ -15140,7 +15140,7 @@ RecordStore.Mock = (function()
 			error("before-update hook must be a function or nil", 2)
 		end
 		local mock_state = mock_database :: any
-		mock_state.__recordstore_before_next_update = hook
+		mock_state[RecordStore] = hook
 	end
 
 	local function mock_set_update_replay(retries: number, advance_seconds: number)
