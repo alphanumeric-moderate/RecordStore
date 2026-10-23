@@ -703,4 +703,104 @@ end
 
 RecordStore.Mock.reset()
 
+
+RecordStore.Mock.reset()
+do
+	local fake_now = DateTime.now().UnixTimestampMillis / 1000 + 1
+	RecordStore.Mock.set_test_clock(function()
+		return fake_now
+	end)
+	local options: any = {
+		schema_version = 1,
+		autosave_interval = 1000,
+		lease_duration = 180,
+		lease_renewal = 60,
+		operation_deadline = 2,
+		retry_attempts = 1,
+		max_dirty_age_seconds = 600,
+		lease_recovery_enabled = true,
+	}
+	local record = RecordStore.Mock.new(
+		"RecordStore_UnknownSaveRecoveryRegression",
+		"global",
+		"expired-lease-same-owner-reacquisition",
+		options
+	)
+	local open_result, open_message = record:Open({ coins = 10, label = "initial" })
+	assert(open_result == "created" or open_result == "loaded", open_message)
+	local before = RecordStore.Mock.get_record_raw(
+		"RecordStore_UnknownSaveRecoveryRegression",
+		"global",
+		"expired-lease-same-owner-reacquisition"
+	) :: { [string]: any }
+	local base_revision = before.revision
+	local base_generation = before.fencing_generation
+	local base_write_id = before.write_id
+	local old_token = ((before.session :: { [string]: any }).token) :: string
+	local update_result, update_message = record:Update(function(data)
+		(data :: { [string]: RecordStore.JsonValue }).coins = 11
+		return data
+	end)
+	assert(update_result == "success", update_message)
+
+	fake_now += 10
+	RecordStore.Mock.set_update_failures(1, "unknown", "injected pre-commit save failure")
+	RecordStore.Mock.set_get_failures(100, "hold verification until after the lease expires")
+	local save_result = record:Save("expired-lease-recovery")
+	assert(save_result == "unknown", "unverified pre-commit save should enter unknown state")
+	local pending = record:GetDurabilityStatus().pending_operation_id
+	assert(pending ~= nil, "ambiguous save must retain its operation ID")
+	local unchanged = RecordStore.Mock.get_record_raw(
+		"RecordStore_UnknownSaveRecoveryRegression",
+		"global",
+		"expired-lease-same-owner-reacquisition"
+	) :: { [string]: any }
+	assert(unchanged.write_id == base_write_id, "pre-commit failure must leave the base write authoritative")
+	assert((unchanged.data :: { [string]: any }).coins == 10, "pre-commit failure must not persist the dirty snapshot")
+
+	fake_now += 181
+	RecordStore.Mock.set_get_failures(0)
+	local recovery_result, recovery_message = RecordStore.Mock.reconcile(record)
+	assert(recovery_result == "success",
+		"opt-in recovery should reacquire the unchanged expired owner without replaying its unsaved snapshot: "
+			.. tostring(recovery_message))
+	assert(record.State == "active", "confirmed same-process lease reacquisition should reactivate the record")
+	assert(record.Generation == base_generation + 1,
+		"lease reacquisition must advance the fencing generation")
+	local status = record:GetDurabilityStatus()
+	assert(status.ownership == "owned", "reacquired session should report owned ownership")
+	assert(status.pending_operation_id == nil, "confirmed reacquisition should clear the ambiguous operation")
+	local recovered = RecordStore.Mock.get_record_raw(
+		"RecordStore_UnknownSaveRecoveryRegression",
+		"global",
+		"expired-lease-same-owner-reacquisition"
+	) :: { [string]: any }
+	assert(recovered.revision == base_revision,
+		"lease-only reacquisition must not increment the profile data revision")
+	assert((recovered.data :: { [string]: any }).coins == 10,
+		"reacquisition must preserve the durable snapshot and not replay an uncommitted save")
+	assert(recovered.write_id ~= base_write_id and recovered.write_id ~= pending,
+		"reacquisition must use its own stable logical write ID")
+	assert(((recovered.session :: { [string]: any }).token) ~= old_token,
+		"reacquisition must replace the expired session token")
+	assert(((recovered.session :: { [string]: any }).lease_until) > fake_now,
+		"reacquired lease must be live")
+
+	local retry_result, retry_message = record:Save("persist-after-lease-reacquisition")
+	assert(retry_result == "saved", retry_message)
+	local persisted = RecordStore.Mock.get_record_raw(
+		"RecordStore_UnknownSaveRecoveryRegression",
+		"global",
+		"expired-lease-same-owner-reacquisition"
+	) :: { [string]: any }
+	assert(persisted.revision == base_revision + 1,
+		"the unsaved mutation should commit exactly once after safe reacquisition")
+	assert((persisted.data :: { [string]: any }).coins == 11,
+		"the retained dirty mutation was lost after lease reacquisition")
+	assert(record:Close() == "closed", "reacquired lease fixture should close")
+	RecordStore.Mock.set_test_clock(nil)
+end
+
+RecordStore.Mock.reset()
+
 print("[PASS] Unknown-save recovery and durability status preserve logical write identity, fencing, and tracked direct-data mutations.")
