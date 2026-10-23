@@ -55,6 +55,10 @@ assert(not pcall(function() return InfiniteMath.new({ 1, 0.5 }):ConvertForLeader
 assert(not pcall(function() return InfiniteMath.new(1) / InfiniteMath.new(0) end), "division by zero was not rejected clearly")
 assert(not pcall(function() return InfiniteMath.new({ 1, 1e308 }) * InfiniteMath.new({ 1, 1e308 }) end), "exponent overflow was not rejected")
 assert(not pcall(function() return InfiniteMath.new({ first = 1, second = math.huge }) end), "non-finite table exponent was accepted")
+local corrupted = InfiniteMath.new(1)
+corrupted.first = math.huge
+assert(not pcall(function() return one / corrupted end), "division accepted a mutated non-finite operand")
+assert(not pcall(function() return one * corrupted end), "multiplication accepted a mutated non-finite operand")
 local wide_int = InfiniteMath.Int.FromRawBytes("le", { 1, 0, 0, 0, 1, 0, 0, 0 }, false)
 assert(math.abs(wide_int:ToNumber():Reverse() - 4294967297) < 1e-4, "InfiniteMath.Int conversion ignored lower limbs")
 local negative_int = InfiniteMath.Int.FromRawBytes("le", { 127, 255 }, true)

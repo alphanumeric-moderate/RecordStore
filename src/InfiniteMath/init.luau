@@ -233,26 +233,30 @@ end
 
 function Number.__mul(a, b)
 	a, b = coerce(a), coerce(b)
-	if isNaNNumber(a) or isNaNNumber(b) then return fastNew(NaN, NaN) end
-	local exponent = a.second + b.second
+	local first1, second1 = normalize(a.first, a.second)
+	local first2, second2 = normalize(b.first, b.second)
+	if first1 ~= first1 or second1 ~= second1 or first2 ~= first2 or second2 ~= second2 then return fastNew(NaN, NaN) end
+	local exponent = second1 + second2
 	if exponent == math.huge or exponent == -math.huge then
-		if a.first == 0 or b.first == 0 then return fastNew(0, 0) end
+		if first1 == 0 or first2 == 0 then return fastNew(0, 0) end
 		error("InfiniteMath multiplication result exponent overflow", 2)
 	end
-	local rf, re = normalize2(a.first * b.first, exponent)
+	local rf, re = normalize2(first1 * first2, exponent)
 	return fastNew(rf, re)
 end
 
 function Number.__div(a, b)
 	a, b = coerce(a), coerce(b)
-	if isNaNNumber(a) or isNaNNumber(b) then return fastNew(NaN, NaN) end
-	if b.first == 0 then error("InfiniteMath division by zero", 2) end
-	local exponent = a.second - b.second
+	local first1, second1 = normalize(a.first, a.second)
+	local first2, second2 = normalize(b.first, b.second)
+	if first1 ~= first1 or second1 ~= second1 or first2 ~= first2 or second2 ~= second2 then return fastNew(NaN, NaN) end
+	if first2 == 0 then error("InfiniteMath division by zero", 2) end
+	local exponent = second1 - second2
 	if exponent == math.huge or exponent == -math.huge then
-		if a.first == 0 then return fastNew(0, 0) end
+		if first1 == 0 then return fastNew(0, 0) end
 		error("InfiniteMath division result exponent overflow", 2)
 	end
-	local rf, re = normalize2(a.first / b.first, exponent)
+	local rf, re = normalize2(first1 / first2, exponent)
 	return fastNew(rf, re)
 end
 
@@ -347,7 +351,8 @@ end
 
 function Number.__unm(a)
 	a = coerce(a)
-	return fastNew(-a.first, a.second) -- much faster than a * -1
+	local first, second = normalize(a.first, a.second)
+	return fastNew(-first, second)
 end
 
 function Number.__tostring(self)
