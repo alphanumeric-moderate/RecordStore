@@ -120,7 +120,9 @@ jobs:
               'local batch_size_value: number = if type(batch_size) == "number" then batch_size :: number else 4',
               'local handler_thread: thread = coroutine.create(function()',
               'local retry_attempts: number = current.attempts :: number',
-              'local exponent_candidate: number = math.max(0, retry_attempts - 1)',
+              'local exponent_candidate: number = retry_attempts - 1',
+              'if exponent_candidate < 0 then exponent_candidate = 0 end',
+              'local exponent: number = if exponent_candidate > 16 then 16 else exponent_candidate',
               'local digest_value: string = digest(digest_input)',
               'string.sub(message :: string, 1, 200)',
           ]

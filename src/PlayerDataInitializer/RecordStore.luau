@@ -4915,8 +4915,9 @@ do
 				return next_record
 			end
 			local retry_attempts: number = current.attempts :: number
-			local exponent_candidate: number = math.max(0, retry_attempts - 1)
-			local exponent: number = math.min(16, exponent_candidate)
+			local exponent_candidate: number = retry_attempts - 1
+			if exponent_candidate < 0 then exponent_candidate = 0 end
+			local exponent: number = if exponent_candidate > 16 then 16 else exponent_candidate
 			local delay: number = math.min(self.options.retry_max_ms :: number, (self.options.retry_base_ms :: number) * (2 ^ exponent))
 			local digest_input: string = route .. ":" .. tostring(retry_attempts)
 			local digest_value: string = digest(digest_input)
