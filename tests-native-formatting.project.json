@@ -15,12 +15,6 @@
       },
       "PlayerDataSetRegression": {
         "$path": "tests/PlayerDataSetRegression.server.luau"
-      },
-      "RecordStoreScheduler": {
-        "$path": "src/PlayerDataInitializer/RecordStoreScheduler.luau"
-      },
-      "MailboxV2": {
-        "$path": "src/PlayerDataInitializer/MailboxV2.luau"
       }
     },
     "ReplicatedStorage": {
