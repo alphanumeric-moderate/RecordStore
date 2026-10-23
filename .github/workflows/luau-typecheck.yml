@@ -74,6 +74,28 @@ jobs:
           print("Strict mode enabled in all RecordStore modules")
           PY
 
+      - name: Require typed sibling-module boundaries
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+
+          source = Path("src/PlayerDataInitializer/RecordStore.luau").read_text()
+          forbidden = [
+              r"local\s+RecordStoreScheduler\s*:\s*any\s*=\s*require\(",
+              r"local\s+MailboxV2\s*:\s*any\s*=\s*require\(",
+              r"local\s+scheduler_dispatcher\s*:\s*any\s*=\s*RecordStoreScheduler\.new_dispatcher\(",
+          ]
+          violations = [pattern for pattern in forbidden if re.search(pattern, source)]
+          if violations:
+              print("RecordStore sibling modules must retain their inferred or explicit API types.")
+              for pattern in violations:
+                  print(f"Forbidden broad boundary annotation: {pattern}")
+              raise SystemExit(1)
+          print("RecordStore sibling-module boundaries are explicitly typed.")
+          PY
+
       - name: Type-check all source modules using their declared modes
         run: |
           set -euo pipefail
