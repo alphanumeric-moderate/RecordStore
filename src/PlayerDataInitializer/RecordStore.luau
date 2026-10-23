@@ -7165,28 +7165,19 @@ local function observe(state: InternalState, event: string, result: ResultCode, 
 	end
 end
 
-local function current_durability_risk_reason(state: InternalState): string?
-	if state.state == "unknown" then
-		return "write_or_lease_outcome_unknown"
-	end
-	local dirty = state.change_sequence ~= state.saved_change_sequence
-	if not dirty then
-		return nil
-	end
-	local dirty_since = state.dirty_since_local
-	if dirty_since == nil then
-		return nil
-	end
-	local max_age = state.options.max_dirty_age_seconds
-		or (state.options.autosave_interval or DEFAULT_AUTOSAVE_INTERVAL) * 2
-	if now_local() - dirty_since >= max_age then
-		return "maximum_dirty_age_exceeded"
-	end
-	return nil
-end
-
 local function refresh_durability_risk(state: InternalState)
-	local reason = current_durability_risk_reason(state)
+	local reason: string? = nil
+	if state.state == "unknown" then
+		reason = "write_or_lease_outcome_unknown"
+	else
+		local dirty = state.change_sequence ~= state.saved_change_sequence
+		local dirty_since = state.dirty_since_local
+		local max_age = state.options.max_dirty_age_seconds
+			or (state.options.autosave_interval or DEFAULT_AUTOSAVE_INTERVAL) * 2
+		if dirty and dirty_since ~= nil and now_local() - dirty_since >= max_age then
+			reason = "maximum_dirty_age_exceeded"
+		end
+	end
 	local active = reason ~= nil
 	local was_active = state.durability_risk_active == true
 	if active == was_active then
