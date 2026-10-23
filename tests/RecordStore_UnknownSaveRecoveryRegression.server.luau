@@ -420,4 +420,70 @@ do
 end
 
 RecordStore.Mock.reset()
-print("[PASS] Unknown-save and release recovery retain operation identity, fence public mutation, preserve in-flight edits, and refuse stale-owner writes.")
+do
+	local invalid_options, invalid_message = RecordStore._internals.normalize_options({
+		schema_version = 1,
+		durability_mode = "guess",
+	})
+	assert(invalid_options == nil and string.find(tostring(invalid_message), "durability_mode", 1, true) ~= nil,
+		"invalid durability policy must be rejected")
+
+	local risk_events = 0
+	local recovered_events = 0
+	local record = RecordStore.Mock.new("RecordStore_UnknownSaveRecoveryRegression", "global", "durability-risk-events", {
+		schema_version = 1,
+		autosave_interval = 1000,
+		lease_duration = 180,
+		lease_renewal = 60,
+		operation_deadline = 2,
+		retry_attempts = 1,
+		max_dirty_age_seconds = 60,
+		durability_mode = "read_only_on_risk",
+		on_event = function(event)
+			if event == "durability_risk" then
+				risk_events += 1
+			elseif event == "durability_recovered" then
+				recovered_events += 1
+			end
+		end,
+	})
+	local open_result, open_message = record:Open({ coins = 10, label = "initial" })
+	assert(open_result == "created" or open_result == "loaded", open_message)
+	local status = record:GetDurabilityStatus()
+	assert(status.durability_mode == "read_only_on_risk", "durability policy was not retained")
+	assert(status.maximum_dirty_age_seconds == 60, "maximum dirty age was not retained")
+
+	local updated, update_message = record:Update(function(data)
+		(data :: { [string]: RecordStore.JsonValue }).coins = 55
+		return data
+	end)
+	assert(updated == "success", update_message)
+
+	RecordStore.Mock.set_update_failures(1, "unknown", "injected uncertain commit")
+	RecordStore.Mock.set_get_failures(100, "hold authoritative verification")
+	local save_result = record:Save("durability-risk-event")
+	assert(save_result == "unknown", "unverified write must enter unknown state")
+	status = record:GetDurabilityStatus()
+	assert(status.ownership == "uncertain", "unknown save must report uncertain ownership")
+	assert(status.durability == "degraded", "unknown save must report degraded durability")
+	assert(status.risk_active == true, "unknown save must be visible as an active durability risk")
+	assert(status.risk_reason == "write_or_lease_outcome_unknown", "unknown risk reason was not exposed")
+	assert(risk_events == 1, "durability risk must emit one edge-triggered event")
+	local health = RecordStore.get_health_snapshot()
+	assert(health.evidence_scope == "server_local_loaded_records", "health snapshot must declare its scope")
+	assert(health.server_state == "degraded", "unknown write must degrade the local health snapshot")
+	assert(health.has_unknown_write_outcome == true, "health snapshot omitted the unknown write")
+
+	RecordStore.Mock.set_get_failures(0)
+	local recovery_result, recovery_message = RecordStore.Mock.reconcile(record)
+	assert(recovery_result == "success", recovery_message)
+	status = record:GetDurabilityStatus()
+	assert(status.ownership == "owned", "confirmed recovery must restore ownership")
+	assert(status.risk_active == false, "confirmed recovery must clear the durability risk")
+	assert(risk_events == 1 and recovered_events == 1,
+		"risk notifications must be edge-triggered and emit one recovery transition")
+	assert(record:Close() == "closed", "durability risk regression record should close")
+end
+
+RecordStore.Mock.reset()
+print("[PASS] Unknown-save recovery preserves write identity and fencing; durability risk is observable, bounded, and cleared only after confirmed recovery.")
