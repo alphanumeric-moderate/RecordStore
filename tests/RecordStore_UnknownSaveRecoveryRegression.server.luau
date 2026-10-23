@@ -300,6 +300,57 @@ do
 	RecordStore.Mock.set_test_clock(function()
 		return fake_now
 	end)
+	local record = open_test_record("renew-commit-expired-before-reconcile")
+	local base_revision = record:GetRevision()
+	local before = RecordStore.Mock.get_record_raw(
+		"RecordStore_UnknownSaveRecoveryRegression",
+		"global",
+		"renew-commit-expired-before-reconcile"
+	) :: { [string]: any }
+	local before_lease = ((before.session :: { [string]: any }).lease_until) :: number
+	fake_now += 10
+
+	RecordStore.Mock.set_update_commit_then_failures(1)
+	RecordStore.Mock.set_get_failures(100, "hold committed renewal verification")
+	local renew_result = RecordStore.Mock.renew(record)
+	assert(renew_result == "unknown", "committed but unverified renewal must stay unknown")
+	local operation_id = record:GetDurabilityStatus().pending_operation_id
+	assert(operation_id ~= nil, "unknown renewal must retain the operation identity")
+
+	local committed = RecordStore.Mock.get_record_raw(
+		"RecordStore_UnknownSaveRecoveryRegression",
+		"global",
+		"renew-commit-expired-before-reconcile"
+	) :: { [string]: any }
+	assert(committed.write_id == operation_id, "the ambiguous renewal should have committed under its original ID")
+	assert(((committed.session :: { [string]: any }).lease_until) > before_lease,
+		"the injected renewal should extend the durable lease before verification is released")
+
+	fake_now += 181
+	RecordStore.Mock.set_get_failures(0)
+	local recovery_result = RecordStore.Mock.reconcile(record)
+	assert(recovery_result == "fenced",
+		"an expired committed renewal must fence rather than revive the old session")
+	assert(record.State == "fenced", "expired renewal recovery must leave the record fenced")
+	local after = RecordStore.Mock.get_record_raw(
+		"RecordStore_UnknownSaveRecoveryRegression",
+		"global",
+		"renew-commit-expired-before-reconcile"
+	) :: { [string]: any }
+	assert(after.write_id == operation_id, "expired renewal recovery must not submit another write")
+	assert(after.revision == base_revision, "expired renewal recovery must not alter the data revision")
+	assert(((after.session :: { [string]: any }).lease_until) <= fake_now,
+		"expired renewal recovery must not extend an already-expired lease")
+	RecordStore.Mock.set_test_clock(nil)
+end
+
+RecordStore.Mock.reset()
+
+do
+	local fake_now = DateTime.now().UnixTimestampMillis / 1000 + 1
+	RecordStore.Mock.set_test_clock(function()
+		return fake_now
+	end)
 	local record = open_test_record("expired-lease-no-retry")
 	local base_revision = record:GetRevision()
 	local updated, update_message = record:Update(function(data)
