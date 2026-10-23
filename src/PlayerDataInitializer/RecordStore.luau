@@ -487,7 +487,7 @@ type InternalState = {
 	busy: boolean,
 	queue_busy: boolean,
 	mailbox_v2_binding: boolean,
-	mailbox_v2: any?,
+	mailbox_v2: MailboxV2.Mailbox?,
 	save_requested: boolean,
 	shutdown: boolean,
 	retired: boolean,
@@ -5069,7 +5069,7 @@ local function message(self: Record, message_type: string, data: JsonValue?): (R
 	return "success", nil
 end
 
-local function mailbox_bound_for_state(state: InternalState): (any?, ResultCode?, string?)
+local function mailbox_bound_for_state(state: InternalState): (MailboxV2.Mailbox?, ResultCode?, string?)
 	local mailbox = state.mailbox_v2
 	if mailbox == nil then return nil, nil, nil end
 	if type(mailbox) ~= "table" or type(mailbox.GetOwner) ~= "function"
@@ -5118,7 +5118,7 @@ local function map_mailbox_v2_result(code: unknown): ResultCode
 	return "unknown"
 end
 
-local install_mailbox_renewal_scheduler: any
+local install_mailbox_renewal_scheduler: ((Record, InternalState, MailboxV2.Mailbox) -> (boolean, string?))?
 local process_queue_v2: any
 local scheduler_enabled = false
 
@@ -5477,15 +5477,19 @@ local function bind_mailbox_v2_async(self: Record, mailbox: unknown): (ResultCod
 	if state.options.durable_queue_enabled == false then
 		return "invalid", "safe V2 binding requires the legacy queue to be enabled so pending messages can be checked"
 	end
-	local mailbox_api: any = mailbox
-	if type(mailbox_api) ~= "table" or type(mailbox_api.GetOwner) ~= "function"
+	if type(mailbox) ~= "table" then
+		return "invalid", "mailbox must expose the V2 owner, enqueue, processing and lease-renewal APIs"
+	end
+	local mailbox_api = mailbox :: { [string]: unknown }
+	if type(mailbox_api.GetOwner) ~= "function"
 		or type(mailbox_api.GetActiveRecord) ~= "function" or type(mailbox_api.EnqueueAsync) ~= "function"
 		or type(mailbox_api.ProcessNextAsync) ~= "function" or type(mailbox_api.SetLeaseRenewalScheduler) ~= "function"
 	then
 		return "invalid", "mailbox must expose the V2 owner, enqueue, processing and lease-renewal APIs"
 	end
-	local owner_ok, owner = pcall(function() return mailbox_api:GetOwner() end)
-	local active_ok, active_record = pcall(function() return mailbox_api:GetActiveRecord() end)
+	local mailbox_instance = (mailbox_api :: unknown) :: MailboxV2.Mailbox
+	local owner_ok, owner = pcall(function() return mailbox_instance:GetOwner() end)
+	local active_ok, active_record = pcall(function() return mailbox_instance:GetActiveRecord() end)
 	if not owner_ok or type(owner) ~= "table" then return "invalid", "V2 mailbox owner identity could not be read" end
 	if not active_ok or active_record ~= self then
 		return "conflict", "V2 mailbox must be bound to this exact active Record instance"
@@ -5514,9 +5518,9 @@ local function bind_mailbox_v2_async(self: Record, mailbox: unknown): (ResultCod
 		state.mailbox_v2_binding = false
 		return "busy", "legacy queue contains pending messages; drain it before binding the V2 mailbox"
 	end
-	state.mailbox_v2 = mailbox
+	state.mailbox_v2 = mailbox_instance
 	state.mailbox_v2_binding = false
-	local configured, configure_error = install_mailbox_renewal_scheduler(self, state, mailbox_api)
+	local configured, configure_error = install_mailbox_renewal_scheduler(self, state, mailbox_instance)
 	if not configured then
 		state.mailbox_v2 = nil
 		return "invalid", configure_error or "failed to install V2 mailbox lease-renewal scheduling"
@@ -7949,10 +7953,7 @@ local function enqueue_state_work(
 	return result
 end
 
-install_mailbox_renewal_scheduler = function(record: Record, state: InternalState, mailbox: any): (boolean, string?)
-	if type(mailbox) ~= "table" or type(mailbox.SetLeaseRenewalScheduler) ~= "function" then
-		return false, "V2 mailbox does not expose SetLeaseRenewalScheduler"
-	end
+install_mailbox_renewal_scheduler = function(record: Record, state: InternalState, mailbox: MailboxV2.Mailbox): (boolean, string?)
 	local set_ok, configured, configure_error = pcall(function()
 		return mailbox:SetLeaseRenewalScheduler(function(
 			message_id: string,
