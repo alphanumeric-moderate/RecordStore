@@ -196,7 +196,7 @@ local function canonical(value: unknown, stack: { [any]: boolean }?, depth: numb
 		error("cyclic tables are not valid mailbox payloads", 2)
 	end
 	active[table_value] = true
-	local source = table_value :: Dict
+	local source: { [string | number]: unknown } = table_value
 	local count = 0
 	local max_array_index = 0
 	local array_only = true
@@ -281,7 +281,12 @@ local function valid_owner(owner: unknown): (Owner?, string?)
 	if value.user_id ~= nil and (not is_finite(value.user_id) or (value.user_id :: number) < 1 or (value.user_id :: number) ~= math.floor(value.user_id :: number)) then
 		return nil, "user_id must be a positive integer when supplied"
 	end
-	return clone_owner(value :: Owner), nil
+	return {
+		store_name = value.store_name :: string,
+		scope = value.scope :: string,
+		profile_key = value.profile_key :: string,
+		user_id = value.user_id :: number?,
+	}, nil
 end
 
 local function same_owner(left: unknown, right: Owner): boolean
@@ -400,7 +405,7 @@ function MailboxV2.new(store: unknown, owner_value: Owner, options_value: Option
 		"max_attempts", "retry_base_ms", "retry_max_ms", "priority_aging_ms", "high_priority_burst",
 	}
 	for _, key in numeric_options do
-		local value = (options :: Dict)[key]
+		local value = ((options :: unknown) :: Dict)[key]
 		if not is_finite(value) or (value :: number) < 1 or (value :: number) ~= math.floor(value :: number) then
 			error(key .. " must be a positive integer", 2)
 		end
@@ -996,12 +1001,12 @@ function MailboxV2._reserve(self: Mailbox, route: string, request_text: string, 
 	local updated, update_error = self:_update(key, function(raw)
 		local current = as_dict(raw)
 		if current == nil then
-			current = {
+			current = ({
 				version = VERSION,
 				owner = clone_owner(self.owner),
 				shard = shard,
 				entries = {},
-			}
+			} :: unknown) :: Dict
 		end
 		if current.version ~= VERSION or current.shard ~= shard or not same_owner(current.owner, self.owner) then
 			return raw
@@ -1187,13 +1192,13 @@ function MailboxV2._ensure_ordering_slot(self: Mailbox, route: string, ordering_
 	local updated, update_error = self:_update(ordering_route, function(raw)
 		local current = as_dict(raw)
 		if current == nil then
-			current = {
+			current = ({
 				version = VERSION,
 				owner = clone_owner(self.owner),
 				ordering_key = ordering_key,
 				next_sequence = 1,
 				routes = {},
-			}
+			} :: unknown) :: Dict
 		end
 		if current.version ~= VERSION or not same_owner(current.owner, self.owner)
 			or current.ordering_key ~= ordering_key
@@ -1311,14 +1316,14 @@ function MailboxV2._reserve_replay_ordering_slot(
 	local updated, update_error = self:_update(ordering_route, function(raw)
 		local current = as_dict(raw)
 		if current == nil then
-			current = {
+			current = ({
 				version = VERSION,
 				owner = clone_owner(self.owner),
 				ordering_key = ordering_key,
 				next_sequence = 1,
 				routes = {},
 				replay_operations = {},
-			}
+			} :: unknown) :: Dict
 		end
 		if current.version ~= VERSION or not same_owner(current.owner, self.owner)
 			or current.ordering_key ~= ordering_key
@@ -1610,13 +1615,13 @@ function MailboxV2._resume_reservation(self: Mailbox, route: string, initial_ent
 	if locator == nil then
 		local next_locator, open_error = self:_open_segment("active")
 		if next_locator == nil then
-			local blocked_entry, _blocked_error = self:_set_registry_entry(route, token, { capacity_blocked = true })
+			local blocked_entry, _blocked_error = self:_set_registry_entry(route, token, ({ capacity_blocked = true } :: unknown) :: Dict)
 			return ok("unknown", route, nil, open_error or (if blocked_entry ~= nil then "capacity-blocked preparing reservation" else "preparation remains unresolved"))
 		end
-		local patched, patch_error = self:_set_registry_entry(route, token, {
+		local patched, patch_error = self:_set_registry_entry(route, token, ({
 			locator = { slot = next_locator.slot, generation = next_locator.generation },
 			phase = "located",
-		})
+		} :: unknown) :: Dict)
 		if patch_error ~= nil or patched == nil then
 			return ok("unknown", route, nil, patch_error or "reservation locator update could not be verified")
 		end
@@ -1634,15 +1639,15 @@ function MailboxV2._resume_reservation(self: Mailbox, route: string, initial_ent
 		if appended == "full" then
 			local next_locator, next_error = self:_open_segment("active")
 			if next_locator == nil then
-				local blocked_entry, _blocked_error = self:_set_registry_entry(route, token, { capacity_blocked = true })
+				local blocked_entry, _blocked_error = self:_set_registry_entry(route, token, ({ capacity_blocked = true } :: unknown) :: Dict)
 				return ok("unknown", route, nil, next_error or (if blocked_entry ~= nil then "capacity-blocked preparing reservation" else "preparation remains unresolved"))
 			end
 			local next_placement = placement + 1
-			local patched, patch_error = self:_set_registry_entry(route, token, {
+			local patched, patch_error = self:_set_registry_entry(route, token, ({
 				locator = { slot = next_locator.slot, generation = next_locator.generation },
 				placement_generation = next_placement,
 				phase = "located",
-			})
+			} :: unknown) :: Dict)
 			if patch_error ~= nil or patched == nil then
 				return ok("unknown", route, nil, patch_error or "reservation retarget could not be verified")
 			end
@@ -1650,7 +1655,7 @@ function MailboxV2._resume_reservation(self: Mailbox, route: string, initial_ent
 		elseif appended ~= "appended" then
 			return ok("unknown", route, nil, append_error or "index append has unknown outcome")
 		end
-		local patched, patch_error = self:_set_registry_entry(route, token, { phase = "indexed" })
+		local patched, patch_error = self:_set_registry_entry(route, token, ({ phase = "indexed" } :: unknown) :: Dict)
 		if patch_error ~= nil or patched == nil then
 			return ok("unknown", route, nil, patch_error or "index phase could not be verified")
 		end
