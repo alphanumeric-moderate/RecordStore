@@ -1697,7 +1697,7 @@ function MailboxV2._resume_reservation(self: Mailbox, route: string, initial_ent
 	local preparing_now = self:_now()
 	local preparing, preparing_error = self:_update_message(route, function(current)
 		if current == nil then
-			return {
+			return ({
 				version = VERSION,
 				owner = clone_owner(self.owner),
 				route = route,
@@ -1720,7 +1720,7 @@ function MailboxV2._resume_reservation(self: Mailbox, route: string, initial_ent
 				placement_generation = placement,
 				locator = { slot = locator.slot, generation = locator.generation },
 				effect_outcome = "not_started",
-			}
+			} :: unknown) :: Dict
 		end
 		if current.request_text ~= request_text then
 			return current
@@ -1990,13 +1990,14 @@ function MailboxV2.GetDeliveryAsync(self: Mailbox, message_id: string): (Dict?, 
 		return nil, ok("unknown", message_id, nil, entry_error)
 	end
 	if entry ~= nil then
-		return {
+		local snapshot = ({
 			Id = message_id,
 			State = "preparing",
 			Phase = entry.phase,
 			CreatedAt = entry.created_at,
 			CapacityBlocked = entry.capacity_blocked == true,
-		}, ok("preparing", message_id, nil, nil)
+		} :: unknown) :: Dict
+		return snapshot, ok("preparing", message_id, nil, nil)
 	end
 	return nil, ok("not_found", message_id, nil, "no canonical message or active preparation is present")
 end
