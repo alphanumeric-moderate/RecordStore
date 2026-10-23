@@ -5913,6 +5913,14 @@ export type SessionStatus = {
 	IsAuthoritativeOwnershipDecision: false,
 }
 
+type SessionStatusResolver = (
+	name: string,
+	scope: string,
+	key: string,
+	operation_deadline: number?,
+	mock: boolean
+) -> (SessionStatus?, ResultCode, string?)
+
 export type HistoryEntry = {
 	Version: string,
 	CreatedTime: number,
@@ -14204,7 +14212,7 @@ function RecordStore.get_session_status_async(
 	key: string,
 	operation_deadline: number?
 ): (SessionStatus?, ResultCode, string?)
-	local helper = rawget(RecordStore._internals, "get_session_status_internal")
+	local helper = rawget(RecordStore._internals, "get_session_status_internal") :: SessionStatusResolver
 	return helper(name, scope, key, operation_deadline, false)
 end
 
@@ -14846,7 +14854,7 @@ RecordStore.Mock = (function()
 			key: string,
 			operation_deadline: number?
 		): (SessionStatus?, ResultCode, string?)
-			local helper = rawget(RecordStore._internals, "get_session_status_internal")
+			local helper = rawget(RecordStore._internals, "get_session_status_internal") :: SessionStatusResolver
 			return helper(name, scope, key, operation_deadline, true)
 		end,
 		read_async = read_async_mock,
