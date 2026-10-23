@@ -170,7 +170,7 @@ local function clone_json(value: unknown, depth: number?): unknown
 end
 
 local function canonical(value: unknown, stack: { [any]: boolean }?, depth: number?): string
-	local active = stack or {}
+	local active: { [any]: boolean } = stack or {}
 	local level = depth or 0
 	if level > 64 then
 		error("value exceeds the supported nesting depth", 2)
@@ -1008,6 +1008,7 @@ function MailboxV2._reserve(self: Mailbox, route: string, request_text: string, 
 				entries = {},
 			} :: unknown) :: Dict
 		end
+		assert(current ~= nil)
 		if current.version ~= VERSION or current.shard ~= shard or not same_owner(current.owner, self.owner) then
 			return raw
 		end
@@ -1200,6 +1201,7 @@ function MailboxV2._ensure_ordering_slot(self: Mailbox, route: string, ordering_
 				routes = {},
 			} :: unknown) :: Dict
 		end
+		assert(current ~= nil)
 		if current.version ~= VERSION or not same_owner(current.owner, self.owner)
 			or current.ordering_key ~= ordering_key
 		then
@@ -1325,6 +1327,7 @@ function MailboxV2._reserve_replay_ordering_slot(
 				replay_operations = {},
 			} :: unknown) :: Dict
 		end
+		assert(current ~= nil)
 		if current.version ~= VERSION or not same_owner(current.owner, self.owner)
 			or current.ordering_key ~= ordering_key
 		then
@@ -1866,13 +1869,14 @@ local function verify_active_record(self: Mailbox): (string, string?)
 	if type(user_ids) ~= "table" then
 		return "fenced", "bound Record UserIds could not be verified"
 	end
+	local user_ids_array = user_ids :: { unknown }
 	if self.owner.user_id ~= nil then
 		local found = false
-		for _, user_id in ipairs(user_ids) do
+		for _, user_id in ipairs(user_ids_array) do
 			if user_id == self.owner.user_id then found = true; break end
 		end
 		if not found then return "fenced", "V2 mailbox UserId does not match the bound Record" end
-	elseif #user_ids > 0 then
+	elseif #user_ids_array > 0 then
 		return "fenced", "V2 mailbox owner must include a UserId for this Record"
 	end
 	local stats_ok, stats = pcall(function() return record:Stats() end)
@@ -1892,7 +1896,7 @@ function MailboxV2.EnqueueAsync(self: Mailbox, message_type: string, payload: un
 	if type(message_type) ~= "string" or message_type == "" or #message_type > 100 then
 		return ok("invalid", nil, nil, "message_type must be 1 to 100 bytes")
 	end
-	local options = enqueue_options or {}
+	local options: Dict = enqueue_options or ({} :: Dict)
 	local ordering_key = options.ordering_key
 	if ordering_key ~= nil and (type(ordering_key) ~= "string" or ordering_key == ""
 		or #ordering_key > MAX_ORDERING_KEY_LENGTH)
