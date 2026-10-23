@@ -120,22 +120,28 @@ end
 
 local function load_scheduler(): any
 	if loaded_scheduler_module ~= nil then return loaded_scheduler_module end
-	loaded_scheduler_module = load_module(
-		"src/PlayerDataInitializer/RecordStoreScheduler.luau",
-		"RecordStoreScheduler"
-	)
+	local source = fs.readFile(SOURCE_PATH)
+	local begin_marker = "-- BEGIN EMBEDDED SCHEDULER MODULE"
+	local end_marker = "-- END EMBEDDED SCHEDULER MODULE"
+	local begin_position = string.find(source, begin_marker, 1, true)
+	local end_position = if begin_position ~= nil
+		then string.find(source, end_marker, begin_position + #begin_marker, true)
+		else nil
+	assert(begin_position ~= nil and end_position ~= nil and end_position > begin_position,
+		"embedded scheduler implementation markers are missing or out of order")
+	local embedded_source = string.sub(source, begin_position, end_position - 1)
+	local chunk = luau.load(embedded_source .. "\nreturn RecordStoreScheduler\n", {
+		debugName = "RecordStoreScheduler",
+		environment = Shim.environment,
+	})
+	loaded_scheduler_module = chunk()
 	return loaded_scheduler_module
 end
-
 local function load_mailbox(): any
 	if loaded_mailbox_module ~= nil then return loaded_mailbox_module end
-	loaded_mailbox_module = load_module(
-		"src/PlayerDataInitializer/MailboxV2.luau",
-		"MailboxV2"
-	)
+	loaded_mailbox_module = Shim.load().MailboxV2
 	return loaded_mailbox_module
 end
-
 local function load_record_store(source_path: string?): any
 	if loaded_module ~= nil then
 		return loaded_module

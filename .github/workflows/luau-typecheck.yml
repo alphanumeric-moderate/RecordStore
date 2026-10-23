@@ -55,45 +55,58 @@ jobs:
           rojo sourcemap default.project.json --include-non-scripts --output /tmp/sourcemap.json
           test -s /tmp/sourcemap.json
 
-      - name: Require strict mode for RecordStore modules
+      - name: Require strict mode for the consolidated RecordStore module
         run: |
           set -euo pipefail
           python3 - <<'PY'
           from pathlib import Path
 
-          paths = [
-              Path("src/PlayerDataInitializer/RecordStore.luau"),
-              Path("src/PlayerDataInitializer/RecordStoreScheduler.luau"),
-              Path("src/PlayerDataInitializer/MailboxV2.luau"),
-          ]
-          missing = [str(path) for path in paths if not path.read_text().startswith("--!strict")]
-          if missing:
-              print("RecordStore modules must begin with --!strict:")
-              print("\n".join(missing))
+          path = Path("src/PlayerDataInitializer/RecordStore.luau")
+          if not path.read_text().startswith("--!strict"):
+              print(f"{path} must begin with --!strict")
               raise SystemExit(1)
-          print("Strict mode enabled in all RecordStore modules")
+          print("Strict mode enabled for the consolidated RecordStore module")
           PY
 
-      - name: Require typed sibling-module boundaries
+      - name: Require in-file scheduler and mailbox implementations
         run: |
           set -euo pipefail
           python3 - <<'PY'
           import re
           from pathlib import Path
 
-          source = Path("src/PlayerDataInitializer/RecordStore.luau").read_text()
+          root = Path("src/PlayerDataInitializer")
+          source = (root / "RecordStore.luau").read_text()
           forbidden = [
-              r"local\s+RecordStoreScheduler\s*:\s*any\s*=\s*require\(",
-              r"local\s+MailboxV2\s*:\s*any\s*=\s*require\(",
-              r"local\s+scheduler_dispatcher\s*:\s*any\s*=\s*RecordStoreScheduler\.new_dispatcher\(",
+              r"require\s*\(\s*script\.Parent\.RecordStoreScheduler\s*\)",
+              r"require\s*\(\s*script\.Parent\.MailboxV2\s*\)",
+          ]
+          required_markers = [
+              "-- BEGIN EMBEDDED SCHEDULER MODULE",
+              "-- END EMBEDDED SCHEDULER MODULE",
+              "-- BEGIN EMBEDDED MAILBOX V2 MODULE",
+              "-- END EMBEDDED MAILBOX V2 MODULE",
           ]
           violations = [pattern for pattern in forbidden if re.search(pattern, source)]
-          if violations:
-              print("RecordStore sibling modules must retain their inferred or explicit API types.")
-              for pattern in violations:
-                  print(f"Forbidden broad boundary annotation: {pattern}")
+          missing = [marker for marker in required_markers if source.count(marker) != 1]
+          separate = [
+              str(path) for path in (
+                  root / "RecordStoreScheduler.luau",
+                  root / "MailboxV2.luau",
+              ) if path.exists()
+          ]
+          if violations or missing or separate:
+              if violations:
+                  print("RecordStore must not require separate scheduler/mailbox implementations:")
+                  print("\n".join(violations))
+              if missing:
+                  print("Missing or duplicated embedded implementation markers:")
+                  print("\n".join(missing))
+              if separate:
+                  print("Separate implementation files must not remain:")
+                  print("\n".join(separate))
               raise SystemExit(1)
-          print("RecordStore sibling-module boundaries are explicitly typed.")
+          print("Scheduler and Mailbox V2 implementations are embedded in RecordStore.luau")
           PY
 
       - name: Type-check all source modules using their declared modes

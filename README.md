@@ -6,7 +6,7 @@ RecordStore is a server-side Roblox Luau persistence module.
 
 ## Install in Roblox Studio
 
-The Rojo projects map `src/PlayerDataInitializer` to a Script named `ServerScriptService.PlayerDataInitializer`. Its child ModuleScripts include `PlayerData`, `PlayerDataCore`, `RecordStore`, `RecordStoreScheduler`, `MailboxV2`, `IntegerInfinityValue` and `InfiniteMathValue`. InfiniteMath Revised is vendored at `src/InfiniteMath` and mapped to `ReplicatedStorage.InfiniteMath`.
+The Rojo projects map `src/PlayerDataInitializer` to a Script named `ServerScriptService.PlayerDataInitializer`. Its child ModuleScripts include `PlayerData`, `PlayerDataCore`, `RecordStore`, `IntegerInfinityValue` and `InfiniteMathValue`. The scheduler and Mailbox V2 implementations are embedded in `RecordStore.luau`. InfiniteMath Revised is vendored at `src/InfiniteMath` and mapped to `ReplicatedStorage.InfiniteMath`.
 
 **`InfiniteMath` must be a ModuleScript at `ReplicatedStorage.InfiniteMath`.** The vendored InfiniteMath Revised module is outside `PlayerDataInitializer` because `InfiniteMathValue` resolves it from `ReplicatedStorage`. Do not move `InfiniteMath` into `PlayerDataInitializer`.
 
@@ -20,8 +20,6 @@ ServerScriptService
     ├── PlayerData (ModuleScript; PlayerData.luau)
     ├── PlayerDataCore (ModuleScript; PlayerDataCore.luau)
     ├── RecordStore (ModuleScript; RecordStore.luau)
-    ├── RecordStoreScheduler (ModuleScript; RecordStoreScheduler.luau)
-    ├── MailboxV2 (ModuleScript; MailboxV2.luau)
     ├── IntegerInfinityValue (ModuleScript; IntegerInfinityValue.luau)
     └── InfiniteMathValue (ModuleScript; InfiniteMathValue.luau)
 
@@ -72,9 +70,7 @@ The repository also includes:
 
 - `src/PlayerDataInitializer/PlayerData.luau`: the shared controller ModuleScript required by the initializer and gameplay scripts.
 - `src/PlayerDataInitializer/PlayerDataCore.luau`: a configurable player session, leaderstats, persistence, retry, and shutdown controller.
-- `src/PlayerDataInitializer/RecordStore.luau`: the underlying persistence, session ownership, versioning, and recovery API.
-- `src/PlayerDataInitializer/RecordStoreScheduler.luau`: the bounded request governor, scheduling policy and dispatcher used by RecordStore.
-- `src/PlayerDataInitializer/MailboxV2.luau`: the durable Mailbox V2 implementation used by RecordStore.
+- `src/PlayerDataInitializer/RecordStore.luau`: the persistence, session ownership, versioning and recovery API, including its bounded request governor, scheduling policy, dispatcher, and durable Mailbox V2 implementation.
 - `src/PlayerDataInitializer/IntegerInfinityValue.luau`: a `NumberValue` factory that rounds finite values to integers while preserving positive infinity, negative infinity, and NaN. The default `kills` field uses this type so non-finite values are not silently replaced with zero.
 - `InfiniteMath.format(value, options?)`: the shared abbreviation formatter for native and InfiniteMath numbers. Formatting never changes stored values.
 - `src/PlayerDataInitializer/InfiniteMathValue.luau`: an adapter for the vendored InfiniteMath Revised module. It persists the number's normalized `first`/`second` pair inside a versioned JSON envelope and provides `get`/`set` helpers for a replicated StringValue backing instance. With the default schema, this adapter is not required during startup; `PlayerDataCore` loads it only when an `InfiniteMathValue` field is configured or used.
