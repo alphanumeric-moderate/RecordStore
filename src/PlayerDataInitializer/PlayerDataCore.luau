@@ -266,7 +266,7 @@ local function decode_stored_field_value(
 		local factory = infinitemath_factory or InfiniteMathValueFactory
 		if type(value) ~= "string" then return nil, false end
 		if factory.is_unsupported_version ~= nil and factory.is_unsupported_version(value) then
-			error("stored InfiniteMathValue uses a newer codec version; refusing to overwrite it with a default", 2)
+			error("stored InfiniteMathValue uses an unsupported codec version; refusing to overwrite it with a default", 2)
 		end
 		local normalized = normalize_serialized_infinitemath(factory, value)
 		if normalized == nil then return nil, false end
@@ -428,9 +428,9 @@ local function validate_player_data(
 		if field ~= nil and field.class_name == "InfiniteMathValue" then
 			local factory = infinimath_factory or InfiniteMathValueFactory
 			local supported = item_type == "string" and factory.is_serialized(item)
-			local future = item_type == "string" and factory.is_unsupported_version ~= nil
+			local unsupported = item_type == "string" and factory.is_unsupported_version ~= nil
 				and factory.is_unsupported_version(item)
-			if not supported and not future then
+			if not supported and not unsupported then
 				return false, ("player data.%s must contain a valid serialized InfiniteMath value"):format(key)
 			end
 		end

@@ -46,6 +46,8 @@ assert(InfiniteMathValue.format(nan_payload) == "NaN", "NaN special-value round-
 local future_payload = '{"schema":"InfiniteMathValue","version":99,"value":{"kind":"number","first":1,"second":1000}}'
 assert(not InfiniteMathValue.is_serialized(future_payload), "future codec version was accepted as supported")
 assert(InfiniteMathValue.is_unsupported_version(future_payload), "future codec version was not identified for safe handling")
+local old_unsupported_payload = '{"schema":"InfiniteMathValue","version":0,"value":{}}'
+assert(InfiniteMathValue.is_unsupported_version(old_unsupported_payload), "unknown old codec version was not detected for safe handling")
 assert(not InfiniteMathValue.is_serialized(string.rep("x", 199_999)), "malformed JSON was accepted")
 assert(not InfiniteMathValue.is_value({}), "unsupported input table was accepted")
 assert(not InfiniteMathValue.is_value(string.rep("9", 200_000)), "oversized input was accepted")

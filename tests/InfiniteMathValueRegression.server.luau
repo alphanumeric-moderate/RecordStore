@@ -49,6 +49,8 @@ assert(backing.Value == previous, "invalid assignment changed the previous valid
 local future_payload = '{"schema":"InfiniteMathValue","version":99,"value":{"kind":"number","first":1,"second":1000}}'
 assert(not InfiniteMathValue.is_serialized(future_payload), "future codec version was accepted as supported")
 assert(InfiniteMathValue.is_unsupported_version(future_payload), "future codec version was not detected")
+local old_unsupported_payload = '{"schema":"InfiniteMathValue","version":0,"value":{}}'
+assert(InfiniteMathValue.is_unsupported_version(old_unsupported_payload), "unknown old codec version was not detected")
 assert(not InfiniteMathValue.is_value({}), "unsupported input table was accepted")
 backing:Destroy()
 

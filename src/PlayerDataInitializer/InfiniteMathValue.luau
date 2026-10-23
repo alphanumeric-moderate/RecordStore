@@ -320,7 +320,7 @@ function InfiniteMathValue.is_unsupported_version(value)
 	local ok, envelope = pcall(function() return HttpService:JSONDecode(value) end)
 	return ok and type(envelope) == "table" and envelope.schema == SCHEMA
 		and type(envelope.version) == "number" and is_finite(envelope.version)
-		and envelope.version > InfiniteMathValue.FORMAT_VERSION
+		and envelope.version ~= InfiniteMathValue.FORMAT_VERSION
 end
 
 

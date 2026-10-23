@@ -485,69 +485,57 @@ end
 	@param abbreviation boolean | nil
 	@return string
 ]=]
-function Number:GetSuffix(abbreviation: boolean?): string
-	if type(abbreviation) ~= "boolean" then
-		abbreviation = true
+local function getDecimalPoints(): number
+	local decimals = InfiniteMath.DECIMALPOINTS
+	if type(decimals) ~= "number" or decimals ~= decimals or decimals % 1 ~= 0 or decimals < 0 or decimals > 14 then
+		error("InfiniteMath.DECIMALPOINTS must be an integer from 0 through 14", 2)
 	end
+	return decimals
+end
 
+local function roundDecimal(value: number, decimals: number): number
+	local scale = pow10(decimals)
+	local scaled = value * scale
+	if value < 0 then return math.ceil(scaled - 0.5) / scale end
+	return math.floor(scaled + 0.5) / scale
+end
+
+function Number:GetSuffix(abbreviation: boolean?): string
+	if type(abbreviation) ~= "boolean" then abbreviation = true end
 	local first, second = normalize(self.first, self.second)
 	if first ~= first or second ~= second then return "NaN" end
-	if second < -308 then return self:ScientificNotation(abbreviation, false) end
-
+	local decimals = getDecimalPoints()
 	if second < 3 then
-		local result = `{self:Reverse()}`
-		local Length = 2
-		if math.sign(first) == -1 then Length = 3 end
-
-		if math.abs(first) >= 1 then
-			if InfiniteMath.DECIMALPOINTS > 0 then
-				result = result:sub(1, second + Length + InfiniteMath.DECIMALPOINTS)
-				local decimal = string.split(result, ".")[2]
-				if decimal == nil then return result end
-
-				if tonumber(decimal) == 0 then
-					result = string.split(result, ".")[1]
-				elseif decimal == string.rep(9 :: any, InfiniteMath.DECIMALPOINTS) then
-					result = tonumber(string.split(result, ".")[1]) + 1
-				end
-			else
-				result = string.split(result, ".")[1]
-			end
-		else
-			if math.abs(first) <= .01 then return "0" end
-			result = result:sub(1, second + Length + InfiniteMath.DECIMALPOINTS)
-			local decimal = result:split(".")[2]
-
-			if decimal == string.rep(9 :: any, InfiniteMath.DECIMALPOINTS) then
-				result = tonumber(string.split(result, ".")[1]) + 1
+		if second < -decimals then return self:ScientificNotation(abbreviation, false) end
+		local value = self:Reverse()
+		if value == 0 and first ~= 0 then return self:ScientificNotation(abbreviation, false) end
+		local result = string.format("%." .. tostring(decimals) .. "f", value)
+		if decimals > 0 then
+			local integer_part, fraction = string.match(result, "^([+-]?%d+)%.(%d+)$")
+			if integer_part ~= nil and fraction ~= nil then
+				fraction = string.gsub(fraction, "0+$", "")
+				result = if fraction == "" then integer_part else integer_part .. "." .. fraction
 			end
 		end
-
 		return result
 	end
-
 	local secondRemainder = second % 3
 	first *= smallPow10(secondRemainder)
-
-	local suffixIndex = math.floor(second/3)
-	local dp = InfiniteMath.DECIMALPOINTS
-	local scale = pow10(dp)
-	local str = math.floor(first * scale) / scale -- The * 10 / 10 controls decimal precision, more zeros = more decimals
-
-	local suffix = if abbreviation then suffixes[suffixIndex] else full_names[suffixIndex]
-	if not abbreviation and suffix ~= nil then
-		suffix = " " .. suffix
+	local suffixIndex = math.floor(second / 3)
+	local str = roundDecimal(first, decimals)
+	if math.abs(str) >= 1000 then
+		str = if str < 0 then -1 else 1
+		suffixIndex += 1
 	end
-
+	local suffix = if abbreviation then suffixes[suffixIndex] else full_names[suffixIndex]
+	if not abbreviation and suffix ~= nil then suffix = " " .. suffix end
 	if suffixIndex > 0 then
 		if suffix ~= nil then
-			str ..= suffix
-		else
-			str = self:ScientificNotation(abbreviation)
+			return tostring(str) .. suffix
 		end
+		return self:ScientificNotation(abbreviation)
 	end
-
-	return str
+	return tostring(str)
 end
 
 --[=[
@@ -581,19 +569,38 @@ end
 function Number:ScientificNotation(abbreviation: boolean?, secondAbbreviation: boolean?): string
 	local first, second = normalize(self.first, self.second)
 	if first ~= first or second ~= second then return "NaN" end
-	local dp = InfiniteMath.DECIMALPOINTS
-	local scale = pow10(dp)
-	local str = math.floor(first * scale) / scale
-	if secondAbbreviation == false then second = tostring(second)
-	elseif second > 1e+6 then
-		second = fastNew(second, 0)
-		if abbreviation ~= false then second = second:GetSuffix(true) else second = second:ScientificNotation(nil, false) end
+	local decimals = getDecimalPoints()
+	local rounded = roundDecimal(first, decimals)
+	if math.abs(rounded) >= 10 and second + 1 ~= second then
+		rounded /= 10
+		second += 1
 	end
-	local exponent_text = tostring(second)
-	if string.sub(exponent_text, 1, 1) ~= "-" and string.sub(exponent_text, 1, 1) ~= "+" then exponent_text = "+" .. exponent_text end
-	return str .. "e" .. exponent_text
+	local str = tostring(rounded)
+	local exponentMagnitude = math.abs(second)
+	local exponentText
+	if secondAbbreviation == false then
+		if exponentMagnitude >= 1e6 then
+			exponentText = string.format("%.0f", exponentMagnitude)
+		else
+			exponentText = tostring(exponentMagnitude)
+			if string.find(exponentText, "e", 1, true) ~= nil then exponentText = "(" .. exponentText .. ")" end
+		end
+	else
+		if exponentMagnitude > 1e6 then
+			local exponentNumber = fastNew(exponentMagnitude, 0)
+			if abbreviation == false then
+				exponentText = exponentNumber:ScientificNotation(false, false)
+			else
+				exponentText = exponentNumber:GetSuffix(true)
+			end
+		else
+			exponentText = tostring(exponentMagnitude)
+		end
+		if string.find(exponentText, "e", 1, true) ~= nil then exponentText = "(" .. exponentText .. ")" end
+	end
+	local exponentSign = if second < 0 then "-" else "+"
+	return str .. "e" .. exponentSign .. exponentText
 end
-
 
 --[=[
 	@within Number
@@ -646,15 +653,17 @@ local Alphabet = {"a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m
 ]=]
 function Number:aaNotation(): string
 	local first, second = normalize(self.first, self.second)
-
+	if first ~= first or second ~= second then return "NaN" end
 	local secondRemainder = second % 3
 	first *= smallPow10(secondRemainder)
 	local suffixIndex = math.floor(second / 3) - 4
-
-	if suffixIndex <= 0 then
-		return self:GetSuffix()
+	if suffixIndex <= 0 then return self:GetSuffix() end
+	local decimals = getDecimalPoints()
+	local str = roundDecimal(first, decimals)
+	if math.abs(str) >= 1000 then
+		str = if str < 0 then -1 else 1
+		suffixIndex += 1
 	end
-
 	local suffix = ""
 	while suffixIndex > 0 do
 		local remainder = suffixIndex % #Alphabet
@@ -662,15 +671,8 @@ function Number:aaNotation(): string
 		suffix = `{Alphabet[remainder]}{suffix}`
 		suffixIndex = math.floor((suffixIndex - remainder) / #Alphabet)
 	end
-
-	if #suffix > InfiniteMath.AALENGTHMAX then
-		return self:ScientificNotation()
-	end
-
-	local dp = InfiniteMath.DECIMALPOINTS
-	local scale = pow10(dp)
-	local str = math.floor(first * scale) / scale
-	return `{str}{suffix}`
+	if #suffix > InfiniteMath.AALENGTHMAX then return self:ScientificNotation() end
+	return tostring(str) .. suffix
 end
 
 --[=[
@@ -689,15 +691,12 @@ end
 ]=]
 function Number:ConvertForLeaderboards(): number
 	local first, second = normalize(self.first, self.second)
-	if first < 0 then
-		error("ConvertForLeaderboards does not support negative numbers")
-	end
-
+	if first ~= first or second ~= second then error("ConvertForLeaderboards requires a non-NaN value", 2) end
+	if first < 0 then error("ConvertForLeaderboards does not support negative numbers", 2) end
+	if second % 1 ~= 0 then error("ConvertForLeaderboards requires an integer exponent", 2) end
 	local encoded = math.abs(second) * LEADERBOARDPRECISION + math.floor(first * 1000)
-	if encoded > LEADERBOARDMAXSECOND * LEADERBOARDPRECISION + 9999 then
-		return LEADERBOARDMAXSECOND * LEADERBOARDPRECISION + 9999
-	end
-
+	local maximum = LEADERBOARDMAXSECOND * LEADERBOARDPRECISION + 9999
+	if encoded > maximum then return if second < 0 then -maximum else maximum end
 	return if second < 0 then -encoded else encoded
 end
 
@@ -718,14 +717,21 @@ end
 	@return Number
 ]=]
 function InfiniteMath:ConvertFromLeaderboards(GivenNumber: number): Number
-	local num = GivenNumber
-	if num == 0 then
-		return fastNew(0, 0)
+	if type(GivenNumber) ~= "number" or GivenNumber ~= GivenNumber or GivenNumber == math.huge or GivenNumber == -math.huge
+		or GivenNumber % 1 ~= 0 then
+		error("ConvertFromLeaderboards requires a finite integer encoding", 2)
 	end
-
-	local second = math.floor(math.abs(num) / LEADERBOARDPRECISION)
-	local first = (math.abs(num) % LEADERBOARDPRECISION) / 1000
-
+	local num = GivenNumber
+	if num == 0 then return fastNew(0, 0) end
+	local magnitude = math.abs(num)
+	local maximum = LEADERBOARDMAXSECOND * LEADERBOARDPRECISION + 9999
+	if magnitude > maximum then error("ConvertFromLeaderboards encoding exceeds the supported range", 2) end
+	local mantissaPart = magnitude % LEADERBOARDPRECISION
+	local second = math.floor(magnitude / LEADERBOARDPRECISION)
+	if mantissaPart < 1000 or (num < 0 and second == 0) then
+		error("ConvertFromLeaderboards received an invalid encoding", 2)
+	end
+	local first = mantissaPart / 1000
 	return fastNew(first, if num < 0 then -second else second)
 end
 
