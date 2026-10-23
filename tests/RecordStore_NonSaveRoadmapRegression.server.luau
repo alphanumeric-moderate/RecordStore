@@ -29,7 +29,7 @@ local function seed_record(key, session, tombstone)
 		fencing_generation = 2,
 		created_at = 900,
 		updated_at = 950,
-		data = { value = 12 },
+		data = if tombstone ~= nil then nil else { value = 12 },
 		user_ids = {},
 		tombstone = tombstone,
 		write_id = "write-" .. key,
