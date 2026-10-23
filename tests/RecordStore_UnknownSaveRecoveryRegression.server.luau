@@ -760,6 +760,7 @@ do
 
 	fake_now += 181
 	RecordStore.Mock.set_get_failures(0)
+	RecordStore.Mock.set_update_commit_then_failures(1, "injected response loss after lease-recovery commit")
 	local recovery_result, recovery_message = RecordStore.Mock.reconcile(record)
 	assert(recovery_result == "success",
 		"opt-in recovery should reacquire the unchanged expired owner without replaying its unsaved snapshot: "
@@ -798,6 +799,94 @@ do
 	assert((persisted.data :: { [string]: any }).coins == 11,
 		"the retained dirty mutation was lost after lease reacquisition")
 	assert(record:Close() == "closed", "reacquired lease fixture should close")
+	RecordStore.Mock.set_test_clock(nil)
+end
+
+RecordStore.Mock.reset()
+
+
+RecordStore.Mock.reset()
+do
+	local fake_now = DateTime.now().UnixTimestampMillis / 1000 + 1
+	RecordStore.Mock.set_test_clock(function()
+		return fake_now
+	end)
+	local options: any = {
+		schema_version = 1,
+		autosave_interval = 1000,
+		lease_duration = 180,
+		lease_renewal = 60,
+		operation_deadline = 2,
+		retry_attempts = 1,
+		max_dirty_age_seconds = 600,
+		lease_recovery_enabled = true,
+	}
+	local key = "expired-lease-cas-replacement-owner-wins"
+	local record = RecordStore.Mock.new(
+		"RecordStore_UnknownSaveRecoveryRegression",
+		"global",
+		key,
+		options
+	)
+	local open_result, open_message = record:Open({ coins = 10, label = "initial" })
+	assert(open_result == "created" or open_result == "loaded", open_message)
+	local base = RecordStore.Mock.get_record_raw(
+		"RecordStore_UnknownSaveRecoveryRegression", "global", key
+	) :: { [string]: any }
+	local update_result, update_message = record:Update(function(data)
+		(data :: { [string]: RecordStore.JsonValue }).coins = 11
+		return data
+	end)
+	assert(update_result == "success", update_message)
+
+	fake_now += 10
+	RecordStore.Mock.set_update_failures(1, "unknown", "injected pre-commit save failure")
+	RecordStore.Mock.set_get_failures(100, "hold save verification until lease expiration")
+	assert(record:Save("expired-lease-race") == "unknown",
+		"race fixture must retain an unresolved pre-commit save")
+	fake_now += 181
+	RecordStore.Mock.set_get_failures(0)
+
+	local hook_ran = false
+	RecordStore.Mock.set_before_next_update(function()
+		local current = RecordStore.Mock.get_record_raw(
+			"RecordStore_UnknownSaveRecoveryRegression", "global", key
+		) :: { [string]: any }
+		local replacement = table.clone(current)
+		local generation = current.fencing_generation + 1
+		local session = table.clone(current.session :: { [string]: any })
+		replacement.fencing_generation = generation
+		replacement.updated_at = fake_now
+		replacement.write_id = "replacement-owner-write"
+		replacement.data = { coins = 99, label = "replacement" }
+		session.token = "replacement-owner-token"
+		session.generation = generation
+		session.job_id = "replacement-job"
+		session.acquired_at = fake_now
+		session.lease_until = fake_now + 180
+		replacement.session = session
+		local seed_result, seed_message = RecordStore.Mock.seed_record_raw(
+			"RecordStore_UnknownSaveRecoveryRegression", "global", key, replacement
+		)
+		assert(seed_result == "success", seed_message)
+		hook_ran = true
+	end)
+
+	local result, message = RecordStore.Mock.reconcile(record)
+	assert(hook_ran, "the competing owner must be installed immediately before the CAS update")
+	assert(result == "fenced", "expired-session recovery must fence when a new owner wins the key CAS")
+	assert(record.State == "fenced", "stale local session must remain fenced after the race")
+	local after = RecordStore.Mock.get_record_raw(
+		"RecordStore_UnknownSaveRecoveryRegression", "global", key
+	) :: { [string]: any }
+	assert(after.write_id == "replacement-owner-write",
+		"lease recovery must not overwrite the competing owner's durable operation")
+	assert(after.fencing_generation == base.fencing_generation + 1,
+		"the replacement owner's fencing generation must remain authoritative")
+	assert((after.data :: { [string]: any }).coins == 99,
+		"the replacement owner's data must not be overwritten by the stale snapshot")
+	assert(((after.session :: { [string]: any }).token) == "replacement-owner-token",
+		"the competing owner token must remain authoritative")
 	RecordStore.Mock.set_test_clock(nil)
 end
 
