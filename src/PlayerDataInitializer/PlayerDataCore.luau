@@ -197,6 +197,8 @@ local CONFIG = {
 	autosave_interval = 90,
 
 	retry_attempts = 5,
+	durability_mode = "balanced",
+	max_dirty_age_seconds = 180,
 	operation_deadline = 20,
 	load_retry_attempts = 4,
 	load_retry_window = 45,
@@ -967,6 +969,16 @@ local function new(dependencies: Dependencies?): Controller
 				end
 				return
 			end
+			local backpressure = mutation_backpressure_reason(record)
+			if backpressure ~= nil then
+				restoring = true
+				local restore_ok = pcall(assign_backing_value, instance, last_valid_value)
+				restoring = false
+				if not restore_ok then
+					warn("[PlayerData]", record.Key, "could not restore a backpressured value change", key, "unknown error")
+				end
+				return
+			end
 
 			last_valid_value = normalized_value
 			if normalized_value ~= new_value then
@@ -1002,6 +1014,13 @@ local function new(dependencies: Dependencies?): Controller
 				return
 			end
 			if record.State ~= "active" or closing_records[record] then
+				restoring = true
+				backing_value.Value = last_valid_serialized
+				restoring = false
+				return
+			end
+			local backpressure = mutation_backpressure_reason(record)
+			if backpressure ~= nil then
 				restoring = true
 				backing_value.Value = last_valid_serialized
 				restoring = false
@@ -1357,6 +1376,22 @@ local function new(dependencies: Dependencies?): Controller
 		end
 	end
 
+	local function mutation_backpressure_reason(record: PlayerRecord): string?
+		local status_ok, status = pcall(function()
+			return record:GetDurabilityStatus()
+		end)
+		if not status_ok or type(status) ~= "table" then
+			if CONFIG.durability_mode == "read_only_on_risk" then
+				return "could not verify persistence risk status; mutations are paused"
+			end
+			return nil
+		end
+		if status.mutation_admission == "read_only" then
+			return "persistence risk threshold exceeded; mutations are paused"
+		end
+		return nil
+	end
+
 	local function set_player_value(player: Player, key: string, value: unknown): (boolean, string?)
 		if typeof(player) ~= "Instance" or not player:IsA("Player") then
 			return false, "player must be a Player instance"
@@ -1378,6 +1413,10 @@ local function new(dependencies: Dependencies?): Controller
 		local normalized = normalize_set_value(field, value)
 		if normalized == nil then
 			return false, ("invalid value for PlayerData field %q"):format(key)
+		end
+		local backpressure = mutation_backpressure_reason(record)
+		if backpressure ~= nil then
+			return false, backpressure
 		end
 
 		local requires_instance = CONFIG.leaderstats.enabled
@@ -1540,6 +1579,8 @@ local function new(dependencies: Dependencies?): Controller
 			return record_store.new(CONFIG.store_name, CONFIG.scope, resolve_key(player), {
 				schema_version = CONFIG.schema_version,
 				autosave_interval = CONFIG.autosave_interval,
+				durability_mode = CONFIG.durability_mode,
+				max_dirty_age_seconds = CONFIG.max_dirty_age_seconds,
 				lease_duration = CONFIG.lease_duration,
 				lease_renewal = CONFIG.lease_renewal,
 				retry_attempts = CONFIG.retry_attempts,
