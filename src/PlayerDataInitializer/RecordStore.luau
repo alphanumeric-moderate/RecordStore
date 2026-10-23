@@ -8870,7 +8870,7 @@ local function disconnect_message_subscription(state: InternalState)
 	pcall(function()
 		connection:Disconnect()
 	end)
-	if state.state == "active" then
+	if (state.state :: SessionState) == "active" then
 		state.next_message_subscribe = now_local() + MESSAGE_SUBSCRIBE_RETRY
 	else
 		state.next_message_subscribe = math.huge
@@ -9326,7 +9326,7 @@ local function save_internal(state: InternalState, reason: string?, operation_de
 			decision = result_code
 			decision_message = result_message
 		end
-		if state.retired or state.state ~= "saving" then
+		if state.retired or (state.state :: SessionState) ~= "saving" then
 			state.busy = false
 			return "closing", "save was invalidated before its result could be applied"
 		end
@@ -9794,9 +9794,8 @@ track_external_data_mutation = function(state: InternalState)
 	end
 	local public_record = state.public_record
 	local public_data: unknown = state.data
-	local public_record_table: { Data: unknown }? = nil
 	if type(public_record) == "table" then
-		public_record_table = public_record :: { Data: unknown }
+		local public_record_table = public_record :: { Data: unknown }
 		public_data = public_record_table.Data
 	end
 	local candidate = public_data :: JsonValue?
@@ -9905,7 +9904,7 @@ local function sync_public(record: Record, skip_external_mutation_check: boolean
 		end
 		record.Data = if state.data ~= nil then copy_value(state.data) else nil
 	end
-	if state.state == "active" then
+	if (state.state :: SessionState) == "active" then
 		active_records[record] = true
 	else
 		active_records[record] = nil
@@ -10752,10 +10751,11 @@ local function enqueue(self: Record, message_type: string, data: JsonValue?, enq
 		if not call_ok or type(result) ~= "table" or type(result.code) ~= "string" then
 			return "unknown", if call_ok then "V2 mailbox returned no structured enqueue result" else tostring(result)
 		end
-		if result.code == "accepted" then observe(state, "v2_enqueue", "success", message_type); return "enqueued", nil end
-		if result.code == "duplicate" then observe(state, "v2_enqueue", "duplicate", message_type); return "duplicate", nil end
-		local message = if type(result.error) == "string" then result.error else "V2 mailbox enqueue returned " .. result.code
-		return map_mailbox_v2_result(result.code), message
+		local result_table: any = result
+		if result_table.code == "accepted" then observe(state, "v2_enqueue", "success", message_type); return "enqueued", nil end
+		if result_table.code == "duplicate" then observe(state, "v2_enqueue", "duplicate", message_type); return "duplicate", nil end
+		local message = if type(result_table.error) == "string" then result_table.error else "V2 mailbox enqueue returned " .. result_table.code
+		return map_mailbox_v2_result(result_table.code), message
 	end
 	if enqueue_options ~= nil then return "invalid", "enqueue_options require a bound V2 mailbox" end
 	return enqueue_internal(state, message_type, data)
@@ -10932,8 +10932,9 @@ local function bind_mailbox_v2_async(self: Record, mailbox: unknown): (ResultCod
 	then
 		return "invalid", "mailbox must expose the V2 owner, enqueue, processing and lease-renewal APIs"
 	end
-	local owner_ok, owner = pcall(function() return mailbox:GetOwner() end)
-	local active_ok, active_record = pcall(function() return mailbox:GetActiveRecord() end)
+	local mailbox_api: any = mailbox
+	local owner_ok, owner = pcall(function() return mailbox_api:GetOwner() end)
+	local active_ok, active_record = pcall(function() return mailbox_api:GetActiveRecord() end)
 	if not owner_ok or type(owner) ~= "table" then return "invalid", "V2 mailbox owner identity could not be read" end
 	if not active_ok or active_record ~= self then
 		return "conflict", "V2 mailbox must be bound to this exact active Record instance"
@@ -10964,7 +10965,7 @@ local function bind_mailbox_v2_async(self: Record, mailbox: unknown): (ResultCod
 	end
 	state.mailbox_v2 = mailbox
 	state.mailbox_v2_binding = false
-	local configured, configure_error = install_mailbox_renewal_scheduler(self, state, mailbox)
+	local configured, configure_error = install_mailbox_renewal_scheduler(self, state, mailbox_api)
 	if not configured then
 		state.mailbox_v2 = nil
 		return "invalid", configure_error or "failed to install V2 mailbox lease-renewal scheduling"
@@ -11428,7 +11429,7 @@ local function delete_record(self: Record): (ResultCode, string?)
 			decision = result_code
 			decision_message = result_message
 		end
-		if state.retired or state.state ~= "releasing" then
+		if state.retired or (state.state :: SessionState) ~= "releasing" then
 			state.busy = false
 			return "closing", "delete was invalidated before its result could be applied"
 		end
@@ -11667,7 +11668,7 @@ local function open_internal(state: InternalState, default_data: JsonValue?, rec
 	if closing then
 		return "closing", "server is shutting down"
 	end
-	if state.state == "active" then
+	if (state.state :: SessionState) == "active" then
 		return "already_open", nil
 	end
 	if state.busy or state.state == "acquiring" or state.state == "releasing" then
@@ -11916,7 +11917,7 @@ local function open_internal(state: InternalState, default_data: JsonValue?, rec
 			decision = result_code
 			decision_message = result_message
 		end
-		if state.retired or state.state ~= "acquiring" then
+		if state.retired or (state.state :: SessionState) ~= "acquiring" then
 			state.busy = false
 			disconnect_message_subscription(state)
 			return "closing", "open was invalidated before its result could be applied"
@@ -12225,7 +12226,7 @@ local function renew_internal(state: InternalState): (ResultCode, string?)
 			decision = result_code
 			decision_message = result_message
 		end
-		if state.retired or state.state ~= "saving" then
+		if state.retired or (state.state :: SessionState) ~= "saving" then
 			state.busy = false
 			return "closing", "renewal was invalidated before its result could be applied"
 		end
@@ -12542,7 +12543,7 @@ local function reconcile_unknown_internal(state: InternalState): (ResultCode, st
 	if state.retired then return "invalid", "record has been retired" end
 	if closing and not state.shutdown then return "closing", "server is shutting down" end
 	if state.state ~= "unknown" then
-		return if state.state == "active" then "success" else "fenced", "record is not awaiting reconciliation"
+		return if (state.state :: SessionState) == "active" then "success" else "fenced", "record is not awaiting reconciliation"
 	end
 	local pending = state.pending_operation
 	if pending == nil then
@@ -13308,7 +13309,7 @@ local function apply_scheduler_activation()
 	end
 end
 
-local scheduler_state: { [InternalState]: any } = setmetatable({}, { __mode = "k" })
+local scheduler_state: any = setmetatable({}, { __mode = "k" })
 
 local function scheduler_owner_id(state: InternalState): string
 	local function component(value: string): string
@@ -13359,11 +13360,11 @@ local function enqueue_state_work(
 				state.next_queue_poll = math.min(state.next_queue_poll, retry_at)
 			end
 		end
-		if kind == "lease_renewal" and type(result) == "table" and result.code == "retry_exhausted" and state.state == "active" then
+		if kind == "lease_renewal" and type(result) == "table" and result.code == "retry_exhausted" and (state.state :: SessionState) == "active" then
 			state.next_renewal = math.min(state.next_renewal, now_local())
-		elseif kind == "autosave" and type(result) == "table" and result.code == "retry_exhausted" and state.state == "active" then
+		elseif kind == "autosave" and type(result) == "table" and result.code == "retry_exhausted" and (state.state :: SessionState) == "active" then
 			state.next_autosave = math.min(state.next_autosave, now_local())
-		elseif kind == "queue_poll" and type(result) == "table" and result.code == "retry_exhausted" and state.state == "active" then
+		elseif kind == "queue_poll" and type(result) == "table" and result.code == "retry_exhausted" and (state.state :: SessionState) == "active" then
 			state.next_queue_poll = math.min(state.next_queue_poll, now_local())
 		end
 		if type(caller_on_complete) == "function" then pcall(caller_on_complete, result) end
@@ -13751,7 +13752,7 @@ local function start_scheduler()
 		while not closing do
 			for record in active_records do
 				local state = private[record]
-				if state ~= nil and state.state == "active" then
+				if state ~= nil and (state.state :: SessionState) == "active" then
 					local now = now_local()
 					if scheduler_enabled then
 						run_scheduled_record_work(record, state, now)
