@@ -4,29 +4,29 @@
 local MailboxV2 = {}
 MailboxV2.__index = MailboxV2
 
-type Dict = { [string]: unknown }
-type Owner = {
+export type Dict = { [string]: unknown }
+export type Owner = {
 	store_name: string,
 	scope: string,
 	profile_key: string,
 	user_id: number?,
 }
-type ActiveRecordLike = {
+export type ActiveRecordLike = {
 	GetIdentity: (self: ActiveRecordLike) -> Dict,
 	IsOpen: (self: ActiveRecordLike) -> boolean,
 	GetState: (self: ActiveRecordLike) -> string,
 	Stats: (self: ActiveRecordLike) -> Dict,
 }
-type StoreAdapter = {
+export type StoreAdapter = {
 	GetAsync: (self: StoreAdapter, key: string) -> unknown,
 	GetAsyncFresh: ((self: StoreAdapter, key: string) -> unknown)?,
 	UpdateAsync: (self: StoreAdapter, key: string, transform: (unknown, unknown?) -> (unknown, { number }?, Dict?)) -> unknown,
 	RemoveAsync: ((self: StoreAdapter, key: string) -> ())?,
 }
-type WakeupAdapter = {
+export type WakeupAdapter = {
 	Publish: (self: WakeupAdapter, owner_identity: string, reason: string) -> Dict,
 }
-type Options = {
+export type Options = {
 	active_record: ActiveRecordLike?,
 	wakeups: WakeupAdapter?,
 	sender_job_id: string?,
@@ -55,19 +55,19 @@ type Options = {
 	activation_guard: ((string) -> (boolean, string?))?,
 	allow_unattested_activation: boolean?,
 }
-type Locator = { slot: number, generation: number, key: string }
-type Result = {
+export type Locator = { slot: number, generation: number, key: string }
+export type Result = {
 	code: string,
 	message_id: string?,
 	message: Dict?,
 	error: string?,
 }
-type HandlerContext = {
+export type HandlerContext = {
 	is_cancelled: () -> boolean,
 	cancellation_reason: () -> string?,
 	renew_lease_async: () -> Result,
 }
-type Mailbox = typeof(setmetatable({} :: {
+export type Mailbox = typeof(setmetatable({} :: {
 	store: StoreAdapter,
 	owner: Owner,
 	owner_text: string,
