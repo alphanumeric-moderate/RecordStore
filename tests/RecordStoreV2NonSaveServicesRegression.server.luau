@@ -215,6 +215,10 @@ local transfer = sagas:TransferAsync("transfer-stable-001", sender, recipient, 1
 expect(transfer.code == "settled", "transfer saga did not settle: " .. tostring(transfer.code) .. " " .. tostring(transfer.message))
 expect(sender:Get().Balance == 85 and recipient:Get().Balance == 40,
 	"settled transfer violated balance conservation")
+local settled_transfer_status = sagas:GetStatus("transfer-stable-001")
+for _, leg in ipairs({ "reserve", "credit", "settle" }) do
+	assert_leg_outcome(sagas, "transfer-stable-001", leg, "committed")
+end
 local duplicate_transfer = sagas:TransferAsync("transfer-stable-001", sender, recipient, 15, {
 	sender_id = "sender", recipient_id = "recipient",
 })
@@ -374,6 +378,165 @@ expect(resumed_terminal.phase == "settled" and terminal_loss_sagas:GetStatus("tr
 	"confirmed saga did not remain settled on retry")
 expect(sender:Get().Balance == 78 and recipient:Get().Balance == 47,
 	"retry after manual resolution applied a transfer leg more than once")
+
+local function new_leg_pair(store_name)
+	local source = RecordStore.Mock.new(store_name, "global", "sender", {
+		schema_version = 1, transactional_operations_enabled = true,
+	})
+	local target = RecordStore.Mock.new(store_name, "global", "recipient", {
+		schema_version = 1, transactional_operations_enabled = true,
+	})
+	local source_open, source_message = source:Open({ Balance = 100 })
+	local target_open, target_message = target:Open({ Balance = 25 })
+	expect(source_open == "created" or source_open == "loaded", "leg-test sender open failed: " .. tostring(source_message))
+	expect(target_open == "created" or target_open == "loaded", "leg-test recipient open failed: " .. tostring(target_message))
+	return source, target
+end
+
+local function inject_post_commit_unknown(record, suffix)
+	local original = record.TransactAsync
+	local armed = true
+	record.TransactAsync = function(self, operation_id, reducer, options)
+		local result, status, message = original(self, operation_id, reducer, options)
+		if armed and type(operation_id) == "string"
+			and string.sub(operation_id, -#suffix) == suffix and status == "committed"
+		then
+			armed = false
+			return nil, "unknown", "injected post-commit response loss for " .. suffix
+		end
+		return result, status, message
+	end
+	return function() return not armed end
+end
+
+local function assert_leg_outcome(sagas_service, transfer_id, leg, state)
+	local status = sagas_service:GetStatus(transfer_id)
+	local outcome = type(status.leg_outcomes) == "table" and status.leg_outcomes[leg] or nil
+	expect(type(outcome) == "table" and outcome.state == state,
+		("transfer %s did not persist %s leg state %s"):format(transfer_id, leg, state))
+	return outcome
+end
+
+do
+	local source, target = new_leg_pair("V2SagaReserveResponseLoss")
+	local source_loss_seen = inject_post_commit_unknown(source, ":reserve")
+	local saga_service = V2.Sagas.new(new_store())
+	local initial = saga_service:TransferAsync("reserve-loss", source, target, 10, {
+		sender_id = "sender", recipient_id = "recipient",
+	})
+	expect(initial.code == "reconciliation_required",
+		"reserve response loss was not surfaced as unresolved: " .. tostring(initial.code))
+	expect(source:Get().Balance == 90 and target:Get().Balance == 25,
+		"reserve response-loss fixture did not commit only the reservation leg")
+	expect(assert_leg_outcome(saga_service, "reserve-loss", "reserve", "unknown").attempts == 1,
+		"reserve response loss was not recorded durably")
+	local resumed = saga_service:TransferAsync("reserve-loss", source, target, 10, {
+		sender_id = "sender", recipient_id = "recipient",
+	})
+	expect(source_loss_seen() and resumed.code == "settled" and source:Get().Balance == 90 and target:Get().Balance == 35,
+		"reserve retry did not reconcile its stable operation ID without re-reserving")
+	expect(assert_leg_outcome(saga_service, "reserve-loss", "reserve", "committed").attempts == 2,
+		"reserve duplicate reconciliation did not update the durable leg outcome")
+	expect(source:Close() == "closed" and target:Close() == "closed", "reserve response-loss records did not close")
+end
+
+do
+	local source, target = new_leg_pair("V2SagaCreditResponseLoss")
+	local credit_loss_seen = inject_post_commit_unknown(target, ":credit")
+	local saga_service = V2.Sagas.new(new_store())
+	local initial = saga_service:TransferAsync("credit-loss", source, target, 10, {
+		sender_id = "sender", recipient_id = "recipient",
+	})
+	expect(initial.code == "reconciliation_required",
+		"credit response loss was not surfaced as unresolved: " .. tostring(initial.code))
+	expect(source:Get().Balance == 90 and target:Get().Balance == 35,
+		"credit response-loss fixture violated the reserved balance transition")
+	expect(assert_leg_outcome(saga_service, "credit-loss", "credit", "unknown").attempts == 1,
+		"credit response loss was not recorded durably")
+	local resumed = saga_service:TransferAsync("credit-loss", source, target, 10, {
+		sender_id = "sender", recipient_id = "recipient",
+	})
+	expect(credit_loss_seen() and resumed.code == "settled" and source:Get().Balance == 90 and target:Get().Balance == 35,
+		"credit retry did not reconcile the durable receipt without granting twice")
+	expect(assert_leg_outcome(saga_service, "credit-loss", "credit", "committed").attempts == 2,
+		"credit duplicate reconciliation did not update the durable leg outcome")
+	expect(source:Close() == "closed" and target:Close() == "closed", "credit response-loss records did not close")
+end
+
+do
+	local source, target = new_leg_pair("V2SagaSettleResponseLoss")
+	local settle_loss_seen = inject_post_commit_unknown(source, ":settle")
+	local saga_service = V2.Sagas.new(new_store())
+	local initial = saga_service:TransferAsync("settle-loss", source, target, 10, {
+		sender_id = "sender", recipient_id = "recipient",
+	})
+	expect(initial.code == "reconciliation_required",
+		"settlement response loss was not surfaced as unresolved: " .. tostring(initial.code))
+	expect(source:Get().Balance == 90 and target:Get().Balance == 35,
+		"settlement response-loss fixture violated balance conservation")
+	expect(assert_leg_outcome(saga_service, "settle-loss", "settle", "unknown").attempts == 1,
+		"settlement response loss was not recorded durably")
+	local resumed = saga_service:TransferAsync("settle-loss", source, target, 10, {
+		sender_id = "sender", recipient_id = "recipient",
+	})
+	expect(settle_loss_seen() and resumed.code == "settled" and source:Get().Balance == 90 and target:Get().Balance == 35,
+		"settlement retry did not reconcile the durable source escrow receipt")
+	expect(assert_leg_outcome(saga_service, "settle-loss", "settle", "committed").attempts == 2,
+		"settlement duplicate reconciliation did not update the durable leg outcome")
+	expect(source:Close() == "closed" and target:Close() == "closed", "settlement response-loss records did not close")
+end
+
+do
+	local source, target = new_leg_pair("V2SagaRefundResponseLoss")
+	local source_base = source.TransactAsync
+	local refund_loss_armed = true
+	source.TransactAsync = function(self, operation_id, reducer, options)
+		local result, status, message = source_base(self, operation_id, reducer, options)
+		if refund_loss_armed and type(operation_id) == "string"
+			and string.sub(operation_id, -#":refund") == ":refund" and status == "committed"
+		then
+			refund_loss_armed = false
+			return nil, "unknown", "injected post-commit refund response loss"
+		end
+		return result, status, message
+	end
+	local target_base = target.TransactAsync
+	local credit_attempts, reject_credit_once = 0, true
+	target.TransactAsync = function(self, operation_id, reducer, options)
+		if type(operation_id) == "string" and string.sub(operation_id, -#":credit") == ":credit" then
+			credit_attempts += 1
+			if reject_credit_once then
+				reject_credit_once = false
+				return nil, "invalid", "injected definitive credit rejection"
+			end
+		end
+		return target_base(self, operation_id, reducer, options)
+	end
+	local saga_service = V2.Sagas.new(new_store())
+	local initial = saga_service:TransferAsync("refund-loss", source, target, 10, {
+		sender_id = "sender", recipient_id = "recipient",
+	})
+	expect(initial.code == "reconciliation_required"
+		and saga_service:GetStatus("refund-loss").phase == "compensation_pending",
+		"refund response loss did not enter the dedicated compensation-pending phase")
+	expect(source:Get().Balance == 100 and target:Get().Balance == 25
+		and (source:Get().__recordstore_v2_escrow or {})["refund-loss"] == nil,
+		"refund response-loss fixture did not durably restore the source balance")
+	expect(assert_leg_outcome(saga_service, "refund-loss", "credit", "failed").attempts == 1
+		and assert_leg_outcome(saga_service, "refund-loss", "refund", "unknown").attempts == 1,
+		"failed credit and uncertain refund outcomes were not durably recorded")
+	local resumed = saga_service:TransferAsync("refund-loss", source, target, 10, {
+		sender_id = "sender", recipient_id = "recipient",
+	})
+	expect(refund_loss_armed == false and resumed.code == "rejected"
+		and saga_service:GetStatus("refund-loss").phase == "rejected",
+		"refund recovery did not reach a durable rejected terminal phase")
+	expect(credit_attempts == 1 and source:Get().Balance == 100 and target:Get().Balance == 25,
+		"compensation recovery incorrectly retried credit after refund might have committed")
+	expect(assert_leg_outcome(saga_service, "refund-loss", "refund", "committed").attempts == 2,
+		"refund retry did not reconcile its stable receipt")
+	expect(source:Close() == "closed" and target:Close() == "closed", "refund response-loss records did not close")
+end
 
 local projection_store = new_store()
 local projections = V2.Projections.new(projection_store)

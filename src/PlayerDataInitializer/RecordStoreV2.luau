@@ -1467,6 +1467,22 @@ local function saga_coordinator(store, options)
 	options = options or {}
 	local api = { store = store }
 	local MAX_SAGA_TRANSITIONS = 32
+	local SAGA_LEG_NAMES = { reserve = true, credit = true, refund = true, settle = true }
+	local function valid_saga_leg_outcomes(outcomes)
+		if outcomes == nil then return true end
+		if type(outcomes) ~= "table" or key_count(outcomes) > 4 then return false end
+		for name, row in pairs(outcomes) do
+			if not SAGA_LEG_NAMES[name] or type(row) ~= "table"
+				or not valid_text(row.operation_id, 128)
+				or not valid_text(row.request_fingerprint, 128)
+				or not finite(row.attempts) or row.attempts < 1 or math.floor(row.attempts) ~= row.attempts
+				or (row.state ~= "committed" and row.state ~= "unknown" and row.state ~= "failed")
+				or not valid_text(row.last_code, 64) or not finite(row.updated_at)
+				or (row.last_error ~= nil and (type(row.last_error) ~= "string" or #row.last_error > 256))
+			then return false end
+		end
+		return true
+	end
 	local function valid_transition_history(history)
 		if type(history) ~= "table" or #history > MAX_SAGA_TRANSITIONS or key_count(history) ~= #history then return false end
 		local previous_attempt = 0
@@ -1502,6 +1518,7 @@ local function saga_coordinator(store, options)
 					then err else "invalid"
 				return nil
 			end
+			if not valid_saga_leg_outcomes(changed.leg_outcomes) then decision = "corrupt"; return nil end
 			local history_value = if changed.transition_history ~= nil then changed.transition_history else state.transition_history
 			if history_value == nil then history_value = {} end
 			if not valid_transition_history(history_value) then
@@ -1549,6 +1566,7 @@ local function saga_coordinator(store, options)
 		if message then return { code = "unknown", message = message } end
 		if not value then return { code = "not_found" } end
 		if value.transfer_id ~= id then return { code = "conflict", message = "saga route collision" } end
+		if not valid_saga_leg_outcomes(value.leg_outcomes) then return { code = "corrupt", transfer_id = id, message = "saga per-leg outcome ledger is malformed" } end
 		value.code = value.status or "unknown"
 		return copy(value)
 	end
@@ -1561,6 +1579,7 @@ local function saga_coordinator(store, options)
 		if not request_bytes then return { code = "invalid", message = request_error } end
 		if expected_phase ~= "requested" and expected_phase ~= "reserved"
 			and expected_phase ~= "credit_pending" and expected_phase ~= "credited"
+			and expected_phase ~= "compensation_pending"
 		then return { code = "invalid", message = "expected_phase is not a manually recoverable saga phase" } end
 		if expected_status ~= "pending" and expected_status ~= "reconciliation_required" then
 			return { code = "invalid", message = "expected_status must be pending or reconciliation_required" }
@@ -1706,6 +1725,7 @@ local function saga_coordinator(store, options)
 				local prior_phase = current_manual.prior_phase
 				if prior_phase ~= "requested" and prior_phase ~= "reserved"
 					and prior_phase ~= "credit_pending" and prior_phase ~= "credited"
+					and prior_phase ~= "compensation_pending"
 				then return nil, "conflict" end
 				current.phase = prior_phase
 				current.status = "pending"
@@ -1756,6 +1776,79 @@ local function saga_coordinator(store, options)
 				return current
 			end)
 		end
+		local function run_leg(leg, record, operation_id, leg_request, reducer)
+			local leg_material, material_error = request_material(leg_request)
+			if not leg_material then return { code = "invalid", message = material_error } end
+			local result = transaction_run(record, operation_id, leg_request, reducer)
+			local leg_state = if result.code == "committed" or result.code == "duplicate"
+				then "committed" elseif result.code == "unknown" then "unknown" else "failed"
+			local value, code, update_error = update_saga(id, request, function(current)
+				if current.phase == "settled" or current.phase == "rejected" or current.phase == "manual_resolution_required" then
+					return nil, "conflict"
+				end
+				local outcomes = current.leg_outcomes or {}
+				if type(outcomes) ~= "table" then return nil, "corrupt" end
+				local prior = outcomes[leg]
+				local fingerprint = digest(leg_material)
+				if prior ~= nil and (type(prior) ~= "table" or prior.operation_id ~= operation_id
+					or prior.request_fingerprint ~= fingerprint)
+				then return nil, "conflict" end
+				outcomes[leg] = {
+					operation_id = operation_id,
+					request_fingerprint = fingerprint,
+					attempts = (if type(prior) == "table" then prior.attempts else 0) + 1,
+					state = leg_state,
+					last_code = tostring(result.code or "unknown"),
+					updated_at = os.time(),
+					last_error = if type(result.message) == "string" and result.message ~= ""
+						then text_error(result.message, 256) else nil,
+				}
+				current.leg_outcomes = outcomes
+				return current
+			end)
+			if type(value) ~= "table" or type(value.leg_outcomes) ~= "table"
+				or type(value.leg_outcomes[leg]) ~= "table"
+			then
+				return { code = "unknown", message = update_error or (code and tostring(code)) or "saga leg outcome is unresolved" }
+			end
+			result.leg_outcome = copy(value.leg_outcomes[leg])
+			return result
+		end
+		local function refund_source()
+			return run_leg("refund", sender, "rv2:transfer:" .. digest(id) .. ":refund",
+				{ transfer_id = id, amount = amount, leg = "refund" }, function(current)
+					local next_data = copy(current)
+					local escrow = next_data[escrow_field] or {}
+					if type(escrow) ~= "table" then error("escrow namespace malformed") end
+					if not escrow[id] then return next_data end
+					if escrow[id].amount ~= amount then error("escrow amount mismatch") end
+					escrow[id] = nil
+					next_data[escrow_field] = escrow
+					if not finite(next_data[balance_field]) then error("sender balance missing or invalid during refund") end
+					next_data[balance_field] += amount
+					return next_data
+				end)
+		end
+		if saga.phase == "compensation_pending" then
+			local refund = refund_source()
+			if refund.code == "committed" or refund.code == "duplicate" then
+				local rejected, rejected_code, rejected_error = mark(
+					"rejected", "rejected", saga.last_error or "recipient credit failed; source refund reconciled"
+				)
+				if type(rejected) == "table" and rejected.phase == "rejected" then
+					return { code = "rejected", transfer_id = id, message = rejected.last_error }
+				end
+				return { code = rejected_code or "unknown", transfer_id = id, message = rejected_error }
+			end
+			local pending, pending_code, pending_error = mark(
+				"compensation_pending", "reconciliation_required", refund.message or "source refund remains unresolved"
+			)
+			return {
+				code = if type(pending) == "table" then "reconciliation_required" else pending_code or "unknown",
+				transfer_id = id,
+				message = if type(pending) == "table" then pending.last_error else pending_error,
+			}
+		end
 		if saga.phase == "requested" then
 			local data, read_error = record_data(sender)
 			if type(data) ~= "table" then return { code = "fenced", transfer_id = id, message = read_error } end
@@ -1763,7 +1856,7 @@ local function saga_coordinator(store, options)
 				local rejected, code = mark("rejected", "rejected", "insufficient available balance")
 				return { code = if rejected then "rejected" else code, phase = "rejected", transfer_id = id }
 			end
-			local reserve = transaction_run(sender, "rv2:transfer:" .. digest(id) .. ":reserve", { transfer_id = id, amount = amount, leg = "reserve", sender_id = sender_id }, function(current)
+			local reserve = run_leg("reserve", sender, "rv2:transfer:" .. digest(id) .. ":reserve", { transfer_id = id, amount = amount, leg = "reserve", sender_id = sender_id }, function(current)
 				local next_data = copy(current)
 				local escrow = next_data[escrow_field] or {}
 				if type(escrow) ~= "table" then error("escrow namespace malformed") end
@@ -1785,7 +1878,7 @@ local function saga_coordinator(store, options)
 				saga = mark("credit_pending", "pending")
 				if type(saga) ~= "table" or saga.phase ~= "credit_pending" then return { code = "unknown", transfer_id = id } end
 			end
-			local credit = transaction_run(recipient, "rv2:transfer:" .. digest(id) .. ":credit", { transfer_id = id, amount = amount, leg = "credit", recipient_id = recipient_id }, function(current)
+			local credit = run_leg("credit", recipient, "rv2:transfer:" .. digest(id) .. ":credit", { transfer_id = id, amount = amount, leg = "credit", recipient_id = recipient_id }, function(current)
 				local next_data = copy(current)
 				local ledger = next_data[RESERVED .. "received_transfers"] or {}
 				if type(ledger) ~= "table" then error("received-transfer ledger malformed") end
@@ -1799,25 +1892,31 @@ local function saga_coordinator(store, options)
 				return { code = if marked then "reconciliation_required" else code, transfer_id = id, message = credit.message }
 			end
 			if credit.code ~= "committed" and credit.code ~= "duplicate" then
-				local refund = transaction_run(sender, "rv2:transfer:" .. digest(id) .. ":refund", { transfer_id = id, amount = amount, leg = "refund" }, function(current)
-					local next_data = copy(current); local escrow = next_data[escrow_field] or {}
-					if not escrow[id] then return next_data end
-					if escrow[id].amount ~= amount then error("escrow amount mismatch") end
-					escrow[id] = nil; next_data[escrow_field] = escrow; next_data[balance_field] = (next_data[balance_field] or 0) + amount
-					return next_data
-				end)
+				local credit_error = credit.message or "recipient credit was rejected"
+				local refund = refund_source()
 				if refund.code == "committed" or refund.code == "duplicate" then
-					local rejected, code = mark("rejected", "rejected", credit.message)
-					return { code = if rejected then "rejected" else code, transfer_id = id, message = credit.message }
+					local rejected, rejected_code, rejected_error = mark("rejected", "rejected", credit_error)
+					return {
+						code = if type(rejected) == "table" then "rejected" else rejected_code or "unknown",
+						transfer_id = id,
+						message = if type(rejected) == "table" then rejected.last_error else rejected_error,
+					}
 				end
-				local marked, code = mark("credit_pending", "reconciliation_required", "recipient credit and source refund are unresolved")
-				return { code = if marked then "reconciliation_required" else code, transfer_id = id }
+				local pending, pending_code, pending_error = mark(
+					"compensation_pending", "reconciliation_required",
+					"recipient credit was rejected; source refund remains unresolved"
+				)
+				return {
+					code = if type(pending) == "table" then "reconciliation_required" else pending_code or "unknown",
+					transfer_id = id,
+					message = if type(pending) == "table" then pending.last_error else pending_error,
+				}
 			end
 			saga = mark("credited", "pending")
 			if type(saga) ~= "table" or saga.phase ~= "credited" then return { code = "unknown", transfer_id = id, message = "recipient credit committed; saga update unresolved" } end
 		end
 		if saga.phase == "credited" then
-			local settle = transaction_run(sender, "rv2:transfer:" .. digest(id) .. ":settle", { transfer_id = id, amount = amount, leg = "settle" }, function(current)
+			local settle = run_leg("settle", sender, "rv2:transfer:" .. digest(id) .. ":settle", { transfer_id = id, amount = amount, leg = "settle" }, function(current)
 				local next_data = copy(current); local escrow = next_data[escrow_field] or {}
 				if not escrow[id] then return next_data end
 				if escrow[id].amount ~= amount then error("escrow amount mismatch") end
