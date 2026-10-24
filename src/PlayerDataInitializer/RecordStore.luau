@@ -15301,7 +15301,7 @@ RecordStore._internals.transact = (function()
 	end
 end)()
 
-get_transaction_status_engine = function(
+(RecordStore._internals :: { [string]: any }).get_transaction_status = function(
 	self: Record,
 	operation_id: string,
 	request: JsonValue
@@ -17126,7 +17126,7 @@ end)()
 RecordStore.new = (function()
 	local normalize_options = RecordStore._internals.normalize_options
 	local transact_engine = RecordStore._internals.transact :: (Record, string, string, TransactionReducer, TransactionOptions?, string?, JsonValue?, { OutboxEventSpec }?) -> (JsonValue?, TransactionStatus, string?)
-	local transaction_status_engine = RecordStore._internals.get_transaction_status :: (Record, string, JsonValue) -> TransactionReceiptStatus
+	local transaction_status_engine = (RecordStore._internals :: { [string]: any }).get_transaction_status :: (Record, string, JsonValue) -> TransactionReceiptStatus
 	return function(name: string, scope: string, key: string, options: Options): Record
 	if closing then
 		error("RecordStore is shutting down", 2)
@@ -17152,7 +17152,7 @@ end)()
 RecordStore.Mock = (function()
 	local normalize_options = RecordStore._internals.normalize_options
 	local transact_engine = RecordStore._internals.transact :: (Record, string, string, TransactionReducer, TransactionOptions?, string?, JsonValue?, { OutboxEventSpec }?) -> (JsonValue?, TransactionStatus, string?)
-	local transaction_status_engine = RecordStore._internals.get_transaction_status :: (Record, string, JsonValue) -> TransactionReceiptStatus
+	local transaction_status_engine = (RecordStore._internals :: { [string]: any }).get_transaction_status :: (Record, string, JsonValue) -> TransactionReceiptStatus
 	local enqueue_mock = RecordStore._internals.enqueue_static.mock
 	local function mock_new(name: string, scope: string, key: string, options: Options): Record
 		if closing then
