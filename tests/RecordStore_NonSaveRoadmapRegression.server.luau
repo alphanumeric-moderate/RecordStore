@@ -291,8 +291,11 @@ local ambiguous_registration = table.clone(migration_2_to_3)
 ambiguous_registration.id = "migration-test-v1-v3-ambiguous"
 ambiguous_registration.from_version = 1
 ambiguous_registration.to_version = 3
-assert(RecordStore.register_migration("MigrationTest", ambiguous_registration) == "conflict",
-	"registry must reject a second route between already connected schema versions")
+local ambiguous_result, ambiguous_message =
+	RecordStore.register_migration("MigrationTest", ambiguous_registration)
+assert(ambiguous_result == "conflict",
+	("registry must reject a second route between already connected schema versions, got %s: %s"):format(
+		tostring(ambiguous_result), tostring(ambiguous_message)))
 
 local preview, preview_result, preview_message = Mock.preview_migration_async(
 	"MigrationTest", "global", "profile", 3, {
