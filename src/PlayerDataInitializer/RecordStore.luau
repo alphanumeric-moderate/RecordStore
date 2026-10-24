@@ -14868,9 +14868,11 @@ RecordStore._internals.migration_registry = (function()
 
 	local function unique_paths(registrations: { [string]: MigrationRegistration }): (boolean, string?)
 		local graph, versions = build_graph(registrations)
+		local registration_count = 0
+		for _ in pairs(registrations) do registration_count += 1 end
 		local function count_paths(from_version: number, target_version: number, depth: number): number
 			if from_version == target_version then return 1 end
-			if depth > #registrations then return 0 end
+			if depth > registration_count then return 0 end
 			local outgoing = graph[from_version]
 			if outgoing == nil then return 0 end
 			local total = 0
@@ -15137,7 +15139,7 @@ RecordStore._internals.migration_registry = (function()
 		local max_nodes = normalized.max_nodes :: number
 		local max_depth = normalized.max_depth :: number
 		local max_changes = normalized.max_changes :: number
-		local before_nodes, _, before_truncated = summarize(snapshot.Data :: JsonValue, max_nodes, max_depth)
+		local _before_nodes, _, before_truncated = summarize(snapshot.Data :: JsonValue, max_nodes, max_depth)
 		local target_nodes, target_depth, target_summary_truncated, target_bytes, target_size_available =
 			summarize(current, max_nodes, max_depth)
 		local changes, visited, diff_truncated = path_diff(snapshot.Data :: JsonValue, current, max_nodes, max_depth, max_changes)
