@@ -47,7 +47,7 @@ local MAX_OPERATION_ID_BYTES = 256
 local MAX_PURCHASE_ID_BYTES = MAX_OPERATION_ID_BYTES - #OPERATION_ID_PREFIX
 local MAX_RECEIPT_RETENTION_SECONDS = 31_536_000
 
-local function normalize_config(config: Config): NormalizedConfig
+local function normalize_config(config: unknown): NormalizedConfig
 	if type(config) ~= "table" then
 		error("config must be a table", 3)
 	end
