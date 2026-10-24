@@ -6086,9 +6086,12 @@ export type TransactionStatus =
 	"committed" | "duplicate" | "conflict" | "capacity" | "fenced" | "retryable"
 	| "unknown" | "disabled" | "invalid" | "validation" | "corrupt"
 
+export type TransactionReceiptStatusCode =
+	"committed" | "not_found" | "expired" | "conflict" | "unknown"
+	| "disabled" | "invalid" | "corrupt" | "legacy" | "future_schema" | "unsupported"
+
 export type TransactionReceiptStatus = {
-	code: "committed" | "not_found" | "expired" | "conflict" | "unknown"
-		| "disabled" | "invalid" | "corrupt" | "legacy" | "future_schema" | "unsupported",
+	code: TransactionReceiptStatusCode,
 	message: string?,
 	result: JsonValue?,
 	result_present: boolean?,
@@ -15334,7 +15337,7 @@ RecordStore._internals.get_transaction_status = function(
 	local raw, _, read_code, read_message = backend_get(state.backend, false, deadline, nil)
 	if read_code ~= nil then
 		local normalized = normalize_result_code(read_code)
-		local code: TransactionReceiptStatus["code"] = if normalized == "legacy" then "legacy"
+		local code: TransactionReceiptStatusCode = if normalized == "legacy" then "legacy"
 			elseif normalized == "future_schema" then "future_schema"
 			elseif normalized == "corrupt" then "corrupt"
 			elseif normalized == "not_found" then "not_found"
@@ -15346,7 +15349,7 @@ RecordStore._internals.get_transaction_status = function(
 
 	local envelope, parse_error, current_format = parse_envelope(raw)
 	if not current_format then
-		local code: TransactionReceiptStatus["code"] = if parse_error == "legacy payload" then "legacy"
+		local code: TransactionReceiptStatusCode = if parse_error == "legacy payload" then "legacy"
 			elseif parse_error == "future implementation version" then "future_schema"
 			else "corrupt"
 		return { code = code, message = parse_error or "durable profile format is unsupported" }
