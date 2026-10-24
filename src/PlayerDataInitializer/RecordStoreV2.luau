@@ -1627,18 +1627,31 @@ local function new_erasure(store, families, options)
 			rtbf_coverage_verified = verified and template_ok == true, created_at = os.time(), updated_at = os.time(),
 		}
 		local value, message = adapter_call(store, "UpdateAsync", manifest_key(user_id), function(old)
-			if old ~= nil and (old.user_id ~= user_id or old.erasure_id ~= erasure_id) then return old end
-			if old ~= nil and old.status == "completed" then return old end
+			if old ~= nil then
+				if type(old) ~= "table" or old.user_id ~= user_id or old.erasure_id ~= erasure_id then return old end
+				return old
+			end
 			return manifest
 		end)
 		if message then
 			local old = adapter_call(store, "GetAsync", manifest_key(user_id))
-			if type(old) == "table" and old.user_id == user_id and old.erasure_id == erasure_id then old.code = "unknown_reconciled"; return copy(old) end
+			if type(old) == "table" and old.user_id == user_id and old.erasure_id == erasure_id then
+				local result = copy(old)
+				result.code = "unknown_reconciled"
+				return result
+			end
 			return { code = "unknown", message = message }
 		end
 		if type(value) ~= "table" or value.user_id ~= user_id or value.erasure_id ~= erasure_id then return { code = "conflict", message = "different erasure already owns this manifest key" } end
-		value.code = "success"
-		return copy(value)
+		if value.version ~= 1 or type(value.entries) ~= "table" or type(value.coverage) ~= "table"
+			or not finite(value.cursor) or math.floor(value.cursor) ~= value.cursor or value.cursor < 0 or value.cursor > #value.entries
+			or not finite(value.completed_count) or value.completed_count < 0 or math.floor(value.completed_count) ~= value.completed_count
+			or (value.status ~= "planned" and value.status ~= "in_progress" and value.status ~= "unknown"
+				and value.status ~= "blocked" and value.status ~= "completed" and value.status ~= "resolved")
+		then return { code = "corrupt", message = "existing erasure manifest failed validation" } end
+		local result = copy(value)
+		result.code = "success"
+		return result
 	end
 	function coordinator:ExecuteAsync(user_id, erasure_id, max_items)
 		if not finite(user_id) or user_id < 1 or math.floor(user_id) ~= user_id or not valid_text(erasure_id, 96) then return { code = "invalid" } end
@@ -1647,7 +1660,8 @@ local function new_erasure(store, families, options)
 		local manifest, message = adapter_call(store, "GetAsync", key)
 		if message then return { code = "unknown", message = message } end
 		if type(manifest) ~= "table" or manifest.user_id ~= user_id or manifest.erasure_id ~= erasure_id then return { code = "not_found" } end
-		if manifest.status == "completed" then return { code = "committed", completed_count = manifest.completed_count or 0, rtbf_coverage_verified = manifest.rtbf_coverage_verified } end
+		if manifest.status == "completed" then return { code = "committed", completed_count = manifest.completed_count or 0, cursor = manifest.cursor, rtbf_coverage_verified = manifest.rtbf_coverage_verified } end
+		if manifest.status == "resolved" then return { code = "resolved", completed_count = manifest.completed_count or 0, cursor = manifest.cursor } end
 		for _, family in ipairs(self.families) do
 			if type(family.fence_user) ~= "function" or type(family.redact_or_delete_if_generation) ~= "function" then return { code = "unsupported", message = "family needs writer fence and generation-aware delete/redact" } end
 			local fenced, fence_error = io_call(family.fence_user, user_id, erasure_id)
@@ -1664,28 +1678,76 @@ local function new_erasure(store, families, options)
 			local status, action_error = io_call(family.redact_or_delete_if_generation, entry.item, user_id, erasure_id)
 			if status ~= "deleted" and status ~= "redacted" then
 				adapter_call(store, "UpdateAsync", key, function(old)
-					if type(old) ~= "table" or old.erasure_id ~= erasure_id then return old end
-					local value = copy(old); value.status = if status == "unknown" then "unknown" else "in_progress"; value.last_error = text_error(action_error or status, 256); return value
+					if type(old) ~= "table" or old.user_id ~= user_id or old.erasure_id ~= erasure_id
+						or old.status == "completed" or old.status == "resolved"
+					then return old end
+					local value = copy(old)
+					value.status = if status == "unknown" then "unknown" else "in_progress"
+					value.last_error = text_error(action_error or status, 256)
+					return value
 				end)
 				return { code = if status == "unknown" then "unknown" else "retryable", cursor = index - 1, message = action_error or "delete outcome unresolved" }
 			end
 			completed += 1
+			local progress_decision = "unknown"
 			local updated, progress_error = adapter_call(store, "UpdateAsync", key, function(old)
-				if type(old) ~= "table" or old.erasure_id ~= erasure_id then return old end
-				local value = copy(old); value.cursor = index; value.completed_count = completed; value.status = "in_progress"; value.updated_at = os.time(); value.last_error = nil; return value
+				progress_decision = "unknown"
+				if type(old) ~= "table" or old.user_id ~= user_id or old.erasure_id ~= erasure_id then
+					progress_decision = "conflict"
+					return old
+				end
+				if old.status == "completed" or old.status == "resolved" then
+					progress_decision = "already_terminal"
+					return old
+				end
+				local durable_cursor = old.cursor or 0
+				if durable_cursor >= index then
+					progress_decision = "already_checkpointed"
+					return old
+				end
+				if durable_cursor ~= index - 1 then
+					progress_decision = "conflict"
+					return old
+				end
+				local value = copy(old)
+				value.cursor = index
+				value.completed_count = math.max(value.completed_count or 0, completed)
+				value.status = "in_progress"
+				value.updated_at = os.time()
+				value.last_error = nil
+				progress_decision = "committed"
+				return value
 			end)
-			if progress_error or type(updated) ~= "table" or updated.cursor ~= index then return { code = "unknown", cursor = index - 1, completed_count = completed, message = "action succeeded; repeat idempotently because cursor is unresolved" } end
+			if progress_error or type(updated) ~= "table" then
+				return { code = "unknown", cursor = index - 1, completed_count = completed, message = "action succeeded; repeat idempotently because cursor is unresolved" }
+			end
+			if progress_decision == "conflict" then
+				return { code = "conflict", cursor = updated.cursor, completed_count = updated.completed_count, message = "erasure progress changed outside the expected cursor" }
+			end
+			cursor = updated.cursor or cursor
+			completed = updated.completed_count or completed
 		end
 		local final, final_error = adapter_call(store, "UpdateAsync", key, function(old)
-			if type(old) ~= "table" or old.erasure_id ~= erasure_id then return old end
-			local value = copy(old); value.completed_count = completed
+			if type(old) ~= "table" or old.user_id ~= user_id or old.erasure_id ~= erasure_id
+				or old.status == "completed" or old.status == "resolved"
+			then return old end
+			local value = copy(old)
+			value.completed_count = math.max(value.completed_count or 0, completed)
 			value.status = if value.cursor >= #value.entries then "completed" else "in_progress"
 			value.completed_at = if value.status == "completed" then os.time() else nil
 			value.updated_at = os.time()
 			return value
 		end)
 		if final_error then return { code = "unknown", message = final_error } end
-		return { code = if final and final.status == "completed" then "committed" else "incomplete", cursor = final and final.cursor or cursor, completed_count = completed, rtbf_coverage_verified = final and final.rtbf_coverage_verified == true or false, message = if final and final.status ~= "completed" then "resume in bounded steps" else nil }
+		if type(final) ~= "table" or final.user_id ~= user_id or final.erasure_id ~= erasure_id then
+			return { code = "conflict", message = "erasure terminal checkpoint identity changed" }
+		end
+		return {
+			code = if final.status == "completed" then "committed" elseif final.status == "resolved" then "resolved" else "incomplete",
+			cursor = final.cursor, completed_count = final.completed_count or completed,
+			rtbf_coverage_verified = final.rtbf_coverage_verified == true,
+			message = if final.status == "completed" or final.status == "resolved" then nil else "resume in bounded steps",
+		}
 	end
 	function coordinator:GetStatus(user_id)
 		local result, message = adapter_call(store, "GetAsync", manifest_key(user_id))

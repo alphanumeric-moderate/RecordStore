@@ -259,7 +259,10 @@ local families = {
 		templates = { { name = "PlayerData", scope = "global", key = "Player_{user_id}" } },
 		templates_verified = true,
 		inventory = function(user_id, maximum)
-			return { { key = "Player_" .. tostring(user_id), generation = 4 } }
+			return {
+				{ key = "Player_" .. tostring(user_id), generation = 4 },
+				{ key = "PlayerArchive_" .. tostring(user_id), generation = 8 },
+			}
 		end,
 		fence_user = function() return true end,
 		dependencies_clear = function() return true end,
@@ -275,12 +278,62 @@ local erasure = V2.Erasure.new(erase_store, families, {
 local erasure_plan = erasure:PlanAsync(123456, "erase-stable-1")
 expect(erasure_plan.code == "success" and erasure_plan.rtbf_coverage_verified == true,
 	"verified erasure plan was not recorded")
+local partial_erasure = erasure:ExecuteAsync(123456, "erase-stable-1", 1)
+expect(partial_erasure.code == "incomplete" and partial_erasure.cursor == 1,
+	"bounded erasure execution did not checkpoint its first item")
+local retried_erasure_plan = erasure:PlanAsync(123456, "erase-stable-1")
+expect(retried_erasure_plan.cursor == 1 and #retried_erasure_plan.entries == 2
+	and retried_erasure_plan.status == "in_progress",
+	"replanning an in-progress erasure reset its durable cursor or inventory")
 local erasure_result = erasure:ExecuteAsync(123456, "erase-stable-1", 1)
-expect(erasure_result.code == "committed" and erasure_result.completed_count == 1,
-	"bounded erasure execution did not complete")
-expect(#deleted_items == 1 and deleted_items[1].key == "Player_123456",
-	"erasure failed to invoke its generation-aware deletion adapter")
+expect(erasure_result.code == "committed" and erasure_result.completed_count == 2,
+	"bounded erasure execution did not complete after resuming")
+expect(#deleted_items == 2 and deleted_items[1].key == "Player_123456"
+	and deleted_items[2].key == "PlayerArchive_123456",
+	"erasure failed to invoke each generation-aware deletion adapter")
 expect(erasure:GetStatus(123456).status == "completed", "erasure manifest status was not durable")
+
+local concurrent_erase_store = new_store()
+local concurrent_eraser
+local nested_erasure_result
+local reenter_erasure = true
+local concurrent_deleted = {}
+local concurrent_family = {
+	{
+		name = "concurrent_profiles",
+		templates = { { name = "PlayerData", scope = "global", key = "Player_{user_id}" } },
+		templates_verified = true,
+		inventory = function(user_id)
+			return {
+				{ key = "Player_" .. tostring(user_id), generation = 4 },
+				{ key = "PlayerArchive_" .. tostring(user_id), generation = 8 },
+			}
+		end,
+		fence_user = function() return true end,
+		dependencies_clear = function() return true end,
+		redact_or_delete_if_generation = function(item)
+			concurrent_deleted[#concurrent_deleted + 1] = item.key
+			if reenter_erasure then
+				reenter_erasure = false
+				nested_erasure_result = concurrent_eraser:ExecuteAsync(654321, "erase-concurrent-1", 2)
+			end
+			return "deleted"
+		end,
+	},
+}
+concurrent_eraser = V2.Erasure.new(concurrent_erase_store, concurrent_family, {
+	verify_templates = function() return true end,
+})
+expect(concurrent_eraser:PlanAsync(654321, "erase-concurrent-1").code == "success",
+	"concurrent erasure plan creation failed")
+local outer_erasure_result = concurrent_eraser:ExecuteAsync(654321, "erase-concurrent-1", 1)
+expect(nested_erasure_result.code == "committed", "nested erasure did not complete both items")
+expect(outer_erasure_result.code == "committed" and outer_erasure_result.completed_count == 2,
+	"stale erasure worker overwrote newer terminal progress")
+expect(concurrent_eraser:GetStatus(654321).status == "completed"
+	and concurrent_eraser:GetStatus(654321).cursor == 2,
+	"concurrent erasure execution regressed the durable cursor");
+
 local unverified_erasure = V2.Erasure.new(new_store(), {
 	{
 		name = "unverified_family",

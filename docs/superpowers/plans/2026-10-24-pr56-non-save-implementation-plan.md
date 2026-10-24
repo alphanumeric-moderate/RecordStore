@@ -80,7 +80,7 @@
 
 ### Slice 7: Projections, erasure and operation tracing
 - [x] Add opt-in durable event-driven projections, revision/idempotency checks, bounded rebuild cursors and durable uniqueness reservations.
-- [x] Add resumable bounded erasure manifests with explicit application family inventory, writer fence, dependency check, and generation-aware redaction/deletion callbacks.
+- [x] Add resumable bounded erasure manifests with explicit application family inventory, writer fence, dependency check, and generation-aware redaction/deletion callbacks; repeated planning preserves existing progress, `resolved` is terminal, and cursor checkpoints use monotonic compare-and-update so a stale worker cannot regress completion.
 - [x] Add bounded redacted trace buffering and optional durable trace flush/read reconciliation.
 
 - [x] Add opt-in durable projection rebuild manifests with stable rebuild/snapshot identity, bounded page processing, persisted cursors and counts, exact ambiguous-write reconciliation, status inspection, restart/resume coverage, and strict complete/cursor contract validation. The source adapter must pin the same immutable snapshot for every page; source-specific platform acceptance remains a release gate.
