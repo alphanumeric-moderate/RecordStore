@@ -562,11 +562,34 @@ local function test_future_message_version_fails_closed()
 	assert(delivery == nil and delivery_result.code == "unsupported_schema",
 		"public delivery read treated a future message version as a v2 envelope")
 
+	local queue, queue_result = mailbox:GetQueueAsync()
+	assert(#queue == 0 and queue_result.code == "unsupported_schema",
+		"public queue read exposed a future-version message as a v2 entry")
+
 	local claimed, claim_result = mailbox:_claim(queued.message_id)
 	assert(claimed == nil and claim_result.code == "unsupported_schema",
 		"claim attempted to process a message from an unsupported schema version")
 	assert(store.values[queued.message_id].version == 3 and store.values[queued.message_id].state == "ready",
 		"unsupported message schema was rewritten during fail-closed validation")
+
+	local ack_mailbox, ack_store = new_mailbox()
+	local acknowledging = enqueue(ack_mailbox, "future-ack-schema", "future-ack-schema-id", nil, "normal")
+	ack_store.values[acknowledging.message_id].version = 3
+	ack_store.values[acknowledging.message_id].state = "acknowledging"
+	ack_store.values[acknowledging.message_id].claim_token = "future-claim-token"
+	local ack_result = ack_mailbox:_finish_acknowledgement(acknowledging.message_id, "future-claim-token")
+	assert(ack_result.code == "unsupported_schema"
+		and ack_store.values[acknowledging.message_id].state == "acknowledging",
+		"acknowledgement recovery mutated a future-version canonical message")
+
+	local dlq_mailbox, dlq_store = new_mailbox()
+	local dead_lettering = enqueue(dlq_mailbox, "future-dlq-schema", "future-dlq-schema-id", nil, "normal")
+	dlq_store.values[dead_lettering.message_id].version = 3
+	dlq_store.values[dead_lettering.message_id].state = "dead_lettering"
+	local dlq_result = dlq_mailbox:_finish_dead_letter(dead_lettering.message_id)
+	assert(dlq_result.code == "unsupported_schema"
+		and dlq_store.values[dead_lettering.message_id].state == "dead_lettering",
+		"dead-letter recovery mutated a future-version canonical message")
 end
 
 local function test_high_priority_burst_does_not_starve_background_messages()

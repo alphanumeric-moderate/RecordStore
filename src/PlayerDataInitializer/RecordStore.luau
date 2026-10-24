@@ -3527,6 +3527,9 @@ do
 			if current ~= nil and not same_owner(current.owner, self.owner) then
 				return raw
 			end
+			if current ~= nil and current.version ~= VERSION then
+				return raw
+			end
 			return transform(current)
 		end)
 		if update_error ~= nil then
@@ -3535,6 +3538,9 @@ do
 		local record = as_dict(updated)
 		if record ~= nil and not same_owner(record.owner, self.owner) then
 			return nil, "canonical route collision: owner identity mismatch"
+		end
+		if record ~= nil and record.version ~= VERSION then
+			return nil, "unsupported schema version: canonical message version is not supported"
 		end
 		return record, nil
 	end
@@ -4539,6 +4545,11 @@ do
 			if record_value ~= nil and record == nil then
 				return {}, ok("corrupt", nil, nil, "queue index points to a malformed canonical record")
 			end
+			if record ~= nil and same_owner(record.owner, self.owner)
+				and record.state == "ready" and record.version ~= VERSION
+			then
+				return {}, ok("unsupported_schema", route, nil, "canonical message version is unsupported")
+			end
 			local locator = as_dict(row.locator)
 			local record_locator = if record ~= nil then as_dict(record.locator) else nil
 			if record ~= nil and same_owner(record.owner, self.owner) and record.state == "ready"
@@ -4610,7 +4621,8 @@ do
 			return next_record
 		end)
 		if finish_error ~= nil then
-			return ok("unknown", route, nil, finish_error)
+			local code = if string.find(finish_error, "unsupported schema version", 1, true) then "unsupported_schema" else "unknown"
+			return ok(code, route, nil, finish_error)
 		end
 		if finished == nil then
 			return ok("unknown", route, nil, "acknowledgement completion could not be verified")
@@ -4629,6 +4641,9 @@ do
 		local record = as_dict(record_value)
 		if read_error ~= nil or record == nil then
 			return ok("unknown", route, nil, read_error or "dead-letter source record is missing")
+		end
+		if record.version ~= VERSION then
+			return ok("unsupported_schema", route, nil, "canonical message version is unsupported")
 		end
 		if record.state == "dead_lettered" then
 			return ok("duplicate", route, self:_record_snapshot(record), nil)
@@ -5300,6 +5315,9 @@ do
 					return {}, nil, ok("corrupt", nil, nil, "dead-letter index points to a malformed canonical record")
 				end
 				if record ~= nil and same_owner(record.owner, self.owner) and record.state == "dead_lettered" then
+					if record.version ~= VERSION then
+						return {}, nil, ok("unsupported_schema", route, nil, "canonical message version is unsupported")
+					end
 					seen[route] = true
 					table.insert(messages, self:_record_snapshot(record))
 				end
