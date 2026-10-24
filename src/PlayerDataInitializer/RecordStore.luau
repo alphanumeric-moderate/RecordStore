@@ -3567,6 +3567,9 @@ do
 	end
 
 	local function valid_scheduling_record(record: EmbeddedMailboxDict, route: string): (boolean, string?)
+		if record.version ~= VERSION then
+			return false, "canonical message version is unsupported"
+		end
 		if type(record.route) ~= "string" or record.route ~= route then
 			return false, "canonical route does not match its index entry"
 		end
@@ -4461,6 +4464,9 @@ do
 			if not same_owner(record.owner, self.owner) then
 				return nil, ok("conflict", message_id, nil, "message key belongs to another owner")
 			end
+			if record.version ~= VERSION then
+				return nil, ok("unsupported_schema", message_id, nil, "canonical message version is unsupported")
+			end
 			return self:_record_snapshot(record), ok("success", message_id, nil, nil)
 		end
 		local entry, entry_error = self:_get_registry_entry(message_id)
@@ -4765,7 +4771,8 @@ do
 		if claimed.state == "ready" or claimed.state == "claimed" then
 			local valid, validation_error = valid_scheduling_record(claimed, route)
 			if not valid then
-				return nil, ok("corrupt", route, nil, validation_error or "canonical scheduling metadata is malformed")
+				local code = if validation_error == "canonical message version is unsupported" then "unsupported_schema" else "corrupt"
+				return nil, ok(code, route, nil, validation_error or "canonical scheduling metadata is malformed")
 			end
 		end
 		if claimed.state == "acknowledging" then

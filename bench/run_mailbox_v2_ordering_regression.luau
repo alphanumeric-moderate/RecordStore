@@ -553,6 +553,22 @@ local function test_corrupt_ready_message_metadata_fails_closed()
 		"negative retry accounting reached a message handler")
 end
 
+local function test_future_message_version_fails_closed()
+	local mailbox, store = new_mailbox({ strict_ordering_enabled = true })
+	local queued = enqueue(mailbox, "future-schema", "future-schema-id", nil, "normal")
+	store.values[queued.message_id].version = 3
+
+	local delivery, delivery_result = mailbox:GetDeliveryAsync(queued.message_id)
+	assert(delivery == nil and delivery_result.code == "unsupported_schema",
+		"public delivery read treated a future message version as a v2 envelope")
+
+	local claimed, claim_result = mailbox:_claim(queued.message_id)
+	assert(claimed == nil and claim_result.code == "unsupported_schema",
+		"claim attempted to process a message from an unsupported schema version")
+	assert(store.values[queued.message_id].version == 3 and store.values[queued.message_id].state == "ready",
+		"unsupported message schema was rewritten during fail-closed validation")
+end
+
 local function test_high_priority_burst_does_not_starve_background_messages()
 	local mailbox = new_mailbox({ strict_ordering_enabled = true })
 	for index = 1, 7 do
@@ -987,6 +1003,7 @@ test_corrupt_existing_ordering_slot_fails_closed()
 test_corrupt_ordering_index_fails_closed()
 test_stale_cache_cannot_bypass_claim_metadata_validation()
 test_corrupt_ready_message_metadata_fails_closed()
+test_future_message_version_fails_closed()
 test_high_priority_burst_does_not_starve_background_messages()
 test_clock_skew_cannot_break_ordering_under_adversarial_sort_keys()
 test_priority_burst_policy_is_bounded_and_configurable()
