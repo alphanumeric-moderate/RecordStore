@@ -86,7 +86,7 @@
 - [x] Add opt-in durable projection rebuild manifests with stable rebuild/snapshot identity, bounded page processing, persisted cursors and counts, exact ambiguous-write reconciliation, status inspection, restart/resume coverage, and strict complete/cursor contract validation. The source adapter must pin the same immutable snapshot for every page; source-specific platform acceptance remains a release gate.
 - [ ] Add a user-data family inventory and resumable erasure plan/execution/status that fences recreation and reports uncertain/unmatched families.
 - [ ] Keep the RTBF-completeness claim blocked until templates cover every user-associated key layout and the real platform acceptance test passes.
-- [ ] Add bounded correlated operation traces that distinguish durable evidence from process-local observations and redact payload/identity fields by default.
+- [x] Add bounded correlated operation traces with unique per-event IDs, cross-process-safe merge/deduplication, explicit `process_local` / `durable_store` / `durable_store_and_local` evidence labels, durability summaries, and payload/identity redaction.
 
 ### Slice 8: Verification and merge gates
 

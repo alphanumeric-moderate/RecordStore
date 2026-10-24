@@ -803,18 +803,50 @@ local function path_diff(left, right, options)
 	return { changes = changes, truncated = truncated, nodes_examined = nodes, bytes_budget = max_bytes }
 end
 
+local function trace_event_identity(event)
+	if valid_text(event.trace_event_id, 128) then return "id:" .. event.trace_event_id end
+	local ok, material = pcall(canonical, event)
+	if ok then return "legacy:" .. digest(material) end
+	return "legacy:" .. tostring(event.timestamp_unix or 0) .. ":" .. tostring(event.sequence or 0)
+end
+
+local function trace_event_less(left, right)
+	local left_time = if finite(left.timestamp_unix) then left.timestamp_unix else 0
+	local right_time = if finite(right.timestamp_unix) then right.timestamp_unix else 0
+	if left_time ~= right_time then return left_time < right_time end
+	return tostring(left.trace_event_id or left.sequence or "") < tostring(right.trace_event_id or right.sequence or "")
+end
+
 local function new_tracer(options)
 	options = options or {}
 	local capacity = math.clamp(math.floor(options.max_events or 256), 16, MAX_TRACE_EVENTS)
 	local sample_every = math.clamp(math.floor(options.success_sample_every or 1), 1, 10000)
+	local event_id_generator = options.new_event_id
+	if type(event_id_generator) ~= "function" then
+		local service_ok, http_service = pcall(function() return game:GetService("HttpService") end)
+		if service_ok and http_service then
+			event_id_generator = function() return http_service:GenerateGUID(false) end
+		end
+	end
 	local tracer = { events = {}, next_sequence = 1, dropped = 0, emitted = 0, sampled = 0, store = options.store }
+	local local_event_nonce = tostring(tracer) .. ":" .. tostring(os.clock()) .. ":" .. tostring(math.random())
+	local function next_trace_event_id(sequence, timestamp)
+		if type(event_id_generator) == "function" then
+			local value = io_call(event_id_generator)
+			if valid_text(value, 128) then return value end
+		end
+		return digest(local_event_nonce .. ":" .. tostring(sequence) .. ":" .. tostring(timestamp))
+	end
 	function tracer:Emit(event)
 		if type(event) ~= "table" then return false, "trace event required" end
 		local result = tostring(event.result or "unknown")
 		local always = result == "unknown" or result == "corrupt" or result == "failed" or result == "conflict"
 		if not always and result == "success" then self.sampled += 1; if self.sampled % sample_every ~= 0 then return true, "sampled_out" end end
+		local timestamp = if finite(event.timestamp_unix) then event.timestamp_unix else os.time()
 		local value = {
-			sequence = self.next_sequence, timestamp_unix = if finite(event.timestamp_unix) then event.timestamp_unix else os.time(),
+			sequence = self.next_sequence,
+			trace_event_id = next_trace_event_id(self.next_sequence, timestamp),
+			timestamp_unix = timestamp,
 			operation_id = if valid_text(event.operation_id, 128) then event.operation_id else nil,
 			correlation_id = if valid_text(event.correlation_id, 128) then event.correlation_id else nil,
 			causation_id = if valid_text(event.causation_id, 128) then event.causation_id else nil,
@@ -836,12 +868,29 @@ local function new_tracer(options)
 		if not valid_text(operation_id, 128) then return { code = "invalid", events = {} } end
 		local matches = {}
 		for _, event in ipairs(self.events) do
-			if event.operation_id == operation_id or event.correlation_id == operation_id or event.causation_id == operation_id then table.insert(matches, copy(event)) end
+			if event.operation_id == operation_id or event.correlation_id == operation_id or event.causation_id == operation_id then
+				local value = copy(event)
+				value.evidence_source = "process_local"
+				table.insert(matches, value)
+			end
 		end
 		limit = math.clamp(math.floor(limit or 128), 1, 256)
 		local truncated = #matches > limit
 		while #matches > limit do table.remove(matches, 1) end
-		return { code = "success", events = matches, truncated = truncated or self.dropped > 0, dropped_local_events = self.dropped, completeness = if self.dropped == 0 and not truncated then "local_ring_complete" else "incomplete", note = "not a linearizable cross-server snapshot" }
+		return {
+			code = "success", events = matches,
+			truncated = truncated or self.dropped > 0,
+			dropped_local_events = self.dropped,
+			completeness = if self.dropped == 0 and not truncated then "local_ring_complete" else "incomplete",
+			evidence_summary = {
+				durable_read = "not_requested",
+				process_local_events = #matches,
+				durable_events = 0,
+				durable_and_local_events = 0,
+				consistency = "process_local_only",
+			},
+			note = "not a linearizable cross-server snapshot",
+		}
 	end
 	function tracer:FlushAsync(operation_id, maximum)
 		if not self.store then return { code = "unsupported", message = "no durable trace adapter configured" } end
@@ -856,12 +905,17 @@ local function new_tracer(options)
 		local stored, write_error = adapter_call(self.store, "UpdateAsync", key, function(old)
 			if old ~= nil and old.operation_id ~= operation_id then return old end
 			local next_value = if type(old) == "table" then copy(old) else { version = 1, operation_id = operation_id, events = {}, truncated = false }
+			if type(next_value.events) ~= "table" then error("durable trace event collection is malformed") end
+			local known = {}
+			for _, prior in ipairs(next_value.events) do known[trace_event_identity(prior)] = true end
 			for _, event in ipairs(batch) do
-				local found = false
-				for _, prior in ipairs(next_value.events) do if prior.sequence == event.sequence then found = true break end end
-				if not found then table.insert(next_value.events, event) end
+				local identity = trace_event_identity(event)
+				if not known[identity] then
+					table.insert(next_value.events, event)
+					known[identity] = true
+				end
 			end
-			table.sort(next_value.events, function(a, b) return a.sequence < b.sequence end)
+			table.sort(next_value.events, trace_event_less)
 			while #next_value.events > 128 do table.remove(next_value.events, 1); next_value.truncated = true end
 			next_value.updated_at = os.time()
 			return next_value
@@ -874,17 +928,65 @@ local function new_tracer(options)
 		local result = self:GetOperationTrace(operation_id, limit)
 		if not self.store then return result end
 		local stored, read_error = adapter_call(self.store, "GetAsync", "rv2t-" .. digest(operation_id))
-		if read_error then result.durable_read = "unknown"; result.message = read_error; return result end
-		if not stored then result.durable_read = "not_found"; return result end
-		if stored.operation_id ~= operation_id then return { code = "conflict", events = {} } end
+		if read_error then
+			result.durable_read = "unknown"
+			result.evidence_summary = {
+				durable_read = "unknown", process_local_events = #result.events,
+				durable_events = 0, durable_and_local_events = 0, consistency = "process_local_only",
+			}
+			result.message = read_error
+			return result
+		end
+		if not stored then
+			result.durable_read = "not_found"
+			result.evidence_summary.durable_read = "not_found"
+			return result
+		end
+		if type(stored) ~= "table" or stored.operation_id ~= operation_id then return { code = "conflict", events = {} } end
+		if type(stored.events) ~= "table" then return { code = "corrupt", events = {}, durable_read = "success", message = "durable trace event collection is malformed" } end
 		local merged, seen = {}, {}
-		for _, event in ipairs(stored.events or {}) do local id = tostring(event.sequence); if not seen[id] then seen[id] = true; table.insert(merged, copy(event)) end end
-		for _, event in ipairs(result.events) do local id = tostring(event.sequence); if not seen[id] then seen[id] = true; table.insert(merged, copy(event)) end end
-		table.sort(merged, function(a, b) return a.sequence < b.sequence end)
+		local function add_event(event, evidence_source)
+			if type(event) ~= "table" then return false end
+			local identity = trace_event_identity(event)
+			local index = seen[identity]
+			if index then
+				if evidence_source == "process_local" then merged[index].evidence_source = "durable_store_and_local" end
+				return true
+			end
+			local value = copy(event)
+			value.evidence_source = evidence_source
+			seen[identity] = #merged + 1
+			table.insert(merged, value)
+			return true
+		end
+		for _, event in ipairs(stored.events) do
+			if not add_event(event, "durable_store") then
+				return { code = "corrupt", events = {}, durable_read = "success", message = "durable trace contains a malformed event" }
+			end
+		end
+		for _, event in ipairs(result.events) do
+			if not add_event(event, "process_local") then
+				return { code = "corrupt", events = {}, durable_read = "success", message = "local trace contains a malformed event" }
+			end
+		end
+		table.sort(merged, trace_event_less)
 		limit = math.clamp(math.floor(limit or 128), 1, 256)
 		while #merged > limit do table.remove(merged, 1); result.truncated = true end
+		local local_only, durable_only, durable_and_local = 0, 0, 0
+		for _, event in ipairs(merged) do
+			if event.evidence_source == "process_local" then local_only += 1
+			elseif event.evidence_source == "durable_store" then durable_only += 1
+			elseif event.evidence_source == "durable_store_and_local" then durable_and_local += 1 end
+		end
 		result.events, result.durable_read = merged, "success"
 		result.truncated = result.truncated or stored.truncated == true
+		result.evidence_summary = {
+			durable_read = "success",
+			process_local_events = local_only,
+			durable_events = durable_only,
+			durable_and_local_events = durable_and_local,
+			consistency = "eventual_not_linearizable",
+		}
 		return result
 	end
 	function tracer:Drain(limit)

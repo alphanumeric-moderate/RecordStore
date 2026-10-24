@@ -53,10 +53,15 @@ expect(V2.ApplyRuntimePolicy({ revision = 3, max_dirty_age_seconds = math.huge }
 	"runtime policy accepted a non-finite dirty-age threshold")
 
 local trace_store = new_store()
-local tracer = V2.Tracing.new({ max_events = 16, success_sample_every = 1, store = trace_store })
+local trace_a_id = 0
+local tracer = V2.Tracing.new({
+	max_events = 16, success_sample_every = 1, store = trace_store,
+	new_event_id = function() trace_a_id += 1; return "trace-a-" .. tostring(trace_a_id) end,
+})
 local trace_ok = tracer:Emit({
 	operation_id = "operation-1", correlation_id = "correlation-1", causation_id = "cause-1",
 	component = "transaction", operation = "commit", result = "unknown", duration_ms = 27,
+	timestamp_unix = 1700000000,
 	payload = { private = "must not be stored" }, player_name = "must not be stored",
 })
 expect(trace_ok == true, "trace event was rejected")
@@ -64,12 +69,35 @@ local local_trace = tracer:GetOperationTrace("correlation-1", 8)
 expect(local_trace.code == "success" and #local_trace.events == 1, "local trace could not be queried by correlation ID")
 expect(local_trace.events[1].payload == nil and local_trace.events[1].player_name == nil,
 	"trace captured raw payload or player identity")
+expect(local_trace.events[1].evidence_source == "process_local"
+	and local_trace.evidence_summary.process_local_events == 1,
+	"local trace did not label its process-local evidence")
 local flush = tracer:FlushAsync("operation-1", 8)
 expect(flush.code == "committed", "durable trace flush failed: " .. tostring(flush.message))
+
+local trace_b = V2.Tracing.new({
+	max_events = 16, success_sample_every = 1, store = trace_store,
+	new_event_id = function() return "trace-b-1" end,
+})
+expect(trace_b:Emit({
+	operation_id = "operation-1", correlation_id = "correlation-1",
+	component = "mailbox", operation = "claim", result = "unknown", duration_ms = 19,
+	timestamp_unix = 1700000000,
+}), "second process trace event was rejected")
+local cross_process_flush = trace_b:FlushAsync("operation-1", 8)
+expect(cross_process_flush.code == "committed" and cross_process_flush.retained == 2,
+	"traces from separate processes collided on their local sequence numbers")
 local durable_trace = tracer:GetOperationTraceAsync("operation-1", 8)
-expect(durable_trace.durable_read == "success" and #durable_trace.events == 1,
-	"durable trace read/merge failed")
-expect(durable_trace.events[1].payload == nil, "durable trace stored payload data")
+expect(durable_trace.durable_read == "success" and #durable_trace.events == 2,
+	"durable trace read/merge dropped an event from another process")
+expect(durable_trace.events[1].payload == nil and durable_trace.events[2].payload == nil,
+	"durable trace stored raw payload data")
+expect(durable_trace.events[1].evidence_source == "durable_store_and_local"
+	and durable_trace.events[2].evidence_source == "durable_store",
+	"merged traces did not distinguish persisted evidence from local-only observations")
+expect(durable_trace.evidence_summary.durable_and_local_events == 1
+	and durable_trace.evidence_summary.durable_events == 1,
+	"durable trace evidence summary did not match the merged events")
 
 local sender = RecordStore.Mock.new("V2SagaProfiles", "global", "sender", {
 	schema_version = 1, transactional_operations_enabled = true,
