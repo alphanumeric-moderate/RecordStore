@@ -356,6 +356,8 @@ local transact_result, transact_status, transact_message = transactional_record:
 )
 assert(transact_status == "committed", tostring(transact_message))
 assert(transact_result.coins_granted == 100)
+assert(type(transactional_record:Get()) == "table",
+	"transaction must persist reducer data rather than the validator success flag")
 assert(transactional_record:Get().coins == 110)
 
 local duplicate_result, duplicate_status, duplicate_message = transactional_record:TransactAsync(

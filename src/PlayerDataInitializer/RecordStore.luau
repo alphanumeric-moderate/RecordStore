@@ -14960,10 +14960,16 @@ RecordStore._internals.transact = (function()
 					decision_message = "transaction reducer must return non-nil profile data"
 					return nil, nil, nil
 				end
-				local frozen_data, data_error = validate_value(next_data, state.options.validator)
-				if frozen_data == nil then
+				local data_valid, data_error = validate_value(next_data, state.options.validator)
+				if not data_valid then
 					decision = "validation"
 					decision_message = data_error or "transaction data is invalid"
+					return nil, nil, nil
+				end
+				local frozen_data = copy_value(next_data)
+				if frozen_data == nil then
+					decision = "validation"
+					decision_message = "transaction data could not be copied"
 					return nil, nil, nil
 				end
 				local data_ok, data_message = validate_serialized_size(frozen_data)
