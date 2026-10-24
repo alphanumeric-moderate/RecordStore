@@ -10,6 +10,15 @@
 
 **Source of truth:** PR #39 design specification, especially sections 3-25, 27.2(D-E), 28-31 and implementation phases 3-12. PR #37 already supplies the advanced scheduler core; do not reimplement it.
 
+## Intentional v1 omissions (per PR #39)
+
+- No cross-server server-priority/master-server election or durable global worker ranking. Server role/runtime profile is a local policy hint only.
+- No durable due-time index unless measurements prove the current bounded local wake scheduler and periodic authoritative reconciliation are insufficient.
+- No automatic `SetRateLimitForRequestType()` changes to attempt manufacturing Roblox request priority.
+- No general message reprioritization contract in the initial version. Any future reprioritization needs its own versioned compare-and-update operation and crash/compatibility tests.
+- No priority override of canonical ordering, ownership/claim fencing, retry/expiry semantics, or the internal persistence reserve.
+- No hard completion-deadline guarantee from queue scheduling; deadlines are advisory targets, distinct from `available_at`, expiry, and claim-lease expiry.
+
 ## Global Constraints
 
 - PR #55 owns P0 save/renewal/release uncertainty recovery, durability SLO/backpressure, and PlayerData mutation admission; do not duplicate or weaken those changes.
@@ -26,15 +35,15 @@
 
 ### Slice 1: Audit and complete PR #37 non-save scheduling correctness
 
-- [ ] Compare the merged scheduler implementation and public API against PR #39 sections 28-29 and the latest PR #37 follow-up findings.
+- [x] Compare the merged scheduler and public API against PR #39 sections 28-29 and PR #37 follow-up behavior. The audit confirms bounded local scheduling, per-owner/resource admission, critical reserves, deadline-aware lease renewal, retry/circuit backpressure, kill-switch/pause behavior, and dependency retention have existing implementation/tests; no new global scheduler tier is warranted.
 - [x] Add focused tests for reserved work-class aliases, dependency terminal history while queued/in-flight dependents hold references, and bounded reclamation after all dependents terminate.
-- [ ] Fix only reproduced defects; preserve queue bounds and critical-lane isolation.
-- [ ] Record which omissions are intentionally rejected by PR #39, rather than treating them as missing features.
+- [x] Fix only reproduced defects; preserve queue bounds and critical-lane isolation. This slice fixed the proven V2 transaction API signature mismatch, removed the unsafe read-before-reserve balance rejection that could strand an all-balance reservation after response loss, and persists `compensation_pending` before invoking refund.
+- [x] Record intentional omissions: no cross-server server/master ranking; no durable due-time index without measured need; no automatic Roblox request-rate manipulation; no reprioritization operation in the initial schema; and priority never bypasses ordering, claim fencing, or the reserved critical persistence lane. Local wakeups remain disposable hints backed by bounded polling/reconciliation.
 
 ### Slice 2: Mailbox V2 protocol and operations
 - [x] Add an opt-in outbox destination adapter that validates destination identity/UserId, requires an explicit activation guard, binds the embedded Mailbox V2 to an active destination Record, and acknowledges only accepted/duplicate enqueue results carrying a durable message ID.
 
-- [ ] Audit existing Mailbox V2 coverage against the canonical envelope, producer idempotency, bounded preparation discoverability, claims/renewal/ack/DLQ/replay, and v3 compatibility contracts.
+- [ ] Finish the Mailbox V2 version/compatibility audit: canonical v2 envelope, producer receipt discoverability, claims/renewal/ack/DLQ/replay and existing crash regressions are covered individually, but the complete mixed-version/v3 rollout and remaining partial-write windows still need a unified compatibility/fault matrix.
 - [x] Reject message-level envelope versions other than V2 in public delivery/queue/dead-letter reads and all canonical message updates; regression covers ready claims, acknowledgement recovery and dead-letter transitions, confirming future-version records remain untouched and claim results use `unsupported_schema` rather than `unknown`. Full mixed-version and v3 rollout compatibility remains open.
 - [ ] Implement missing idempotent producer receipts and recovery for partial preparation/acknowledgement, without duplicating already implemented strict per-key ordering.
 - [x] Audit and cover the existing bounded Mailbox V2 operational APIs: `RecoverAsync`, `GetStatsAsync`, `ReclaimAsync`, and `MaintenanceAsync`. Maintenance regression verifies the bounded/non-linearizable status contract, recovery/reclamation results, capacity/readiness reporting, and fail-closed activation denial. Separate indexes and wake-up hints remain advisory.
@@ -63,10 +72,10 @@
 - [x] Add versioned bounded runtime policy updates routed to the existing core scheduler, plus a read-only runtime snapshot and diagnostic dirty-age policy.
 - [x] Add resumable bounded maintenance compaction with persisted cursors and generation-aware delete callbacks; checkpoint status now matches terminal/paused/unknown outcomes, unresolved inspection/delete results keep the cursor, and oversized pages are rejected before processing.
 
-- [ ] Add versioned bounded runtime policies and read-only health/runtime snapshots on top of the current scheduler/governor.
-- [ ] Preserve the internal critical persistence reserve and keep adaptive changes opt-in.
-- [ ] Add bounded session contention/takeover diagnostics, a resumable retention compactor and an offline maintenance runner.
-- [ ] Add fairness, low-budget, throttle, lease-margin, pause/resume and bounded-progress tests.
+- [x] Add versioned bounded runtime policies and read-only health/runtime snapshots on top of the current scheduler/governor; this duplicates the checked runtime-policy/snapshot item above and has been reconciled with its existing regression coverage.
+- [x] Preserve the internal critical persistence reserve and keep adaptive changes opt-in. Existing scheduler tests confirm generic work cannot consume reserved critical capacity; runtime policy changes are versioned and explicitly applied.
+- [ ] Complete the offline maintenance runner and real retention-compaction acceptance. Bounded session/lease diagnostics and resumable, generation-aware compaction orchestration exist; live retention behavior and an independently invokable offline runner remain open.
+- [x] Add fairness, low-budget, throttle, lease-margin, pause/resume and bounded-progress regressions to the common Lune runner. The advanced scheduler suite covers request-budget recovery, pause/resume and kill-switch behavior; the focused scheduler slice checks high-lane flood fairness, low-budget critical preference, circuit cooldown recovery, and lease-margin renewal selection.
 
 ### Slice 6: Migration and Profile Doctor
 - [x] Add durable migration manifests with stable migration IDs/revisions, guarded execution through Record transactions, explicit failed-step quarantine, and operator-audited quarantine resolution.
@@ -85,7 +94,7 @@
 - [x] Add bounded redacted trace buffering and optional durable trace flush/read reconciliation.
 
 - [x] Add opt-in durable projection rebuild manifests with stable rebuild/snapshot identity, bounded page processing, persisted cursors and counts, exact ambiguous-write reconciliation, status inspection, restart/resume coverage, and strict complete/cursor contract validation. The source adapter must pin the same immutable snapshot for every page; source-specific platform acceptance remains a release gate.
-- [ ] Add a user-data family inventory and resumable erasure plan/execution/status that fences recreation and reports uncertain/unmatched families.
+- [ ] Connect the generic erasure coordinator to the application's actual user-associated key families; supply exhaustive inventories, verified templates, generation-aware actions, and writer/recreation fences for every active write path. The generic bounded plan/execution/status API exists, but the real user-key inventory and exhaustive application wiring are not implemented.
 - [ ] Keep the RTBF-completeness claim blocked until templates cover every user-associated key layout and the real platform acceptance test passes.
 - [x] Add bounded correlated operation traces with unique per-event IDs, cross-process-safe merge/deduplication, explicit `process_local` / `durable_store` / `durable_store_and_local` evidence labels, durability summaries, and payload/identity redaction.
 

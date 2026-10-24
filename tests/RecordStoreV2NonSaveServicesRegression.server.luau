@@ -201,6 +201,23 @@ expect(outbox_transaction.code == "committed" and outbox_transaction.result.Bala
 local outbox_events = outbox_contract_record:GetOutboxAsync(4)
 expect(type(outbox_events) == "table" and #outbox_events == 1,
 	"V2 outbox transaction omitted its durable outbox intent")
+local outbox_revision_before_invalid = outbox_contract_record:GetRevision()
+local invalid_outbox_key = V2.Transactions.CommitWithOutbox(
+	outbox_contract_record, string.rep("x", 65), { reason = "too long", amount = 1 },
+	function(current, request)
+		local updated = clone(current)
+		updated.Balance += request.amount
+		return updated
+	end,
+	{ {
+		type = "balance.changed", payload_version = 1, payload = { amount = 1 },
+		target_store = "V2OutboxTransactionContract", target_scope = "global", target_key = "destination",
+	} }
+)
+expect(invalid_outbox_key.code == "invalid"
+	and outbox_contract_record:GetRevision() == outbox_revision_before_invalid
+	and outbox_contract_record:Get().Balance == 9,
+	"oversized V2 outbox id was not rejected before transaction mutation")
 expect(outbox_contract_record:Close() == "closed", "outbox transaction contract Record did not close")
 expect(inbox_contract_record:Close() == "closed", "inbox contract Record did not close")
 expect(transaction_contract_record:Close() == "closed", "transaction contract Record did not close")

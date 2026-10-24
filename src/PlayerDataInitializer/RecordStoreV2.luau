@@ -172,6 +172,9 @@ end
 local function transaction_run(record, operation_id, request, reducer, mode, events)
 	if type(record) ~= "table" then return { code = "invalid", message = "record is required" } end
 	if not valid_text(operation_id, 128) then return { code = "invalid", message = "operation_id must be 1 to 128 bytes" } end
+	if mode == "outbox" and #operation_id > 64 then
+		return { code = "invalid", message = "outbox commit_key must be 1 to 64 bytes" }
+	end
 	if type(reducer) ~= "function" then return { code = "invalid", message = "reducer must be a pure non-yielding function" } end
 	local material, material_error = request_material(request)
 	if not material then return { code = "invalid", message = material_error } end
