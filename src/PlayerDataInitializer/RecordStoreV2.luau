@@ -175,21 +175,30 @@ local function transaction_run(record, operation_id, request, reducer, mode, eve
 	if type(reducer) ~= "function" then return { code = "invalid", message = "reducer must be a pure non-yielding function" } end
 	local material, material_error = request_material(request)
 	if not material then return { code = "invalid", message = material_error } end
-	local fingerprint = digest(material)
-	local fn = if mode == "inbox" then record.ApplyInboxAsync elseif mode == "outbox" then record.CommitWithOutboxAsync else record.TransactAsync
+	local fn = if mode == "outbox" then record.CommitWithOutboxAsync else record.TransactAsync
 	if type(fn) ~= "function" then return { code = "invalid", message = "record lacks the requested transaction API" } end
 	local function transform(data)
 		local next_data, reducer_error = pure(reducer, data, request)
 		if next_data == nil then error("v2 reducer rejected request: " .. tostring(reducer_error or "returned nil")) end
 		return next_data
 	end
-	local code, message
+	local result, status, message
 	if mode == "outbox" then
-		code, message = fn(record, operation_id, fingerprint, transform, events or {}, material)
+		result, status, message = fn(
+			record,
+			operation_id,
+			"recordstore.v2.transaction",
+			request,
+			events or {},
+			transform,
+			nil
+		)
 	else
-		code, message = fn(record, operation_id, fingerprint, transform, material)
+		result, status, message = fn(record, operation_id, transform, { request = request })
 	end
-	return normalize_result(code, message)
+	local normalized = normalize_result(status, message)
+	normalized.result = result
+	return normalized
 end
 
 local function dense_array(value, maximum)

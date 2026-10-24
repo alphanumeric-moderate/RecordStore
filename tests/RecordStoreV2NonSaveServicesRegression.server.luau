@@ -103,6 +103,100 @@ expect(durable_trace.evidence_summary.durable_events == 2
 	and durable_trace.evidence_summary.durable_and_local_events == 1,
 	"durable trace evidence summary did not count unique persisted events consistently")
 
+local transaction_contract_record = RecordStore.Mock.new("V2TransactionContract", "global", "primary", {
+	schema_version = 1, transactional_operations_enabled = true,
+})
+local transaction_contract_open, transaction_contract_message = transaction_contract_record:Open({ Balance = 0 })
+expect(transaction_contract_open == "created" or transaction_contract_open == "loaded",
+	"transaction contract Record open failed: " .. tostring(transaction_contract_message))
+local transaction_reducer_calls = 0
+local transaction_contract_request = { amount = 7, reason = "test" }
+local transaction_contract = V2.Transactions.Run(
+	transaction_contract_record, "v2-transaction-contract-001", transaction_contract_request,
+	function(current, request)
+		transaction_reducer_calls += 1
+		local updated = clone(current)
+		updated.Balance += request.amount
+		return updated
+	end
+)
+expect(transaction_contract.code == "committed" and transaction_contract.result.Balance == 7,
+	"V2 transaction wrapper did not expose the durable Record transaction result: " .. tostring(transaction_contract.code))
+local transaction_contract_duplicate = V2.Transactions.Run(
+	transaction_contract_record, "v2-transaction-contract-001", transaction_contract_request,
+	function(current, request)
+		transaction_reducer_calls += 1
+		local updated = clone(current)
+		updated.Balance += request.amount
+		return updated
+	end
+)
+expect(transaction_contract_duplicate.code == "duplicate",
+	"V2 transaction retry did not use the public RecordStore idempotency receipt")
+expect(transaction_reducer_calls == 1 and transaction_contract_record:Get().Balance == 7,
+	"V2 transaction retry reapplied the reducer")
+
+local inbox_contract_record = RecordStore.Mock.new("V2InboxContract", "global", "primary", {
+	schema_version = 1, transactional_operations_enabled = true,
+})
+local inbox_contract_open, inbox_contract_message = inbox_contract_record:Open({ total = 0 })
+expect(inbox_contract_open == "created" or inbox_contract_open == "loaded",
+	"inbox contract Record open failed: " .. tostring(inbox_contract_message))
+local inbox_contract = V2.Inbox.ApplyBatch(
+	inbox_contract_record, "inbox-contract-batch-001",
+	{ { message_id = "inbox-contract-message-001", message_type = "delta", payload = { amount = 4 }, payload_version = 1 } },
+	function(current, payload)
+		local updated = clone(current)
+		updated.total += payload.amount
+		return updated
+	end
+)
+expect(inbox_contract.code == "committed" and inbox_contract.applied == 1,
+	"V2 inbox batch did not commit mutation plus its idempotency receipt: " .. tostring(inbox_contract.code))
+local inbox_duplicate = V2.Inbox.ApplyBatch(
+	inbox_contract_record, "inbox-contract-batch-001",
+	{ { message_id = "inbox-contract-message-001", message_type = "delta", payload = { amount = 4 }, payload_version = 1 } },
+	function(current, payload)
+		local updated = clone(current)
+		updated.total += payload.amount
+		return updated
+	end
+)
+expect(inbox_duplicate.code == "duplicate" and inbox_contract_record:Get().total == 4,
+	"V2 inbox batch replay duplicated its profile mutation")
+
+local outbox_contract_record = RecordStore.Mock.new("V2OutboxTransactionContract", "global", "primary", {
+	schema_version = 1, transactional_operations_enabled = true,
+})
+local outbox_contract_open, outbox_contract_message = outbox_contract_record:Open({ Balance = 0 })
+expect(outbox_contract_open == "created" or outbox_contract_open == "loaded",
+	"outbox contract Record open failed: " .. tostring(outbox_contract_message))
+local outbox_transaction = V2.Transactions.CommitWithOutbox(
+	outbox_contract_record, "v2-outbox-contract-001", { reason = "credit", amount = 9 },
+	function(current, request)
+		local updated = clone(current)
+		updated.Balance += request.amount
+		return updated
+	end,
+	{ {
+		type = "balance.changed",
+		payload_version = 1,
+		payload = { amount = 9 },
+		target_store = "V2OutboxTransactionContract",
+		target_scope = "global",
+		target_key = "destination",
+		target_user_id = 456,
+	} }
+)
+expect(outbox_transaction.code == "committed" and outbox_transaction.result.Balance == 9,
+	"V2 outbox transaction did not atomically commit the mutation and intent: " .. tostring(outbox_transaction.code))
+local outbox_events = outbox_contract_record:GetOutboxAsync(4)
+expect(type(outbox_events) == "table" and #outbox_events == 1,
+	"V2 outbox transaction omitted its durable outbox intent")
+expect(outbox_contract_record:Close() == "closed", "outbox transaction contract Record did not close")
+expect(inbox_contract_record:Close() == "closed", "inbox contract Record did not close")
+expect(transaction_contract_record:Close() == "closed", "transaction contract Record did not close")
+
 local sender = RecordStore.Mock.new("V2SagaProfiles", "global", "sender", {
 	schema_version = 1, transactional_operations_enabled = true,
 })

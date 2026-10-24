@@ -44,8 +44,8 @@
 
 - [x] Cover outbox batches over the 16-event limit and persistent sidecar encoded-size saturation, asserting failures do not advance the revision or mutate profile data.
 
-- [x] Implement same-profile inbox mutation + receipt and source mutation + outbox intent within one authoritative profile-key UpdateAsync; regression coverage verifies the source mutation and outbox intent commit together.
-- [x] Add general idempotent transactions with canonical request identity, bounded results/receipts, duplicate/conflict/capacity/unknown outcomes and explicit retention guarantees.
+- [x] Implement same-profile inbox mutation + receipt and source mutation + outbox intent within one authoritative profile-key UpdateAsync. Regression covers inbox batch commit/replay and the public outbox transaction adapter; the V2 facade forwards arguments according to the current public RecordStore method contracts.
+- [x] Add general idempotent transactions with canonical request identity, bounded results/receipts, duplicate/conflict/capacity/unknown outcomes and explicit retention guarantees; regression now exercises the public `TransactAsync` adapter contract, result tuple, duplicate receipts, and canonical request binding.
 - [x] Add bounded outbox reads and callback-based at-least-once dispatch with per-event destination receipt IDs, unknown-outcome reconciliation, and bounded retention cleanup.
 - [x] Add inbox/transaction receipt-capacity and expiry-recovery tests; surface encoded-sidecar-size exhaustion as capacity while preserving profile data and valid duplicate receipts.
 - [x] Add an opt-in legacy developer-product receipt handler factory with receipt/product validation, active-session checks, same-profile durable idempotency, and no implicit MarketplaceService registration.
