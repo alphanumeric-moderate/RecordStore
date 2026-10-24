@@ -514,6 +514,10 @@ Versioned runtime policy updates are routed to the current RecordStore scheduler
 
 Durable migration manifests and quarantine records help coordinate operators. `ProfileDoctor.Restore` now fails closed unless the application supplies an authorization callback and an erasure-status callback, uses active session ownership and expected revision, binds the transaction to the preflight profile digest, preserves reserved RecordStore keys, and records operator identity/reason. `ProfileDoctor.CheckWritableAsync` provides a fail-closed pre-write gate, but it is not an atomic fence by itself: every writer must integrate it alongside a durable writer-fencing protocol to prevent check/write races. These services remain opt-in and require real Roblox service/rollback acceptance before production enablement.
 
+## Mailbox V2 operations and maintenance
+
+The embedded Mailbox V2 exposes bounded `RecoverAsync`, `GetStatsAsync`, `ReclaimAsync`, and `MaintenanceAsync` operations. Maintenance sequences recovery, slot reclamation, and a capacity/status read; its report uses `consistency = "bounded_non_linearizable"` and `complete = true` means that bounded sequence finished, not that it captured a linearizable cross-server snapshot. Activation denial is returned before backing-store reads or writes.
+
 ## Opt-in outbox-to-Mailbox V2 delivery
 
 `RecordStoreOutboxMailboxAdapter` adapts `Record:DispatchOutboxAsync()` to the embedded Mailbox V2. It verifies the resolved destination's store, scope, profile key, and optional UserId, requires an explicit activation guard, binds Mailbox V2 only when the destination Record is active and its legacy queue is empty, and uses the durable outbox event ID as the mailbox idempotency key.

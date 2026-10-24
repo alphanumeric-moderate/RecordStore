@@ -872,6 +872,43 @@ local function test_mailbox_capacity_is_bounded_and_reported()
 		"mailbox stats exceeded the configured active capacity")
 end
 
+local function test_mailbox_maintenance_reports_bounded_state_and_fails_closed()
+	local mailbox = new_mailbox({
+		max_segments = 1,
+		segment_max_messages = 2,
+		preparation_shard_count = 1,
+		preparation_max_entries_per_shard = 4,
+	})
+	local queued = enqueue(mailbox, "maintenance-ready", "maintenance-ready-id", nil, "normal")
+	local report, maintenance_result = mailbox:MaintenanceAsync()
+	assert(maintenance_result.code == "success" and report.complete == true,
+		"mailbox maintenance did not finish its bounded recovery/reclaim/status sequence")
+	assert(type(report.recovery) == "table" and report.recovery.code == "success",
+		"mailbox maintenance omitted recovery evidence")
+	assert(type(report.reclaim) == "table"
+		and (report.reclaim.code == "success" or report.reclaim.code == "empty"),
+		"mailbox maintenance omitted bounded reclamation evidence")
+	assert(type(report.stats) == "table"
+		and report.stats.consistency == "bounded_non_linearizable"
+		and report.stats.completeness.global_snapshot == false,
+		"mailbox maintenance misrepresented its bounded status snapshot")
+	assert(report.stats.active_capacity == 2 and report.stats.ready == 1,
+		"mailbox maintenance capacity/readiness report was inconsistent with the observed queue")
+	assert(queued.message_id ~= nil, "maintenance fixture did not retain a canonical message ID")
+
+	local denied_store = MailboxV2.MockStore()
+	local denied_mailbox = MailboxV2.new(denied_store, owner, {
+		active_record = active_record,
+		activation_guard = function() return false, "maintenance not enabled" end,
+		encode = function(value) return serde.encode("json", value) end,
+	})
+	local denied_report, denied_result = denied_mailbox:MaintenanceAsync()
+	assert(denied_result.code == "disabled" and denied_report.complete ~= true,
+		"mailbox maintenance reported completion after activation was denied")
+	assert(denied_store.get_calls == 0 and denied_store.update_calls == 0,
+		"denied mailbox maintenance touched the backing store")
+end
+
 local function test_recordstore_installs_shared_scheduler_for_v2_claim_renewal()
 	RecordStore.Mock.reset()
 	local renewal_calls = 0
@@ -958,6 +995,7 @@ test_dead_letter_transition_response_loss_recovers_once()
 test_expired_claim_is_recovered_and_retried_at_least_once()
 test_competing_mailbox_instances_cannot_claim_the_same_message()
 test_mailbox_capacity_is_bounded_and_reported()
+test_mailbox_maintenance_reports_bounded_state_and_fails_closed()
 
-print("[MailboxV2] ordering, claim/ack recovery, bounded capacity, stale-read resistance, and idempotency regressions passed.")
+print("[MailboxV2] ordering, claim/ack recovery, bounded capacity, maintenance reporting, stale-read resistance, and idempotency regressions passed.")
 Shim.close()
