@@ -14718,6 +14718,7 @@ RecordStore._internals.profile_doctor = (function()
 	return {
 		inspect = inspect,
 		diff = diff,
+		summarize_data = summarize_data,
 	}
 end)()
 
@@ -14746,6 +14747,448 @@ RecordStore.diff_profile_versions_async = (function()
 		options: ProfileDoctorOptions?
 	): (ProfileVersionDiff?, ResultCode, string?)
 		return diff(name, scope, key, before_version, after_version, options, version_reader)
+	end
+end)()
+
+RecordStore._internals.migration_registry = (function()
+	local registries: { [string]: { [string]: MigrationRegistration } } = {}
+	local MAX_MIGRATIONS_PER_STORE = 128
+	local MAX_SCHEMA_VERSION = 1_000_000
+
+	local function valid_version(value: unknown): boolean
+		return type(value) == "number"
+			and math.isfinite(value)
+			and math.floor(value) == value
+			and value >= 0
+			and value <= MAX_SCHEMA_VERSION
+	end
+
+	local function normalize_registration(value: unknown): (MigrationRegistration?, string?)
+		if type(value) ~= "table" then
+			return nil, "migration registration must be a table"
+		end
+		local raw = value :: { [string]: unknown }
+		local allowed = {
+			id = true,
+			from_version = true,
+			to_version = true,
+			implementation_revision = true,
+			compatible_schema_min = true,
+			compatible_schema_max = true,
+			transform = true,
+			validator = true,
+		}
+		for key in pairs(raw) do
+			if not allowed[key] then
+				return nil, "unsupported migration registration field: " .. tostring(key)
+			end
+		end
+		if type(raw.id) ~= "string" or raw.id == "" or #raw.id > 96 then
+			return nil, "migration id must be 1 to 96 characters"
+		end
+		if not valid_version(raw.from_version) or not valid_version(raw.to_version) then
+			return nil, "migration versions must be integers from 0 to 1000000"
+		end
+		local from_version = raw.from_version :: number
+		local to_version = raw.to_version :: number
+		if to_version <= from_version then
+			return nil, "migration edges must move to a strictly newer schema version"
+		end
+		if type(raw.implementation_revision) ~= "string"
+			or raw.implementation_revision == ""
+			or #raw.implementation_revision > 128
+		then
+			return nil, "implementation_revision must be 1 to 128 characters"
+		end
+		if not valid_version(raw.compatible_schema_min)
+			or not valid_version(raw.compatible_schema_max)
+		then
+			return nil, "compatibility bounds must be schema-version integers from 0 to 1000000"
+		end
+		local compatible_min = raw.compatible_schema_min :: number
+		local compatible_max = raw.compatible_schema_max :: number
+		if compatible_min > compatible_max
+			or from_version < compatible_min
+			or to_version > compatible_max
+		then
+			return nil, "migration versions fall outside the declared compatibility range"
+		end
+		if type(raw.transform) ~= "function" then
+			return nil, "migration transform must be a function"
+		end
+		if raw.validator ~= nil and type(raw.validator) ~= "function" then
+			return nil, "migration validator must be a function or nil"
+		end
+		return {
+			id = raw.id,
+			from_version = from_version,
+			to_version = to_version,
+			implementation_revision = raw.implementation_revision,
+			compatible_schema_min = compatible_min,
+			compatible_schema_max = compatible_max,
+			transform = raw.transform :: Migration,
+			validator = raw.validator :: Validator?,
+		}, nil
+	end
+
+	local function same_registration(left: MigrationRegistration, right: MigrationRegistration): boolean
+		return left.id == right.id
+			and left.from_version == right.from_version
+			and left.to_version == right.to_version
+			and left.implementation_revision == right.implementation_revision
+			and left.compatible_schema_min == right.compatible_schema_min
+			and left.compatible_schema_max == right.compatible_schema_max
+			and left.transform == right.transform
+			and left.validator == right.validator
+	end
+
+	local function build_graph(registrations: { [string]: MigrationRegistration }): ({ [number]: { MigrationRegistration } }, { [number]: boolean })
+		local graph: { [number]: { MigrationRegistration } } = {}
+		local versions: { [number]: boolean } = {}
+		for _, registration in pairs(registrations) do
+			local outgoing = graph[registration.from_version]
+			if outgoing == nil then
+				outgoing = {}
+				graph[registration.from_version] = outgoing
+			end
+			outgoing[#outgoing + 1] = registration
+			versions[registration.from_version] = true
+			versions[registration.to_version] = true
+		end
+		for _, outgoing in pairs(graph) do
+			table.sort(outgoing, function(left, right)
+				if left.to_version ~= right.to_version then
+					return left.to_version < right.to_version
+				end
+				return left.id < right.id
+			end)
+		end
+		return graph, versions
+	end
+
+	local function unique_paths(registrations: { [string]: MigrationRegistration }): (boolean, string?)
+		local graph, versions = build_graph(registrations)
+		local function count_paths(from_version: number, target_version: number, depth: number): number
+			if from_version == target_version then return 1 end
+			if depth > #registrations then return 0 end
+			local outgoing = graph[from_version]
+			if outgoing == nil then return 0 end
+			local total = 0
+			for _, edge in ipairs(outgoing) do
+				if edge.to_version <= target_version then
+					total += count_paths(edge.to_version, target_version, depth + 1)
+					if total > 1 then return 2 end
+				end
+			end
+			return total
+		end
+		for from_version in pairs(versions) do
+			for target_version in pairs(versions) do
+				if target_version > from_version and count_paths(from_version, target_version, 0) > 1 then
+					return false, ("migration registry has ambiguous paths from schema %d to %d"):format(
+						from_version, target_version
+					)
+				end
+			end
+		end
+		return true, nil
+	end
+
+	local function register(store_name: string, value: MigrationRegistration): (ResultCode, string?)
+		if type(store_name) ~= "string" or store_name == "" or #store_name > 50 then
+			return "invalid", "store_name must be 1 to 50 characters"
+		end
+		local registration, message = normalize_registration(value)
+		if registration == nil then return "invalid", message end
+		local current = registries[store_name] or {}
+		local existing = current[registration.id]
+		if existing ~= nil then
+			if same_registration(existing, registration) then
+				return "duplicate", "the same migration id and implementation revision are already registered"
+			end
+			return "conflict", "migration id is already registered with different metadata or implementation"
+		end
+		local count = 0
+		for _ in pairs(current) do count += 1 end
+		if count >= MAX_MIGRATIONS_PER_STORE then
+			return "capacity", "migration registry reached its per-store registration limit"
+		end
+		local candidate = table.clone(current)
+		candidate[registration.id] = registration
+		local paths_ok, paths_error = unique_paths(candidate)
+		if not paths_ok then return "conflict", paths_error end
+		registries[store_name] = candidate
+		return "success", nil
+	end
+
+	local function normalize_preview_options(options: MigrationPreviewOptions?): (MigrationPreviewOptions?, string?)
+		if options ~= nil and type(options) ~= "table" then
+			return nil, "migration preview options must be a table"
+		end
+		local normalized: MigrationPreviewOptions = if options == nil then {} else table.clone(options)
+		local allowed = {
+			operation_deadline = true,
+			legacy_decoder = true,
+			max_nodes = true,
+			max_depth = true,
+			max_changes = true,
+		}
+		if options ~= nil then
+			for key in pairs(options) do
+				if not allowed[key] then
+					return nil, "unsupported migration preview option: " .. tostring(key)
+				end
+			end
+		end
+		if normalized.legacy_decoder ~= nil and type(normalized.legacy_decoder) ~= "function" then
+			return nil, "legacy_decoder must be a function"
+		end
+		if normalized.max_nodes == nil then normalized.max_nodes = 4096 end
+		if normalized.max_depth == nil then normalized.max_depth = 32 end
+		if normalized.max_changes == nil then normalized.max_changes = 256 end
+		if type(normalized.max_nodes) ~= "number" or not math.isfinite(normalized.max_nodes)
+			or math.floor(normalized.max_nodes) ~= normalized.max_nodes
+			or normalized.max_nodes < 1 or normalized.max_nodes > 50000
+		then
+			return nil, "max_nodes must be an integer from 1 to 50000"
+		end
+		if type(normalized.max_depth) ~= "number" or not math.isfinite(normalized.max_depth)
+			or math.floor(normalized.max_depth) ~= normalized.max_depth
+			or normalized.max_depth < 1 or normalized.max_depth > 64
+		then
+			return nil, "max_depth must be an integer from 1 to 64"
+		end
+		if type(normalized.max_changes) ~= "number" or not math.isfinite(normalized.max_changes)
+			or math.floor(normalized.max_changes) ~= normalized.max_changes
+			or normalized.max_changes < 1 or normalized.max_changes > 2048
+		then
+			return nil, "max_changes must be an integer from 1 to 2048"
+		end
+		return normalized, nil
+	end
+
+	local function find_path(store_name: string, from_version: number, target_version: number): ({ MigrationRegistration }?, string?)
+		if from_version == target_version then return {}, nil end
+		if target_version < from_version then
+			return nil, "backwards migrations are not supported"
+		end
+		local registrations = registries[store_name]
+		if registrations == nil then
+			return nil, ("no migration path is registered from schema %d to %d"):format(from_version, target_version)
+		end
+		local graph = build_graph(registrations)
+		local path: { MigrationRegistration } = {}
+		local function walk(version: number): boolean
+			if version == target_version then return true end
+			local outgoing = graph[version]
+			if outgoing == nil then return false end
+			for _, edge in ipairs(outgoing) do
+				if edge.to_version <= target_version then
+					path[#path + 1] = edge
+					if walk(edge.to_version) then return true end
+					path[#path] = nil
+				end
+			end
+			return false
+		end
+		if not walk(from_version) then
+			return nil, ("no migration path is registered from schema %d to %d"):format(from_version, target_version)
+		end
+		return table.clone(path), nil
+	end
+
+	local function summarize(
+		value: JsonValue,
+		max_nodes: number,
+		max_depth: number
+	): (number, number, boolean, number?, boolean)
+		local doctor = RecordStore._internals.profile_doctor
+		return doctor.summarize_data(value, max_nodes, max_depth)
+	end
+
+	local function path_diff(
+		before_value: JsonValue,
+		after_value: JsonValue,
+		max_nodes: number,
+		max_depth: number,
+		max_changes: number
+	): ({ ProfileDiffChange }, number, boolean)
+		local changes: { ProfileDiffChange } = {}
+		local visited = 0
+		local truncated = false
+		local function make_child_path(parent: string, key: string | number): string
+			if type(key) == "number" then return parent .. "[" .. tostring(key) .. "]" end
+			if string.match(key, "^[%a_][%w_]*$") then return parent .. "." .. key end
+			local ok, encoded = pcall(function() return HttpService:JSONEncode(key) end)
+			return if ok and type(encoded) == "string" then parent .. "[" .. encoded .. "]" else parent .. "[<key>]"
+		end
+		local function append(path: string, kind: "added" | "removed" | "changed", before: unknown, after: unknown, before_present: boolean, after_present: boolean)
+			if #changes >= max_changes then
+				truncated = true
+				return
+			end
+			changes[#changes + 1] = {
+				Path = string.sub(path, 1, 512),
+				Kind = kind,
+				BeforeType = if before_present then typeof(before) else nil,
+				AfterType = if after_present then typeof(after) else nil,
+			}
+		end
+		local function visit(before: unknown, after: unknown, path: string, depth: number, before_present: boolean, after_present: boolean)
+			if truncated then return end
+			if visited >= max_nodes then
+				truncated = true
+				return
+			end
+			visited += 1
+			if not before_present then append(path, "added", nil, after, false, true); return end
+			if not after_present then append(path, "removed", before, nil, true, false); return end
+			if type(before) == "table" and type(after) == "table" then
+				local left = before :: { [string | number]: JsonValue }
+				local right = after :: { [string | number]: JsonValue }
+				if next(left) == nil and next(right) == nil then return end
+				if depth >= max_depth then
+					truncated = true
+					append(path, "changed", before, after, true, true)
+					return
+				end
+				local keys: { [string | number]: boolean } = {}
+				for key in pairs(left) do keys[key] = true end
+				for key in pairs(right) do keys[key] = true end
+				local ordered: { string | number } = {}
+				for key in pairs(keys) do ordered[#ordered + 1] = key end
+				table.sort(ordered, function(a, b)
+					if type(a) ~= type(b) then return type(a) < type(b) end
+					if type(a) == "number" then return (a :: number) < (b :: number) end
+					return (a :: string) < (b :: string)
+				end)
+				for _, key in ipairs(ordered) do
+					if truncated then return end
+					local left_value, right_value = left[key], right[key]
+					visit(left_value, right_value, make_child_path(path, key), depth + 1, left_value ~= nil, right_value ~= nil)
+				end
+				return
+			end
+			if type(before) == "number" and type(after) == "number"
+				and math.isnan(before) and math.isnan(after) then return end
+			if typeof(before) == "buffer" or typeof(after) == "buffer" then
+				if typeof(before) == "buffer" and typeof(after) == "buffer"
+					and buffer.tostring(before :: buffer) == buffer.tostring(after :: buffer) then return end
+			elseif before == after then
+				return
+			end
+			append(path, "changed", before, after, true, true)
+		end
+		visit(before_value, after_value, "$", 0, true, true)
+		return changes, visited, truncated
+	end
+
+	local function preview(
+		store_name: string,
+		scope: string,
+		key: string,
+		target_version: number,
+		options: MigrationPreviewOptions?,
+		reader: any,
+		mock: boolean
+	): (MigrationPreview?, ResultCode, string?)
+		local valid_identity, identity_message = validate_store_identity(store_name, scope, key)
+		if not valid_identity then return nil, "invalid", identity_message end
+		if not valid_version(target_version) then return nil, "invalid", "target_version must be an integer from 0 to 1000000" end
+		local normalized, options_error = normalize_preview_options(options)
+		if normalized == nil then return nil, "invalid", options_error end
+		local deadline, deadline_error = resolve_operation_deadline(normalized.operation_deadline)
+		if deadline == nil then return nil, "invalid", deadline_error end
+		local remaining = deadline - now_local()
+		if remaining <= 0 then return nil, "budget", "migration preview deadline expired before profile read" end
+		local snapshot, read_result, read_message = reader(
+			store_name,
+			scope,
+			key,
+			remaining,
+			normalized.legacy_decoder
+		)
+		if snapshot == nil or (read_result ~= "success" and read_result ~= "legacy") then
+			return nil, normalize_result_code(read_result) or "unknown", read_message
+		end
+		if snapshot.Tombstoned or snapshot.Data == nil then
+			return nil, "tombstoned", "migration preview refuses tombstoned or data-less profiles"
+		end
+		local source_version = snapshot.SchemaVersion
+		local path, path_error = find_path(store_name, source_version, target_version)
+		if path == nil then return nil, "migration", path_error end
+		local current = copy_value(snapshot.Data)
+		if current == nil then return nil, "validation", "source profile data could not be copied" end
+		local steps: { MigrationPreviewStep } = {}
+		for _, edge in ipairs(path) do
+			if now_local() >= deadline then return nil, "budget", "migration preview deadline expired during transforms" end
+			local migrated, migration_error = run_migration(edge.transform, edge.from_version, current)
+			if migrated == nil then return nil, "migration", migration_error end
+			local valid, validation_error = validate_value(migrated, edge.validator)
+			if not valid then return nil, "validation", validation_error end
+			current = migrated
+			steps[#steps + 1] = {
+				Id = edge.id,
+				FromVersion = edge.from_version,
+				ToVersion = edge.to_version,
+				ImplementationRevision = edge.implementation_revision,
+			}
+		end
+		local max_nodes = normalized.max_nodes :: number
+		local max_depth = normalized.max_depth :: number
+		local max_changes = normalized.max_changes :: number
+		local before_nodes, _, before_truncated = summarize(snapshot.Data :: JsonValue, max_nodes, max_depth)
+		local target_nodes, target_depth, target_summary_truncated, target_bytes, target_size_available =
+			summarize(current, max_nodes, max_depth)
+		local changes, visited, diff_truncated = path_diff(snapshot.Data :: JsonValue, current, max_nodes, max_depth, max_changes)
+		local observed_at = session_now_unix(mock)
+		local session_active = snapshot.LeaseUntil ~= nil and snapshot.LeaseUntil > observed_at and not snapshot.Tombstoned
+		return {
+			StoreName = store_name,
+			Scope = scope,
+			ProfileKey = key,
+			ObservedAt = observed_at,
+			Consistency = "read_only_non_authoritative_preview",
+			SourceSchemaVersion = source_version,
+			TargetSchemaVersion = target_version,
+			SourceRevision = snapshot.Revision,
+			SourceGeneration = snapshot.Generation,
+			SessionActive = session_active,
+			Steps = steps,
+			Changes = changes,
+			VisitedNodes = visited,
+			Truncated = before_truncated or target_summary_truncated or diff_truncated,
+			TargetDataNodeCount = target_nodes,
+			TargetDataDepth = target_depth,
+			TargetDataEncodedBytes = target_bytes,
+			TargetDataSizeAvailable = target_size_available,
+		}, "success", nil
+	end
+
+	return {
+		register = register,
+		preview = preview,
+	}
+end)()
+
+RecordStore.register_migration = (function()
+	local register = RecordStore._internals.migration_registry.register
+	return function(store_name: string, registration: MigrationRegistration): (ResultCode, string?)
+		return register(store_name, registration)
+	end
+end)()
+
+RecordStore.preview_migration_async = (function()
+	local preview = RecordStore._internals.migration_registry.preview
+	local reader = RecordStore.read_async
+	return function(
+		store_name: string,
+		scope: string,
+		key: string,
+		target_version: number,
+		options: MigrationPreviewOptions?
+	): (MigrationPreview?, ResultCode, string?)
+		return preview(store_name, scope, key, target_version, options, reader, false)
 	end
 end)()
 
@@ -15404,6 +15847,18 @@ RecordStore.Mock = (function()
 				options: ProfileDoctorOptions?
 			): (ProfileVersionDiff?, ResultCode, string?)
 				return diff(name, scope, key, before_version, after_version, options, get_version_mock)
+			end
+		end)(),
+		preview_migration_async = (function()
+			local preview = RecordStore._internals.migration_registry.preview
+			return function(
+				store_name: string,
+				scope: string,
+				key: string,
+				target_version: number,
+				options: MigrationPreviewOptions?
+			): (MigrationPreview?, ResultCode, string?)
+				return preview(store_name, scope, key, target_version, options, read_async_mock, true)
 			end
 		end)(),
 		read_async = read_async_mock,
