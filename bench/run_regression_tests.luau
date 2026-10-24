@@ -8,6 +8,8 @@ local Shim = require("./RobloxShim")
 for _, path in {
 	"src/PlayerDataInitializer/RecordStore.luau",
 	"src/PlayerDataInitializer/PurchaseReceiptProcessor.luau",
+	"src/PlayerDataInitializer/RecordStoreOutboxMailboxAdapter.luau",
+	"tests/RecordStore_OutboxMailboxAdapterRegression.server.luau",
 	"src/PlayerDataInitializer/PlayerDataCore.luau",
 	"src/PlayerDataInitializer/IntegerInfinityValue.luau",
 	"src/InfiniteMath/init.luau",
@@ -78,5 +80,6 @@ Shim.run_script("tests/RecordStore_NonFiniteNumbersRegression.server.luau")
 Shim.run_script("tests/RecordStore_LegacyPayloadRegression.server.luau")
 Shim.run_script("tests/RecordStore_UnknownSaveRecoveryRegression.server.luau")
 Shim.run_script("tests/PurchaseReceiptProcessorRegression.server.luau")
+Shim.run_script("tests/RecordStore_OutboxMailboxAdapterRegression.server.luau")
 Shim.run_script("tests/RecordStore_NonSaveRoadmapRegression.server.luau")
 Shim.close()

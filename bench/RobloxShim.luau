@@ -100,12 +100,15 @@ local loaded_module: any = nil
 local loaded_scheduler_module: any = nil
 local loaded_mailbox_module: any = nil
 local loaded_receipt_processor: any = nil
+local loaded_outbox_mailbox_adapter: any = nil
 
 local RecordStoreInstance = table.freeze({ Name = "RecordStore", ClassName = "ModuleScript" })
 local PurchaseReceiptProcessorInstance = table.freeze({ Name = "PurchaseReceiptProcessor", ClassName = "ModuleScript" })
+local OutboxMailboxAdapterInstance = table.freeze({ Name = "RecordStoreOutboxMailboxAdapter", ClassName = "ModuleScript" })
 local PlayerDataInitializer = {
 	RecordStore = RecordStoreInstance,
 	PurchaseReceiptProcessor = PurchaseReceiptProcessorInstance,
+	RecordStoreOutboxMailboxAdapter = OutboxMailboxAdapterInstance,
 }
 function PlayerDataInitializer:WaitForChild(name: string): any
 	local child = self[name]
@@ -155,6 +158,17 @@ local function load_record_store(source_path: string?): any
 	})
 	loaded_module = chunk()
 	return loaded_module
+end
+
+local function load_outbox_mailbox_adapter(): any
+	if loaded_outbox_mailbox_adapter ~= nil then return loaded_outbox_mailbox_adapter end
+	local module_environment = table.clone(Shim.environment)
+	module_environment.script = { Parent = PlayerDataInitializer }
+	local chunk = luau.load(fs.readFile("src/PlayerDataInitializer/RecordStoreOutboxMailboxAdapter.luau"), {
+		debugName = "RecordStoreOutboxMailboxAdapter", environment = module_environment,
+	})
+	loaded_outbox_mailbox_adapter = chunk()
+	return loaded_outbox_mailbox_adapter
 end
 
 local function load_receipt_processor(): any
@@ -211,6 +225,7 @@ local function shim_require(target: any)
 	if target == PurchaseReceiptProcessorInstance then
 		return load_receipt_processor()
 	end
+	if target == OutboxMailboxAdapterInstance then return load_outbox_mailbox_adapter() end
 	return require(target)
 end
 

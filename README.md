@@ -504,6 +504,26 @@ These operations can read and update the source outbox while the source `Record`
 
 `Record:PruneOutboxAsync(delivered_before_unix, max_events?)` explicitly removes only events with confirmed `delivered` state and `delivered_at` strictly earlier than the cutoff. The cutoff is a Unix timestamp in **seconds**, not milliseconds. Cleanup is bounded (at most 16 events per call); pending, unknown, and blocked events are never pruned by this API. Cleanup is not automatic.
 
+## Opt-in outbox-to-Mailbox V2 delivery
+
+`RecordStoreOutboxMailboxAdapter` adapts `Record:DispatchOutboxAsync()` to the embedded Mailbox V2. It verifies the resolved destination's store, scope, profile key, and optional UserId, requires an explicit activation guard, binds Mailbox V2 only when the destination Record is active and its legacy queue is empty, and uses the durable outbox event ID as the mailbox idempotency key.
+
+The destination receipt is the stable Mailbox V2 message ID. The source outbox is marked delivered only after Mailbox V2 returns `accepted` or `duplicate` with that non-empty ID. Unknown enqueue/bind outcomes throw so the source outbox records an uncertain outcome and retries the same event ID. Known rejections do not receive a success receipt.
+
+This is **durable mailbox acceptance**, not proof that the destination's eventual handler ran or that an arbitrary external side effect completed. Keep destination handlers idempotent, check `payload_version`, and treat external effects as at-least-once. The adapter never enables Mailbox V2 globally; the application supplies the rollout/activation guard.
+
+```lua
+local adapter = RecordStoreOutboxMailboxAdapter.new({
+    get_record = function(event)
+        return active_records[event.DestinationProfileKey]
+    end,
+    activation_guard = function(record, operation)
+        return rollout_is_enabled(record, operation)
+    end,
+})
+source_record:DispatchOutboxAsync(adapter.Dispatch, 8)
+```
+
 ## Opt-in developer product receipts
 
 `PurchaseReceiptProcessor` creates a legacy `MarketplaceService.ProcessReceipt` callback for developer products. It does not access `MarketplaceService`, assign the global callback, or register anything when the module is required. The game must explicitly compose the returned handler with its existing server-side receipt integration.

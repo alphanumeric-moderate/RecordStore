@@ -32,6 +32,7 @@
 - [ ] Record which omissions are intentionally rejected by PR #39, rather than treating them as missing features.
 
 ### Slice 2: Mailbox V2 protocol and operations
+- [x] Add an opt-in outbox destination adapter that validates destination identity/UserId, requires an explicit activation guard, binds the embedded Mailbox V2 to an active destination Record, and acknowledges only accepted/duplicate enqueue results carrying a durable message ID.
 
 - [ ] Audit existing Mailbox V2 coverage against the canonical envelope, producer idempotency, bounded preparation discoverability, claims/renewal/ack/DLQ/replay, and v3 compatibility contracts.
 - [ ] Implement missing idempotent producer receipts and recovery for partial preparation/acknowledgement, without duplicating already implemented strict per-key ordering.
@@ -96,4 +97,6 @@ Implemented and covered by the current Lune regression suite:
 - Regression coverage for inbox/transaction receipt saturation and expiry recovery: full collections reject new operation IDs without profile mutation; live receipts still deduplicate; expired receipts are reclaimed before a new commit.
 - Opt-in developer-product receipt processing through `PurchaseReceiptProcessor:CreateHandler`: malformed receipt and unsupported product checks, active-profile requirements, durable same-profile grant/idempotency, duplicate acknowledgement, conflict deferral, and explicit finite receipt retention.
 
-Still incomplete: scheduler audit items and the full Mailbox V2 producer/recovery acceptance matrix; an application-specific destination adapter that integrates Mailbox V2 and verifies destination receipts; durable receipt status lookup and additional purchase receipt types; recoverable saga orchestration; adaptive runtime policy APIs; resumable retention/offline maintenance; durable migration manifests and guarded execution/quarantine/restore; durable indexes/materialized views; erasure inventory/coordinator; and correlated operation tracing. Live Roblox service and rollout acceptance remains a separate release gate.
+Still incomplete: scheduler audit items and the full Mailbox V2 producer/recovery acceptance matrix; durable receipt status lookup and additional purchase receipt types; recoverable saga orchestration; adaptive runtime policy APIs; resumable retention/offline maintenance; durable migration manifests and guarded execution/quarantine/restore; durable indexes/materialized views; erasure inventory/coordinator; and correlated operation tracing. Live Roblox service and rollout acceptance remains a separate release gate.
+
+The outbox-to-Mailbox V2 adapter receipt proves durable mailbox acceptance only. It does not prove that a destination handler executed, or that an external effect completed. Keep handler-side processing idempotent and retain live multi-server acceptance as a separate release gate.
