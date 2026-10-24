@@ -1,0 +1,84 @@
+# PR #56 Non-Save PR #39 Implementation Plan
+
+> Execution: implement in bounded, testable slices on `feat/pr39-non-save-operations-2026-10-24`; keep PR #56 a draft until all merge gates for the delivered scope pass.
+
+**Goal:** Implement the remaining non-save features defined by PR #39, including missing non-save functionality around the merged PR #37 scheduler, while leaving PR #55's durable-save recovery and PlayerData durability/backpressure work separate.
+
+**Architecture:** Keep profile-key DataStore envelopes authoritative and all local scheduler, MemoryStore, MessagingService, cache, index, maintenance and tracing state advisory unless a feature has its own explicit durable protocol. Extend the existing embedded Mailbox V2 and RecordStore abstractions rather than adding a parallel persistence protocol. Each write transform remains pure, deterministic, non-yielding and side-effect free. New durable features stay disabled until their correctness and rollout gates pass.
+
+**Tech Stack:** Roblox Luau strict mode, DataStoreService, MemoryStoreService/MessagingService where supported, the existing embedded RecordStore scheduler and Mailbox V2, Lune regression shim, CodSpeed.
+
+**Source of truth:** PR #39 design specification, especially sections 3-25, 27.2(D-E), 28-31 and implementation phases 3-12. PR #37 already supplies the advanced scheduler core; do not reimplement it.
+
+## Global Constraints
+
+- PR #55 owns P0 save/renewal/release uncertainty recovery, durability SLO/backpressure, and PlayerData mutation admission; do not duplicate or weaken those changes.
+- Cross-key workflows are not atomic, arbitrary callbacks are not exactly-once, and unknown outcomes are never treated as confirmed non-commit.
+- All accepted durable work must remain discoverable through bounded recovery; no whole-keyspace scans on request paths.
+- Do not physically delete records without a durable tombstone/fence, verified references, and reconciled ambiguous writes.
+- Do not enable destructive restore, compaction, retention or erasure by default.
+- Do not claim complete RTBF coverage unless every user-associated key family is matchable by verified Roblox templates and the platform-specific gate passes.
+- PR #39 explicitly rejects global/cross-server server ranking as a core feature for the initial design; retain server-local roles and scheduling only.
+- Persisted format changes require versioning, mixed-version rejection, migration/rollback tests, and explicit opt-in activation.
+- Performance claims require same-environment CodSpeed comparisons; synthetic/Lune behavior is not live Roblox service evidence.
+
+## Work slices
+
+### Slice 1: Audit and complete PR #37 non-save scheduling correctness
+
+- [ ] Compare the merged scheduler implementation and public API against PR #39 sections 28-29 and the latest PR #37 follow-up findings.
+- [ ] Add focused tests for reserved work-class aliases, dependency terminal history while queued/in-flight dependents hold references, and bounded reclamation after all dependents terminate.
+- [ ] Fix only reproduced defects; preserve queue bounds and critical-lane isolation.
+- [ ] Record which omissions are intentionally rejected by PR #39, rather than treating them as missing features.
+
+### Slice 2: Mailbox V2 protocol and operations
+
+- [ ] Audit existing Mailbox V2 coverage against the canonical envelope, producer idempotency, bounded preparation discoverability, claims/renewal/ack/DLQ/replay, and v3 compatibility contracts.
+- [ ] Implement missing idempotent producer receipts and recovery for partial preparation/acknowledgement, without duplicating already implemented strict per-key ordering.
+- [ ] Add bounded operational APIs for recovery, capacity/status reporting, safe reclamation and resumable maintenance; preserve advisory-only semantics for separate indexes and MessagingService hints.
+- [ ] Add crash-window, competing-claim, capacity-full, duplicate-producer, stale-index and response-loss tests.
+
+### Slice 3: Same-profile inbox/outbox and idempotent transactions
+
+- [ ] Implement same-profile inbox mutation + receipt and source mutation + outbox intent within one authoritative profile-key UpdateAsync.
+- [ ] Add general idempotent transactions with canonical request identity, bounded results/receipts, duplicate/conflict/capacity/unknown outcomes and explicit retention guarantees.
+- [ ] Add bounded outbox fan-out with per-destination receipts and resumable cleanup.
+- [ ] Add purchase receipt processing as an opt-in adapter; never auto-register or replace MarketplaceService callbacks.
+
+### Slice 4: Recoverable saga coordinator
+
+- [ ] Persist bounded workflow identity, step state, retry/compensation state and unresolved external outcomes.
+- [ ] Resume from authoritative coordinator records, preserve idempotency across retries, and expose explicit manual-resolution states.
+- [ ] Add crash/failure injection for every step boundary; never claim cross-profile atomic transactions.
+
+### Slice 5: Server-local operations and adaptive governor
+
+- [ ] Add versioned bounded runtime policies and read-only health/runtime snapshots on top of the current scheduler/governor.
+- [ ] Preserve the internal critical persistence reserve and keep adaptive changes opt-in.
+- [ ] Add bounded session contention/takeover diagnostics, a resumable retention compactor and an offline maintenance runner.
+- [ ] Add fairness, low-budget, throttle, lease-margin, pause/resume and bounded-progress tests.
+
+### Slice 6: Migration and Profile Doctor
+
+- [ ] Add a migration registry with stable IDs, declared implementation revisions, compatibility ranges, cycle/gap checks and unique paths.
+- [ ] Add dry-run path-level previews, execution with source revision/fencing checks, and a visible quarantined result on validation failure.
+- [ ] Add read-only profile inspection/version diff/repair preview and guarded restore with audit identity.
+- [ ] Ensure restore never overwrites protocol metadata, receipts, fencing state or erasure tombstones.
+
+### Slice 7: Projections, erasure and operation tracing
+
+- [ ] Add opt-in durable secondary indexes/materialized views backed by durable events or a verified snapshot/cursor protocol, with idempotent projection offsets and rebuild status.
+- [ ] Add a user-data family inventory and resumable erasure plan/execution/status that fences recreation and reports uncertain/unmatched families.
+- [ ] Keep the RTBF-completeness claim blocked until templates cover every user-associated key layout and the real platform acceptance test passes.
+- [ ] Add bounded correlated operation traces that distinguish durable evidence from process-local observations and redact payload/identity fields by default.
+
+### Slice 8: Verification and merge gates
+
+- [ ] Run all Luau checks and Lune regression stages for every delivered slice.
+- [ ] Add fault-injection tests and focused CodSpeed benchmarks for each durable protocol/maintenance path.
+- [ ] Complete independent code review and inspect every changed file.
+- [ ] Keep live Roblox Studio/DataStore multi-server, throttling/cache, crash/shutdown, mixed-version rollout/rollback and RTBF template acceptance explicitly blocked until executed in a real test experience.
+
+## Current status
+
+The existing PR #56 code currently implements only read-only session lease diagnostics, a bounded Mailbox V2 maintenance orchestration pass, its regression tests and documentation. Those are retained as Slice 2 work, not presented as completing this plan.
