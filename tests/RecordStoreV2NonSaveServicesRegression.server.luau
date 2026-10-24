@@ -260,9 +260,9 @@ local families = {
 		templates_verified = true,
 		inventory = function(user_id, maximum)
 			return {
-				{ key = "Player_" .. tostring(user_id), generation = 4 },
-				{ key = "PlayerArchive_" .. tostring(user_id), generation = 8 },
-			}
+				{ name = "PlayerData", scope = "global", key = "Player_" .. tostring(user_id), generation = 4 },
+				{ name = "PlayerData", scope = "global", key = "PlayerArchive_" .. tostring(user_id), generation = 8 },
+			}, true
 		end,
 		fence_user = function() return true end,
 		dependencies_clear = function() return true end,
@@ -293,6 +293,64 @@ expect(#deleted_items == 2 and deleted_items[1].key == "Player_123456"
 	"erasure failed to invoke each generation-aware deletion adapter")
 expect(erasure:GetStatus(123456).status == "completed", "erasure manifest status was not durable")
 
+local unmatched_erasure = V2.Erasure.new(new_store(), {
+	{
+		name = "profile_family",
+		templates = { { name = "PlayerData", scope = "global", key = "Player_{user_id}" } },
+		templates_verified = true,
+		inventory = function(user_id)
+			return { { name = "UnexpectedStore", scope = "global", key = "Orphan_" .. tostring(user_id), generation = 2 } }, true
+		end,
+		fence_user = function() return true end,
+		redact_or_delete_if_generation = function() return "deleted" end,
+	},
+}, { verify_templates = function() return true end })
+local unmatched_plan = unmatched_erasure:PlanAsync(777, "erase-unmatched")
+expect(unmatched_plan.code == "success" and unmatched_plan.rtbf_coverage_verified == false
+	and unmatched_plan.coverage.profile_family.status == "unmatched_inventory"
+	and unmatched_plan.coverage.profile_family.unmatched_count == 1,
+	"erasure did not report an inventory locator that matched no verified template")
+
+local incomplete_erasure = V2.Erasure.new(new_store(), {
+	{
+		name = "partial_family",
+		templates = { { name = "PlayerData", scope = "global", key = "Player_{user_id}" } },
+		templates_verified = true,
+		inventory = function(user_id)
+			return { { name = "PlayerData", scope = "global", key = "Player_" .. tostring(user_id), generation = 1 } }, false
+		end,
+		fence_user = function() return true end,
+		redact_or_delete_if_generation = function() return "deleted" end,
+	},
+}, { verify_templates = function() return true end })
+local incomplete_plan = incomplete_erasure:PlanAsync(778, "erase-incomplete")
+expect(incomplete_plan.rtbf_coverage_verified == false
+	and incomplete_plan.coverage.partial_family.status == "inventory_incomplete",
+	"erasure claimed complete coverage without an explicit exhaustive inventory acknowledgement")
+
+local oversize_items = {}
+for index = 1, 513 do
+	table.insert(oversize_items, {
+		name = "PlayerData", scope = "global", key = "Player_" .. tostring(index), generation = index,
+	})
+end
+local oversize_store = new_store()
+local oversize_erasure = V2.Erasure.new(oversize_store, {
+	{
+		name = "oversized_family",
+		templates = { { name = "PlayerData", scope = "global", key = "Player_{user_id}" } },
+		templates_verified = true,
+		inventory = function() return oversize_items, true end,
+		fence_user = function() return true end,
+		redact_or_delete_if_generation = function() return "deleted" end,
+	},
+}, { verify_templates = function() return true end })
+local oversized_plan = oversize_erasure:PlanAsync(779, "erase-oversized")
+expect(oversized_plan.code == "capacity" and oversized_plan.family == "oversized_family",
+	"erasure silently truncated an oversized inventory instead of failing closed")
+expect(oversize_store.values["rv2erase-u779"] == nil,
+	"erasure persisted a truncated manifest after inventory overflow")
+
 local concurrent_erase_store = new_store()
 local concurrent_eraser
 local nested_erasure_result
@@ -305,9 +363,9 @@ local concurrent_family = {
 		templates_verified = true,
 		inventory = function(user_id)
 			return {
-				{ key = "Player_" .. tostring(user_id), generation = 4 },
-				{ key = "PlayerArchive_" .. tostring(user_id), generation = 8 },
-			}
+				{ name = "PlayerData", scope = "global", key = "Player_" .. tostring(user_id), generation = 4 },
+				{ name = "PlayerData", scope = "global", key = "PlayerArchive_" .. tostring(user_id), generation = 8 },
+			}, true
 		end,
 		fence_user = function() return true end,
 		dependencies_clear = function() return true end,
@@ -339,7 +397,7 @@ local unverified_erasure = V2.Erasure.new(new_store(), {
 		name = "unverified_family",
 		templates = { { name = "SharedStore", scope = "global", key = "shared-key" } },
 		templates_verified = false,
-		inventory = function() return {} end,
+		inventory = function() return {}, true end,
 		fence_user = function() return true end,
 		redact_or_delete_if_generation = function() return "deleted" end,
 	},

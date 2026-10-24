@@ -1598,29 +1598,77 @@ local function new_erasure(store, families, options)
 	end
 	function coordinator:PlanAsync(user_id, erasure_id)
 		if not finite(user_id) or user_id < 1 or math.floor(user_id) ~= user_id or not valid_text(erasure_id, 96) then return { code = "invalid" } end
-		local entries, coverage = {}, {}
+		local entries, coverage, rendered = {}, {}, self:RenderTemplates(user_id)
 		for _, family in ipairs(self.families) do
 			if type(family.inventory) ~= "function" then
-				coverage[family.name] = { status = "unresolved", count = 0 }
+				coverage[family.name] = { status = "unresolved", count = 0, inventory_complete = false, unmatched_count = 0 }
 			else
-				local items, message = io_call(family.inventory, user_id, MAX_ERASURE_ITEMS)
-				if type(items) ~= "table" then coverage[family.name] = { status = "unresolved", count = 0, message = message }
+				local items, inventory_complete = io_call(family.inventory, user_id, MAX_ERASURE_ITEMS)
+				if type(items) ~= "table" then
+					coverage[family.name] = {
+						status = "unresolved", count = 0, inventory_complete = false, unmatched_count = 0,
+						message = inventory_complete,
+					}
 				else
-					local count = 0
-					for index, item in ipairs(items) do
-						if index > MAX_ERASURE_ITEMS then break end
-						if type(item) ~= "table" or not valid_text(item.key, 50) or not finite(item.generation) then return { code = "invalid", message = "inventory items require key and observed generation" } end
-						table.insert(entries, { family = family.name, item = copy(item) }); count += 1
-						if #entries > MAX_ERASURE_ITEMS then return { code = "capacity", message = "erasure plan exceeds bounded item count" } end
+					if #items > MAX_ERASURE_ITEMS then
+						return { code = "capacity", family = family.name, maximum = MAX_ERASURE_ITEMS, message = "erasure inventory exceeds its per-family bound" }
 					end
-					coverage[family.name] = { status = if family.templates_verified == true then "template_verified_by_integrator" else "template_unverified", count = count }
+					if key_count(items) ~= #items then
+						return { code = "invalid", family = family.name, message = "erasure inventory must be a dense array" }
+					end
+					for item_key in pairs(items) do
+						if type(item_key) ~= "number" or not finite(item_key) or math.floor(item_key) ~= item_key
+							or item_key < 1 or item_key > #items
+						then return { code = "invalid", family = family.name, message = "erasure inventory must be a dense numeric array" } end
+					end
+					local count, unmatched_count, unmatched_samples = 0, 0, {}
+					local seen_items = {}
+					for _, item in ipairs(items) do
+						if type(item) ~= "table" or not valid_text(item.key, 50) or not finite(item.generation) then
+							return { code = "invalid", family = family.name, message = "inventory items require key and observed generation" }
+						end
+						if (item.name ~= nil and type(item.name) ~= "string")
+							or (item.scope ~= nil and type(item.scope) ~= "string")
+						then return { code = "invalid", family = family.name, message = "inventory name and scope must be strings when supplied" } end
+						local locator = tostring(item.name or "") .. "\0" .. tostring(item.scope or "") .. "\0" .. item.key
+					if seen_items[locator] then return { code = "invalid", family = family.name, message = "inventory repeats a DataStore name/scope/key locator" } end
+						seen_items[locator] = true
+						local matched_template = false
+						for _, template_entry in ipairs(rendered) do
+							if template_entry.family == family.name then
+								local matches = true
+								for _, field in ipairs({ "name", "scope", "key" }) do
+									local expected = template_entry.template[field]
+									if type(expected) == "string" and item[field] ~= expected then matches = false; break end
+								end
+								if matches then matched_template = true; break end
+							end
+						end
+						if not matched_template then
+							unmatched_count += 1
+							if #unmatched_samples < 8 then table.insert(unmatched_samples, item.key) end
+						end
+						table.insert(entries, { family = family.name, item = copy(item) })
+						count += 1
+						if #entries > MAX_ERASURE_ITEMS then return { code = "capacity", family = family.name, message = "erasure plan exceeds bounded item count" } end
+					end
+					local inventory_is_complete = inventory_complete == true
+					local status = if not inventory_is_complete then "inventory_incomplete"
+						elseif family.templates_verified ~= true then "template_unverified"
+						elseif unmatched_count > 0 then "unmatched_inventory"
+						else "template_verified_by_integrator"
+					coverage[family.name] = {
+						status = status, count = count, inventory_complete = inventory_is_complete,
+						unmatched_count = unmatched_count, unmatched_samples = unmatched_samples,
+					}
 				end
 			end
 		end
-		local rendered = self:RenderTemplates(user_id)
 		local template_ok = if type(options.verify_templates) == "function" then io_call(options.verify_templates, user_id, rendered) else false
 		local verified = #self.families > 0
-		for _, row in pairs(coverage) do if row.status ~= "template_verified_by_integrator" then verified = false end end
+		for _, row in pairs(coverage) do
+			if row.status ~= "template_verified_by_integrator" or row.inventory_complete ~= true or row.unmatched_count ~= 0 then verified = false end
+		end
 		local manifest = {
 			version = 1, user_id = user_id, erasure_id = erasure_id, status = "planned", cursor = 0,
 			completed_count = 0, entries = entries, coverage = coverage,
