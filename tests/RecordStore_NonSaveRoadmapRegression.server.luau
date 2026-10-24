@@ -392,6 +392,27 @@ local transact_result, transact_status, transact_message = transactional_record:
 )
 assert(transact_status == "committed", "TransactAsync status=" .. tostring(transact_status) .. " message=" .. tostring(transact_message))
 assert(transact_result.coins_granted == 100)
+local status_before_lookup = Mock.get_record_raw("TransactionTest", "global", "profile")
+local durable_status = transactional_record:GetTransactionStatusAsync(
+	"reward:daily:test",
+	{ kind = "daily_reward", amount = 100 }
+)
+assert(durable_status.code == "committed" and durable_status.result_present == true,
+	"read-only durable receipt lookup failed: " .. tostring(durable_status.message))
+assert(durable_status.result.coins_granted == 100, "durable receipt lookup returned the wrong reducer result")
+local missing_status = transactional_record:GetTransactionStatusAsync(
+	"reward:missing:test",
+	{ kind = "daily_reward", amount = 100 }
+)
+assert(missing_status.code == "not_found", "missing transaction receipt was not reported as not_found")
+local conflicting_status = transactional_record:GetTransactionStatusAsync(
+	"reward:daily:test",
+	{ kind = "daily_reward", amount = 999 }
+)
+assert(conflicting_status.code == "conflict", "receipt lookup did not bind status to canonical request identity")
+local status_after_lookup = Mock.get_record_raw("TransactionTest", "global", "profile")
+assert(status_after_lookup.revision == status_before_lookup.revision,
+	"read-only transaction status lookup mutated the durable profile revision")
 assert(type(transactional_record:Get()) == "table",
 	"transaction must persist reducer data rather than the validator success flag")
 assert(transactional_record:Get().coins == 110)
@@ -764,6 +785,11 @@ local function exercise_receipt_capacity_and_retention(kind)
 		prefix .. " duplicate receipt applied the reducer a second time")
 
 	receipt_test_now += 2
+	if kind == "transaction" then
+		local expired_status = record:GetTransactionStatusAsync(last_operation_id, last_request)
+		assert(expired_status.code == "expired",
+			prefix .. " expired durable receipt was reported as " .. tostring(expired_status.code))
+	end
 	local _, after_expiry_status, after_expiry_message = execute(
 		"after-expiry-" .. kind,
 		{ index = 10000 }

@@ -217,12 +217,30 @@ local function create_handler(
 				}
 			)
 		end)
-		if not transaction_ok then
-			emit_diagnostic(config, "transaction_error", nil, tostring(_result), validated_product_id)
-			return not_processed_yet
-		end
-		if status == "committed" or status == "duplicate" then
+		if transaction_ok and (status == "committed" or status == "duplicate") then
 			return purchase_granted
+		end
+
+		if not transaction_ok or status == "unknown" then
+			local lookup_ok, durable_status = pcall(function()
+				return record:GetTransactionStatusAsync(
+					OPERATION_ID_PREFIX .. validated_purchase_id,
+					request
+				)
+			end)
+			if lookup_ok and durable_status.code == "committed" then
+				return purchase_granted
+			end
+			if lookup_ok and durable_status.code == "conflict" then
+				emit_diagnostic(config, "transaction_conflict", "conflict",
+					durable_status.message, validated_product_id)
+				return not_processed_yet
+			end
+			local lookup_message = if lookup_ok then durable_status.message else tostring(durable_status)
+			emit_diagnostic(config, "transaction_status_unresolved",
+				if lookup_ok then durable_status.code else "unknown",
+				lookup_message or tostring(_result), validated_product_id)
+			return not_processed_yet
 		end
 
 		local outcome_status = status :: string?

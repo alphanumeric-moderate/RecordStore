@@ -48,7 +48,8 @@
 - [x] Add bounded outbox reads and callback-based at-least-once dispatch with per-event destination receipt IDs, unknown-outcome reconciliation, and bounded retention cleanup.
 - [x] Add inbox/transaction receipt-capacity and expiry-recovery tests; surface encoded-sidecar-size exhaustion as capacity while preserving profile data and valid duplicate receipts.
 - [x] Add an opt-in legacy developer-product receipt handler factory with receipt/product validation, active-session checks, same-profile durable idempotency, and no implicit MarketplaceService registration.
-- [ ] Add durable receipt status lookup, additional receipt-type adapters, and live-platform acceptance for purchase processing.
+- [x] Add identity-bound, read-only durable transaction receipt status lookup with committed/not-found/expired/conflict/unknown outcomes; the purchase adapter consults it before deferring an uncertain transaction.
+- [ ] Add additional receipt-type adapters and live-platform acceptance for purchase processing.
 
 ### Slice 4: Recoverable saga coordinator
 - [x] Add an opt-in durable cross-profile transfer saga with stable operation IDs, reservation/credit/settlement phases, compensation, durable status, and explicit unresolved outcomes.
@@ -105,6 +106,6 @@ Implemented and covered by the current Lune regression suite:
 - Regression coverage for inbox/transaction receipt saturation and expiry recovery: full collections reject new operation IDs without profile mutation; live receipts still deduplicate; expired receipts are reclaimed before a new commit.
 - Opt-in developer-product receipt processing through `PurchaseReceiptProcessor:CreateHandler`: malformed receipt and unsupported product checks, active-profile requirements, durable same-profile grant/idempotency, duplicate acknowledgement, conflict deferral, and explicit finite receipt retention.
 
-Still incomplete: remaining scheduler audit; Mailbox V2 mixed-version/v3 compatibility, adversarial concurrent-claim and full fault-injection matrix; handler-side destination effect integration and real multi-server acceptance; durable receipt status lookup and additional purchase receipt types; live enforcement of quarantine across every writer; real key-family inventory and RTBF completeness; saga failure injection for every transfer leg; adaptive governor fairness/low-budget/throttle/lease-margin acceptance; independent code review; fault-injection execution on the final head; and live Roblox Studio/DataStore throttling, crash/shutdown and mixed-version rollback acceptance.
+Still incomplete: remaining scheduler audit; Mailbox V2 mixed-version/v3 compatibility, adversarial concurrent-claim and full fault-injection matrix; handler-side destination effect integration and real multi-server acceptance; additional purchase receipt types; live enforcement of quarantine across every writer; real key-family inventory and RTBF completeness; saga failure injection for every transfer leg; adaptive governor fairness/low-budget/throttle/lease-margin acceptance; independent code review; fault-injection execution on the final head; and live Roblox Studio/DataStore throttling, crash/shutdown and mixed-version rollback acceptance.
 
 The outbox-to-Mailbox V2 adapter receipt proves durable mailbox acceptance only. It does not prove that a destination handler executed, or that an external effect completed. Keep handler-side processing idempotent and retain live multi-server acceptance as a separate release gate.

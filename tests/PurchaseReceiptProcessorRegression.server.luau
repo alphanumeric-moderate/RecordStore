@@ -63,6 +63,14 @@ local purchase = {
 local granted = handler(purchase)
 expect(granted == Enum.ProductPurchaseDecision.PurchaseGranted, "valid durable purchase was not granted")
 expect(record:Get().coins == 25, "purchase grant was not committed to profile data")
+local receipt_lookup = record:GetTransactionStatusAsync("purchase:" .. purchase.PurchaseId, {
+	receipt_type = "developer_product",
+	purchase_id = purchase.PurchaseId,
+	player_id = purchase.PlayerId,
+	product_id = purchase.ProductId,
+})
+expect(receipt_lookup.code == "committed" and receipt_lookup.result.granted == 25,
+	"developer-product durable receipt could not be queried read-only")
 expect(record:Get().last_purchase_id == purchase.PurchaseId, "grant reducer did not receive the validated receipt")
 expect(grant_calls == 1, "grant reducer did not run exactly once")
 

@@ -6086,6 +6086,17 @@ export type TransactionStatus =
 	"committed" | "duplicate" | "conflict" | "capacity" | "fenced" | "retryable"
 	| "unknown" | "disabled" | "invalid" | "validation" | "corrupt"
 
+export type TransactionReceiptStatus = {
+	code: "committed" | "not_found" | "expired" | "conflict" | "unknown"
+		| "disabled" | "invalid" | "corrupt" | "legacy" | "future_schema" | "unsupported",
+	message: string?,
+	result: JsonValue?,
+	result_present: boolean?,
+	committed_revision: number?,
+	created_at: number?,
+	expires_at: number?,
+}
+
 export type TransactionOptions = {
 	request: JsonValue?,
 	receipt_retention_seconds: number?,
@@ -6446,6 +6457,7 @@ export type Record = {
 	Reconcile: (self: Record, template: JsonValue) -> (ResultCode, string?),
 	Save: (self: Record, reason: string?) -> (ResultCode, string?),
 	TransactAsync: (self: Record, operation_id: string, reducer: TransactionReducer, options: TransactionOptions) -> (JsonValue?, TransactionStatus, string?),
+	GetTransactionStatusAsync: (self: Record, operation_id: string, request: JsonValue) -> TransactionReceiptStatus,
 	ApplyInboxAsync: (self: Record, message_id: string, message_type: string, payload: JsonValue, reducer: TransactionReducer, options: TransactionOptions?) -> (JsonValue?, TransactionStatus, string?),
 	CommitWithOutboxAsync: (self: Record, commit_key: string, command_type: string, command_payload: JsonValue, outbox_events: { OutboxEventSpec }, reducer: TransactionReducer, options: TransactionOptions?) -> (JsonValue?, TransactionStatus, string?),
 	GetOutboxAsync: (self: Record, max_events: number?) -> ({ OutboxEvent }, ResultCode, string?),
@@ -13963,6 +13975,9 @@ local function make_record(name: string, scope: string, key: string, options: Op
 			sync_public(self)
 			return result, status :: TransactionStatus, message
 		end,
+		GetTransactionStatusAsync = function(self: Record, operation_id: string, request: JsonValue): TransactionReceiptStatus
+			return RecordStore._internals.get_transaction_status(self, operation_id, request) :: TransactionReceiptStatus
+		end,
 		ApplyInboxAsync = function(self: Record, message_id: string, message_type: string, payload: JsonValue, reducer: TransactionReducer, options: TransactionOptions?)
 			local result, status, message = transact_engine(self, "inbox", message_id, reducer, options, message_type, payload, nil)
 			sync_public(self)
@@ -15282,6 +15297,106 @@ RecordStore._internals.transact = (function()
 		return nil, status, final_message
 	end
 end)()
+
+RecordStore._internals.get_transaction_status = function(
+	self: Record,
+	operation_id: string,
+	request: JsonValue
+): TransactionReceiptStatus
+	local state = private[self]
+	if state == nil then return { code = "invalid", message = "record does not exist" } end
+	if state.options.transactional_operations_enabled ~= true then
+		return { code = "disabled", message = "transactional operations are disabled for this Record" }
+	end
+	if type(operation_id) ~= "string" or operation_id == "" or #operation_id > 256 then
+		return { code = "invalid", message = "operation_id must be 1 to 256 bytes" }
+	end
+	if request == nil then return { code = "invalid", message = "request is required for identity-bound status lookup" } end
+
+	local copied_request = copy_value(request)
+	if copied_request == nil then return { code = "invalid", message = "request could not be copied" } end
+	local request_material: JsonValue = { kind = "transaction", request = copied_request }
+	local protocol = prepared_envelope_cache._sidecar_protocol
+	local request_identity, identity_error = protocol.canonicalize({
+		store_name = state.name,
+		scope = state.scope,
+		profile_key = state.key,
+		operation_kind = "transaction",
+		request = request_material,
+	})
+	if request_identity == nil then return { code = "invalid", message = identity_error } end
+	if #request_identity > 16_384 then
+		return { code = "invalid", message = "canonical transaction request exceeds 16384 bytes" }
+	end
+
+	local deadline, deadline_error = resolve_operation_deadline(state.options.operation_deadline)
+	if deadline == nil then return { code = "invalid", message = deadline_error } end
+	local raw, _, read_code, read_message = backend_get(state.backend, false, deadline, nil)
+	if read_code ~= nil then
+		local normalized = normalize_result_code(read_code)
+		local code: TransactionReceiptStatus["code"] = if normalized == "legacy" then "legacy"
+			elseif normalized == "future_schema" then "future_schema"
+			elseif normalized == "corrupt" then "corrupt"
+			elseif normalized == "not_found" then "not_found"
+			elseif normalized == "disabled" then "disabled"
+			else "unknown"
+		return { code = code, message = read_message or "durable transaction receipt could not be read" }
+	end
+	if raw == nil then return { code = "not_found", message = "profile envelope does not exist" } end
+
+	local envelope, parse_error, current_format = parse_envelope(raw)
+	if not current_format then
+		local code: TransactionReceiptStatus["code"] = if parse_error == "legacy payload" then "legacy"
+			elseif parse_error == "future implementation version" then "future_schema"
+			else "corrupt"
+		return { code = code, message = parse_error or "durable profile format is unsupported" }
+	end
+	if envelope == nil then return { code = "corrupt", message = parse_error or "durable profile envelope is invalid" } end
+	if envelope.sidecars == nil or envelope.implementation_version < protocol.transaction_version then
+		return { code = "unsupported", message = "profile has no transactional receipt sidecars" }
+	end
+
+	local receipt = envelope.sidecars.transaction_receipts[operation_id]
+	if receipt == nil then return { code = "not_found", message = "transaction receipt was not found" } end
+	if receipt.request_identity ~= request_identity then
+		return {
+			code = "conflict",
+			message = "operation_id is bound to a different durable request",
+			committed_revision = receipt.committed_revision,
+			created_at = receipt.created_at,
+			expires_at = receipt.expires_at,
+		}
+	end
+	if receipt.expires_at <= session_now_unix(state.backend.mock) then
+		return {
+			code = "expired",
+			message = "transaction receipt is past its retention deadline",
+			committed_revision = receipt.committed_revision,
+			created_at = receipt.created_at,
+			expires_at = receipt.expires_at,
+		}
+	end
+	if receipt.committed_revision > envelope.revision then
+		return {
+			code = "unknown",
+			message = "transaction receipt refers to a future profile revision",
+			committed_revision = receipt.committed_revision,
+			created_at = receipt.created_at,
+			expires_at = receipt.expires_at,
+		}
+	end
+	if receipt.result_present and receipt.result == nil then
+		return { code = "corrupt", message = "transaction result is missing from its durable receipt" }
+	end
+	return {
+		code = "committed",
+		result = if receipt.result_present then copy_value(receipt.result) else nil,
+		result_present = receipt.result_present,
+		committed_revision = receipt.committed_revision,
+		created_at = receipt.created_at,
+		expires_at = receipt.expires_at,
+	}
+end
 
 prepared_envelope_cache._outbox_engine = (function()
 	local protocol = prepared_envelope_cache._sidecar_protocol
