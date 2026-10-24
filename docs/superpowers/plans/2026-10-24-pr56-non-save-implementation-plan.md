@@ -60,9 +60,10 @@
 
 ### Slice 6: Migration and Profile Doctor
 
-- [ ] Add a migration registry with stable IDs, declared implementation revisions, compatibility ranges, cycle/gap checks and unique paths.
-- [ ] Add dry-run path-level previews, execution with source revision/fencing checks, and a visible quarantined result on validation failure.
-- [ ] Add read-only profile inspection/version diff/repair preview and guarded restore with audit identity.
+- [x] Add a process-local migration registry with stable IDs, declared implementation revisions, compatibility ranges, forward-only edges and ambiguous-path rejection. A target with no path fails closed during preview.
+- [x] Add bounded read-only path/type migration previews. Preview executes non-yielding transformations on a snapshot and never persists the result.
+- [x] Add read-only profile inspection and historical version diffs that omit raw values and report truncation explicitly.
+- [ ] Add durable registry manifests, execution with source revision/session fencing checks, visible quarantine on validation failure, repair preview and guarded restore with audit identity.
 - [ ] Ensure restore never overwrites protocol metadata, receipts, fencing state or erasure tombstones.
 
 ### Slice 7: Projections, erasure and operation tracing
@@ -81,4 +82,9 @@
 
 ## Current status
 
-The existing PR #56 code currently implements only read-only session lease diagnostics, a bounded Mailbox V2 maintenance orchestration pass, its regression tests and documentation. Those are retained as Slice 2 work, not presented as completing this plan.
+Implemented and test-covered on this branch:
+- Read-only session lease diagnostics and bounded Mailbox V2 maintenance orchestration.
+- Profile Doctor point-in-time inspection and bounded historical version diffs with path/type-only output.
+- Process-local migration registration with stable IDs/implementation revisions, compatibility validation, forward-only edges, ambiguity rejection, and read-only migration previews.
+
+Still not implemented: durable inbox/outbox transactions and receipts, purchase receipt processing, saga orchestration, durable migration manifests and guarded migration execution/quarantine, runtime policy APIs, resumable retention compaction/offline maintenance, durable indexes/materialized views, escrow workflows, complete erasure coordination, and correlated operation tracing. Live Roblox service and rollout acceptance remains a separate release gate.
