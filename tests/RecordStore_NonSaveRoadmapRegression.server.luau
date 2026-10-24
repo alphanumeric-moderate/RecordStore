@@ -19,6 +19,9 @@ assert(type(RecordStore.inspect_profile_async) == "function", "Profile Doctor in
 assert(type(Mock.inspect_profile_async) == "function", "mock Profile Doctor inspection API is missing")
 assert(type(RecordStore.diff_profile_versions_async) == "function", "Profile Doctor version diff API is missing")
 assert(type(Mock.diff_profile_versions_async) == "function", "mock Profile Doctor version diff API is missing")
+assert(type(RecordStore.register_migration) == "function", "migration registry API is missing")
+assert(type(RecordStore.preview_migration_async) == "function", "migration preview API is missing")
+assert(type(Mock.preview_migration_async) == "function", "mock migration preview API is missing")
 
 Mock.reset()
 Mock.set_test_clock(function()
@@ -221,6 +224,112 @@ local bounded_diff, bounded_result, bounded_message = Mock.diff_profile_versions
 assert(bounded_result == "success", tostring(bounded_message))
 assert(#bounded_diff.Changes <= 1)
 assert(bounded_diff.Truncated == true, "diff must report truncation when the change cap is reached")
+
+local migration_record = Mock.new("MigrationTest", "global", "profile", {
+	schema_version = 1,
+	autosave_interval = 1000,
+	lease_duration = 180,
+	lease_renewal = 60,
+})
+local migration_open, migration_open_message = migration_record:Open({
+	coins = 10,
+	nested = { label = "before" },
+})
+assert(migration_open == "created" or migration_open == "loaded", tostring(migration_open_message))
+local migration_before = Mock.get_record_raw("MigrationTest", "global", "profile")
+local migration_before_revision = migration_record:GetRevision()
+
+local migration_1_to_2 = {
+	id = "migration-test-v1-v2",
+	from_version = 1,
+	to_version = 2,
+	implementation_revision = "test-implementation-1",
+	compatible_schema_min = 1,
+	compatible_schema_max = 3,
+	transform = function(_from_version, data)
+		local next_data = table.clone(data)
+		next_data.coins += 5
+		next_data.nested = table.clone(next_data.nested)
+		next_data.nested.label = "middle"
+		return next_data
+	end,
+}
+local migration_2_to_3 = {
+	id = "migration-test-v2-v3",
+	from_version = 2,
+	to_version = 3,
+	implementation_revision = "test-implementation-1",
+	compatible_schema_min = 1,
+	compatible_schema_max = 3,
+	transform = function(_from_version, data)
+		local next_data = table.clone(data)
+		next_data.coins += 7
+		next_data.nested = table.clone(next_data.nested)
+		next_data.nested.label = "after"
+		next_data.schema_marker = 3
+		return next_data
+	end,
+}
+local migration_register_1, migration_register_1_message =
+	RecordStore.register_migration("MigrationTest", migration_1_to_2)
+assert(migration_register_1 == "success", tostring(migration_register_1_message))
+local migration_register_2, migration_register_2_message =
+	RecordStore.register_migration("MigrationTest", migration_2_to_3)
+assert(migration_register_2 == "success", tostring(migration_register_2_message))
+local duplicate_registration, duplicate_message =
+	RecordStore.register_migration("MigrationTest", migration_1_to_2)
+assert(duplicate_registration == "duplicate", tostring(duplicate_message))
+
+local invalid_backward = table.clone(migration_2_to_3)
+invalid_backward.id = "migration-test-v3-v2"
+invalid_backward.from_version = 3
+invalid_backward.to_version = 2
+assert(RecordStore.register_migration("MigrationTest", invalid_backward) == "invalid",
+	"registry must reject backwards migration edges")
+
+local ambiguous_registration = table.clone(migration_2_to_3)
+ambiguous_registration.id = "migration-test-v1-v3-ambiguous"
+ambiguous_registration.from_version = 1
+ambiguous_registration.to_version = 3
+assert(RecordStore.register_migration("MigrationTest", ambiguous_registration) == "conflict",
+	"registry must reject a second route between already connected schema versions")
+
+local preview, preview_result, preview_message = Mock.preview_migration_async(
+	"MigrationTest", "global", "profile", 3, {
+		max_nodes = 100,
+		max_depth = 16,
+		max_changes = 20,
+	}
+)
+assert(preview_result == "success", tostring(preview_message))
+assert(preview.Consistency == "read_only_non_authoritative_preview")
+assert(preview.SourceSchemaVersion == 1 and preview.TargetSchemaVersion == 3)
+assert(#preview.Steps == 2)
+assert(preview.TargetDataNodeCount ~= nil and preview.TargetDataNodeCount > 0)
+assert(preview.Truncated == false)
+local preview_paths = {}
+for _, change in ipairs(preview.Changes) do
+	preview_paths[change.Path] = change.Kind
+	assert(change.BeforeValue == nil and change.AfterValue == nil,
+		"migration preview must not expose raw profile values")
+end
+assert(preview_paths["$.coins"] == "changed")
+assert(preview_paths["$.nested.label"] == "changed")
+assert(preview_paths["$.schema_marker"] == "added")
+
+local preview_gap, preview_gap_result =
+	Mock.preview_migration_async("MigrationTest", "global", "profile", 4)
+assert(preview_gap == nil and preview_gap_result == "migration",
+	"preview must reject a target with no unique registered migration path")
+local migration_after = Mock.get_record_raw("MigrationTest", "global", "profile")
+assert(migration_after.schema_version == migration_before.schema_version,
+	"dry-run migration preview modified the durable schema version")
+assert(migration_after.revision == migration_before.revision,
+	"dry-run migration preview modified the durable revision")
+assert((migration_after.data :: { [string]: any }).coins == (migration_before.data :: { [string]: any }).coins,
+	"dry-run migration preview modified durable profile data")
+assert(migration_record:GetRevision() == migration_before_revision,
+	"dry-run migration preview mutated the live mock Record")
 
 Mock.reset()
 Shim.close()
