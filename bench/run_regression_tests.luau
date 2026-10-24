@@ -7,6 +7,11 @@ local Shim = require("./RobloxShim")
 
 for _, path in {
 	"src/PlayerDataInitializer/RecordStore.luau",
+	"src/PlayerDataInitializer/PurchaseReceiptProcessor.luau",
+	"src/PlayerDataInitializer/RecordStoreOutboxMailboxAdapter.luau",
+	"src/PlayerDataInitializer/RecordStoreV2.luau",
+	"tests/RecordStoreV2NonSaveServicesRegression.server.luau",
+	"tests/RecordStore_OutboxMailboxAdapterRegression.server.luau",
 	"src/PlayerDataInitializer/PlayerDataCore.luau",
 	"src/PlayerDataInitializer/IntegerInfinityValue.luau",
 	"src/InfiniteMath/init.luau",
@@ -22,6 +27,7 @@ for _, path in {
 	"tests/InfiniteMathValueRegression.server.luau",
 	"tests/InfiniteMathFormattingRegression.server.luau",
 	"tests/RecordStore_EventQueueRegression.server.luau",
+	"tests/PurchaseReceiptProcessorRegression.server.luau",
 	"bench/playerdata_set_harness.luau",
 	"bench/playerdata_set_paths.bench.luau",
 	"bench/playerdata_startup_common.luau",
@@ -75,4 +81,8 @@ Shim.run_script("tests/RecordStore_EventQueueRegression.server.luau")
 Shim.run_script("tests/RecordStore_NonFiniteNumbersRegression.server.luau")
 Shim.run_script("tests/RecordStore_LegacyPayloadRegression.server.luau")
 Shim.run_script("tests/RecordStore_UnknownSaveRecoveryRegression.server.luau")
+Shim.run_script("tests/PurchaseReceiptProcessorRegression.server.luau")
+Shim.run_script("tests/RecordStore_OutboxMailboxAdapterRegression.server.luau")
+Shim.run_script("tests/RecordStoreV2NonSaveServicesRegression.server.luau")
+Shim.run_script("tests/RecordStore_NonSaveRoadmapRegression.server.luau")
 Shim.close()

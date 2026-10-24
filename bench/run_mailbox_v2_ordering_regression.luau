@@ -229,6 +229,61 @@ local function test_ordering_is_opt_in_and_input_validation_is_side_effect_free(
 	assert(not ok, "strict ordering accepted an adapter without uncached authoritative reads")
 end
 
+local function test_producer_idempotency_conflict_and_preparation_response_loss()
+	local backing = MailboxV2.MockStore()
+	local route = nil
+	local lost_route_write = false
+	local store = {
+		GetAsync = function(_, key) return backing:GetAsync(key) end,
+		GetAsyncFresh = function(_, key) return backing:GetAsyncFresh(key) end,
+		UpdateAsync = function(_, key, transform)
+			if key == route and not lost_route_write then
+				lost_route_write = true
+				backing:FailNextUpdate("after")
+			end
+			return backing:UpdateAsync(key, transform)
+		end,
+		RemoveAsync = function(_, key) return backing:RemoveAsync(key) end,
+	}
+	local mailbox = new_mailbox({ strict_ordering_enabled = true }, store)
+	local route_error
+	route, route_error = mailbox:_route_key("producer-crash-window")
+	assert(route ~= nil, tostring(route_error))
+
+	local options = {
+		idempotency_key = "producer-crash-window",
+		ordering_key = "producer-crash-account",
+		priority = "normal",
+		available_at = now_ms,
+	}
+	local first = mailbox:EnqueueAsync("purchase", { sku = "item-A" }, options)
+	assert(lost_route_write, "test did not inject response loss on the canonical preparation write")
+	assert(first.code == "unknown",
+		"ambiguous canonical preparation write was not exposed as unknown: " .. tostring(first.code))
+
+	local recovery = mailbox:RecoverAsync()
+	assert(recovery.code == "success",
+		"bounded preparation recovery failed after canonical response loss: " .. tostring(recovery.error))
+	local delivery, delivery_result = mailbox:GetDeliveryAsync(route)
+	assert(delivery_result.code == "success" and delivery ~= nil,
+		"recovered producer receipt could not be read: " .. tostring(delivery_result.error))
+	assert(delivery.State == "ready", "recovered producer receipt did not reach ready")
+
+	local duplicate = mailbox:EnqueueAsync("purchase", { sku = "item-A" }, options)
+	assert(duplicate.code == "duplicate", "same producer request was not idempotent: " .. tostring(duplicate.code))
+	assert(duplicate.message_id == route, "duplicate producer request returned a different message ID")
+
+	local conflict = mailbox:EnqueueAsync("purchase", { sku = "item-B" }, options)
+	assert(conflict.code == "conflict", "reused producer key with a changed payload was not rejected")
+	local queue, queue_result = mailbox:GetQueueAsync()
+	assert(queue_result.code == "success", "queue could not be read after producer recovery")
+	local route_count = 0
+	for _, message in ipairs(queue) do
+		if message.Id == route then route_count += 1 end
+	end
+	assert(route_count == 1, "response-loss recovery or duplicate enqueue created multiple active placements")
+end
+
 local function test_priority_never_overtakes_an_earlier_ordered_message()
 	local mailbox = new_mailbox({ strict_ordering_enabled = true })
 	local earlier = enqueue(mailbox, "earlier", "priority-earlier", "account-alpha", "background")
@@ -646,6 +701,214 @@ local function test_priority_burst_policy_is_bounded_and_configurable()
 		"configurable burst failed to serve background work after two high-priority claims")
 end
 
+local function test_acknowledgement_response_loss_recovers_without_redelivery()
+	local backing = MailboxV2.MockStore()
+	local route = nil
+	local fail_next_route_update = false
+	local store = {
+		GetAsync = function(_, key) return backing:GetAsync(key) end,
+		GetAsyncFresh = function(_, key) return backing:GetAsyncFresh(key) end,
+		UpdateAsync = function(_, key, transform)
+			if fail_next_route_update and key == route then
+				fail_next_route_update = false
+				backing:FailNextUpdate("after")
+			end
+			return backing:UpdateAsync(key, transform)
+		end,
+		RemoveAsync = function(_, key) return backing:RemoveAsync(key) end,
+	}
+	local mailbox = new_mailbox({ strict_ordering_enabled = true }, store)
+	local queued = enqueue(mailbox, "ack-response-loss", "ack-response-loss-id", "ack-account", "high")
+	route = queued.message_id
+	local handler_calls = 0
+	local first = process_one(mailbox, function()
+		handler_calls += 1
+		fail_next_route_update = true
+		return true
+	end)
+	assert(first.code == "unknown" or first.code == "processed",
+		"response-loss acknowledgement returned an unexpected status: " .. tostring(first.code))
+	local before_recovery = backing:GetAsyncFresh(route)
+	assert(before_recovery.state == "acknowledging" or before_recovery.state == "acknowledged",
+		"response-loss did not leave a recoverable acknowledgement state")
+	local recovered = mailbox:RecoverAsync()
+	assert(recovered.code == "success", "acknowledgement recovery failed: " .. tostring(recovered.error))
+	local durable = backing:GetAsyncFresh(route)
+	assert(durable.state == "acknowledged" and durable.effect_outcome == "handler_succeeded",
+		"recovery did not reconcile the acknowledged terminal state")
+	local delivery, delivery_result = mailbox:GetDeliveryAsync(route)
+	assert(delivery_result.code == "success" and delivery.State == "acknowledged",
+		"acknowledgement terminal state was not visible through the public API")
+	local retried = process_one(mailbox, function()
+		handler_calls += 1
+		return true
+	end)
+	assert(retried.code == "empty" and handler_calls == 1,
+		"recovered acknowledgement redelivered a successfully handled message")
+end
+
+local function test_dead_letter_transition_response_loss_recovers_once()
+	local backing = MailboxV2.MockStore()
+	local route = nil
+	local fail_next_route_update = false
+	local store = {
+		GetAsync = function(_, key) return backing:GetAsync(key) end,
+		GetAsyncFresh = function(_, key) return backing:GetAsyncFresh(key) end,
+		UpdateAsync = function(_, key, transform)
+			if fail_next_route_update and key == route then
+				fail_next_route_update = false
+				backing:FailNextUpdate("after")
+			end
+			return backing:UpdateAsync(key, transform)
+		end,
+		RemoveAsync = function(_, key) return backing:RemoveAsync(key) end,
+	}
+	local mailbox = new_mailbox({
+		strict_ordering_enabled = true,
+		max_attempts = 1,
+		retry_base_ms = 1000,
+		retry_max_ms = 1000,
+	}, store)
+	local queued = enqueue(mailbox, "dlq-response-loss", "dlq-response-loss-id", "dlq-account", "high")
+	route = queued.message_id
+	local handler_calls = 0
+	local first = process_one(mailbox, function()
+		handler_calls += 1
+		fail_next_route_update = true
+		return false, "injected handler failure"
+	end)
+	assert(first.code == "unknown" or first.code == "dead_lettered",
+		"response-loss dead-letter transition returned an unexpected status: " .. tostring(first.code))
+	local before_recovery = backing:GetAsyncFresh(route)
+	assert(before_recovery.state == "dead_lettering" or before_recovery.state == "dead_lettered",
+		"response loss did not leave a recoverable dead-letter state")
+	local recovered = mailbox:RecoverAsync()
+	assert(recovered.code == "success", "dead-letter recovery failed: " .. tostring(recovered.error))
+	local durable = backing:GetAsyncFresh(route)
+	assert(durable.state == "dead_lettered", "dead-letter recovery did not reach its terminal state")
+	local entries, _, result = mailbox:GetDeadLettersAsync(nil, 8)
+	assert(result.code == "success", "dead-letter index could not be read: " .. tostring(result.error))
+	local copies = 0
+	for _, entry in ipairs(entries) do if entry.Id == route then copies += 1 end end
+	assert(copies == 1, "dead-letter response-loss recovery duplicated the DLQ entry")
+	assert(handler_calls == 1, "dead-letter recovery reran a completed handler")
+end
+
+local function test_expired_claim_is_recovered_and_retried_at_least_once()
+	local mailbox, backing = new_mailbox({
+		strict_ordering_enabled = true,
+		lease_ms = 10000,
+		lease_renewal_horizon_ms = 40000,
+		retry_base_ms = 1000,
+		retry_max_ms = 1000,
+	})
+	local queued = enqueue(mailbox, "expired-claim", "expired-claim-id", "expired-account", "high")
+	local handler_calls = 0
+	local first = process_one(mailbox, function()
+		handler_calls += 1
+		now_ms += 20000
+		return true
+	end)
+	assert(first.code ~= "processed", "expired claim was acknowledged after its lease elapsed")
+	local claimed = backing:GetAsyncFresh(queued.message_id)
+	assert(claimed.state == "claimed", "expired claim was not left for explicit recovery")
+	local recovered = mailbox:RecoverAsync()
+	assert(recovered.code == "success", "expired claim recovery failed: " .. tostring(recovered.error))
+	local ready = backing:GetAsyncFresh(queued.message_id)
+	assert(ready.state == "ready", "expired claim was not returned to a retryable state")
+	now_ms += 60000
+	local second = process_one(mailbox, function()
+		handler_calls += 1
+		return true
+	end)
+	assert(second.code == "processed" and handler_calls == 2,
+		"expired handler outcome was not retried with at-least-once semantics")
+	local completed = backing:GetAsyncFresh(queued.message_id)
+	assert(completed.state == "acknowledged", "retry did not finish acknowledgement")
+end
+
+local function test_competing_mailbox_instances_cannot_claim_the_same_message()
+	local first_mailbox, backing = new_mailbox({ strict_ordering_enabled = true })
+	local second_mailbox = new_mailbox({ strict_ordering_enabled = true }, backing)
+	local queued = enqueue(first_mailbox, "competing-claim", "competing-claim-id", nil, "high")
+	local first_claim, first_result = first_mailbox:_claim(queued.message_id)
+	assert(type(first_claim) == "table" and first_claim.state == "claimed",
+		"first mailbox did not acquire the claim: " .. tostring(first_result.code))
+	local second_claim, second_result = second_mailbox:_claim(queued.message_id)
+	assert(second_claim == nil and second_result.code ~= "claimed",
+		"second mailbox instance acquired a live claim: " .. tostring(second_result.code))
+	local durable = backing:GetAsyncFresh(queued.message_id)
+	assert(durable.state == "claimed" and durable.claim_token == first_claim.claim_token,
+		"competing claim changed the authoritative owner token")
+end
+
+local function test_mailbox_capacity_is_bounded_and_reported()
+	local mailbox = new_mailbox({
+		max_segments = 1,
+		segment_max_messages = 1,
+		preparation_shard_count = 1,
+		preparation_max_entries_per_shard = 4,
+	})
+	local first = enqueue(mailbox, "capacity-one", "capacity-one-id", nil, "normal")
+	local second = mailbox:EnqueueAsync("capacity-two", { value = 2 }, {
+		idempotency_key = "capacity-two-id",
+		priority = "normal",
+		available_at = now_ms,
+	})
+	assert(second.code == "capacity" or second.code == "unknown",
+		"mailbox capacity exhaustion returned unsafe success: " .. tostring(second.code))
+	local recovery = mailbox:RecoverAsync()
+	assert(recovery.code == "success",
+		"capacity-blocked preparation was not safely recoverable: " .. tostring(recovery.code))
+	if second.code == "unknown" then
+		assert(type(recovery.message) == "table" and recovery.message.capacity_blocked_preparations == 1,
+			"ambiguous capacity rejection was not exposed in recovery metadata")
+	end
+	local queue, queue_result = mailbox:GetQueueAsync()
+	assert(queue_result.code == "success" and #queue == 1 and queue[1].Id == first.message_id,
+		"capacity exhaustion created an extra active placement")
+	local stats, stats_result = mailbox:GetStatsAsync()
+	assert(stats_result.code == "success" and stats.active_capacity <= 1,
+		"mailbox stats exceeded the configured active capacity")
+end
+
+local function test_mailbox_maintenance_reports_bounded_state_and_fails_closed()
+	local mailbox = new_mailbox({
+		max_segments = 1,
+		segment_max_messages = 2,
+		preparation_shard_count = 1,
+		preparation_max_entries_per_shard = 4,
+	})
+	local queued = enqueue(mailbox, "maintenance-ready", "maintenance-ready-id", nil, "normal")
+	local report, maintenance_result = mailbox:MaintenanceAsync()
+	assert(maintenance_result.code == "success" and report.complete == true,
+		"mailbox maintenance did not finish its bounded recovery/reclaim/status sequence")
+	assert(type(report.recovery) == "table" and report.recovery.code == "success",
+		"mailbox maintenance omitted recovery evidence")
+	assert(type(report.reclaim) == "table"
+		and (report.reclaim.code == "success" or report.reclaim.code == "empty"),
+		"mailbox maintenance omitted bounded reclamation evidence")
+	assert(type(report.stats) == "table"
+		and report.stats.consistency == "bounded_non_linearizable"
+		and report.stats.completeness.global_snapshot == false,
+		"mailbox maintenance misrepresented its bounded status snapshot")
+	assert(report.stats.active_capacity == 2 and report.stats.ready == 1,
+		"mailbox maintenance capacity/readiness report was inconsistent with the observed queue")
+	assert(queued.message_id ~= nil, "maintenance fixture did not retain a canonical message ID")
+
+	local denied_store = MailboxV2.MockStore()
+	local denied_mailbox = MailboxV2.new(denied_store, owner, {
+		active_record = active_record,
+		activation_guard = function() return false, "maintenance not enabled" end,
+		encode = function(value) return serde.encode("json", value) end,
+	})
+	local denied_report, denied_result = denied_mailbox:MaintenanceAsync()
+	assert(denied_result.code == "disabled" and denied_report.complete ~= true,
+		"mailbox maintenance reported completion after activation was denied")
+	assert(denied_store.get_calls == 0 and denied_store.update_calls == 0,
+		"denied mailbox maintenance touched the backing store")
+end
+
 local function test_recordstore_installs_shared_scheduler_for_v2_claim_renewal()
 	RecordStore.Mock.reset()
 	local renewal_calls = 0
@@ -713,6 +976,7 @@ test_injected_clock_and_guid_contracts_fail_closed()
 test_clock_is_never_called_inside_update_async_transform()
 test_ordering_is_opt_in_and_input_validation_is_side_effect_free()
 test_recordstore_installs_shared_scheduler_for_v2_claim_renewal()
+test_producer_idempotency_conflict_and_preparation_response_loss()
 test_priority_never_overtakes_an_earlier_ordered_message()
 test_delayed_predecessor_blocks_later_high_priority_work()
 test_retrying_predecessor_blocks_same_key_successor()
@@ -726,6 +990,12 @@ test_corrupt_ready_message_metadata_fails_closed()
 test_high_priority_burst_does_not_starve_background_messages()
 test_clock_skew_cannot_break_ordering_under_adversarial_sort_keys()
 test_priority_burst_policy_is_bounded_and_configurable()
+test_acknowledgement_response_loss_recovers_without_redelivery()
+test_dead_letter_transition_response_loss_recovers_once()
+test_expired_claim_is_recovered_and_retried_at_least_once()
+test_competing_mailbox_instances_cannot_claim_the_same_message()
+test_mailbox_capacity_is_bounded_and_reported()
+test_mailbox_maintenance_reports_bounded_state_and_fails_closed()
 
-print("[MailboxV2] ordering, replay recovery, stale-read resistance, deterministic priority fairness, and input validation regressions passed.")
+print("[MailboxV2] ordering, claim/ack recovery, bounded capacity, maintenance reporting, stale-read resistance, and idempotency regressions passed.")
 Shim.close()
