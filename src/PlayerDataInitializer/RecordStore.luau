@@ -5921,6 +5921,68 @@ type SessionStatusResolver = (
 	mock: boolean
 ) -> (SessionStatus?, ResultCode, string?)
 
+export type ProfileDoctorClassification =
+	"missing" | "legacy" | "future_schema" | "corrupt" | "unreadable"
+	| "tombstoned" | "active_session" | "expired_session" | "no_session"
+
+export type ProfileDoctorOptions = {
+	operation_deadline: number?,
+	legacy_decoder: LegacyDecoder?,
+	max_nodes: number?,
+	max_depth: number?,
+	max_changes: number?,
+}
+
+export type ProfileInspection = {
+	StoreName: string,
+	Scope: string,
+	ProfileKey: string,
+	ObservedAt: number,
+	Consistency: "point_in_time_non_authoritative",
+	Classification: ProfileDoctorClassification,
+	ReadResult: ResultCode,
+	SchemaVersion: number?,
+	Revision: number?,
+	Generation: number?,
+	CreatedAt: number?,
+	UpdatedAt: number?,
+	Tombstoned: boolean?,
+	SessionActive: boolean?,
+	LeaseUntil: number?,
+	OwnerJobId: string?,
+	OwnerPlaceId: number?,
+	BackendVersion: string?,
+	DataNodeCount: number?,
+	DataDepth: number?,
+	DataEncodedBytes: number?,
+	DataSizeAvailable: boolean,
+	DataSummaryTruncated: boolean,
+}
+
+export type ProfileDiffChange = {
+	Path: string,
+	Kind: "added" | "removed" | "changed",
+	BeforeType: string?,
+	AfterType: string?,
+}
+
+export type ProfileVersionDiff = {
+	StoreName: string,
+	Scope: string,
+	ProfileKey: string,
+	BeforeVersion: string,
+	AfterVersion: string,
+	BeforeRevision: number,
+	AfterRevision: number,
+	BeforeSchemaVersion: number,
+	AfterSchemaVersion: number,
+	ObservedAt: number,
+	Consistency: "bounded_historical_diff",
+	VisitedNodes: number,
+	Truncated: boolean,
+	Changes: { ProfileDiffChange },
+}
+
 export type HistoryEntry = {
 	Version: string,
 	CreatedTime: number,
@@ -14230,6 +14292,401 @@ RecordStore._internals.get_session_status_mock_async = (function()
 	end
 end)()
 
+RecordStore._internals.profile_doctor = (function()
+	local function normalize_options(options: ProfileDoctorOptions?): (ProfileDoctorOptions?, string?)
+		if options ~= nil and type(options) ~= "table" then
+			return nil, "Profile Doctor options must be a table"
+		end
+		local normalized: ProfileDoctorOptions = if options == nil then {} else table.clone(options)
+		local allowed = {
+			operation_deadline = true,
+			legacy_decoder = true,
+			max_nodes = true,
+			max_depth = true,
+			max_changes = true,
+		}
+		if options ~= nil then
+			for key in pairs(options) do
+				if not allowed[key] then
+					return nil, "unsupported Profile Doctor option: " .. tostring(key)
+				end
+			end
+		end
+		if normalized.legacy_decoder ~= nil and type(normalized.legacy_decoder) ~= "function" then
+			return nil, "legacy_decoder must be a function"
+		end
+		if normalized.max_nodes == nil then normalized.max_nodes = 4096 end
+		if normalized.max_depth == nil then normalized.max_depth = 32 end
+		if normalized.max_changes == nil then normalized.max_changes = 256 end
+		if type(normalized.max_nodes) ~= "number"
+			or not math.isfinite(normalized.max_nodes)
+			or math.floor(normalized.max_nodes) ~= normalized.max_nodes
+			or normalized.max_nodes < 1
+			or normalized.max_nodes > 50000
+		then
+			return nil, "max_nodes must be an integer from 1 to 50000"
+		end
+		if type(normalized.max_depth) ~= "number"
+			or not math.isfinite(normalized.max_depth)
+			or math.floor(normalized.max_depth) ~= normalized.max_depth
+			or normalized.max_depth < 1
+			or normalized.max_depth > 64
+		then
+			return nil, "max_depth must be an integer from 1 to 64"
+		end
+		if type(normalized.max_changes) ~= "number"
+			or not math.isfinite(normalized.max_changes)
+			or math.floor(normalized.max_changes) ~= normalized.max_changes
+			or normalized.max_changes < 1
+			or normalized.max_changes > 2048
+		then
+			return nil, "max_changes must be an integer from 1 to 2048"
+		end
+		return normalized, nil
+	end
+
+	local function classify_read(snapshot: Snapshot?, read_result: ResultCode): ProfileDoctorClassification
+		if read_result == "not_found" then return "missing" end
+		if read_result == "legacy" then return "legacy" end
+		if read_result == "future_schema" then return "future_schema" end
+		if read_result == "corrupt" then return "corrupt" end
+		if snapshot == nil then return "unreadable" end
+		if snapshot.Tombstoned then return "tombstoned" end
+		if snapshot.SessionActive then return "active_session" end
+		if snapshot.LeaseUntil ~= nil then return "expired_session" end
+		return "no_session"
+	end
+
+	local function summarize_data(data: JsonValue?, max_nodes: number, max_depth: number): (number, number, boolean, number?, boolean)
+		if data == nil then
+			return 0, 0, false, 0, true
+		end
+		local node_count = 0
+		local deepest = 0
+		local truncated = false
+		local active_tables: { [any]: boolean } = {}
+		local function visit(value: unknown, depth: number)
+			if node_count >= max_nodes then
+				truncated = true
+				return
+			end
+			node_count += 1
+			deepest = math.max(deepest, depth)
+			if type(value) ~= "table" then return end
+			local current = value :: { [any]: unknown }
+			if active_tables[current] then
+				truncated = true
+				return
+			end
+			if depth >= max_depth then
+				if next(current) ~= nil then truncated = true end
+				return
+			end
+			active_tables[current] = true
+			for _, child in pairs(current) do
+				if node_count >= max_nodes then
+					truncated = true
+					break
+				end
+				visit(child, depth + 1)
+				if truncated and node_count >= max_nodes then break end
+			end
+			active_tables[current] = nil
+		end
+		visit(data, 0)
+
+		local encoded_bytes: number? = nil
+		local size_available = false
+		if not truncated then
+			local encoded_ok, encoded_value = pcall(function()
+				return HttpService:JSONEncode(encode_non_finite_numbers(data))
+			end)
+			if encoded_ok and type(encoded_value) == "string" then
+				encoded_bytes = #encoded_value
+				size_available = true
+			end
+		end
+		return node_count, deepest, truncated, encoded_bytes, size_available
+	end
+
+	local function inspect(
+		name: string,
+		scope: string,
+		key: string,
+		options: ProfileDoctorOptions?,
+		reader: any
+	): (ProfileInspection?, ResultCode, string?)
+		local valid_identity, identity_message = validate_store_identity(name, scope, key)
+		if not valid_identity then return nil, "invalid", identity_message end
+		local normalized, options_error = normalize_options(options)
+		if normalized == nil then return nil, "invalid", options_error end
+		local deadline, deadline_error = resolve_operation_deadline(normalized.operation_deadline)
+		if deadline == nil then return nil, "invalid", deadline_error end
+
+		local snapshot, read_result, read_message = reader(
+			name,
+			scope,
+			key,
+			deadline,
+			normalized.legacy_decoder
+		)
+		if read_result == "invalid" then return nil, "invalid", read_message end
+		local code = normalize_result_code(read_result) or "unknown"
+		local classification = classify_read(snapshot, code)
+		local node_count: number? = nil
+		local data_depth: number? = nil
+		local encoded_bytes: number? = nil
+		local size_available = false
+		local summary_truncated = false
+		if snapshot ~= nil then
+			node_count, data_depth, summary_truncated, encoded_bytes, size_available =
+				summarize_data(snapshot.Data, normalized.max_nodes :: number, normalized.max_depth :: number)
+		end
+		local report: ProfileInspection = {
+			StoreName = name,
+			Scope = scope,
+			ProfileKey = key,
+			ObservedAt = now_unix(),
+			Consistency = "point_in_time_non_authoritative",
+			Classification = classification,
+			ReadResult = code,
+			SchemaVersion = if snapshot ~= nil then snapshot.SchemaVersion else nil,
+			Revision = if snapshot ~= nil then snapshot.Revision else nil,
+			Generation = if snapshot ~= nil then snapshot.Generation else nil,
+			CreatedAt = if snapshot ~= nil then snapshot.CreatedAt else nil,
+			UpdatedAt = if snapshot ~= nil then snapshot.UpdatedAt else nil,
+			Tombstoned = if snapshot ~= nil then snapshot.Tombstoned else nil,
+			SessionActive = if snapshot ~= nil then snapshot.SessionActive else nil,
+			LeaseUntil = if snapshot ~= nil then snapshot.LeaseUntil else nil,
+			OwnerJobId = if snapshot ~= nil then snapshot.SessionJobId else nil,
+			OwnerPlaceId = if snapshot ~= nil then snapshot.SessionPlaceId else nil,
+			BackendVersion = if snapshot ~= nil then snapshot.BackendVersion else nil,
+			DataNodeCount = node_count,
+			DataDepth = data_depth,
+			DataEncodedBytes = encoded_bytes,
+			DataSizeAvailable = size_available,
+			DataSummaryTruncated = summary_truncated,
+		}
+		return report, code, read_message
+	end
+
+	local function diff(
+		name: string,
+		scope: string,
+		key: string,
+		before_version: string,
+		after_version: string,
+		options: ProfileDoctorOptions?,
+		version_reader: any
+	): (ProfileVersionDiff?, ResultCode, string?)
+		local valid_identity, identity_message = validate_store_identity(name, scope, key)
+		if not valid_identity then return nil, "invalid", identity_message end
+		if type(before_version) ~= "string" or before_version == "" then
+			return nil, "invalid", "before_version must be a non-empty string"
+		end
+		if type(after_version) ~= "string" or after_version == "" then
+			return nil, "invalid", "after_version must be a non-empty string"
+		end
+		local normalized, options_error = normalize_options(options)
+		if normalized == nil then return nil, "invalid", options_error end
+		local deadline, deadline_error = resolve_operation_deadline(normalized.operation_deadline)
+		if deadline == nil then return nil, "invalid", deadline_error end
+
+		local before_snapshot, before_result, before_message = version_reader(
+			name, scope, key, before_version, deadline, normalized.legacy_decoder
+		)
+		if before_snapshot == nil or (before_result ~= "success" and before_result ~= "legacy") then
+			return nil, normalize_result_code(before_result) or "unknown", before_message
+		end
+		local after_snapshot, after_result, after_message = version_reader(
+			name, scope, key, after_version, deadline, normalized.legacy_decoder
+		)
+		if after_snapshot == nil or (after_result ~= "success" and after_result ~= "legacy") then
+			return nil, normalize_result_code(after_result) or "unknown", after_message
+		end
+
+		local changes: { ProfileDiffChange } = {}
+		local visited_nodes = 0
+		local truncated = false
+		local node_limit = normalized.max_nodes :: number
+		local depth_limit = normalized.max_depth :: number
+		local change_limit = normalized.max_changes :: number
+
+		local function child_path(parent: string, child_key: string | number): string
+			if type(child_key) == "number" then
+				return parent .. "[" .. tostring(child_key) .. "]"
+			end
+			if string.match(child_key, "^[%a_][%w_]*$") then
+				return parent .. "." .. child_key
+			end
+			local encoded_ok, encoded_key = pcall(function()
+				return HttpService:JSONEncode(child_key)
+			end)
+			if encoded_ok and type(encoded_key) == "string" then
+				return parent .. "[" .. encoded_key .. "]"
+			end
+			return parent .. "[<key>]"
+		end
+
+		local function append_change(
+			path: string,
+			kind: "added" | "removed" | "changed",
+			before_value: unknown,
+			after_value: unknown,
+			before_present: boolean,
+			after_present: boolean
+		): boolean
+			if #changes >= change_limit then
+				truncated = true
+				return false
+			end
+			changes[#changes + 1] = {
+				Path = string.sub(path, 1, 512),
+				Kind = kind,
+				BeforeType = if before_present then typeof(before_value) else nil,
+				AfterType = if after_present then typeof(after_value) else nil,
+			}
+			return true
+		end
+
+		local function visit(
+			before_value: unknown,
+			after_value: unknown,
+			path: string,
+			depth: number,
+			before_present: boolean,
+			after_present: boolean
+		)
+			if truncated then return end
+			if visited_nodes >= node_limit then
+				truncated = true
+				return
+			end
+			visited_nodes += 1
+			if not before_present then
+				append_change(path, "added", nil, after_value, false, true)
+				return
+			end
+			if not after_present then
+				append_change(path, "removed", before_value, nil, true, false)
+				return
+			end
+			if before_value == after_value then return end
+			if type(before_value) == "number" and type(after_value) == "number"
+				and math.isnan(before_value) and math.isnan(after_value)
+			then
+				return
+			end
+			if typeof(before_value) == "buffer" or typeof(after_value) == "buffer" then
+				if typeof(before_value) == "buffer" and typeof(after_value) == "buffer"
+					and buffer.tostring(before_value :: buffer) == buffer.tostring(after_value :: buffer)
+				then
+					return
+				end
+				append_change(path, "changed", before_value, after_value, true, true)
+				return
+			end
+			if type(before_value) ~= "table" or type(after_value) ~= "table" then
+				append_change(path, "changed", before_value, after_value, true, true)
+				return
+			end
+			local before_table = before_value :: { [string | number]: JsonValue }
+			local after_table = after_value :: { [string | number]: JsonValue }
+			if next(before_table) == nil and next(after_table) == nil then return end
+			if depth >= depth_limit then
+				truncated = true
+				append_change(path, "changed", before_value, after_value, true, true)
+				return
+			end
+
+			local key_set: { [string | number]: boolean } = {}
+			for child_key in pairs(before_table) do key_set[child_key] = true end
+			for child_key in pairs(after_table) do key_set[child_key] = true end
+			local ordered_keys: { string | number } = {}
+			for child_key in pairs(key_set) do
+				ordered_keys[#ordered_keys + 1] = child_key
+			end
+			table.sort(ordered_keys, function(left, right)
+				if type(left) ~= type(right) then return type(left) < type(right) end
+				if type(left) == "number" then return (left :: number) < (right :: number) end
+				return (left :: string) < (right :: string)
+			end)
+			for _, child_key in ipairs(ordered_keys) do
+				if truncated then return end
+				local before_child = before_table[child_key]
+				local after_child = after_table[child_key]
+				visit(
+					before_child,
+					after_child,
+					child_path(path, child_key),
+					depth + 1,
+					before_child ~= nil,
+					after_child ~= nil
+				)
+			end
+		end
+
+		visit(
+			before_snapshot.Data,
+			after_snapshot.Data,
+			"$",
+			0,
+			before_snapshot.Data ~= nil,
+			after_snapshot.Data ~= nil
+		)
+		local report: ProfileVersionDiff = {
+			StoreName = name,
+			Scope = scope,
+			ProfileKey = key,
+			BeforeVersion = before_version,
+			AfterVersion = after_version,
+			BeforeRevision = before_snapshot.Revision,
+			AfterRevision = after_snapshot.Revision,
+			BeforeSchemaVersion = before_snapshot.SchemaVersion,
+			AfterSchemaVersion = after_snapshot.SchemaVersion,
+			ObservedAt = now_unix(),
+			Consistency = "bounded_historical_diff",
+			VisitedNodes = visited_nodes,
+			Truncated = truncated,
+			Changes = changes,
+		}
+		return report, if before_result == "legacy" or after_result == "legacy" then "legacy" else "success", nil
+	end
+
+	return {
+		inspect = inspect,
+		diff = diff,
+	}
+end)()
+
+RecordStore.inspect_profile_async = (function()
+	local inspect = RecordStore._internals.profile_doctor.inspect
+	local reader = RecordStore.read_async
+	return function(
+		name: string,
+		scope: string,
+		key: string,
+		options: ProfileDoctorOptions?
+	): (ProfileInspection?, ResultCode, string?)
+		return inspect(name, scope, key, options, reader)
+	end
+end)()
+
+RecordStore.diff_profile_versions_async = (function()
+	local diff = RecordStore._internals.profile_doctor.diff
+	local version_reader = RecordStore.get_version_async
+	return function(
+		name: string,
+		scope: string,
+		key: string,
+		before_version: string,
+		after_version: string,
+		options: ProfileDoctorOptions?
+	): (ProfileVersionDiff?, ResultCode, string?)
+		return diff(name, scope, key, before_version, after_version, options, version_reader)
+	end
+end)()
+
 RecordStore._internals.normalize_options = function(options: Options): (Options?, string?)
 	if type(options) ~= "table" then
 		return nil, "options must be a table"
@@ -14863,6 +15320,30 @@ RecordStore.Mock = (function()
 			return normalize_result_code(result) or "unknown", message
 		end,
 		get_session_status_async = RecordStore._internals.get_session_status_mock_async,
+		inspect_profile_async = (function()
+			local inspect = RecordStore._internals.profile_doctor.inspect
+			return function(
+				name: string,
+				scope: string,
+				key: string,
+				options: ProfileDoctorOptions?
+			): (ProfileInspection?, ResultCode, string?)
+				return inspect(name, scope, key, options, read_async_mock)
+			end
+		end)(),
+		diff_profile_versions_async = (function()
+			local diff = RecordStore._internals.profile_doctor.diff
+			return function(
+				name: string,
+				scope: string,
+				key: string,
+				before_version: string,
+				after_version: string,
+				options: ProfileDoctorOptions?
+			): (ProfileVersionDiff?, ResultCode, string?)
+				return diff(name, scope, key, before_version, after_version, options, get_version_mock)
+			end
+		end)(),
 		read_async = read_async_mock,
 		claim_queue_message = mock_claim_queue_message,
 		dead_letter_queue_message = mock_dead_letter_queue_message,
