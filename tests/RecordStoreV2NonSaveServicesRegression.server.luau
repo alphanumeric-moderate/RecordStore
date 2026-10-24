@@ -163,6 +163,14 @@ expect(duplicate_projection.code == "duplicate", "projection duplicate was reapp
 local projected = projections:GetAsync("balance_projection_v1", "user-1")
 expect(projected.code == "success" and projected.row.value.total == 10,
 	"projection did not retain its idempotent value")
+local conflicting_projection_event = projections:ApplyAsync("balance_projection_v1", {
+	event_id = "projection-event-1", entity_id = "user-1", source_revision = 1, amount = 999,
+})
+expect(conflicting_projection_event.code == "conflict",
+	"projection reused an event ID for a different payload without conflict")
+local unchanged_projection = projections:GetAsync("balance_projection_v1", "user-1")
+expect(unchanged_projection.code == "success" and unchanged_projection.row.value.total == 10,
+	"conflicting projection event mutated the materialized value")
 local rebuild_store = new_store()
 local rebuild_projections = V2.Projections.new(rebuild_store)
 expect(rebuild_projections:Register("durable_balance_v1", 1, function(current, event)

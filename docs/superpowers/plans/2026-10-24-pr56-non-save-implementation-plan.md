@@ -79,7 +79,7 @@
 - [x] Ensure restore never overwrites protocol metadata, receipts, fencing state or erasure tombstones; regression injects conflicting historical values for each class.
 
 ### Slice 7: Projections, erasure and operation tracing
-- [x] Add opt-in durable event-driven projections, revision/idempotency checks, bounded rebuild cursors and durable uniqueness reservations.
+- [x] Add opt-in durable event-driven projections with monotonic revision checks, payload-fingerprinted bounded idempotency receipts (event-ID reuse with a different payload conflicts), durable bounded rebuild cursors, and durable uniqueness reservations.
 - [x] Add resumable bounded erasure manifests with explicit application family inventory, writer fence, dependency check, and generation-aware redaction/deletion callbacks; repeated planning preserves existing progress, `resolved` is terminal, cursor checkpoints use monotonic compare-and-update, inventory must explicitly certify completeness, malformed/oversized lists fail closed, and unmatched template locators remain visible and block RTBF coverage claims.
 - [x] Add bounded redacted trace buffering and optional durable trace flush/read reconciliation.
 

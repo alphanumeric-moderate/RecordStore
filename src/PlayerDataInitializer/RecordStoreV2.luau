@@ -1829,13 +1829,50 @@ local function new_projections(store, options)
 		self.projections[name] = { name = name, version = version, projector = projector, definition = copy(definition or {}) }
 		return true
 	end
+	local function projection_event_receipt_status(recent_events, event_id, fingerprint)
+		for _, receipt in ipairs(recent_events) do
+			if type(receipt) == "table" and receipt.event_id == event_id then
+				return if receipt.fingerprint == fingerprint then "duplicate" else "conflict"
+			end
+			if type(receipt) == "string" and receipt == event_id then
+				return "conflict"
+			end
+		end
+		return nil
+	end
+	local function valid_projection_receipts(recent_events)
+		if type(recent_events) ~= "table" or #recent_events > 64 or key_count(recent_events) ~= #recent_events then return false end
+		for receipt_key, receipt in pairs(recent_events) do
+			if type(receipt_key) ~= "number" or not finite(receipt_key) or math.floor(receipt_key) ~= receipt_key
+				or receipt_key < 1 or receipt_key > #recent_events
+			then return false end
+			if type(receipt) == "string" then
+				if not valid_text(receipt, 128) then return false end
+			elseif type(receipt) == "table" then
+				if not valid_text(receipt.event_id, 128) or not valid_text(receipt.fingerprint, 128) then return false end
+			else
+				return false
+			end
+		end
+		return true
+	end
 	function service:ApplyAsync(name, event)
 		local def = self.projections[name]
 		if not def then return { code = "not_found" } end
 		if type(event) ~= "table" or not valid_text(event.event_id, 128) or not valid_text(event.entity_id, 128)
-			or not finite(event.source_revision) or event.source_revision < 0 or math.floor(event.source_revision) ~= event.source_revision then return { code = "invalid" } end
+			or not finite(event.source_revision) or event.source_revision < 0 or math.floor(event.source_revision) ~= event.source_revision
+		then return { code = "invalid" } end
+		local event_ok, event_material = pcall(canonical, event)
+		if not event_ok then return { code = "invalid", message = tostring(event_material) } end
+		local event_fingerprint = digest(event_material)
 		if type(options.is_erased) == "function" then
+			if event.subject_user_ids ~= nil and type(event.subject_user_ids) ~= "table" then
+				return { code = "invalid", message = "subject_user_ids must be an array" }
+			end
 			for _, user_id in ipairs(event.subject_user_ids or {}) do
+				if not finite(user_id) or user_id < 1 or math.floor(user_id) ~= user_id then
+					return { code = "invalid", message = "subject_user_ids must contain positive integer UserIds" }
+				end
 				local erased, error_value = io_call(options.is_erased, user_id)
 				if erased == true then return { code = "erased" } elseif erased == nil then return { code = "unknown", message = error_value or "erasure state unresolved" } end
 			end
@@ -1843,22 +1880,47 @@ local function new_projections(store, options)
 		local key, decision = key_for(name, event.entity_id), "unknown"
 		local value, write_error = adapter_call(store, "UpdateAsync", key, function(old)
 			decision = "unknown"
-			if old ~= nil and (old.entity_id ~= event.entity_id or old.projection_name ~= name) then decision = "conflict"; return old end
+			if old ~= nil and (type(old) ~= "table" or old.entity_id ~= event.entity_id or old.projection_name ~= name) then
+				decision = "conflict"
+				return old
+			end
 			if old ~= nil and old.version ~= def.version then decision = "unsupported_schema"; return old end
-			local current = if type(old) == "table" then old else { projection_name = name, version = def.version, entity_id = event.entity_id, value = {}, source_revision = -1, recent_events = {} }
-			for _, event_id in ipairs(current.recent_events or {}) do if event_id == event.event_id then decision = "duplicate"; return current end end
+			local current = if type(old) == "table" then old else {
+				projection_name = name, version = def.version, entity_id = event.entity_id,
+				value = {}, source_revision = -1, recent_events = {},
+			}
+			if type(current.value) ~= "table" or not finite(current.source_revision)
+				or current.source_revision < -1 or math.floor(current.source_revision) ~= current.source_revision
+				or not valid_projection_receipts(current.recent_events)
+			then decision = "corrupt"; return current end
+			local receipt_status = projection_event_receipt_status(current.recent_events, event.event_id, event_fingerprint)
+			if receipt_status ~= nil then decision = receipt_status; return current end
 			if event.source_revision <= current.source_revision then decision = "stale"; return current end
 			local next_value = pure(def.projector, copy(current.value), copy(event))
 			if type(next_value) ~= "table" then decision = "invalid"; return current end
-			local result = copy(current); result.value = next_value; result.source_revision = event.source_revision; result.updated_at = os.time()
-			result.recent_events = copy(current.recent_events or {}); table.insert(result.recent_events, event.event_id)
+			local result = copy(current)
+			result.value = next_value
+			result.source_revision = event.source_revision
+			result.updated_at = os.time()
+			result.recent_events = copy(current.recent_events)
+			table.insert(result.recent_events, { event_id = event.event_id, fingerprint = event_fingerprint })
 			while #result.recent_events > 64 do table.remove(result.recent_events, 1) end
 			decision = "committed"
 			return result
 		end)
 		if write_error then
 			local observed = adapter_call(store, "GetAsync", key)
-			if type(observed) == "table" then for _, id in ipairs(observed.recent_events or {}) do if id == event.event_id then return { code = "committed", row = observed, reconciled = true, consistency = "eventual" } end end end
+			if type(observed) == "table" then
+				if observed.entity_id ~= event.entity_id or observed.projection_name ~= name then
+					return { code = "conflict", message = "projection identity changed after ambiguous update" }
+				end
+				if observed.version ~= def.version then return { code = "unsupported_schema" } end
+				if type(observed.recent_events) == "table" and valid_projection_receipts(observed.recent_events) then
+					local receipt_status = projection_event_receipt_status(observed.recent_events, event.event_id, event_fingerprint)
+					if receipt_status == "duplicate" then return { code = "committed", row = observed, reconciled = true, consistency = "eventual" } end
+					if receipt_status == "conflict" then return { code = "conflict", message = "event ID was durably used for a different request" } end
+				end
+			end
 			return { code = "unknown", message = write_error }
 		end
 		return { code = decision, row = value, consistency = "eventual" }
