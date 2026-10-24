@@ -7,6 +7,7 @@ local Shim = require("./RobloxShim")
 
 for _, path in {
 	"src/PlayerDataInitializer/RecordStore.luau",
+	"bench/run_scheduler_bugfix_regression.luau",
 	"src/PlayerDataInitializer/PurchaseReceiptProcessor.luau",
 	"src/PlayerDataInitializer/RecordStoreOutboxMailboxAdapter.luau",
 	"src/PlayerDataInitializer/RecordStoreV2.luau",
@@ -84,5 +85,6 @@ Shim.run_script("tests/RecordStore_UnknownSaveRecoveryRegression.server.luau")
 Shim.run_script("tests/PurchaseReceiptProcessorRegression.server.luau")
 Shim.run_script("tests/RecordStore_OutboxMailboxAdapterRegression.server.luau")
 Shim.run_script("tests/RecordStoreV2NonSaveServicesRegression.server.luau")
+Shim.run_script("bench/run_scheduler_bugfix_regression.luau")
 Shim.run_script("tests/RecordStore_NonSaveRoadmapRegression.server.luau")
 Shim.close()
