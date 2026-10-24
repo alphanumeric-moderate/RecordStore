@@ -343,7 +343,7 @@ local transactional_open, transactional_open_message = transactional_record:Open
 	coins = 10,
 	inventory = {},
 })
-assert(transactional_open == "success", tostring(transactional_open_message))
+assert(transactional_open == "success", "transaction open status=" .. tostring(transactional_open) .. " message=" .. tostring(transactional_open_message))
 
 local transact_result, transact_status, transact_message = transactional_record:TransactAsync(
 	"reward:daily:test",
@@ -354,7 +354,7 @@ local transact_result, transact_status, transact_message = transactional_record:
 	end,
 	{ request = { kind = "daily_reward", amount = 100 }, receipt_retention_seconds = 3600 }
 )
-assert(transact_status == "committed", tostring(transact_message))
+assert(transact_status == "committed", "TransactAsync status=" .. tostring(transact_status) .. " message=" .. tostring(transact_message))
 assert(transact_result.coins_granted == 100)
 assert(type(transactional_record:Get()) == "table",
 	"transaction must persist reducer data rather than the validator success flag")
@@ -367,7 +367,7 @@ local duplicate_result, duplicate_status, duplicate_message = transactional_reco
 	end,
 	{ request = { amount = 100, kind = "daily_reward" }, receipt_retention_seconds = 3600 }
 )
-assert(duplicate_status == "duplicate", tostring(duplicate_message))
+assert(duplicate_status == "duplicate", "duplicate TransactAsync status=" .. tostring(duplicate_status) .. " message=" .. tostring(duplicate_message))
 assert(duplicate_result.coins_granted == 100)
 assert(transactional_record:Get().coins == 110, "duplicate transaction reapplied its reducer")
 
@@ -393,7 +393,7 @@ local inbox_result, inbox_status, inbox_message = transactional_record:ApplyInbo
 		return next_data, { applied = payload.amount }
 	end
 )
-assert(inbox_status == "committed", tostring(inbox_message))
+assert(inbox_status == "committed", "ApplyInboxAsync status=" .. tostring(inbox_status) .. " message=" .. tostring(inbox_message))
 assert(inbox_result.applied == 7)
 local inbox_duplicate, inbox_duplicate_status = transactional_record:ApplyInboxAsync(
 	"mail:award:test",
@@ -439,7 +439,7 @@ local outbox_result, outbox_status, outbox_message = transactional_record:Commit
 		return next_data, { queued = true }
 	end
 )
-assert(outbox_status == "committed", tostring(outbox_message))
+assert(outbox_status == "committed", "CommitWithOutboxAsync status=" .. tostring(outbox_status) .. " message=" .. tostring(outbox_message))
 assert(outbox_result.queued == true)
 assert(transactional_record:Get().coins == 114)
 local durable_transaction = Mock.get_record_raw("TransactionTest", "global", "profile")
@@ -498,7 +498,7 @@ local ambiguous_result, ambiguous_status, ambiguous_message = ambiguous_record:T
 	end,
 	{ request = { action = "ambiguous", amount = 2 } }
 )
-assert(ambiguous_status == "committed", tostring(ambiguous_message))
+assert(ambiguous_status == "committed", "ambiguous TransactAsync status=" .. tostring(ambiguous_status) .. " message=" .. tostring(ambiguous_message))
 assert(ambiguous_result.coins_granted == 2)
 assert(ambiguous_record:Get().coins == 6,
 	"commit-then-response-loss must reconcile from the durable receipt without applying twice")
