@@ -5983,6 +5983,53 @@ export type ProfileVersionDiff = {
 	Changes: { ProfileDiffChange },
 }
 
+export type MigrationRegistration = {
+	id: string,
+	from_version: number,
+	to_version: number,
+	implementation_revision: string,
+	compatible_schema_min: number,
+	compatible_schema_max: number,
+	transform: Migration,
+	validator: Validator?,
+}
+
+export type MigrationPreviewOptions = {
+	operation_deadline: number?,
+	legacy_decoder: LegacyDecoder?,
+	max_nodes: number?,
+	max_depth: number?,
+	max_changes: number?,
+}
+
+export type MigrationPreviewStep = {
+	Id: string,
+	FromVersion: number,
+	ToVersion: number,
+	ImplementationRevision: string,
+}
+
+export type MigrationPreview = {
+	StoreName: string,
+	Scope: string,
+	ProfileKey: string,
+	ObservedAt: number,
+	Consistency: "read_only_non_authoritative_preview",
+	SourceSchemaVersion: number,
+	TargetSchemaVersion: number,
+	SourceRevision: number,
+	SourceGeneration: number,
+	SessionActive: boolean,
+	Steps: { MigrationPreviewStep },
+	Changes: { ProfileDiffChange },
+	VisitedNodes: number,
+	Truncated: boolean,
+	TargetDataNodeCount: number,
+	TargetDataDepth: number,
+	TargetDataEncodedBytes: number?,
+	TargetDataSizeAvailable: boolean,
+}
+
 export type HistoryEntry = {
 	Version: string,
 	CreatedTime: number,
@@ -14429,11 +14476,13 @@ RecordStore._internals.profile_doctor = (function()
 		local deadline, deadline_error = resolve_operation_deadline(normalized.operation_deadline)
 		if deadline == nil then return nil, "invalid", deadline_error end
 
+		local remaining_deadline = deadline - now_local()
+		if remaining_deadline <= 0 then return nil, "budget", "Profile Doctor inspection deadline expired" end
 		local snapshot, read_result, read_message = reader(
 			name,
 			scope,
 			key,
-			deadline,
+			remaining_deadline,
 			normalized.legacy_decoder
 		)
 		if read_result == "invalid" then return nil, "invalid", read_message end
@@ -14501,14 +14550,18 @@ RecordStore._internals.profile_doctor = (function()
 		local deadline, deadline_error = resolve_operation_deadline(normalized.operation_deadline)
 		if deadline == nil then return nil, "invalid", deadline_error end
 
+		local before_remaining = deadline - now_local()
+		if before_remaining <= 0 then return nil, "budget", "Profile Doctor diff deadline expired before first version read" end
 		local before_snapshot, before_result, before_message = version_reader(
-			name, scope, key, before_version, deadline, normalized.legacy_decoder
+			name, scope, key, before_version, before_remaining, normalized.legacy_decoder
 		)
 		if before_snapshot == nil or (before_result ~= "success" and before_result ~= "legacy") then
 			return nil, normalize_result_code(before_result) or "unknown", before_message
 		end
+		local after_remaining = deadline - now_local()
+		if after_remaining <= 0 then return nil, "budget", "Profile Doctor diff deadline expired before second version read" end
 		local after_snapshot, after_result, after_message = version_reader(
-			name, scope, key, after_version, deadline, normalized.legacy_decoder
+			name, scope, key, after_version, after_remaining, normalized.legacy_decoder
 		)
 		if after_snapshot == nil or (after_result ~= "success" and after_result ~= "legacy") then
 			return nil, normalize_result_code(after_result) or "unknown", after_message
