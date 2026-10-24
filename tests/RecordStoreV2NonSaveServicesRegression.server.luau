@@ -256,7 +256,10 @@ local deleted_items = {}
 local families = {
 	{
 		name = "player_profiles",
-		templates = { { name = "PlayerData", scope = "global", key = "Player_{user_id}" } },
+		templates = {
+			{ name = "PlayerData", scope = "global", key = "Player_{user_id}" },
+			{ name = "PlayerData", scope = "global", key = "PlayerArchive_{user_id}" },
+		},
 		templates_verified = true,
 		inventory = function(user_id, maximum)
 			return {
@@ -273,7 +276,7 @@ local families = {
 	},
 }
 local erasure = V2.Erasure.new(erase_store, families, {
-	verify_templates = function(_user_id, rendered) return type(rendered) == "table" and #rendered == 1 end,
+	verify_templates = function(_user_id, rendered) return type(rendered) == "table" and #rendered == 2 end,
 })
 local erasure_plan = erasure:PlanAsync(123456, "erase-stable-1")
 expect(erasure_plan.code == "success" and erasure_plan.rtbf_coverage_verified == true,
@@ -359,7 +362,10 @@ local concurrent_deleted = {}
 local concurrent_family = {
 	{
 		name = "concurrent_profiles",
-		templates = { { name = "PlayerData", scope = "global", key = "Player_{user_id}" } },
+		templates = {
+			{ name = "PlayerData", scope = "global", key = "Player_{user_id}" },
+			{ name = "PlayerData", scope = "global", key = "PlayerArchive_{user_id}" },
+		},
 		templates_verified = true,
 		inventory = function(user_id)
 			return {
@@ -395,7 +401,7 @@ expect(concurrent_eraser:GetStatus(654321).status == "completed"
 local unverified_erasure = V2.Erasure.new(new_store(), {
 	{
 		name = "unverified_family",
-		templates = { { name = "SharedStore", scope = "global", key = "shared-key" } },
+		templates = { { name = "SharedStore", scope = "global", key = "shared-key-{user_id}" } },
 		templates_verified = false,
 		inventory = function() return {}, true end,
 		fence_user = function() return true end,
