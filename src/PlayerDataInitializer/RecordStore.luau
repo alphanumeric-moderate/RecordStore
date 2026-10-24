@@ -14752,6 +14752,7 @@ end)()
 
 RecordStore._internals.migration_registry = (function()
 	local registries: { [string]: { [string]: MigrationRegistration } } = {}
+	local summarize_profile_data = RecordStore._internals.profile_doctor.summarize_data
 	local MAX_MIGRATIONS_PER_STORE = 128
 	local MAX_SCHEMA_VERSION = 1_000_000
 
@@ -15004,8 +15005,7 @@ RecordStore._internals.migration_registry = (function()
 		max_nodes: number,
 		max_depth: number
 	): (number, number, boolean, number?, boolean)
-		local doctor = RecordStore._internals.profile_doctor
-		return doctor.summarize_data(value, max_nodes, max_depth)
+		return summarize_profile_data(value, max_nodes, max_depth)
 	end
 
 	local function path_diff(
