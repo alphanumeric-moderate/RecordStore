@@ -163,6 +163,58 @@ expect(duplicate_projection.code == "duplicate", "projection duplicate was reapp
 local projected = projections:GetAsync("balance_projection_v1", "user-1")
 expect(projected.code == "success" and projected.row.value.total == 10,
 	"projection did not retain its idempotent value")
+local rebuild_store = new_store()
+local rebuild_projections = V2.Projections.new(rebuild_store)
+expect(rebuild_projections:Register("durable_balance_v1", 1, function(current, event)
+	local updated = clone(current)
+	updated.total = (updated.total or 0) + event.amount
+	return updated
+end) == true, "durable rebuild projection registration failed")
+local function read_rebuild_page(cursor, _maximum, snapshot_id)
+	if snapshot_id ~= "snapshot-17" then error("unexpected snapshot ID") end
+	if cursor == nil then
+		return {
+			{ event_id = "rebuild-e1", entity_id = "entity-a", source_revision = 1, amount = 3 },
+		}, "page-2", false, snapshot_id
+	end
+	if cursor == "page-2" then
+		return {
+			{ event_id = "rebuild-e2", entity_id = "entity-a", source_revision = 2, amount = 4 },
+		}, nil, true, snapshot_id
+	end
+	error("unexpected rebuild cursor")
+end
+local first_rebuild_page = rebuild_projections:RebuildDurableAsync(
+	"durable_balance_v1", "rebuild-stable-1", "snapshot-17", read_rebuild_page, 1
+)
+expect(first_rebuild_page.code == "incomplete" and first_rebuild_page.status == "in_progress"
+	and first_rebuild_page.cursor == "page-2" and first_rebuild_page.pages == 1,
+	"durable projection rebuild did not checkpoint its bounded page cursor")
+local durable_rebuild_status = rebuild_projections:GetRebuildStatusAsync("durable_balance_v1", "rebuild-stable-1")
+expect(durable_rebuild_status.code == "success" and durable_rebuild_status.cursor == "page-2"
+	and durable_rebuild_status.source_snapshot_id == "snapshot-17",
+	"durable projection rebuild status did not expose its saved cursor and snapshot")
+local restarted_rebuild_projections = V2.Projections.new(rebuild_store)
+expect(restarted_rebuild_projections:Register("durable_balance_v1", 1, function(current, event)
+	local updated = clone(current)
+	updated.total = (updated.total or 0) + event.amount
+	return updated
+end) == true, "restarted rebuild projection registration failed")
+local resumed_rebuild = restarted_rebuild_projections:RebuildDurableAsync(
+	"durable_balance_v1", "rebuild-stable-1", "snapshot-17", read_rebuild_page, 1
+)
+expect(resumed_rebuild.code == "committed" and resumed_rebuild.status == "completed"
+	and resumed_rebuild.processed == 2,
+	"durable projection rebuild did not resume and persist terminal status")
+local completed_rebuild_status = restarted_rebuild_projections:GetRebuildStatusAsync("durable_balance_v1", "rebuild-stable-1")
+expect(completed_rebuild_status.code == "success" and completed_rebuild_status.status == "completed"
+	and completed_rebuild_status.cursor == nil,
+	"completed projection rebuild status is not durable")
+local wrong_snapshot = restarted_rebuild_projections:RebuildDurableAsync(
+	"durable_balance_v1", "rebuild-stable-1", "snapshot-18", read_rebuild_page, 1
+)
+expect(wrong_snapshot.code == "conflict",
+	"durable rebuild ID was reused with a different source snapshot")
 projection_store.fail_after_next_update = true
 local response_loss_projection = projections:ApplyAsync("balance_projection_v1", {
 	event_id = "projection-event-2", entity_id = "user-1", source_revision = 2, amount = 5,

@@ -1777,6 +1777,157 @@ local function new_projections(store, options)
 		end
 		return { code = "incomplete", processed = processed, cursor = cursor, complete = false }
 	end
+	local function same_canonical(left, right)
+		local left_ok, left_text = pcall(canonical, left)
+		if not left_ok then return false end
+		local right_ok, right_text = pcall(canonical, right)
+		return right_ok and left_text == right_text
+	end
+	local function rebuild_key(name, rebuild_id)
+		return "rv2rb-" .. digest(name .. ":" .. rebuild_id)
+	end
+	function service:GetRebuildStatusAsync(name, rebuild_id)
+		if not valid_text(name, 40) or not valid_text(rebuild_id, 128) then return { code = "invalid" } end
+		local def = self.projections[name]
+		if not def then return { code = "not_found" } end
+		local manifest, message = adapter_call(store, "GetAsync", rebuild_key(name, rebuild_id))
+		if message then return { code = "unknown", message = message } end
+		if manifest == nil then return { code = "not_found", rebuild_id = rebuild_id } end
+		if type(manifest) ~= "table" or manifest.rebuild_id ~= rebuild_id or manifest.projection_name ~= name then
+			return { code = "conflict", message = "rebuild manifest identity does not match the requested rebuild" }
+		end
+		if manifest.version ~= def.version then return { code = "unsupported_schema", message = "rebuild projection version differs from the registered projector" } end
+		local result = copy(manifest)
+		result.code = "success"
+		result.consistency = "durable"
+		return result
+	end
+	function service:RebuildDurableAsync(name, rebuild_id, source_snapshot_id, fetch_page, max_pages)
+		local def = self.projections[name]
+		if not def or not valid_text(rebuild_id, 128) or not valid_text(source_snapshot_id, 128)
+			or type(fetch_page) ~= "function"
+		then return { code = "invalid", message = "durable rebuild requires a registered projection, stable rebuild/snapshot IDs, and a page adapter" } end
+		max_pages = math.clamp(math.floor(max_pages or 4), 1, 64)
+		local key = rebuild_key(name, rebuild_id)
+		local function matches(manifest)
+			return type(manifest) == "table" and manifest.rebuild_id == rebuild_id
+				and manifest.projection_name == name and manifest.version == def.version
+				and manifest.source_snapshot_id == source_snapshot_id
+		end
+		local manifest, message = adapter_call(store, "GetAsync", key)
+		if message then return { code = "unknown", rebuild_id = rebuild_id, message = message } end
+		if manifest == nil then
+			local now = os.time()
+			local initial = {
+				version = def.version, rebuild_id = rebuild_id, projection_name = name,
+				source_snapshot_id = source_snapshot_id, status = "in_progress",
+				pages = 0, processed = 0, created_at = now, updated_at = now,
+			}
+			local inserted, insert_error = adapter_call(store, "UpdateAsync", key, function(old)
+				if old ~= nil then return old end
+				return copy(initial)
+			end)
+			if insert_error then
+				manifest, message = adapter_call(store, "GetAsync", key)
+				if message or not matches(manifest) then return { code = "unknown", rebuild_id = rebuild_id, message = insert_error } end
+			elseif type(inserted) == "table" then
+				manifest = inserted
+			else
+				return { code = "unknown", rebuild_id = rebuild_id, message = "initial rebuild manifest was not returned" }
+			end
+		end
+		if type(manifest) ~= "table" or manifest.rebuild_id ~= rebuild_id or manifest.projection_name ~= name then
+			return { code = "conflict", rebuild_id = rebuild_id, message = "another rebuild owns the durable manifest key" }
+		end
+		if manifest.version ~= def.version then return { code = "unsupported_schema", rebuild_id = rebuild_id } end
+		if manifest.source_snapshot_id ~= source_snapshot_id then
+			return { code = "conflict", rebuild_id = rebuild_id, message = "a rebuild ID cannot be reused for another source snapshot" }
+		end
+		local function result(code, detail)
+			local value = {
+				code = code, rebuild_id = rebuild_id, projection_name = name, version = def.version,
+				source_snapshot_id = source_snapshot_id, status = manifest.status,
+				pages = manifest.pages or 0, processed = manifest.processed or 0,
+				complete = manifest.status == "completed", consistency = "durable",
+			}
+			if manifest.cursor ~= nil then value.cursor = copy(manifest.cursor) end
+			if detail ~= nil then value.message = detail end
+			return value
+		end
+		if manifest.status == "completed" then return result("committed") end
+		if manifest.status ~= "in_progress" and manifest.status ~= "unknown" and manifest.status ~= "blocked" then
+			return result("corrupt", "durable rebuild status is unrecognized")
+		end
+		local function replace_manifest(expected, candidate)
+			local updated, update_error = adapter_call(store, "UpdateAsync", key, function(old)
+				if same_canonical(old, expected) then return copy(candidate) end
+				return old
+			end)
+			if update_error then
+				local observed, read_error = adapter_call(store, "GetAsync", key)
+				if not read_error and same_canonical(observed, candidate) then return copy(observed), nil end
+				return nil, "unknown", update_error
+			end
+			if same_canonical(updated, candidate) then return copy(updated), nil end
+			return nil, "conflict", updated
+		end
+		local function stop_with_status(outcome, status, detail)
+			local candidate = copy(manifest)
+			candidate.status = status
+			candidate.last_error = text_error(detail, 256)
+			candidate.updated_at = os.time()
+			local updated, update_code, update_message = replace_manifest(manifest, candidate)
+			if not updated then
+				return result("unknown", update_message or "failed to checkpoint rebuild status: " .. tostring(update_code))
+			end
+			manifest = updated
+			return result(outcome, detail)
+		end
+		for _ = 1, max_pages do
+			local page, next_cursor, complete, observed_snapshot = io_call(fetch_page, manifest.cursor, 64, source_snapshot_id)
+			if type(page) ~= "table" then
+				return stop_with_status("unknown", "unknown", tostring(next_cursor or "source page read failed"))
+			end
+			if observed_snapshot ~= source_snapshot_id then
+				return stop_with_status("conflict", "blocked", "source page does not belong to the pinned snapshot")
+			end
+			if type(complete) ~= "boolean" or #page > 64 or key_count(page) ~= #page then
+				return stop_with_status("invalid", "blocked", "source page must be a dense array of at most 64 events with a completion flag")
+			end
+			for page_key in pairs(page) do
+				if type(page_key) ~= "number" or not finite(page_key) or math.floor(page_key) ~= page_key or page_key < 1 or page_key > #page then
+					return stop_with_status("invalid", "blocked", "source page is not a dense numeric array")
+				end
+			end
+			local cursor_ok, next_cursor_text = pcall(canonical, next_cursor)
+			if not cursor_ok then return stop_with_status("invalid", "blocked", "source cursor is not canonicalizable") end
+			local prior_ok, prior_cursor_text = pcall(canonical, manifest.cursor)
+			if not prior_ok then return stop_with_status("corrupt", "blocked", "durable rebuild cursor is malformed") end
+			if complete ~= true and next_cursor ~= nil and next_cursor_text == prior_cursor_text then
+				return stop_with_status("blocked", "blocked", "source cursor made no progress")
+			end
+			for _, event in ipairs(page) do
+				local applied = self:ApplyAsync(name, event)
+				if applied.code ~= "committed" and applied.code ~= "duplicate" and applied.code ~= "stale" then
+					return stop_with_status(applied.code, if applied.code == "unknown" then "unknown" else "blocked", applied.message or ("projection event returned " .. tostring(applied.code)))
+				end
+			end
+			local candidate = copy(manifest)
+			candidate.cursor = next_cursor
+			candidate.pages = (manifest.pages or 0) + 1
+			candidate.processed = (manifest.processed or 0) + #page
+			candidate.status = if complete or next_cursor == nil then "completed" else "in_progress"
+			candidate.last_error = nil
+			candidate.updated_at = os.time()
+			local updated, update_code, update_message = replace_manifest(manifest, candidate)
+			if not updated then
+				return result(if update_code == "conflict" then "conflict" else "unknown", update_message or "source page applied; durable rebuild cursor is unresolved")
+			end
+			manifest = updated
+			if manifest.status == "completed" then return result("committed") end
+		end
+		return result("incomplete")
+	end
 	function service:ReserveUnique(namespace, unique_value, entity_id, operation_id)
 		if not valid_text(namespace, 32) or not valid_text(unique_value, 128) or not valid_text(entity_id, 128) or not valid_text(operation_id, 128) then return { code = "invalid" } end
 		local key = "rv2u-" .. digest(namespace .. ":" .. unique_value)
