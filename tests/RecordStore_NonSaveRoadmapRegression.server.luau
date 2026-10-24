@@ -684,5 +684,109 @@ assert(ambiguous_record:Get().coins == 6,
 	"commit-then-response-loss must reconcile from the durable receipt without applying twice")
 
 
+
+local receipt_test_now = 1000
+Mock.set_test_clock(function()
+	return receipt_test_now
+end)
+
+local function exercise_receipt_capacity_and_retention(kind)
+	local prefix = if kind == "inbox" then "InboxReceiptCapacity" else "TransactionReceiptCapacity"
+	local store_name = prefix
+	local record = Mock.new(store_name, "global", "profile", {
+		schema_version = 1,
+		transactional_operations_enabled = true,
+	})
+	local opened, open_message = record:Open({ count = 0 })
+	assert(opened == "success" or opened == "created",
+		prefix .. " open status=" .. tostring(opened) .. " message=" .. tostring(open_message))
+
+	local function execute(operation_id, request)
+		local function reducer(data)
+			local next_data = table.clone(data)
+			next_data.count += 1
+			return next_data
+		end
+		if kind == "inbox" then
+			return record:ApplyInboxAsync(
+				operation_id,
+				"ReceiptCapacityMessage",
+				request,
+				reducer,
+				{ receipt_retention_seconds = 1 }
+			)
+		end
+		return record:TransactAsync(operation_id, reducer, {
+			request = request,
+			receipt_retention_seconds = 1,
+		})
+	end
+
+	local successful_count = 0
+	local last_operation_id = nil
+	local last_request = nil
+	local reached_capacity = false
+	for index = 1, 258 do
+		local operation_id = (if kind == "inbox" then "i" else "t") .. tostring(index)
+		local request = { index = index }
+		local _, status, message = execute(operation_id, request)
+		if status == "committed" then
+			successful_count += 1
+			last_operation_id = operation_id
+			last_request = request
+		elseif status == "capacity" then
+			reached_capacity = true
+			break
+		else
+			error(prefix .. " expected commit or capacity, got " .. tostring(status)
+				.. ": " .. tostring(message))
+		end
+	end
+	assert(reached_capacity, prefix .. " never reported receipt capacity")
+	assert(successful_count > 0 and successful_count < 258,
+		prefix .. " receipt-capacity boundary was not reached")
+
+	local before_overflow = Mock.get_record_raw(store_name, "global", "profile")
+	local before_data = record:Get()
+	assert(before_data.count == successful_count, prefix .. " successful receipt count disagrees with profile data")
+	local _, overflow_status = execute("overflow-" .. kind, { index = 9999 })
+	assert(overflow_status == "capacity", prefix .. " did not preserve capacity backpressure")
+	local after_overflow = Mock.get_record_raw(store_name, "global", "profile")
+	assert(after_overflow.revision == before_overflow.revision,
+		prefix .. " capacity failure changed the durable revision")
+	assert(after_overflow.data.count == before_overflow.data.count,
+		prefix .. " capacity failure mutated profile data")
+
+	local _, duplicate_status = execute(last_operation_id, last_request)
+	assert(duplicate_status == "duplicate",
+		prefix .. " full capacity must still honor an unexpired idempotency receipt")
+	assert(record:Get().count == successful_count,
+		prefix .. " duplicate receipt applied the reducer a second time")
+
+	receipt_test_now += 2
+	local _, after_expiry_status, after_expiry_message = execute(
+		"after-expiry-" .. kind,
+		{ index = 10000 }
+	)
+	assert(after_expiry_status == "committed",
+		prefix .. " did not reclaim expired receipts: " .. tostring(after_expiry_message))
+	local after_expiry = Mock.get_record_raw(store_name, "global", "profile")
+	local collection = if kind == "inbox"
+		then after_expiry.sidecars.inbox_receipts
+		else after_expiry.sidecars.transaction_receipts
+	local retained_count = 0
+	for _ in pairs(collection) do retained_count += 1 end
+	assert(retained_count == 1,
+		prefix .. " expiry cleanup should retain only the newly committed receipt")
+	assert(after_expiry.data.count == successful_count + 1,
+		prefix .. " expiry cleanup did not apply exactly one new operation")
+	assert(after_expiry.revision == before_overflow.revision + 1,
+		prefix .. " capacity/retention recovery advanced the wrong revision")
+	record:Close()
+end
+
+exercise_receipt_capacity_and_retention("transaction")
+exercise_receipt_capacity_and_retention("inbox")
+
 Mock.reset()
 Shim.close()
