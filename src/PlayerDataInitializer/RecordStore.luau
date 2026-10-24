@@ -3146,7 +3146,7 @@ do
 	end
 
 	function MailboxV2._reclaim_slot(self: EmbeddedMailbox, kind: string): boolean
-		local manifest, manifest_error = self:_get_manifest(kind)
+		local manifest, _manifest_error = self:_get_manifest(kind)
 		if manifest == nil then
 			return false
 		end
@@ -7865,111 +7865,133 @@ local function get_string_field(value: unknown, key: string): unknown
 	if type(value) ~= "table" then return nil end
 	return rawget(value :: any, key)
 end
-local function empty_envelope_sidecars(): EnvelopeSidecars
+local EnvelopeSidecarProtocol = (function()
+	local MAX_READABLE_IMPLEMENTATION_VERSION = 3
+	local TRANSACTION_IMPLEMENTATION_VERSION = 3
+	local MAX_INBOX_RECEIPTS = 256
+	local MAX_TRANSACTION_RECEIPTS = 256
+	local MAX_OUTBOX_EVENTS = 128
+	local MAX_ENVELOPE_SIDECAR_BYTES = 48_000
+
+	local function empty(): EnvelopeSidecars
+		return {
+			version = 1,
+			inbox_receipts = {},
+			transaction_receipts = {},
+			outbox_events = {},
+		}
+	end
+
+	local function clone(sidecars: EnvelopeSidecars?): EnvelopeSidecars?
+		if sidecars == nil then return nil end
+		local copied = copy_value(sidecars :: JsonValue)
+		if type(copied) ~= "table" then return nil end
+		return copied :: EnvelopeSidecars
+	end
+
+	local function validate(value: unknown): (boolean, string?)
+		if type(value) ~= "table" then return false, "sidecars must be a table" end
+		local sidecars = value :: { [string]: unknown }
+		if sidecars.version ~= 1 then return false, "unsupported sidecar protocol version" end
+		local inbox = sidecars.inbox_receipts
+		local transactions = sidecars.transaction_receipts
+		local outbox = sidecars.outbox_events
+		if type(inbox) ~= "table" or type(transactions) ~= "table" or type(outbox) ~= "table" then
+			return false, "sidecar collections must be tables"
+		end
+		local inbox_receipts = inbox :: { [string]: unknown }
+		local transaction_receipts = transactions :: { [string]: unknown }
+		local outbox_events = outbox :: { [string]: unknown }
+		local inbox_count = 0
+		for id, raw_receipt in inbox_receipts do
+			inbox_count += 1
+			if inbox_count > MAX_INBOX_RECEIPTS then return false, "inbox receipt capacity exceeded" end
+			if type(id) ~= "string" or id == "" or #id > 256 or type(raw_receipt) ~= "table" then
+				return false, "inbox receipt identity is invalid"
+			end
+			local receipt = raw_receipt :: { [string]: unknown }
+			if type(receipt.request_identity) ~= "string" or receipt.request_identity == ""
+				or #receipt.request_identity > 16_384
+				or type(receipt.result_present) ~= "boolean"
+				or (receipt.result_present and receipt.result == nil)
+				or (not receipt.result_present and receipt.result ~= nil)
+				or type(receipt.committed_revision) ~= "number"
+				or not math.isfinite(receipt.committed_revision)
+				or math.floor(receipt.committed_revision) ~= receipt.committed_revision
+				or receipt.committed_revision < 0
+				or type(receipt.created_at) ~= "number" or not math.isfinite(receipt.created_at)
+				or type(receipt.expires_at) ~= "number" or not math.isfinite(receipt.expires_at)
+				or receipt.expires_at <= receipt.created_at
+			then
+				return false, "inbox receipt metadata is invalid"
+			end
+		end
+		local transaction_count = 0
+		for id, raw_receipt in transaction_receipts do
+			transaction_count += 1
+			if transaction_count > MAX_TRANSACTION_RECEIPTS then return false, "transaction receipt capacity exceeded" end
+			if type(id) ~= "string" or id == "" or #id > 256 or type(raw_receipt) ~= "table" then
+				return false, "transaction receipt identity is invalid"
+			end
+			local receipt = raw_receipt :: { [string]: unknown }
+			if type(receipt.request_identity) ~= "string" or receipt.request_identity == ""
+				or #receipt.request_identity > 16_384
+				or type(receipt.result_present) ~= "boolean"
+				or (receipt.result_present and receipt.result == nil)
+				or (not receipt.result_present and receipt.result ~= nil)
+				or type(receipt.committed_revision) ~= "number"
+				or not math.isfinite(receipt.committed_revision)
+				or math.floor(receipt.committed_revision) ~= receipt.committed_revision
+				or receipt.committed_revision < 0
+				or type(receipt.created_at) ~= "number" or not math.isfinite(receipt.created_at)
+				or type(receipt.expires_at) ~= "number" or not math.isfinite(receipt.expires_at)
+				or receipt.expires_at <= receipt.created_at
+			then
+				return false, "transaction receipt metadata is invalid"
+			end
+		end
+		local outbox_count = 0
+		for id, raw_event in outbox_events do
+			outbox_count += 1
+			if outbox_count > MAX_OUTBOX_EVENTS then return false, "outbox capacity exceeded" end
+			if type(id) ~= "string" or id == "" or #id > 256 or type(raw_event) ~= "table" then
+				return false, "outbox event identity is invalid"
+			end
+			local event = raw_event :: { [string]: unknown }
+			if event.id ~= id or type(event.event_type) ~= "string" or event.event_type == "" or #event.event_type > 100
+				or type(event.destination_store_name) ~= "string" or event.destination_store_name == "" or #event.destination_store_name > 50
+				or type(event.destination_scope) ~= "string" or #event.destination_scope > 50
+				or type(event.destination_profile_key) ~= "string" or event.destination_profile_key == "" or #event.destination_profile_key > 50
+				or type(event.created_at) ~= "number" or not math.isfinite(event.created_at)
+				or type(event.attempts) ~= "number" or not math.isfinite(event.attempts)
+				or math.floor(event.attempts) ~= event.attempts or event.attempts < 0
+				or (event.state ~= "pending" and event.state ~= "delivered" and event.state ~= "unknown" and event.state ~= "blocked")
+				or (type(event.payload) ~= "table" and type(event.payload) ~= "string"
+					and type(event.payload) ~= "number" and type(event.payload) ~= "boolean")
+			then
+				return false, "outbox event metadata is invalid"
+			end
+		end
+		local encoded_ok, encoded = pcall(function()
+			return HttpService:JSONEncode(sidecars)
+		end)
+		if not encoded_ok or type(encoded) ~= "string" then
+			return false, "sidecars cannot be encoded as JSON"
+		end
+		if #encoded > MAX_ENVELOPE_SIDECAR_BYTES then
+			return false, "sidecars exceed the configured encoded-size limit"
+		end
+		return true, nil
+	end
+
 	return {
-		version = 1,
-		inbox_receipts = {},
-		transaction_receipts = {},
-		outbox_events = {},
+		max_readable_version = MAX_READABLE_IMPLEMENTATION_VERSION,
+		transaction_version = TRANSACTION_IMPLEMENTATION_VERSION,
+		empty = empty,
+		clone = clone,
+		validate = validate,
 	}
-end
-
-local function clone_sidecars(sidecars: EnvelopeSidecars?): EnvelopeSidecars?
-	if sidecars == nil then return nil end
-	return (copy_value(sidecars :: JsonValue) :: unknown) :: EnvelopeSidecars
-end
-
-local function validate_sidecars(value: unknown): (boolean, string?)
-	if type(value) ~= "table" then return false, "sidecars must be a table" end
-	local sidecars = value :: { [string]: unknown }
-	if sidecars.version ~= 1 then return false, "unsupported sidecar protocol version" end
-	local inbox = sidecars.inbox_receipts
-	local transactions = sidecars.transaction_receipts
-	local outbox = sidecars.outbox_events
-	if type(inbox) ~= "table" or type(transactions) ~= "table" or type(outbox) ~= "table" then
-		return false, "sidecar collections must be tables"
-	end
-	local inbox_count = 0
-	for id, raw_receipt in inbox do
-		inbox_count += 1
-		if inbox_count > MAX_INBOX_RECEIPTS then return false, "inbox receipt capacity exceeded" end
-		if type(id) ~= "string" or id == "" or #id > 256 or type(raw_receipt) ~= "table" then
-			return false, "inbox receipt identity is invalid"
-		end
-		local receipt = raw_receipt :: { [string]: unknown }
-		if type(receipt.request_identity) ~= "string" or receipt.request_identity == ""
-			or #receipt.request_identity > 16_384
-			or type(receipt.result_present) ~= "boolean"
-			or (receipt.result_present and receipt.result == nil)
-			or (not receipt.result_present and receipt.result ~= nil)
-			or type(receipt.committed_revision) ~= "number"
-			or not math.isfinite(receipt.committed_revision)
-			or math.floor(receipt.committed_revision) ~= receipt.committed_revision
-			or receipt.committed_revision < 0
-			or type(receipt.created_at) ~= "number" or not math.isfinite(receipt.created_at)
-			or type(receipt.expires_at) ~= "number" or not math.isfinite(receipt.expires_at)
-			or receipt.expires_at <= receipt.created_at
-		then
-			return false, "inbox receipt metadata is invalid"
-		end
-	end
-	local transaction_count = 0
-	for id, raw_receipt in transactions do
-		transaction_count += 1
-		if transaction_count > MAX_TRANSACTION_RECEIPTS then return false, "transaction receipt capacity exceeded" end
-		if type(id) ~= "string" or id == "" or #id > 256 or type(raw_receipt) ~= "table" then
-			return false, "transaction receipt identity is invalid"
-		end
-		local receipt = raw_receipt :: { [string]: unknown }
-		if type(receipt.request_identity) ~= "string" or receipt.request_identity == ""
-			or #receipt.request_identity > 16_384
-			or type(receipt.result_present) ~= "boolean"
-			or (receipt.result_present and receipt.result == nil)
-			or (not receipt.result_present and receipt.result ~= nil)
-			or type(receipt.committed_revision) ~= "number"
-			or not math.isfinite(receipt.committed_revision)
-			or math.floor(receipt.committed_revision) ~= receipt.committed_revision
-			or receipt.committed_revision < 0
-			or type(receipt.created_at) ~= "number" or not math.isfinite(receipt.created_at)
-			or type(receipt.expires_at) ~= "number" or not math.isfinite(receipt.expires_at)
-			or receipt.expires_at <= receipt.created_at
-		then
-			return false, "transaction receipt metadata is invalid"
-		end
-	end
-	local outbox_count = 0
-	for id, raw_event in outbox do
-		outbox_count += 1
-		if outbox_count > MAX_OUTBOX_EVENTS then return false, "outbox capacity exceeded" end
-		if type(id) ~= "string" or id == "" or #id > 256 or type(raw_event) ~= "table" then
-			return false, "outbox event identity is invalid"
-		end
-		local event = raw_event :: { [string]: unknown }
-		if event.id ~= id or type(event.event_type) ~= "string" or event.event_type == "" or #event.event_type > 100
-			or type(event.destination_store_name) ~= "string" or event.destination_store_name == "" or #event.destination_store_name > 50
-			or type(event.destination_scope) ~= "string" or #event.destination_scope > 50
-			or type(event.destination_profile_key) ~= "string" or event.destination_profile_key == "" or #event.destination_profile_key > 50
-			or type(event.created_at) ~= "number" or not math.isfinite(event.created_at)
-			or type(event.attempts) ~= "number" or not math.isfinite(event.attempts)
-			or math.floor(event.attempts) ~= event.attempts or event.attempts < 0
-			or (event.state ~= "pending" and event.state ~= "delivered" and event.state ~= "unknown" and event.state ~= "blocked")
-			or (type(event.payload) ~= "table" and type(event.payload) ~= "string"
-				and type(event.payload) ~= "number" and type(event.payload) ~= "boolean")
-		then
-			return false, "outbox event metadata is invalid"
-		end
-	end
-	local encoded_ok, encoded = pcall(function()
-		return HttpService:JSONEncode(sidecars)
-	end)
-	if not encoded_ok or type(encoded) ~= "string" then
-		return false, "sidecars cannot be encoded as JSON"
-	end
-	if #encoded > MAX_ENVELOPE_SIDECAR_BYTES then
-		return false, "sidecars exceed the configured encoded-size limit"
-	end
-	return true, nil
-end
+end)()
 
 local function parse_envelope(raw: unknown): (Envelope?, string?, boolean)
 	if raw == nil then
@@ -8167,19 +8189,19 @@ local function parse_envelope(raw: unknown): (Envelope?, string?, boolean)
 	if type(implementation_version) ~= "number" or not math.isfinite(implementation_version) or math.floor(implementation_version) ~= implementation_version then
 		return nil, "invalid implementation version", false
 	end
-	if implementation_version > MAX_READABLE_IMPLEMENTATION_VERSION then
+	if implementation_version > EnvelopeSidecarProtocol.max_readable_version then
 		return nil, "future implementation version", false
 	end
 	local parsed_sidecars: EnvelopeSidecars? = nil
-	if implementation_version >= TRANSACTION_IMPLEMENTATION_VERSION then
+	if implementation_version >= EnvelopeSidecarProtocol.transaction_version then
 		if raw_sidecars == nil then
 			return nil, "version 3 envelope is missing transaction sidecars", false
 		end
-		local sidecars_valid, sidecars_error = validate_sidecars(raw_sidecars)
+		local sidecars_valid, sidecars_error = EnvelopeSidecarProtocol.validate(raw_sidecars)
 		if not sidecars_valid then
 			return nil, "invalid transaction sidecars: " .. (sidecars_error or "unknown error"), false
 		end
-		parsed_sidecars = clone_sidecars(raw_sidecars)
+		parsed_sidecars = EnvelopeSidecarProtocol.clone(raw_sidecars)
 	elseif raw_sidecars ~= nil then
 		return nil, "version 2 envelope unexpectedly contains transaction sidecars", false
 	end
@@ -8467,16 +8489,16 @@ end
 
 local function validate_envelope(envelope: Envelope): (boolean, string?)
 	prepared_envelope_cache[envelope] = nil
-	if envelope.implementation_version > MAX_READABLE_IMPLEMENTATION_VERSION then
+	if envelope.implementation_version > EnvelopeSidecarProtocol.max_readable_version then
 		return false, "envelope implementation version is not readable"
 	end
 	if envelope.sidecars ~= nil then
-		if envelope.implementation_version < TRANSACTION_IMPLEMENTATION_VERSION then
+		if envelope.implementation_version < EnvelopeSidecarProtocol.transaction_version then
 			return false, "transaction sidecars require implementation version 3"
 		end
-		local sidecars_valid, sidecars_error = validate_sidecars(envelope.sidecars)
+		local sidecars_valid, sidecars_error = EnvelopeSidecarProtocol.validate(envelope.sidecars)
 		if not sidecars_valid then return false, sidecars_error end
-	elseif envelope.implementation_version >= TRANSACTION_IMPLEMENTATION_VERSION then
+	elseif envelope.implementation_version >= EnvelopeSidecarProtocol.transaction_version then
 		return false, "version 3 envelope is missing transaction sidecars"
 	end
 	local prepared = encode_envelope_for_storage(envelope)
@@ -9833,7 +9855,7 @@ local function save_internal(state: InternalState, reason: string?, operation_de
 				implementation_version = envelope.implementation_version,
 				schema_version = state.options.schema_version,
 				revision = target_revision,
-				sidecars = clone_sidecars(envelope.sidecars),
+				sidecars = EnvelopeSidecarProtocol.clone(envelope.sidecars),
 				fencing_generation = generation,
 				created_at = envelope.created_at,
 				updated_at = transform_time,
@@ -11950,7 +11972,7 @@ local function delete_record(self: Record): (ResultCode, string?)
 				implementation_version = envelope.implementation_version,
 				schema_version = state.options.schema_version,
 				revision = target_revision,
-				sidecars = clone_sidecars(envelope.sidecars),
+				sidecars = EnvelopeSidecarProtocol.clone(envelope.sidecars),
 				fencing_generation = next_generation,
 				created_at = envelope.created_at,
 				updated_at = transform_time,
@@ -12437,7 +12459,7 @@ local function open_internal(state: InternalState, default_data: JsonValue?, rec
 				implementation_version = envelope.implementation_version,
 				schema_version = state.options.schema_version,
 				revision = if envelope.tombstone ~= nil then envelope.revision + 1 else envelope.revision,
-				sidecars = clone_sidecars(envelope.sidecars),
+				sidecars = EnvelopeSidecarProtocol.clone(envelope.sidecars),
 				fencing_generation = next_generation,
 				created_at = if envelope.created_at > 0 then envelope.created_at else commit_time,
 				updated_at = commit_time,
@@ -12748,7 +12770,7 @@ local function renew_internal(state: InternalState): (ResultCode, string?)
 				implementation_version = envelope.implementation_version,
 				schema_version = envelope.schema_version,
 				revision = envelope.revision,
-				sidecars = clone_sidecars(envelope.sidecars),
+				sidecars = EnvelopeSidecarProtocol.clone(envelope.sidecars),
 				fencing_generation = generation,
 				created_at = envelope.created_at,
 				updated_at = transform_time,
@@ -13037,7 +13059,7 @@ local function reconcile_unknown_release_internal(state: InternalState): (Result
 			implementation_version = current.implementation_version,
 			schema_version = state.options.schema_version,
 			revision = pending.target_revision,
-			sidecars = clone_sidecars(current.sidecars),
+			sidecars = EnvelopeSidecarProtocol.clone(current.sidecars),
 			fencing_generation = pending.fencing_generation,
 			created_at = current.created_at,
 			updated_at = transform_time,
@@ -13273,7 +13295,7 @@ local function reconcile_unknown_internal(state: InternalState): (ResultCode, st
 			implementation_version = current.implementation_version,
 			schema_version = if pending.kind == "save" then state.options.schema_version else current.schema_version,
 			revision = if pending.kind == "save" then pending.target_revision else current.revision,
-			sidecars = clone_sidecars(current.sidecars),
+			sidecars = EnvelopeSidecarProtocol.clone(current.sidecars),
 			fencing_generation = pending.fencing_generation,
 			created_at = current.created_at,
 			updated_at = transform_time,
@@ -13482,7 +13504,7 @@ close_internal = function(state: InternalState, shutdown: boolean): (ResultCode,
 				implementation_version = envelope.implementation_version,
 				schema_version = state.options.schema_version,
 				revision = target_revision,
-				sidecars = clone_sidecars(envelope.sidecars),
+				sidecars = EnvelopeSidecarProtocol.clone(envelope.sidecars),
 				fencing_generation = generation,
 				created_at = envelope.created_at,
 				updated_at = transform_time,
