@@ -6082,6 +6082,29 @@ export type MockQueueClaim = {
 	LockedUntil: number,
 }
 
+export type TransactionStatus =
+	"committed" | "duplicate" | "conflict" | "capacity" | "fenced" | "retryable"
+	| "unknown" | "disabled" | "invalid" | "validation"
+
+export type TransactionOptions = {
+	request: JsonValue,
+	receipt_retention_seconds: number?,
+}
+
+export type OutboxEventSpec = {
+	target_store: string,
+	target_scope: string,
+	target_key: string,
+	type: string,
+	payload_version: number,
+	data: JsonValue,
+	target_user_id: number?,
+	correlation_id: string?,
+	causation_id: string?,
+}
+
+export type TransactionReducer = (JsonValue?, JsonValue?) -> (JsonValue?, JsonValue?)
+
 export type Options = {
 	schema_version: number,
 	migrations: { [number]: Migration }?,
@@ -6102,6 +6125,7 @@ export type Options = {
 	takeover_wait: number?,
 	message_topic_prefix: string?,
 	durable_queue_enabled: boolean?,
+	transactional_operations_enabled: boolean?,
 	queue_store_name: string?,
 	queue_poll_interval: number?,
 	queue_lease_duration: number?,
@@ -6141,6 +6165,8 @@ type OperationReceipt = {
 type OutboxEventRecord = {
 	id: string,
 	event_type: string,
+	payload_version: number,
+	request_identity: string,
 	payload: JsonValue,
 	destination_store_name: string,
 	destination_scope: string,
@@ -6349,6 +6375,7 @@ type InternalState = {
 	saved_change_sequence: number,
 	durable_lease_until: number,
 	pending_operation: PendingDurableOperation?,
+	pending_transaction: { operation_id: string, kind: string, request_identity: string }?,
 	next_reconciliation: number,
 	last_reconciliation_category: string?,
 	dirty_since_local: number?,
@@ -6391,6 +6418,9 @@ export type Record = {
 	Update: (self: Record, callback: (JsonValue?) -> JsonValue?) -> (ResultCode, string?),
 	Reconcile: (self: Record, template: JsonValue) -> (ResultCode, string?),
 	Save: (self: Record, reason: string?) -> (ResultCode, string?),
+	TransactAsync: (self: Record, operation_id: string, reducer: TransactionReducer, options: TransactionOptions) -> (JsonValue?, TransactionStatus, string?),
+	ApplyInboxAsync: (self: Record, message_id: string, message_type: string, payload: JsonValue, reducer: TransactionReducer, options: TransactionOptions?) -> (JsonValue?, TransactionStatus, string?),
+	CommitWithOutboxAsync: (self: Record, commit_key: string, command_type: string, command_payload: JsonValue, outbox_events: { OutboxEventSpec }, reducer: TransactionReducer, options: TransactionOptions?) -> (JsonValue?, TransactionStatus, string?),
 	MessageAsync: (self: Record, message_type: string, data: JsonValue?) -> (ResultCode, string?),
 	GetIdentity: (self: Record) -> { [string]: unknown },
 	GetMailboxOwner: (self: Record) -> { [string]: unknown },
@@ -7248,6 +7278,9 @@ prepared_envelope_cache._sidecar_protocol = (function()
 			end
 			local event = raw_event :: { [string]: unknown }
 			if event.id ~= id or type(event.event_type) ~= "string" or event.event_type == "" or #event.event_type > 100
+				or type(event.payload_version) ~= "number" or not math.isfinite(event.payload_version)
+				or math.floor(event.payload_version) ~= event.payload_version or event.payload_version < 1
+				or type(event.request_identity) ~= "string" or event.request_identity == "" or #event.request_identity > 16_384
 				or type(event.destination_store_name) ~= "string" or event.destination_store_name == "" or #event.destination_store_name > 50
 				or type(event.destination_scope) ~= "string" or #event.destination_scope > 50
 				or type(event.destination_profile_key) ~= "string" or event.destination_profile_key == "" or #event.destination_profile_key > 50
@@ -7273,12 +7306,84 @@ prepared_envelope_cache._sidecar_protocol = (function()
 		return true, nil
 	end
 
+	local function canonicalize(root: unknown): (string?, string?)
+		local active: { [any]: boolean } = {}
+		local nodes = 0
+		local function visit(value: unknown, depth: number): (string?, string?)
+			nodes += 1
+			if nodes > 8192 then return nil, "canonical request exceeds the node limit" end
+			if depth > 64 then return nil, "canonical request exceeds the depth limit" end
+			local kind = type(value)
+			if value == nil then return "z", nil end
+			if kind == "boolean" then return if value then "b1" else "b0", nil end
+			if kind == "string" then
+				local text = value :: string
+				return "s" .. tostring(#text) .. ":" .. text, nil
+			end
+			if kind == "number" then
+				local number_value = value :: number
+				if not math.isfinite(number_value) then
+					return nil, "canonical request contains a non-finite number"
+				end
+				local encoded = string.format("%.17g", number_value)
+				return "d" .. tostring(#encoded) .. ":" .. encoded, nil
+			end
+			if kind ~= "table" then return nil, "canonical request contains unsupported type " .. kind end
+			local current = value :: { [any]: unknown }
+			if active[current] then return nil, "canonical request contains a cyclic table" end
+			active[current] = true
+			local keys: { string | number } = {}
+			for key in pairs(current) do
+				if type(key) == "string" then
+					keys[#keys + 1] = key
+				elseif type(key) == "number" and math.isfinite(key) and math.floor(key) == key then
+					keys[#keys + 1] = key
+				else
+					active[current] = nil
+					return nil, "canonical request contains an unsupported table key"
+				end
+			end
+			table.sort(keys, function(left, right)
+				if type(left) ~= type(right) then return type(left) < type(right) end
+				if type(left) == "number" then return (left :: number) < (right :: number) end
+				return (left :: string) < (right :: string)
+			end)
+			local parts = { "t", tostring(#keys), ":" }
+			for _, key in ipairs(keys) do
+				local encoded_key, key_error = visit(key, depth + 1)
+				if encoded_key == nil then active[current] = nil; return nil, key_error end
+				local encoded_value, value_error = visit(current[key], depth + 1)
+				if encoded_value == nil then active[current] = nil; return nil, value_error end
+				parts[#parts + 1] = tostring(#encoded_key) .. ":" .. encoded_key
+				parts[#parts + 1] = tostring(#encoded_value) .. ":" .. encoded_value
+			end
+			active[current] = nil
+			return table.concat(parts), nil
+		end
+		return visit(root, 0)
+	end
+
+	local function stable_event_id(identity: string, ordinal: number): string
+		local seeds = { 17, 131, 911, 3571 }
+		local digests: { string } = {}
+		for index, seed in ipairs(seeds) do
+			local hash = seed
+			for position = 1, #identity do
+				hash = (hash * 131 + string.byte(identity, position) + index * 17) % 2147483647
+			end
+			digests[index] = string.format("%08x", hash)
+		end
+		return "outbox:" .. table.concat(digests) .. ":" .. tostring(ordinal)
+	end
+
 	return {
 		max_readable_version = MAX_READABLE_IMPLEMENTATION_VERSION,
 		transaction_version = TRANSACTION_IMPLEMENTATION_VERSION,
 		empty = empty,
 		clone = clone,
 		validate = validate,
+		canonicalize = canonicalize,
+		stable_event_id = stable_event_id,
 	}
 end)()
 
@@ -15447,6 +15552,9 @@ RecordStore._internals.normalize_options = function(options: Options): (Options?
 	if copied.durable_queue_enabled == nil then
 		copied.durable_queue_enabled = true
 	end
+	if copied.transactional_operations_enabled == nil then
+		copied.transactional_operations_enabled = false
+	end
 	if copied.queue_store_name == nil then
 		copied.queue_store_name = DEFAULT_QUEUE_STORE_NAME
 	end
@@ -15478,6 +15586,9 @@ RecordStore._internals.normalize_options = function(options: Options): (Options?
 	end
 	if type(copied.durable_queue_enabled) ~= "boolean" then
 		return nil, "durable_queue_enabled must be a boolean"
+	end
+	if type(copied.transactional_operations_enabled) ~= "boolean" then
+		return nil, "transactional_operations_enabled must be a boolean"
 	end
 	if type(copied.message_topic_prefix) ~= "string" then
 		return nil, "message_topic_prefix must be a string of at most 72 characters"
