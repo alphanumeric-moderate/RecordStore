@@ -12773,6 +12773,7 @@ local function reconcile_unknown_release_internal(state: InternalState): (Result
 		update_local_from_envelope(state, envelope, info)
 		state.saved_change_sequence = state.change_sequence
 		state.dirty_since_local = nil
+		state.dirty_age_is_lower_bound = false
 		state.last_saved = make_durable_snapshot(envelope, info, "reconcile_" .. pending.reason)
 		state.pending_operation = nil
 		state.token = nil
@@ -12788,6 +12789,7 @@ local function reconcile_unknown_release_internal(state: InternalState): (Result
 		state.save_requested = false
 		state.last_successful_write_local = now_local()
 		state.last_reconciliation_category = nil
+		scheduler_activation.refresh_durability_risk(state)
 		disconnect_message_subscription(state)
 		observe(state, "reconcile_release", "success", nil)
 		return "success", nil
@@ -13677,6 +13679,7 @@ close_internal = function(state: InternalState, shutdown: boolean): (ResultCode,
 		}
 		state.next_reconciliation = now_local() + 0.25
 		state.last_reconciliation_category = "release_outcome_unknown"
+		scheduler_activation.refresh_durability_risk(state)
 		observe(state, "close", "unknown", last_error or "release outcome is unresolved")
 		return "unknown", last_error or "release outcome is unresolved"
 	end
@@ -13691,6 +13694,9 @@ close_internal = function(state: InternalState, shutdown: boolean): (ResultCode,
 	state.next_queue_poll = math.huge
 	state.takeover_requested = false
 	state.queue_hint = false
+	state.dirty_since_local = nil
+	state.dirty_age_is_lower_bound = false
+	scheduler_activation.refresh_durability_risk(state)
 	disconnect_message_subscription(state)
 	observe(state, "close", "closed", nil)
 	return "closed", nil
