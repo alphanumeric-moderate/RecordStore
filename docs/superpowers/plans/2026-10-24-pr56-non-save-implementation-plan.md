@@ -44,7 +44,8 @@
 - [x] Add general idempotent transactions with canonical request identity, bounded results/receipts, duplicate/conflict/capacity/unknown outcomes and explicit retention guarantees.
 - [x] Add bounded outbox reads and callback-based at-least-once dispatch with per-event destination receipt IDs, unknown-outcome reconciliation, and bounded retention cleanup.
 - [x] Add inbox/transaction receipt-capacity and expiry-recovery tests; surface encoded-sidecar-size exhaustion as capacity while preserving profile data and valid duplicate receipts.
-- [ ] Add purchase receipt processing as an opt-in adapter; never auto-register or replace MarketplaceService callbacks.
+- [x] Add an opt-in legacy developer-product receipt handler factory with receipt/product validation, active-session checks, same-profile durable idempotency, and no implicit MarketplaceService registration.
+- [ ] Add durable receipt status lookup, additional receipt-type adapters, and live-platform acceptance for purchase processing.
 
 ### Slice 4: Recoverable saga coordinator
 
@@ -91,5 +92,6 @@ Implemented and covered by the current Lune regression suite:
 - Atomic source-profile mutation plus durable outbox-intent creation through `CommitWithOutboxAsync`.
 - Bounded `GetOutboxAsync`, `DispatchOutboxAsync`, and `PruneOutboxAsync` APIs: stable event IDs, verified destination receipt IDs, sidecar-only raw-envelope writes, closed-source dispatch, bounded pages/cleanup, and explicit unknown/pending states.
 - Regression coverage for inbox/transaction receipt saturation and expiry recovery: full collections reject new operation IDs without profile mutation; live receipts still deduplicate; expired receipts are reclaimed before a new commit.
+- Opt-in developer-product receipt processing through `PurchaseReceiptProcessor:CreateHandler`: malformed receipt and unsupported product checks, active-profile requirements, durable same-profile grant/idempotency, duplicate acknowledgement, conflict deferral, and explicit finite receipt retention.
 
 Still incomplete: scheduler audit items and full mailbox producer/recovery acceptance matrix; additional malformed-receipt, outbox-capacity and sidecar-saturation fault cases; an application-specific destination adapter that integrates Mailbox V2 and verifies destination receipts; purchase receipt adapter; recoverable saga orchestration; adaptive runtime policy APIs; resumable retention/offline maintenance; durable migration manifests and guarded execution/quarantine/restore; durable indexes/materialized views; erasure inventory/coordinator; and correlated operation tracing. Live Roblox service and rollout acceptance remains a separate release gate.

@@ -504,6 +504,45 @@ These operations can read and update the source outbox while the source `Record`
 
 `Record:PruneOutboxAsync(delivered_before_unix, max_events?)` explicitly removes only events with confirmed `delivered` state and `delivered_at` strictly earlier than the cutoff. The cutoff is a Unix timestamp in **seconds**, not milliseconds. Cleanup is bounded (at most 16 events per call); pending, unknown, and blocked events are never pruned by this API. Cleanup is not automatic.
 
+## Opt-in developer product receipts
+
+`PurchaseReceiptProcessor` creates a legacy `MarketplaceService.ProcessReceipt` callback for developer products. It does not access `MarketplaceService`, assign the global callback, or register anything when the module is required. The game must explicitly compose the returned handler with its existing server-side receipt integration.
+
+The processor requires an active RecordStore profile lookup and an explicit finite receipt-retention window between 1 second and 365 days. It commits the profile mutation and a durable idempotency receipt together through `Record:TransactAsync()`. Only `committed` and matching `duplicate` outcomes return `Enum.ProductPurchaseDecision.PurchaseGranted`; conflicts, unknown writes, capacity limits, missing profiles, invalid receipts, and unconfigured products return `NotProcessedYet`.
+
+```lua
+local MarketplaceService = game:GetService("MarketplaceService")
+local PurchaseReceiptProcessor = require(
+    game:GetService("ServerScriptService").PlayerDataInitializer.PurchaseReceiptProcessor
+)
+
+local processor = PurchaseReceiptProcessor.new({
+    get_record = function(user_id)
+        return active_records[user_id]
+    end,
+    receipt_retention_seconds = 30 * 24 * 60 * 60,
+    on_diagnostic = function(diagnostic)
+        warn(diagnostic.category, diagnostic.status, diagnostic.message)
+    end,
+})
+
+local process_receipt = processor:CreateHandler({
+    [123456] = function(data, receipt)
+        local updated = table.clone(data)
+        updated.coins += 100
+        updated.last_purchase_id = receipt.PurchaseId
+        return updated, { coins_granted = 100 }
+    end,
+})
+
+-- Only set this if this script owns the experience's single receipt callback.
+MarketplaceService.ProcessReceipt = process_receipt
+```
+
+`get_record` should be a fast, non-yielding lookup of an already-loaded, actively owned profile. Product reducers must be deterministic, non-yielding data transformations with no external side effects. Apply inventory Instances, effects, or notifications only after the durable transaction result is confirmed.
+
+The idempotency receipt is retained only for the configured window; this does not guarantee lifetime suppression after expiry. Products that require lifetime uniqueness need a permanent domain ledger or durable entitlement model. This initial adapter covers legacy developer-product receipts only; explicit status lookup, transfer receipt types, cross-profile workflows, and live Roblox acceptance remain separate work.
+
 ## Benchmarks
 
 Performance is tracked with [CodSpeed](https://codspeed.io). The benchmarks run `RecordStore.Mock` scenarios outside Roblox with [Lune](https://github.com/lune-org/lune), a standalone Luau runtime. `bench/RobloxShim.luau` provides the small set of Roblox APIs the mock backend needs (`HttpService`, `DateTime`, `Enum`, `task`, ...).
