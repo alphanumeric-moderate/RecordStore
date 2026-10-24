@@ -124,6 +124,8 @@ local function get_infinemath_formatter(): InfiniteMathFormatterAPI
 end
 
 
+type DurabilityMode = "balanced" | "durability_first" | "read_only_on_risk"
+
 export type Dependencies = {
 	Players: typeof(Players)?,
 	RecordStore: typeof(RecordStore)?,
@@ -132,6 +134,9 @@ export type Dependencies = {
 	InfiniteMathFormatter: InfiniteMathFormatterAPI?,
 	new_instance: ((string) -> Instance)?,
 	task: typeof(task)?,
+	DurabilityMode: DurabilityMode?,
+	MaxDirtyAgeSeconds: number?,
+	LeaseRecoveryEnabled: boolean?,
 }
 
 type PlayerRecord = RecordStore.Record
@@ -211,6 +216,9 @@ local CONFIG = {
 	autosave_interval = 90,
 
 	retry_attempts = 5,
+	durability_mode = ("balanced" :: DurabilityMode),
+	max_dirty_age_seconds = 180,
+	lease_recovery_enabled = false,
 	operation_deadline = 20,
 	load_retry_attempts = 4,
 	load_retry_window = 45,
@@ -580,6 +588,25 @@ local function new(dependencies: Dependencies?): Controller
 	local integer_infinity_value_factory = injected.IntegerInfinityValue or IntegerInfinityValueFactory
 	local infinitemath_value_factory = injected.InfiniteMathValue or InfiniteMathValueFactory
 	local infinimath_formatter = injected.InfiniteMathFormatter
+	local durability_mode: DurabilityMode = injected.DurabilityMode or CONFIG.durability_mode
+	local max_dirty_age_seconds: number = injected.MaxDirtyAgeSeconds or CONFIG.max_dirty_age_seconds
+	local lease_recovery_enabled: boolean = if injected.LeaseRecoveryEnabled ~= nil
+		then injected.LeaseRecoveryEnabled else CONFIG.lease_recovery_enabled
+	if durability_mode ~= "balanced"
+		and durability_mode ~= "durability_first"
+		and durability_mode ~= "read_only_on_risk"
+	then
+		error("DurabilityMode must be balanced, durability_first, or read_only_on_risk")
+	end
+	if not math.isfinite(max_dirty_age_seconds)
+		or max_dirty_age_seconds <= 0
+		or max_dirty_age_seconds > 86400
+	then
+		error("MaxDirtyAgeSeconds must be positive and no greater than 86400")
+	end
+	if type(lease_recovery_enabled) ~= "boolean" then
+		error("LeaseRecoveryEnabled must be a boolean")
+	end
 
 	local function format_native_number(value: number, options: NumberFormatOptions?): string
 		local formatter = infinimath_formatter or get_infinemath_formatter()
@@ -759,6 +786,7 @@ local function new(dependencies: Dependencies?): Controller
 	local closing_records: {[PlayerRecord]: boolean} = {}
 
 	local pending_changes: {[PlayerRecord]: {[string]: DataValue}} = {}
+	local pending_since: {[PlayerRecord]: number} = {}
 	local flush_running: {[PlayerRecord]: boolean} = {}
 	local flush_scheduled: {[PlayerRecord]: boolean} = {}
 	local recovery_flush_requested: {[PlayerRecord]: boolean} = {}
@@ -774,6 +802,9 @@ local function new(dependencies: Dependencies?): Controller
 		if pending == nil then
 			pending = {}
 			pending_changes[record] = pending
+		end
+		if pending_since[record] == nil then
+			pending_since[record] = os.clock()
 		end
 
 		for key, value in pairs(changes) do
@@ -796,12 +827,18 @@ local function new(dependencies: Dependencies?): Controller
 		end
 		if record.State ~= "active" then
 			local pending = pending_changes[record]
-			return pending == nil or next(pending) == nil, "fenced", "record is no longer active"
+			local empty = pending == nil or next(pending) == nil
+			if empty then
+				pending_changes[record] = nil
+				pending_since[record] = nil
+			end
+			return empty, "fenced", "record is no longer active"
 		end
 
 		flush_running[record] = true
 		local last_result: RecordStore.ResultCode? = nil
 		local last_message: string? = nil
+		local drained_read_only_snapshot = false
 
 		while record.State == "active" and os.clock() < end_time do
 			local pending = pending_changes[record]
@@ -820,6 +857,34 @@ local function new(dependencies: Dependencies?): Controller
 			if stats.busy ~= 0 then
 				scheduler.wait(0.05)
 				continue
+			end
+
+			if durability_mode == "read_only_on_risk" then
+				local status_ok, status = pcall(function()
+					return record:GetDurabilityStatus()
+				end)
+				if not status_ok or type(status) ~= "table" then
+					last_result = "unknown"
+					last_message = "could not verify persistence state before flushing accepted PlayerData changes"
+					break
+				end
+				if status.mutation_admission == "read_only" and status.dirty == true then
+					if drained_read_only_snapshot then
+						last_result = "capacity"
+						last_message = "Record remains dirty after the bounded drain save; accepted PlayerData changes remain queued"
+						break
+					end
+					local save_ok, save_result, save_message = pcall(function()
+						return record:Save("playerdata-buffer-drain")
+					end)
+					if not save_ok or save_result ~= "saved" then
+						last_result = if save_ok then save_result :: RecordStore.ResultCode else "unknown"
+						last_message = if save_ok then save_message else tostring(save_result)
+						break
+					end
+					drained_read_only_snapshot = true
+					continue
+				end
 			end
 
 			local batch = table.clone(pending)
@@ -862,6 +927,8 @@ local function new(dependencies: Dependencies?): Controller
 		end
 		local remaining = pending_changes[record]
 		if remaining == nil or next(remaining) == nil then
+			pending_changes[record] = nil
+			pending_since[record] = nil
 			return true, nil, nil
 		end
 
@@ -930,6 +997,9 @@ local function new(dependencies: Dependencies?): Controller
 			pending = {}
 			pending_changes[record] = pending
 		end
+		if pending_since[record] == nil then
+			pending_since[record] = os.clock()
+		end
 		pending[key] = normalized_value
 		schedule_pending_flush(record)
 	end
@@ -952,6 +1022,8 @@ local function new(dependencies: Dependencies?): Controller
 			error("configured PlayerData value is not a supported ValueBase instance")
 		end
 	end
+
+	local mutation_backpressure_reason: (record: PlayerRecord) -> string?
 
 	local function connect_persistent_value(
 		record: PlayerRecord,
@@ -1002,6 +1074,16 @@ local function new(dependencies: Dependencies?): Controller
 				end
 				return
 			end
+			local backpressure = mutation_backpressure_reason(record)
+			if backpressure ~= nil then
+				restoring = true
+				local restore_ok = pcall(assign_backing_value, instance, last_valid_value)
+				restoring = false
+				if not restore_ok then
+					warn("[PlayerData]", record.Key, "could not restore a backpressured value change", key, "unknown error")
+				end
+				return
+			end
 
 			last_valid_value = normalized_value
 			if normalized_value ~= new_value then
@@ -1037,6 +1119,13 @@ local function new(dependencies: Dependencies?): Controller
 				return
 			end
 			if record.State ~= "active" or closing_records[record] then
+				restoring = true
+				backing_value.Value = last_valid_serialized
+				restoring = false
+				return
+			end
+			local backpressure = mutation_backpressure_reason(record)
+			if backpressure ~= nil then
 				restoring = true
 				backing_value.Value = last_valid_serialized
 				restoring = false
@@ -1392,6 +1481,26 @@ local function new(dependencies: Dependencies?): Controller
 		end
 	end
 
+	mutation_backpressure_reason = function(record: PlayerRecord): string?
+		if durability_mode ~= "read_only_on_risk" then
+			return nil
+		end
+		local pending_at = pending_since[record]
+		if pending_at ~= nil and os.clock() - pending_at >= max_dirty_age_seconds then
+			return "pending PlayerData changes exceeded MaxDirtyAgeSeconds; mutations are paused"
+		end
+		local status_ok, status = pcall(function()
+			return record:GetDurabilityStatus()
+		end)
+		if not status_ok or type(status) ~= "table" then
+			return "could not verify persistence risk status; mutations are paused"
+		end
+		if status.mutation_admission == "read_only" or status.dirty_age_slo_exceeded == true then
+			return "persistence risk threshold exceeded; mutations are paused"
+		end
+		return nil
+	end
+
 	local function set_player_value(player: Player, key: string, value: unknown): (boolean, string?)
 		if typeof(player) ~= "Instance" or not player:IsA("Player") then
 			return false, "player must be a Player instance"
@@ -1413,6 +1522,10 @@ local function new(dependencies: Dependencies?): Controller
 		local normalized = normalize_set_value(field, value)
 		if normalized == nil then
 			return false, ("invalid value for PlayerData field %q"):format(key)
+		end
+		local backpressure = mutation_backpressure_reason(record)
+		if backpressure ~= nil then
+			return false, backpressure
 		end
 
 		local requires_instance = CONFIG.leaderstats.enabled
@@ -1462,6 +1575,7 @@ local function new(dependencies: Dependencies?): Controller
 				tostring(record.State), reason or "")
 		end
 		pending_changes[record] = nil
+		pending_since[record] = nil
 		deferred_close_records[record] = nil
 		deferred_close_requested[record] = nil
 		recovery_flush_requested[record] = nil
@@ -1575,6 +1689,9 @@ local function new(dependencies: Dependencies?): Controller
 			return record_store.new(CONFIG.store_name, CONFIG.scope, resolve_key(player), {
 				schema_version = CONFIG.schema_version,
 				autosave_interval = CONFIG.autosave_interval,
+				durability_mode = durability_mode,
+				max_dirty_age_seconds = max_dirty_age_seconds,
+				lease_recovery_enabled = lease_recovery_enabled,
 				lease_duration = CONFIG.lease_duration,
 				lease_renewal = CONFIG.lease_renewal,
 				retry_attempts = CONFIG.retry_attempts,
@@ -1848,6 +1965,7 @@ local function new(dependencies: Dependencies?): Controller
 			and (flushed or pending == nil or next(pending) == nil)
 		then
 			pending_changes[record] = nil
+			pending_since[record] = nil
 			close_record(player, record)
 			closing_records[record] = nil
 			removing[player] = nil
@@ -1861,6 +1979,7 @@ local function new(dependencies: Dependencies?): Controller
 					tostring(record.State), flush_message or tostring(flush_result))
 			end
 			pending_changes[record] = nil
+			pending_since[record] = nil
 			close_record(player, record)
 			closing_records[record] = nil
 			removing[player] = nil
