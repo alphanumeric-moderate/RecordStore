@@ -189,6 +189,12 @@ local duplicate_manual_request = terminal_loss_sagas:RequireManualResolutionAsyn
 )
 expect(duplicate_manual_request.code == "duplicate",
 	"manual-resolution request retry was not idempotent")
+local conflicting_manual_request = terminal_loss_sagas:RequireManualResolutionAsync(
+	"transfer-terminal-unknown-003", terminal_request, "credited", "pending",
+	"manual-request-003", "operator-7", "changed reason under the same manual-request ID"
+)
+expect(conflicting_manual_request.code == "conflict",
+	"manual request ID reuse with a changed reason was incorrectly accepted as duplicate")
 local blocked_transfer_retry = terminal_loss_sagas:TransferAsync(
 	"transfer-terminal-unknown-003", sender, recipient, 2,
 	{ sender_id = "sender", recipient_id = "recipient" }
@@ -237,6 +243,13 @@ local duplicate_manual_resolution = terminal_loss_sagas:ResolveManualAsync(
 )
 expect(duplicate_manual_resolution.code == "duplicate",
 	"manual resolution retry did not return its stable duplicate outcome")
+local conflicting_manual_resolution = terminal_loss_sagas:ResolveManualAsync(
+	"transfer-terminal-unknown-003", terminal_request, "manual-request-003", "manual-result-003",
+	"confirm_settled", "operator-9", "different reason under the same resolution ID",
+	function() error("conflicting resolution must be rejected before verifier invocation") end
+)
+expect(conflicting_manual_resolution.code == "conflict",
+	"resolution ID reuse with changed operator/reason was incorrectly accepted as duplicate")
 expect(sender:Get().Balance == 78 and recipient:Get().Balance == 47,
 	"manual resolution altered a profile balance")
 local resumed_terminal = terminal_loss_sagas:TransferAsync(
