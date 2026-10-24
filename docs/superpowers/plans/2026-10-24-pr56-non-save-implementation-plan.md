@@ -51,12 +51,15 @@
 - [ ] Add durable receipt status lookup, additional receipt-type adapters, and live-platform acceptance for purchase processing.
 
 ### Slice 4: Recoverable saga coordinator
+- [x] Add an opt-in durable cross-profile transfer saga with stable operation IDs, reservation/credit/settlement phases, compensation, durable status, and explicit unresolved outcomes.
 
 - [ ] Persist bounded workflow identity, step state, retry/compensation state and unresolved external outcomes.
 - [ ] Resume from authoritative coordinator records, preserve idempotency across retries, and expose explicit manual-resolution states.
 - [ ] Add crash/failure injection for every step boundary; never claim cross-profile atomic transactions.
 
 ### Slice 5: Server-local operations and adaptive governor
+- [x] Add versioned bounded runtime policy updates routed to the existing core scheduler, plus a read-only runtime snapshot and diagnostic dirty-age policy.
+- [x] Add resumable bounded maintenance compaction with persisted cursors and generation-aware delete callbacks; real service effects remain behind application adapters.
 
 - [ ] Add versioned bounded runtime policies and read-only health/runtime snapshots on top of the current scheduler/governor.
 - [ ] Preserve the internal critical persistence reserve and keep adaptive changes opt-in.
@@ -64,6 +67,8 @@
 - [ ] Add fairness, low-budget, throttle, lease-margin, pause/resume and bounded-progress tests.
 
 ### Slice 6: Migration and Profile Doctor
+- [x] Add durable migration manifests with stable migration IDs/revisions, guarded execution through Record transactions, explicit failed-step quarantine, and operator-audited quarantine resolution.
+- [x] Add durable profile quarantine status/resolve APIs and keep repair preview read-only; restore is revision/session guarded and records operator ID plus reason.
 
 - [x] Add a process-local migration registry with stable IDs, declared implementation revisions, compatibility ranges, forward-only edges and ambiguous-path rejection. A target with no path fails closed during preview.
 - [x] Add bounded read-only path/type migration previews. Preview executes non-yielding transformations on a snapshot and never persists the result.
@@ -72,6 +77,9 @@
 - [ ] Ensure restore never overwrites protocol metadata, receipts, fencing state or erasure tombstones.
 
 ### Slice 7: Projections, erasure and operation tracing
+- [x] Add opt-in durable event-driven projections, revision/idempotency checks, bounded rebuild cursors and durable uniqueness reservations.
+- [x] Add resumable bounded erasure manifests with explicit application family inventory, writer fence, dependency check, and generation-aware redaction/deletion callbacks.
+- [x] Add bounded redacted trace buffering and optional durable trace flush/read reconciliation.
 
 - [ ] Add opt-in durable secondary indexes/materialized views backed by durable events or a verified snapshot/cursor protocol, with idempotent projection offsets and rebuild status.
 - [ ] Add a user-data family inventory and resumable erasure plan/execution/status that fences recreation and reports uncertain/unmatched families.
@@ -97,6 +105,6 @@ Implemented and covered by the current Lune regression suite:
 - Regression coverage for inbox/transaction receipt saturation and expiry recovery: full collections reject new operation IDs without profile mutation; live receipts still deduplicate; expired receipts are reclaimed before a new commit.
 - Opt-in developer-product receipt processing through `PurchaseReceiptProcessor:CreateHandler`: malformed receipt and unsupported product checks, active-profile requirements, durable same-profile grant/idempotency, duplicate acknowledgement, conflict deferral, and explicit finite receipt retention.
 
-Still incomplete: scheduler audit items and the full Mailbox V2 producer/recovery acceptance matrix; durable receipt status lookup and additional purchase receipt types; recoverable saga orchestration; adaptive runtime policy APIs; resumable retention/offline maintenance; durable migration manifests and guarded execution/quarantine/restore; durable indexes/materialized views; erasure inventory/coordinator; and correlated operation tracing. Live Roblox service and rollout acceptance remains a separate release gate.
+Still incomplete: scheduler and Mailbox V2 crash/recovery acceptance matrix; handler-side destination effect integration and real multi-server acceptance; durable receipt status lookup and additional purchase receipt types; live enforcement of quarantine across every writer; real key-family inventory and RTBF completeness; independent code review; fault-injection execution on the final head; and live Roblox Studio/DataStore throttling, crash/shutdown and mixed-version rollback acceptance.
 
 The outbox-to-Mailbox V2 adapter receipt proves durable mailbox acceptance only. It does not prove that a destination handler executed, or that an external effect completed. Keep handler-side processing idempotent and retain live multi-server acceptance as a separate release gate.

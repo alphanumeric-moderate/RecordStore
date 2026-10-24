@@ -504,6 +504,16 @@ These operations can read and update the source outbox while the source `Record`
 
 `Record:PruneOutboxAsync(delivered_before_unix, max_events?)` explicitly removes only events with confirmed `delivered` state and `delivered_at` strictly earlier than the cutoff. The cutoff is a Unix timestamp in **seconds**, not milliseconds. Cleanup is bounded (at most 16 events per call); pending, unknown, and blocked events are never pruned by this API. Cleanup is not automatic.
 
+## Opt-in RecordStore V2 non-save services
+
+`RecordStoreV2` is a side-effect-free-on-require, opt-in facade for durable cross-profile sagas, versioned migration manifests, profile diagnosis/repair and quarantine records, erasure plans, eventual projections/unique reservations, bounded redacted traces, and resumable maintenance. All storage-facing workflows accept explicit DataStore-like adapters and use bounded records rather than scanning an entire keyspace.
+
+The saga coordinator is a **recoverable multi-key workflow**, not a cross-key atomic transaction. Use stable transfer IDs, retain the source/recipient operation IDs, and reconcile `unknown` before deciding whether to retry or compensate. Projection rows are eventual and require durable source revision/event IDs. Erasure coverage is only as complete as the application-provided family inventories, writer fences, dependency checks, and key templates.
+
+Versioned runtime policy updates are routed to the current RecordStore scheduler policy API when scheduler fields are present. `max_dirty_age_seconds` is diagnostic/SLO policy; it does not create an unconditional save guarantee. The V2 facade does not register hidden request hooks or enable Mailbox V2 globally. Provide an explicit activation guard.
+
+Durable migration manifests and quarantine records help coordinate operators, but every game write path must enforce the quarantine state before mutating data. `ProfileDoctor.Restore` remains guarded by active session ownership, an expected revision, a stable restore ID, operator identity and reason; configure an application authorization callback for the operator boundary. These services remain opt-in and require real Roblox service/rollback acceptance before production enablement.
+
 ## Opt-in outbox-to-Mailbox V2 delivery
 
 `RecordStoreOutboxMailboxAdapter` adapts `Record:DispatchOutboxAsync()` to the embedded Mailbox V2. It verifies the resolved destination's store, scope, profile key, and optional UserId, requires an explicit activation guard, binds Mailbox V2 only when the destination Record is active and its legacy queue is empty, and uses the durable outbox event ID as the mailbox idempotency key.

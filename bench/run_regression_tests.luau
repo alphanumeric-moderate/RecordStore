@@ -9,6 +9,8 @@ for _, path in {
 	"src/PlayerDataInitializer/RecordStore.luau",
 	"src/PlayerDataInitializer/PurchaseReceiptProcessor.luau",
 	"src/PlayerDataInitializer/RecordStoreOutboxMailboxAdapter.luau",
+	"src/PlayerDataInitializer/RecordStoreV2.luau",
+	"tests/RecordStoreV2NonSaveServicesRegression.server.luau",
 	"tests/RecordStore_OutboxMailboxAdapterRegression.server.luau",
 	"src/PlayerDataInitializer/PlayerDataCore.luau",
 	"src/PlayerDataInitializer/IntegerInfinityValue.luau",
@@ -81,5 +83,6 @@ Shim.run_script("tests/RecordStore_LegacyPayloadRegression.server.luau")
 Shim.run_script("tests/RecordStore_UnknownSaveRecoveryRegression.server.luau")
 Shim.run_script("tests/PurchaseReceiptProcessorRegression.server.luau")
 Shim.run_script("tests/RecordStore_OutboxMailboxAdapterRegression.server.luau")
+Shim.run_script("tests/RecordStoreV2NonSaveServicesRegression.server.luau")
 Shim.run_script("tests/RecordStore_NonSaveRoadmapRegression.server.luau")
 Shim.close()
