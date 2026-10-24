@@ -4778,6 +4778,9 @@ do
 			return next_record
 		end)
 		if claim_error ~= nil then
+			if string.find(claim_error, "unsupported schema version", 1, true) then
+				return nil, ok("unsupported_schema", route, nil, claim_error)
+			end
 			return nil, ok("unknown", route, nil, "claim outcome is unknown: " .. claim_error)
 		end
 		if claimed == nil then
