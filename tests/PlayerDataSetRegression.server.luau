@@ -6,6 +6,15 @@ local Players = game:GetService("Players")
 local ServerScriptService = game:GetService("ServerScriptService")
 local RecordStore = require(ServerScriptService.RecordStore)
 local PlayerDataCore = require(ServerScriptService.PlayerDataCore)
+
+local zero_dirty_age_ok = pcall(function()
+	PlayerDataCore.new({
+		RecordStore = RecordStore.Mock,
+		MaxDirtyAgeSeconds = 0,
+	})
+end)
+assert(not zero_dirty_age_ok,
+	"PlayerDataCore must reject MaxDirtyAgeSeconds = 0 instead of silently using its default")
 local controller = PlayerDataCore.new({
 	RecordStore = RecordStore.Mock,
 })
