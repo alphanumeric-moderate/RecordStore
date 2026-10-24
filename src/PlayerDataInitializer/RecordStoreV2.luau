@@ -1460,12 +1460,14 @@ local function saga_coordinator(store, options)
 	local MAX_SAGA_TRANSITIONS = 32
 	local function valid_transition_history(history)
 		if type(history) ~= "table" or #history > MAX_SAGA_TRANSITIONS or key_count(history) ~= #history then return false end
-		for index, transition in ipairs(history) do
-			if type(transition) ~= "table" or transition.attempt ~= index + (history[1].attempt or 0) - 1
-				or not finite(transition.attempt) or transition.attempt < 1 or math.floor(transition.attempt) ~= transition.attempt
+		local previous_attempt = 0
+		for _, transition in ipairs(history) do
+			if type(transition) ~= "table" or not finite(transition.attempt) or transition.attempt <= previous_attempt
+				or math.floor(transition.attempt) ~= transition.attempt
 				or not finite(transition.at) or type(transition.from_phase) ~= "string" or type(transition.to_phase) ~= "string"
 				or type(transition.from_status) ~= "string" or type(transition.to_status) ~= "string"
 			then return false end
+			previous_attempt = transition.attempt
 		end
 		for key in pairs(history) do
 			if type(key) ~= "number" or not finite(key) or math.floor(key) ~= key or key < 1 or key > #history then return false end

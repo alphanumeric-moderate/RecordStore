@@ -250,6 +250,12 @@ for _, transition in ipairs(transition_history) do
 end
 expect(saw_manual_transition and saw_settled_transition,
 	"saga transition history omitted the manual pause or verified settlement")
+local previous_transition_attempt = 0
+for _, transition in ipairs(transition_history) do
+	expect(transition.attempt > previous_transition_attempt,
+		"saga transition history must be strictly increasing, but may have gaps between transitions")
+	previous_transition_attempt = transition.attempt
+end
 local duplicate_manual_resolution = terminal_loss_sagas:ResolveManualAsync(
 	"transfer-terminal-unknown-003", terminal_request, "manual-request-003", "manual-result-003",
 	"confirm_settled", "operator-8", "verified durable settlement evidence",
