@@ -37,7 +37,7 @@
 - [ ] Audit existing Mailbox V2 coverage against the canonical envelope, producer idempotency, bounded preparation discoverability, claims/renewal/ack/DLQ/replay, and v3 compatibility contracts.
 - [ ] Implement missing idempotent producer receipts and recovery for partial preparation/acknowledgement, without duplicating already implemented strict per-key ordering.
 - [ ] Add bounded operational APIs for recovery, capacity/status reporting, safe reclamation and resumable maintenance; preserve advisory-only semantics for separate indexes and MessagingService hints.
-- [x] Add crash-window, competing-claim, capacity-full, duplicate-producer, stale-index and response-loss tests for producer preparation, acknowledgement, expired claims, and DLQ transition recovery.
+- [x] Add crash-window, competing-claim, capacity-full, duplicate-producer, stale-index and response-loss tests for producer preparation, acknowledgement, expired claims, and DLQ transition recovery. Capacity-full recovery accepts an explicit `capacity` result or an ambiguous `unknown` paired with durable blocked-preparation metadata; it does not misclassify partial writes as definite rejection.
 
 ### Slice 3: Same-profile inbox/outbox and idempotent transactions
 

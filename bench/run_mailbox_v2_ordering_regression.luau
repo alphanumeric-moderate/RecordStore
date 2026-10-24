@@ -855,7 +855,15 @@ local function test_mailbox_capacity_is_bounded_and_reported()
 		priority = "normal",
 		available_at = now_ms,
 	})
-	assert(second.code == "capacity", "mailbox capacity exhaustion was not explicit: " .. tostring(second.code))
+	assert(second.code == "capacity" or second.code == "unknown",
+		"mailbox capacity exhaustion returned unsafe success: " .. tostring(second.code))
+	local recovery = mailbox:RecoverAsync()
+	assert(recovery.code == "success",
+		"capacity-blocked preparation was not safely recoverable: " .. tostring(recovery.code))
+	if second.code == "unknown" then
+		assert(type(recovery.message) == "table" and recovery.message.capacity_blocked_preparations == 1,
+			"ambiguous capacity rejection was not exposed in recovery metadata")
+	end
 	local queue, queue_result = mailbox:GetQueueAsync()
 	assert(queue_result.code == "success" and #queue == 1 and queue[1].Id == first.message_id,
 		"capacity exhaustion created an extra active placement")
