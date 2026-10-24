@@ -15088,7 +15088,9 @@ RecordStore._internals.transact = (function()
 				end
 				local sidecars_valid, sidecars_error = protocol.validate(sidecars)
 				if not sidecars_valid then
-					decision = if string.find(sidecars_error or "", "capacity") ~= nil then "capacity" else "validation"
+					decision = if string.find(sidecars_error or "", "capacity") ~= nil
+					or string.find(sidecars_error or "", "encoded-size limit") ~= nil
+					then "capacity" else "validation"
 					decision_message = sidecars_error
 					return nil, nil, nil
 				end
