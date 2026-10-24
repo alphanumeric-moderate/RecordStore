@@ -14345,15 +14345,20 @@ RecordStore._internals.profile_doctor = (function()
 		return normalized, nil
 	end
 
-	local function classify_read(snapshot: Snapshot?, read_result: ResultCode): ProfileDoctorClassification
+	local function classify_read(
+		snapshot: Snapshot?,
+		read_result: ResultCode,
+		observed_at: number
+	): ProfileDoctorClassification
 		if read_result == "not_found" then return "missing" end
 		if read_result == "legacy" then return "legacy" end
 		if read_result == "future_schema" then return "future_schema" end
 		if read_result == "corrupt" then return "corrupt" end
 		if snapshot == nil then return "unreadable" end
 		if snapshot.Tombstoned then return "tombstoned" end
-		if snapshot.SessionActive then return "active_session" end
-		if snapshot.LeaseUntil ~= nil then return "expired_session" end
+		if snapshot.LeaseUntil ~= nil then
+			return if snapshot.LeaseUntil > observed_at then "active_session" else "expired_session"
+		end
 		return "no_session"
 	end
 
@@ -14414,7 +14419,8 @@ RecordStore._internals.profile_doctor = (function()
 		scope: string,
 		key: string,
 		options: ProfileDoctorOptions?,
-		reader: any
+		reader: any,
+		mock: boolean
 	): (ProfileInspection?, ResultCode, string?)
 		local valid_identity, identity_message = validate_store_identity(name, scope, key)
 		if not valid_identity then return nil, "invalid", identity_message end
@@ -14432,7 +14438,8 @@ RecordStore._internals.profile_doctor = (function()
 		)
 		if read_result == "invalid" then return nil, "invalid", read_message end
 		local code = normalize_result_code(read_result) or "unknown"
-		local classification = classify_read(snapshot, code)
+		local observed_at = session_now_unix(mock)
+		local classification = classify_read(snapshot, code, observed_at)
 		local node_count: number? = nil
 		local data_depth: number? = nil
 		local encoded_bytes: number? = nil
@@ -14446,7 +14453,7 @@ RecordStore._internals.profile_doctor = (function()
 			StoreName = name,
 			Scope = scope,
 			ProfileKey = key,
-			ObservedAt = now_unix(),
+			ObservedAt = observed_at,
 			Consistency = "point_in_time_non_authoritative",
 			Classification = classification,
 			ReadResult = code,
@@ -14456,7 +14463,9 @@ RecordStore._internals.profile_doctor = (function()
 			CreatedAt = if snapshot ~= nil then snapshot.CreatedAt else nil,
 			UpdatedAt = if snapshot ~= nil then snapshot.UpdatedAt else nil,
 			Tombstoned = if snapshot ~= nil then snapshot.Tombstoned else nil,
-			SessionActive = if snapshot ~= nil then snapshot.SessionActive else nil,
+			SessionActive = if snapshot ~= nil then
+				snapshot.LeaseUntil ~= nil and snapshot.LeaseUntil > observed_at and not snapshot.Tombstoned
+				else nil,
 			LeaseUntil = if snapshot ~= nil then snapshot.LeaseUntil else nil,
 			OwnerJobId = if snapshot ~= nil then snapshot.SessionJobId else nil,
 			OwnerPlaceId = if snapshot ~= nil then snapshot.SessionPlaceId else nil,
@@ -14668,7 +14677,7 @@ RecordStore.inspect_profile_async = (function()
 		key: string,
 		options: ProfileDoctorOptions?
 	): (ProfileInspection?, ResultCode, string?)
-		return inspect(name, scope, key, options, reader)
+		return inspect(name, scope, key, options, reader, false)
 	end
 end)()
 
@@ -15328,7 +15337,7 @@ RecordStore.Mock = (function()
 				key: string,
 				options: ProfileDoctorOptions?
 			): (ProfileInspection?, ResultCode, string?)
-				return inspect(name, scope, key, options, read_async_mock)
+				return inspect(name, scope, key, options, read_async_mock, true)
 			end
 		end)(),
 		diff_profile_versions_async = (function()
