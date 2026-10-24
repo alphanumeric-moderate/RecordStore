@@ -56,7 +56,7 @@
 
 - [ ] Persist bounded workflow identity, step state, retry/compensation state and unresolved external outcomes.
 - [ ] Resume from authoritative coordinator records, preserve idempotency across retries, and expose explicit manual-resolution states.
-- [x] Add crash/failure injection for saga manifest creation and reconciliation on response loss; additional failure injection across every individual transfer leg remains needed. Never claim cross-profile atomic transactions.
+- [x] Add crash/failure injection for saga manifest creation and response loss; compare full intended coordinator state before reconciling an ambiguous write, and return `settled` only when that exact terminal state is durable. A pre-commit terminal-state failure stays `unknown` at the last durable phase and resumes idempotently with the same operation ID; additional failure injection across every transfer leg remains needed. Never claim cross-profile atomic transactions.
 
 ### Slice 5: Server-local operations and adaptive governor
 - [x] Add versioned bounded runtime policy updates routed to the existing core scheduler, plus a read-only runtime snapshot and diagnostic dirty-age policy.

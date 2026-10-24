@@ -111,6 +111,42 @@ expect(sender:Get().Balance == 80 and recipient:Get().Balance == 45,
 local durable_transfer_status = sagas:GetStatus("transfer-response-loss-002")
 expect(durable_transfer_status.code == "settled", "saga status read did not return the durable terminal phase")
 
+local terminal_loss_store = new_store()
+local terminal_loss_sagas = V2.Sagas.new(terminal_loss_store)
+local terminal_loss_enabled = true
+local terminal_base_update = terminal_loss_store.UpdateAsync
+terminal_loss_store.UpdateAsync = function(self, key, transform)
+	return terminal_base_update(self, key, function(old)
+		local proposed = transform(old)
+		if terminal_loss_enabled and type(proposed) == "table"
+			and proposed.transfer_id == "transfer-terminal-unknown-003" and proposed.phase == "settled"
+		then
+			terminal_loss_enabled = false
+			error("injected pre-commit rejection of terminal saga state")
+		end
+		return proposed
+	end)
+end
+local uncertain_terminal = terminal_loss_sagas:TransferAsync(
+	"transfer-terminal-unknown-003", sender, recipient, 2,
+	{ sender_id = "sender", recipient_id = "recipient" }
+)
+expect(uncertain_terminal.code == "unknown" and uncertain_terminal.phase == "credited",
+	"saga reported a terminal phase that was not durably committed")
+local uncertain_terminal_status = terminal_loss_sagas:GetStatus("transfer-terminal-unknown-003")
+expect(uncertain_terminal_status.phase == "credited",
+	"saga status did not retain the last durable phase after an uncommitted terminal update")
+expect(sender:Get().Balance == 78 and recipient:Get().Balance == 47,
+	"uncertain terminal status changed the already-applied transfer legs")
+local resumed_terminal = terminal_loss_sagas:TransferAsync(
+	"transfer-terminal-unknown-003", sender, recipient, 2,
+	{ sender_id = "sender", recipient_id = "recipient" }
+)
+expect(resumed_terminal.code == "settled" and terminal_loss_sagas:GetStatus("transfer-terminal-unknown-003").phase == "settled",
+	"retry with the stable operation ID did not resume the durable credited saga")
+expect(sender:Get().Balance == 78 and recipient:Get().Balance == 47,
+	"resuming the saga applied a transfer leg more than once")
+
 local projection_store = new_store()
 local projections = V2.Projections.new(projection_store)
 local registered = projections:Register("balance_projection_v1", 1, function(current, event)

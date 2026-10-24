@@ -1354,20 +1354,31 @@ local function saga_coordinator(store, options)
 	local function update_saga(id, request, mutate)
 		local material = canonical(request)
 		local key, now = "rv2s-" .. digest(id), os.time()
-		local decision
+		local decision, candidate
 		local value, message = adapter_call(store, "UpdateAsync", key, function(old)
 			decision = nil
+			candidate = nil
 			if old ~= nil and (type(old) ~= "table" or old.transfer_id ~= id or old.request_material ~= material) then decision = "conflict"; return old end
 			local state = if type(old) == "table" then copy(old) else { version = 1, transfer_id = id, request_material = material, phase = "requested", status = "pending", created_at = now, attempts = 0 }
 			local changed, err = pure(mutate, state)
 			if type(changed) ~= "table" then decision = "invalid"; return state end
-			changed.updated_at = now; changed.attempts = (changed.attempts or 0) + 1
+			changed.updated_at = now
+			changed.attempts = (changed.attempts or 0) + 1
+			candidate = copy(changed)
 			decision = "committed"
 			return changed
 		end)
 		if message then
 			local seen = adapter_call(store, "GetAsync", key)
-			if type(seen) == "table" and seen.transfer_id == id and seen.request_material == material then return seen, "unknown_reconciled" end
+			if type(seen) == "table" and type(candidate) == "table"
+				and seen.transfer_id == id and seen.request_material == material
+			then
+				local expected_ok, expected_material = pcall(canonical, candidate)
+				local seen_ok, seen_material = pcall(canonical, seen)
+				if expected_ok and seen_ok and expected_material == seen_material then
+					return copy(seen), "committed"
+				end
+			end
 			return nil, "unknown", message
 		end
 		if decision ~= "committed" then return nil, decision or "unknown" end
@@ -1473,8 +1484,16 @@ local function saga_coordinator(store, options)
 				local marked, code = mark("credited", "reconciliation_required", "recipient credited but source escrow settlement unresolved")
 				return { code = if marked then "reconciliation_required" else code, transfer_id = id }
 			end
-			local finished, finish_code = mark("settled", "settled")
-			return { code = if finished then "settled" else finish_code or "unknown", phase = "settled", transfer_id = id }
+			local finished, finish_code, finish_error = mark("settled", "settled")
+			if type(finished) ~= "table" or finished.phase ~= "settled" or finished.status ~= "settled" then
+				return {
+					code = "unknown",
+					phase = if type(finished) == "table" then finished.phase else saga.phase,
+					transfer_id = id,
+					message = finish_error or (finish_code and tostring(finish_code)) or "settlement manifest is unresolved",
+				}
+			end
+			return { code = "settled", phase = "settled", transfer_id = id }
 		end
 		return self:GetStatus(id)
 	end
