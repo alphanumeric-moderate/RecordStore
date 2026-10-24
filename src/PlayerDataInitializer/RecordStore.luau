@@ -15373,7 +15373,7 @@ outbox_engine = (function()
 	end
 
 	local function get(self: Record, max_events: number?): ({ OutboxEvent }, ResultCode, string?)
-		local entries, code, message = get_entries(self, max_events)
+		local entries: { any }, code: ResultCode, message: string? = get_entries(self, max_events)
 		local result: { OutboxEvent } = {}
 		for _, entry in ipairs(entries) do result[#result + 1] = entry.public :: OutboxEvent end
 		return result, code, message
@@ -15540,7 +15540,7 @@ outbox_engine = (function()
 		self: Record, dispatcher: OutboxDispatcher, max_events: number?
 	): (number, ResultCode, string?)
 		if type(dispatcher) ~= "function" then return 0, "invalid", "dispatcher must be a function" end
-		local entries, read_code, read_message = get_entries(self, max_events)
+		local entries: { any }, read_code: ResultCode, read_message: string? = get_entries(self, max_events)
 		if read_code ~= "success" then return 0, read_code, read_message end
 		local delivered_count = 0
 		local failed_count = 0
