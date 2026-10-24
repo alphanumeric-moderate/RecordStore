@@ -1899,11 +1899,17 @@ local function new_projections(store, options)
 					return stop_with_status("invalid", "blocked", "source page is not a dense numeric array")
 				end
 			end
+			if complete == true and next_cursor ~= nil then
+				return stop_with_status("invalid", "blocked", "complete source page must not return a next cursor")
+			end
+			if complete == false and next_cursor == nil then
+				return stop_with_status("invalid", "blocked", "incomplete source page must return a next cursor")
+			end
 			local cursor_ok, next_cursor_text = pcall(canonical, next_cursor)
 			if not cursor_ok then return stop_with_status("invalid", "blocked", "source cursor is not canonicalizable") end
 			local prior_ok, prior_cursor_text = pcall(canonical, manifest.cursor)
 			if not prior_ok then return stop_with_status("corrupt", "blocked", "durable rebuild cursor is malformed") end
-			if complete ~= true and next_cursor ~= nil and next_cursor_text == prior_cursor_text then
+			if complete == false and next_cursor_text == prior_cursor_text then
 				return stop_with_status("blocked", "blocked", "source cursor made no progress")
 			end
 			for _, event in ipairs(page) do
@@ -1916,7 +1922,7 @@ local function new_projections(store, options)
 			candidate.cursor = next_cursor
 			candidate.pages = (manifest.pages or 0) + 1
 			candidate.processed = (manifest.processed or 0) + #page
-			candidate.status = if complete or next_cursor == nil then "completed" else "in_progress"
+			candidate.status = if complete then "completed" else "in_progress"
 			candidate.last_error = nil
 			candidate.updated_at = os.time()
 			local updated, update_code, update_message = replace_manifest(manifest, candidate)

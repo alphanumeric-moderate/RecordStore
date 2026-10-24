@@ -215,6 +215,30 @@ local wrong_snapshot = restarted_rebuild_projections:RebuildDurableAsync(
 )
 expect(wrong_snapshot.code == "conflict",
 	"durable rebuild ID was reused with a different source snapshot")
+
+local malformed_rebuild_store = new_store()
+local malformed_rebuilds = V2.Projections.new(malformed_rebuild_store)
+expect(malformed_rebuilds:Register("malformed_cursor_v1", 1, function(current, event)
+	local updated = clone(current)
+	updated.total = (updated.total or 0) + event.amount
+	return updated
+end) == true, "malformed cursor projection registration failed")
+local missing_cursor_page = malformed_rebuilds:RebuildDurableAsync(
+	"malformed_cursor_v1", "rebuild-missing-cursor", "snapshot-17",
+	function() return {}, nil, false, "snapshot-17" end,
+	1
+)
+expect(missing_cursor_page.code == "invalid" and missing_cursor_page.status == "blocked",
+	"durable rebuild accepted an incomplete page without a continuation cursor")
+expect(malformed_rebuilds:GetRebuildStatusAsync("malformed_cursor_v1", "rebuild-missing-cursor").status == "blocked",
+	"durable rebuild did not persist its malformed page contract failure")
+local extra_cursor_page = malformed_rebuilds:RebuildDurableAsync(
+	"malformed_cursor_v1", "rebuild-extra-cursor", "snapshot-17",
+	function() return {}, "unexpected-page", true, "snapshot-17" end,
+	1
+)
+expect(extra_cursor_page.code == "invalid" and extra_cursor_page.status == "blocked",
+	"durable rebuild accepted a completed page with a continuation cursor")
 projection_store.fail_after_next_update = true
 local response_loss_projection = projections:ApplyAsync("balance_projection_v1", {
 	event_id = "projection-event-2", entity_id = "user-1", source_revision = 2, amount = 5,
