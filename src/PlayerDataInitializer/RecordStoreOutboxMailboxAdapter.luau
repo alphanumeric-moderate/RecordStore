@@ -93,7 +93,7 @@ local function validate_destination(record: RecordStore.Record, event: RecordSto
 			return false, "destination UserId metadata is invalid"
 		end
 		local found = false
-		for _, user_id in ipairs(identity.user_ids) do
+		for _, user_id in ipairs(identity.user_ids :: { unknown }) do
 			if user_id == event.DestinationUserId then found = true; break end
 		end
 		if not found then return false, "destination profile does not own the event UserId" end
