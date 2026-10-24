@@ -27,7 +27,7 @@
 ### Slice 1: Audit and complete PR #37 non-save scheduling correctness
 
 - [ ] Compare the merged scheduler implementation and public API against PR #39 sections 28-29 and the latest PR #37 follow-up findings.
-- [ ] Add focused tests for reserved work-class aliases, dependency terminal history while queued/in-flight dependents hold references, and bounded reclamation after all dependents terminate.
+- [x] Add focused tests for reserved work-class aliases, dependency terminal history while queued/in-flight dependents hold references, and bounded reclamation after all dependents terminate.
 - [ ] Fix only reproduced defects; preserve queue bounds and critical-lane isolation.
 - [ ] Record which omissions are intentionally rejected by PR #39, rather than treating them as missing features.
 
