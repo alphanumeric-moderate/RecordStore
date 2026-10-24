@@ -393,7 +393,23 @@ end
 RecordStore.Mock.reset()
 
 do
-	local record = open_test_record("release-commit-then-error")
+	local risk_events: { string } = {}
+	local record = RecordStore.Mock.new("RecordStore_UnknownSaveRecoveryRegression", "global",
+		"release-commit-then-error", {
+			schema_version = 1,
+			autosave_interval = 1000,
+			lease_duration = 180,
+			lease_renewal = 60,
+			operation_deadline = 2,
+			retry_attempts = 1,
+			on_event = function(event)
+				if event == "durability_risk" or event == "durability_recovered" then
+					table.insert(risk_events, event)
+				end
+			end,
+		})
+	local open_result, open_message = record:Open({ coins = 10, label = "initial" })
+	assert(open_result == "created" or open_result == "loaded", open_message)
 	local updated, update_message = record:Update(function(data)
 		(data :: { [string]: RecordStore.JsonValue }).coins = 20
 		return data
@@ -410,6 +426,10 @@ do
 	assert(operation_id ~= nil, "ambiguous release must retain its operation ID")
 	assert(status.ownership == "uncertain", "ambiguous release must report uncertain ownership")
 	assert(record.State == "unknown", "ambiguous release must keep the public state fenced")
+	assert(risk_events[1] == "durability_risk",
+		"ambiguous release must emit one durability-risk transition")
+	assert(status.risk_active == true and status.risk_reason == "write_or_lease_outcome_unknown",
+		"ambiguous release must expose its unresolved durability risk")
 
 	RecordStore.Mock.set_get_failures(0)
 	local recovery_result, recovery_message = RecordStore.Mock.reconcile(record)
@@ -417,6 +437,10 @@ do
 	assert(record.State == "closed", "reconciled committed release must not resurrect the session")
 	status = record:GetDurabilityStatus()
 	assert(status.pending_operation_id == nil, "confirmed release must clear its pending operation")
+	assert(status.risk_active == false and status.risk_reason == nil,
+		"confirmed release must clear the durability-risk state")
+	assert(risk_events[2] == "durability_recovered",
+		"confirmed release must emit the matching durability-recovered transition")
 	local durable = RecordStore.Mock.get_record_raw(
 		"RecordStore_UnknownSaveRecoveryRegression",
 		"global",
