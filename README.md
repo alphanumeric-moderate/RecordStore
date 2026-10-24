@@ -428,6 +428,59 @@ end
 ```
 
 
+## Profile Doctor and schema migration preview
+
+The read-only Profile Doctor APIs report profile protocol state, a bounded data-size summary, and historical version differences without returning raw profile values.
+
+```lua
+local inspection, result, message =
+    RecordStore.inspect_profile_async("PlayerData", "global", "Player_123")
+
+if result == "success" then
+    print(inspection.Classification, inspection.Revision, inspection.DataNodeCount)
+end
+
+local diff, diff_result, diff_message = RecordStore.diff_profile_versions_async(
+    "PlayerData",
+    "global",
+    "Player_123",
+    before_version,
+    after_version,
+    { max_nodes = 4096, max_depth = 32, max_changes = 256 }
+)
+```
+
+Inspection is a point-in-time, non-authoritative observation. Historical diffs are bounded and include changed paths and value types, not the stored values. Truncation is reported explicitly.
+
+A process-local migration registry supports stable IDs, explicit implementation revisions, declared compatible schema ranges, and forward-only version edges. The registry rejects conflicting ID reuse and ambiguous paths. Load identical migration registrations in every server process that should preview the same schema changes.
+
+```lua
+local register_result, register_message = RecordStore.register_migration("PlayerData", {
+    id = "playerdata-v1-v2",
+    from_version = 1,
+    to_version = 2,
+    implementation_revision = "playerdata-v1-v2@1",
+    compatible_schema_min = 1,
+    compatible_schema_max = 2,
+    transform = function(_from_version, data)
+        local migrated = table.clone(data :: { [string]: RecordStore.JsonValue })
+        migrated.migration_marker = true
+        return migrated
+    end,
+    validator = function(value)
+        return type(value) == "table", "expected a table"
+    end,
+})
+
+local preview, preview_result, preview_message =
+    RecordStore.preview_migration_async("PlayerData", "global", "Player_123", 2)
+if preview_result == "success" then
+    print(preview.SourceSchemaVersion, preview.TargetSchemaVersion, #preview.Steps)
+end
+```
+
+The preview is a dry run only. It runs non-yielding migration callbacks against a read-only snapshot, validates each step, and returns bounded path/type changes without writing the migrated data. The registry and migration code are not persisted by RecordStore, and this API does not automatically migrate profiles during `Open`; guarded execution, durable registry manifests, quarantine, and crash-safe migration acceptance remain unfinished roadmap work.
+
 ## Benchmarks
 
 Performance is tracked with [CodSpeed](https://codspeed.io). The benchmarks run `RecordStore.Mock` scenarios outside Roblox with [Lune](https://github.com/lune-org/lune), a standalone Luau runtime. `bench/RobloxShim.luau` provides the small set of Roblox APIs the mock backend needs (`HttpService`, `DateTime`, `Enum`, `task`, ...).
