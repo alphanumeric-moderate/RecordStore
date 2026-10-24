@@ -55,7 +55,7 @@
 - [x] Add an opt-in durable cross-profile transfer saga with stable operation IDs, reservation/credit/settlement phases, compensation, durable status, and explicit unresolved outcomes.
 
 - [ ] Persist bounded workflow identity, step state, retry/compensation state and unresolved external outcomes.
-- [ ] Resume from authoritative coordinator records, preserve idempotency across retries, and expose explicit manual-resolution states.
+- [x] Resume from authoritative coordinator records, preserve idempotency across retries, and expose explicit manual-resolution states. `RequireManualResolutionAsync` uses the expected phase/status and a stable request ID; `ResolveManualAsync` uses a revision-like attempts/timestamp compare, requires operator/reason audit fields, and requires application-supplied durable evidence verification before terminal `settled`/`rejected` decisions.
 - [x] Add crash/failure injection for saga manifest creation and response loss; compare full intended coordinator state before reconciling an ambiguous write, and return `settled` only when that exact terminal state is durable. A pre-commit terminal-state failure stays `unknown` at the last durable phase and resumes idempotently with the same operation ID; additional failure injection across every transfer leg remains needed. Never claim cross-profile atomic transactions.
 
 ### Slice 5: Server-local operations and adaptive governor

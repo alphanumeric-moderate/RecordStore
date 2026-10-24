@@ -28,12 +28,12 @@ local function new_store()
 	function store:UpdateAsync(key, transform)
 		self.update_calls += 1
 		local next_value = transform(clone(self.values[key]))
-		self.values[key] = clone(next_value)
+		if next_value ~= nil then self.values[key] = clone(next_value) end
 		if self.fail_after_next_update then
 			self.fail_after_next_update = false
 			error("injected response loss after durable update")
 		end
-		return clone(next_value), nil
+		return clone(if next_value == nil then self.values[key] else next_value), nil
 	end
 	return store
 end
@@ -138,14 +138,83 @@ expect(uncertain_terminal_status.phase == "credited",
 	"saga status did not retain the last durable phase after an uncommitted terminal update")
 expect(sender:Get().Balance == 78 and recipient:Get().Balance == 47,
 	"uncertain terminal status changed the already-applied transfer legs")
+local terminal_request = {
+	transfer_id = "transfer-terminal-unknown-003",
+	sender_id = "sender",
+	recipient_id = "recipient",
+	amount = 2,
+	balance_field = "Balance",
+}
+local manual_request = terminal_loss_sagas:RequireManualResolutionAsync(
+	"transfer-terminal-unknown-003", terminal_request, "credited", "pending",
+	"manual-request-003", "operator-7", "terminal state needs durable profile verification"
+)
+expect(manual_request.code == "committed" and manual_request.phase == "manual_resolution_required",
+	"saga did not durably enter the explicit manual-resolution state")
+local duplicate_manual_request = terminal_loss_sagas:RequireManualResolutionAsync(
+	"transfer-terminal-unknown-003", terminal_request, "credited", "pending",
+	"manual-request-003", "operator-7", "terminal state needs durable profile verification"
+)
+expect(duplicate_manual_request.code == "duplicate",
+	"manual-resolution request retry was not idempotent")
+local blocked_transfer_retry = terminal_loss_sagas:TransferAsync(
+	"transfer-terminal-unknown-003", sender, recipient, 2,
+	{ sender_id = "sender", recipient_id = "recipient" }
+)
+expect(blocked_transfer_retry.code == "manual_resolution_required",
+	"normal saga retry bypassed the explicit manual-resolution state")
+local stale_manual_resolution = terminal_loss_sagas:ResolveManualAsync(
+	"transfer-terminal-unknown-003", terminal_request, "wrong-manual-request", "manual-result-003",
+	"confirm_settled", "operator-8", "stale review request",
+	function() return true, "evidence-should-not-be-used" end
+)
+expect(stale_manual_resolution.code == "conflict",
+	"manual resolution accepted a mismatched durable manual-request ID")
+local rejected_manual_verification = terminal_loss_sagas:ResolveManualAsync(
+	"transfer-terminal-unknown-003", terminal_request, "manual-request-003", "manual-result-003",
+	"confirm_settled", "operator-8", "profile receipts have not been reconciled",
+	function() return false, "missing-durable-evidence" end
+)
+expect(rejected_manual_verification.code == "verification_failed"
+	and terminal_loss_sagas:GetStatus("transfer-terminal-unknown-003").phase == "manual_resolution_required",
+	"manual terminal resolution did not fail closed when the verifier rejected the outcome")
+local confirmed_manual_resolution = terminal_loss_sagas:ResolveManualAsync(
+	"transfer-terminal-unknown-003", terminal_request, "manual-request-003", "manual-result-003",
+	"confirm_settled", "operator-8", "verified durable settlement evidence",
+	function(state, decision)
+		if decision ~= "confirm_settled" or state.transfer_id ~= "transfer-terminal-unknown-003" then return false end
+		local sender_data = sender:Get()
+		local recipient_data = recipient:Get()
+		local escrow = sender_data.__recordstore_v2_escrow
+		local receipts = recipient_data.__recordstore_v2_received_transfers
+		if type(escrow) == "table" and escrow[state.transfer_id] ~= nil then return false end
+		if type(receipts) ~= "table" or receipts[state.transfer_id] ~= state.amount then return false end
+		return true, "verified-profile-state:" .. state.transfer_id
+	end
+)
+expect(confirmed_manual_resolution.code == "committed" and confirmed_manual_resolution.phase == "settled",
+	"manual resolution did not durably record its verified terminal outcome")
+local durable_manual_resolution = terminal_loss_sagas:GetStatus("transfer-terminal-unknown-003")
+expect(durable_manual_resolution.manual_resolution.resolution.operator_id == "operator-8"
+	and durable_manual_resolution.manual_resolution.resolution.evidence_id == "verified-profile-state:transfer-terminal-unknown-003",
+	"manual resolution did not persist the operator audit and evidence reference")
+local duplicate_manual_resolution = terminal_loss_sagas:ResolveManualAsync(
+	"transfer-terminal-unknown-003", terminal_request, "manual-request-003", "manual-result-003",
+	"confirm_settled", "operator-8", "verified durable settlement evidence",
+	function() error("duplicate resolution must not invoke the verifier again") end
+)
+expect(duplicate_manual_resolution.code == "duplicate",
+	"manual resolution retry did not return its stable duplicate outcome")
+expect(sender:Get().Balance == 78 and recipient:Get().Balance == 47,
+	"manual resolution altered a profile balance")
 local resumed_terminal = terminal_loss_sagas:TransferAsync(
 	"transfer-terminal-unknown-003", sender, recipient, 2,
 	{ sender_id = "sender", recipient_id = "recipient" }
 )
-expect(resumed_terminal.code == "settled" and terminal_loss_sagas:GetStatus("transfer-terminal-unknown-003").phase == "settled",
-	"retry with the stable operation ID did not resume the durable credited saga")
+expect(resumed_terminal.phase == "settled" and terminal_loss_sagas:GetStatus("transfer-terminal-unknown-003").phase == "settled",
+	"confirmed saga did not remain settled on retry")
 expect(sender:Get().Balance == 78 and recipient:Get().Balance == 47,
-	"resuming the saga applied a transfer leg more than once")
+	"retry after manual resolution applied a transfer leg more than once")
 
 local projection_store = new_store()
 local projections = V2.Projections.new(projection_store)

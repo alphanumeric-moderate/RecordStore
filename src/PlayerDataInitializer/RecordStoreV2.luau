@@ -1361,7 +1361,11 @@ local function saga_coordinator(store, options)
 			if old ~= nil and (type(old) ~= "table" or old.transfer_id ~= id or old.request_material ~= material) then decision = "conflict"; return old end
 			local state = if type(old) == "table" then copy(old) else { version = 1, transfer_id = id, request_material = material, phase = "requested", status = "pending", created_at = now, attempts = 0 }
 			local changed, err = pure(mutate, state)
-			if type(changed) ~= "table" then decision = "invalid"; return state end
+			if type(changed) ~= "table" then
+				decision = if err == "conflict" or err == "duplicate" or err == "manual_resolution_required"
+					then err else "invalid"
+				return nil
+			end
 			changed.updated_at = now
 			changed.attempts = (changed.attempts or 0) + 1
 			candidate = copy(changed)
@@ -1393,6 +1397,159 @@ local function saga_coordinator(store, options)
 		value.code = value.status or "unknown"
 		return copy(value)
 	end
+	function api:RequireManualResolutionAsync(id, request, expected_phase, expected_status, manual_request_id, operator_id, reason)
+		if not valid_text(id, 128) or type(request) ~= "table" or request.transfer_id ~= id
+			or not valid_text(manual_request_id, 128) or not valid_text(operator_id, 96)
+			or not valid_text(reason, 512)
+		then return { code = "invalid", message = "stable transfer/request IDs, operator identity, and reason are required" } end
+		local request_bytes, request_error = request_material(request)
+		if not request_bytes then return { code = "invalid", message = request_error } end
+		if expected_phase ~= "requested" and expected_phase ~= "reserved"
+			and expected_phase ~= "credit_pending" and expected_phase ~= "credited"
+		then return { code = "invalid", message = "expected_phase is not a manually recoverable saga phase" } end
+		if expected_status ~= "pending" and expected_status ~= "reconciliation_required" then
+			return { code = "invalid", message = "expected_status must be pending or reconciliation_required" }
+		end
+		local value, code, message = update_saga(id, request, function(current)
+			if current.phase == "settled" or current.phase == "rejected" then return nil, "conflict" end
+			if current.phase == "manual_resolution_required" then
+				if type(current.manual_resolution) == "table"
+					and current.manual_resolution.request_id == manual_request_id
+				then return nil, "duplicate" end
+				return nil, "conflict"
+			end
+			if current.phase ~= expected_phase or current.status ~= expected_status then return nil, "conflict" end
+			current.manual_resolution = {
+				request_id = manual_request_id,
+				requested_by = operator_id,
+				reason = text_error(reason, 512),
+				requested_at = os.time(),
+				prior_phase = current.phase,
+				prior_status = current.status,
+			}
+			current.phase = "manual_resolution_required"
+			current.status = "manual_resolution_required"
+			return current
+		end)
+		if not value then return { code = code or "unknown", transfer_id = id, message = message } end
+		if value.phase ~= "manual_resolution_required" or type(value.manual_resolution) ~= "table"
+			or value.manual_resolution.request_id ~= manual_request_id
+		then return { code = "conflict", transfer_id = id, message = "durable saga did not enter the requested manual-resolution state" } end
+		return {
+			code = if code == "duplicate" then "duplicate" else "committed",
+			transfer_id = id,
+			phase = value.phase,
+			status = value.status,
+			manual_request_id = manual_request_id,
+		}
+	end
+	function api:ResolveManualAsync(id, request, manual_request_id, resolution_id, decision, operator_id, reason, verify_outcome)
+		if not valid_text(id, 128) or type(request) ~= "table" or request.transfer_id ~= id
+			or not valid_text(manual_request_id, 128) or not valid_text(resolution_id, 128)
+			or not valid_text(operator_id, 96) or not valid_text(reason, 512)
+		then return { code = "invalid", message = "stable IDs, operator identity, and reason are required" } end
+		if decision ~= "resume" and decision ~= "confirm_settled" and decision ~= "confirm_rejected" then
+			return { code = "invalid", message = "decision must be resume, confirm_settled, or confirm_rejected" }
+		end
+		local request_bytes, request_error = request_material(request)
+		if not request_bytes then return { code = "invalid", message = request_error } end
+		local observed = self:GetStatus(id)
+		if observed.code == "unknown" or observed.code == "not_found" or observed.code == "invalid" then
+			return { code = observed.code, transfer_id = id, message = observed.message }
+		end
+		if observed.transfer_id ~= id or observed.request_material ~= request_bytes then
+			return { code = "conflict", transfer_id = id, message = "transfer request identity does not match the durable saga" }
+		end
+		local manual = observed.manual_resolution
+		if observed.phase ~= "manual_resolution_required" then
+			if type(manual) == "table" and type(manual.resolution) == "table"
+				and manual.resolution.resolution_id == resolution_id and manual.resolution.decision == decision
+			then return { code = "duplicate", transfer_id = id, phase = observed.phase, status = observed.status } end
+			return { code = "conflict", transfer_id = id, message = "saga is not awaiting manual resolution" }
+		end
+		if type(manual) ~= "table" or manual.request_id ~= manual_request_id then
+			return { code = "conflict", transfer_id = id, message = "manual-resolution request ID does not match the durable state" }
+		end
+		local evidence_id
+		if decision == "confirm_settled" or decision == "confirm_rejected" then
+			if type(verify_outcome) ~= "function" then
+				return { code = "invalid", transfer_id = id, message = "terminal manual decisions require an application-supplied durable-outcome verifier" }
+			end
+			local verification_state = {
+				transfer_id = id,
+				phase = observed.phase,
+				status = observed.status,
+				prior_phase = manual.prior_phase,
+				prior_status = manual.prior_status,
+				sender_id = observed.sender_id,
+				recipient_id = observed.recipient_id,
+				amount = observed.amount,
+				balance_field = observed.balance_field,
+				last_error = observed.last_error,
+			}
+			local verified, durable_evidence_id = io_call(verify_outcome, copy(verification_state), decision)
+			if verified ~= true or not valid_text(durable_evidence_id, 128) then
+				return { code = "verification_failed", transfer_id = id, message = "application could not verify the requested terminal outcome" }
+			end
+			evidence_id = durable_evidence_id
+		end
+		local snapshot_attempts, snapshot_updated_at = observed.attempts, observed.updated_at
+		local value, code, message = update_saga(id, request, function(current)
+			local current_manual = current.manual_resolution
+			if current.phase ~= "manual_resolution_required" or type(current_manual) ~= "table"
+				or current_manual.request_id ~= manual_request_id
+			then
+				if type(current_manual) == "table" and type(current_manual.resolution) == "table"
+					and current_manual.resolution.resolution_id == resolution_id
+					and current_manual.resolution.decision == decision
+				then return nil, "duplicate" end
+				return nil, "conflict"
+			end
+			if current.attempts ~= snapshot_attempts or current.updated_at ~= snapshot_updated_at then return nil, "conflict" end
+			local resolved_at = os.time()
+			current_manual.resolution = {
+				resolution_id = resolution_id,
+				decision = decision,
+				operator_id = operator_id,
+				reason = text_error(reason, 512),
+				evidence_id = evidence_id,
+				resolved_at = resolved_at,
+			}
+			current_manual.resolved_at = resolved_at
+			current_manual.resolved_by = operator_id
+			if decision == "resume" then
+				local prior_phase = current_manual.prior_phase
+				if prior_phase ~= "requested" and prior_phase ~= "reserved"
+					and prior_phase ~= "credit_pending" and prior_phase ~= "credited"
+				then return nil, "conflict" end
+				current.phase = prior_phase
+				current.status = "pending"
+				current.last_error = nil
+			elseif decision == "confirm_settled" then
+				current.phase = "settled"
+				current.status = "settled"
+				current.last_error = nil
+			else
+				current.phase = "rejected"
+				current.status = "rejected"
+				current.last_error = nil
+			end
+			return current
+		end)
+		if not value then return { code = code or "unknown", transfer_id = id, message = message } end
+		if type(value.manual_resolution) ~= "table" or type(value.manual_resolution.resolution) ~= "table"
+			or value.manual_resolution.resolution.resolution_id ~= resolution_id
+			or value.manual_resolution.resolution.decision ~= decision
+		then return { code = "conflict", transfer_id = id, message = "manual resolution did not match the durable result" } end
+		return {
+			code = if code == "duplicate" then "duplicate" else "committed",
+			transfer_id = id,
+			phase = value.phase,
+			status = value.status,
+			resolution_id = resolution_id,
+			decision = decision,
+		}
+	end
 	function api:TransferAsync(id, sender, recipient, amount, transfer_options)
 		transfer_options = transfer_options or {}
 		if not valid_text(id, 128) or not finite(amount) or amount <= 0 or (transfer_options.allow_fractional ~= true and math.floor(amount) ~= amount) then return { code = "invalid", message = "stable transfer ID and positive amount required" } end
@@ -1401,6 +1558,7 @@ local function saga_coordinator(store, options)
 		local balance_field, escrow_field = transfer_options.balance_field or "Balance", RESERVED .. "escrow"
 		local request = { transfer_id = id, sender_id = sender_id, recipient_id = recipient_id, amount = amount, balance_field = balance_field }
 		local saga, saga_code, saga_error = update_saga(id, request, function(current)
+			if current.phase == "manual_resolution_required" then return nil, "manual_resolution_required" end
 			if current.phase ~= "settled" and current.phase ~= "rejected" then current.sender_id = sender_id; current.recipient_id = recipient_id; current.amount = amount end
 			return current
 		end)
