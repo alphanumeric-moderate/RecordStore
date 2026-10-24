@@ -6519,7 +6519,6 @@ local closing = false
 local scheduler_started = false
 local shutdown_started = false
 local active_requests = 0
-local outbox_engine: any = nil
 local records: { [string]: Record } = {}
 local private: { [Record]: InternalState } = {}
 local active_records: { [Record]: boolean } = {}
@@ -7463,14 +7462,12 @@ local function encode_envelope_for_storage(envelope: Envelope): JsonValue
 	return stored
 end
 
-local INTERNAL_RAW_ENVELOPE_UPDATE = {}
-
 local function encode_backend_update_value(value: unknown): unknown
 	if type(value) ~= "table" then
 		return value
 	end
 	local candidate = value :: { [any]: unknown }
-	if candidate[INTERNAL_RAW_ENVELOPE_UPDATE] == true then
+	if candidate[prepared_envelope_cache] == true then
 		return candidate.raw_value
 	end
 	if candidate.implementation_version ~= nil
@@ -13977,17 +13974,17 @@ local function make_record(name: string, scope: string, key: string, options: Op
 			return result, status :: TransactionStatus, message
 		end,
 		GetOutboxAsync = function(self: Record, max_events: number?)
-			local engine = outbox_engine
+			local engine = prepared_envelope_cache._outbox_engine :: any
 			if engine == nil then return {}, "invalid", "outbox API is not initialized" end
 			return engine.get(self, max_events)
 		end,
 		DispatchOutboxAsync = function(self: Record, dispatcher: OutboxDispatcher, max_events: number?)
-			local engine = outbox_engine
+			local engine = prepared_envelope_cache._outbox_engine :: any
 			if engine == nil then return 0, "invalid", "outbox API is not initialized" end
 			return engine.dispatch(self, dispatcher, max_events)
 		end,
 		PruneOutboxAsync = function(self: Record, delivered_before_unix: number, max_events: number?)
-			local engine = outbox_engine
+			local engine = prepared_envelope_cache._outbox_engine :: any
 			if engine == nil then return 0, "invalid", "outbox API is not initialized" end
 			return engine.prune(self, delivered_before_unix, max_events)
 		end,
@@ -15284,7 +15281,7 @@ RecordStore._internals.transact = (function()
 	end
 end)()
 
-outbox_engine = (function()
+prepared_envelope_cache._outbox_engine = (function()
 	local protocol = prepared_envelope_cache._sidecar_protocol
 	local MAX_OUTBOX_API_BATCH = 16
 	local DEFAULT_OUTBOX_API_BATCH = 8
@@ -15472,7 +15469,7 @@ outbox_engine = (function()
 
 		local returned_raw, _, update_code, update_message = backend_update(state.backend, function(raw, info)
 			if raw == nil then return nil, nil, nil end
-			local envelope, parse_error, current_format = parse_envelope(raw)
+			local envelope, _, current_format = parse_envelope(raw)
 			if not current_format or envelope == nil then return nil, nil, nil end
 			if envelope.sidecars == nil or envelope.implementation_version < protocol.transaction_version then
 				return nil, nil, nil
@@ -15496,7 +15493,7 @@ outbox_engine = (function()
 			updated.delivered_at = if target_state == "delivered" then occurred_at else nil
 			sidecars.outbox_events[expected_event.id] = updated
 
-			local sidecars_valid, sidecars_error = protocol.validate(sidecars)
+			local sidecars_valid = protocol.validate(sidecars)
 			if not sidecars_valid then return nil, nil, nil end
 			local raw_value = copy_value(raw)
 			if type(raw_value) ~= "table" then return nil, nil, nil end
@@ -15504,7 +15501,7 @@ outbox_engine = (function()
 			local raw_valid = validate_serialized_size(raw_value)
 			if not raw_valid then return nil, nil, nil end
 			return {
-				[INTERNAL_RAW_ENVELOPE_UPDATE] = true,
+				[prepared_envelope_cache] = true,
 				raw_value = raw_value,
 			}, clone_user_ids(if info ~= nil then info.UserIds else envelope.user_ids or state.user_ids),
 				clone_metadata(if info ~= nil then info.RawMetadata else state.metadata)
@@ -15669,7 +15666,7 @@ outbox_engine = (function()
 
 		local returned_raw, _, update_code, update_message = backend_update(state.backend, function(raw, info)
 			if raw == nil then return nil, nil, nil end
-			local envelope, parse_error, current_format = parse_envelope(raw)
+			local envelope, _, current_format = parse_envelope(raw)
 			if not current_format or envelope == nil or envelope.sidecars == nil
 				or envelope.implementation_version < protocol.transaction_version
 			then
@@ -15696,7 +15693,7 @@ outbox_engine = (function()
 			local raw_valid = validate_serialized_size(raw_value)
 			if not raw_valid then return nil, nil, nil end
 			return {
-				[INTERNAL_RAW_ENVELOPE_UPDATE] = true,
+				[prepared_envelope_cache] = true,
 				raw_value = raw_value,
 			}, clone_user_ids(if info ~= nil then info.UserIds else envelope.user_ids or state.user_ids),
 				clone_metadata(if info ~= nil then info.RawMetadata else state.metadata)
@@ -15714,7 +15711,7 @@ outbox_engine = (function()
 			return 0, "unknown", update_message or "outbox cleanup outcome remains unknown"
 		end
 		local removed, classify_code, classify_message = count_missing_events(returned_raw, candidate_ids)
-		if removed == nil then return 0, classify_code or "unknown", classify_message end
+		if removed == nil then return 0, (classify_code or "unknown") :: ResultCode, classify_message end
 		if removed > 0 then return removed, "success", nil end
 		return 0, "duplicate", "no delivered outbox events were removed"
 	end
