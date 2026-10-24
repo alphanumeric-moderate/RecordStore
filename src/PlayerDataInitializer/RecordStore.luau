@@ -15299,7 +15299,7 @@ RecordStore._internals.transact = (function()
 		end
 		return nil, status, final_message
 	end
-end)()
+end)();
 
 (RecordStore._internals :: { [string]: any }).get_transaction_status = function(
 	self: Record,
