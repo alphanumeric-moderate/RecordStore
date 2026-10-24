@@ -1457,6 +1457,21 @@ end
 local function saga_coordinator(store, options)
 	options = options or {}
 	local api = { store = store }
+	local MAX_SAGA_TRANSITIONS = 32
+	local function valid_transition_history(history)
+		if type(history) ~= "table" or #history > MAX_SAGA_TRANSITIONS or key_count(history) ~= #history then return false end
+		for index, transition in ipairs(history) do
+			if type(transition) ~= "table" or transition.attempt ~= index + (history[1].attempt or 0) - 1
+				or not finite(transition.attempt) or transition.attempt < 1 or math.floor(transition.attempt) ~= transition.attempt
+				or not finite(transition.at) or type(transition.from_phase) ~= "string" or type(transition.to_phase) ~= "string"
+				or type(transition.from_status) ~= "string" or type(transition.to_status) ~= "string"
+			then return false end
+		end
+		for key in pairs(history) do
+			if type(key) ~= "number" or not finite(key) or math.floor(key) ~= key or key < 1 or key > #history then return false end
+		end
+		return true
+	end
 	local function update_saga(id, request, mutate)
 		local material = canonical(request)
 		local key, now = "rv2s-" .. digest(id), os.time()
@@ -1465,15 +1480,38 @@ local function saga_coordinator(store, options)
 			decision = nil
 			candidate = nil
 			if old ~= nil and (type(old) ~= "table" or old.transfer_id ~= id or old.request_material ~= material) then decision = "conflict"; return old end
-			local state = if type(old) == "table" then copy(old) else { version = 1, transfer_id = id, request_material = material, phase = "requested", status = "pending", created_at = now, attempts = 0 }
+			local state = if type(old) == "table" then copy(old) else {
+				version = 1, transfer_id = id, request_material = material, phase = "requested",
+				status = "pending", created_at = now, attempts = 0, transition_history = {},
+			}
+			local prior_phase, prior_status = state.phase, state.status
 			local changed, err = pure(mutate, state)
 			if type(changed) ~= "table" then
-				decision = if err == "conflict" or err == "duplicate" or err == "manual_resolution_required"
+				decision = if err == "conflict" or err == "duplicate" or err == "manual_resolution_required" or err == "corrupt"
 					then err else "invalid"
 				return nil
 			end
-			changed.updated_at = now
+			local history_value = if changed.transition_history ~= nil then changed.transition_history else state.transition_history
+			if history_value == nil then history_value = {} end
+			if not valid_transition_history(history_value) then
+				decision = "corrupt"
+				return nil
+			end
+			local history = copy(history_value)
 			changed.attempts = (changed.attempts or 0) + 1
+			if changed.phase ~= prior_phase or changed.status ~= prior_status then
+				table.insert(history, {
+					attempt = changed.attempts,
+					at = now,
+					from_phase = tostring(prior_phase),
+					to_phase = tostring(changed.phase),
+					from_status = tostring(prior_status),
+					to_status = tostring(changed.status),
+				})
+				while #history > MAX_SAGA_TRANSITIONS do table.remove(history, 1) end
+			end
+			changed.transition_history = history
+			changed.updated_at = now
 			candidate = copy(changed)
 			decision = "committed"
 			return changed

@@ -236,6 +236,20 @@ local durable_manual_resolution = terminal_loss_sagas:GetStatus("transfer-termin
 expect(durable_manual_resolution.manual_resolution.resolution.operator_id == "operator-8"
 	and durable_manual_resolution.manual_resolution.resolution.evidence_id == "verified-profile-state:transfer-terminal-unknown-003",
 	"manual resolution did not persist the operator audit and evidence reference")
+local transition_history = durable_manual_resolution.transition_history
+expect(type(transition_history) == "table" and #transition_history >= 2 and #transition_history <= 32,
+	"saga did not persist a bounded durable phase/status transition history")
+local saw_manual_transition, saw_settled_transition = false, false
+for _, transition in ipairs(transition_history) do
+	if transition.from_phase == "credited" and transition.to_phase == "manual_resolution_required" then
+		saw_manual_transition = true
+	end
+	if transition.from_phase == "manual_resolution_required" and transition.to_phase == "settled" then
+		saw_settled_transition = true
+	end
+end
+expect(saw_manual_transition and saw_settled_transition,
+	"saga transition history omitted the manual pause or verified settlement")
 local duplicate_manual_resolution = terminal_loss_sagas:ResolveManualAsync(
 	"transfer-terminal-unknown-003", terminal_request, "manual-request-003", "manual-result-003",
 	"confirm_settled", "operator-8", "verified durable settlement evidence",
