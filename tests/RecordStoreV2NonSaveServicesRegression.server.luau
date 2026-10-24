@@ -95,9 +95,13 @@ expect(durable_trace.events[1].payload == nil and durable_trace.events[2].payloa
 expect(durable_trace.events[1].evidence_source == "durable_store_and_local"
 	and durable_trace.events[2].evidence_source == "durable_store",
 	"merged traces did not distinguish persisted evidence from local-only observations")
-expect(durable_trace.evidence_summary.durable_and_local_events == 1
-	and durable_trace.evidence_summary.durable_events == 1,
-	"durable trace evidence summary did not match the merged events")
+expect(durable_trace.evidence_summary.process_local_events == 1
+	and durable_trace.evidence_summary.process_local_only_events == 0,
+	"trace evidence summary did not count the locally observed durable event")
+expect(durable_trace.evidence_summary.durable_events == 2
+	and durable_trace.evidence_summary.durable_only_events == 1
+	and durable_trace.evidence_summary.durable_and_local_events == 1,
+	"durable trace evidence summary did not count unique persisted events consistently")
 
 local sender = RecordStore.Mock.new("V2SagaProfiles", "global", "sender", {
 	schema_version = 1, transactional_operations_enabled = true,

@@ -885,7 +885,9 @@ local function new_tracer(options)
 			evidence_summary = {
 				durable_read = "not_requested",
 				process_local_events = #matches,
+				process_local_only_events = #matches,
 				durable_events = 0,
+				durable_only_events = 0,
 				durable_and_local_events = 0,
 				consistency = "process_local_only",
 			},
@@ -982,8 +984,10 @@ local function new_tracer(options)
 		result.truncated = result.truncated or stored.truncated == true
 		result.evidence_summary = {
 			durable_read = "success",
-			process_local_events = local_only,
-			durable_events = durable_only,
+			process_local_events = local_only + durable_and_local,
+			process_local_only_events = local_only,
+			durable_events = durable_only + durable_and_local,
+			durable_only_events = durable_only,
 			durable_and_local_events = durable_and_local,
 			consistency = "eventual_not_linearizable",
 		}
