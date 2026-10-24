@@ -334,5 +334,173 @@ assert((migration_after.data :: { [string]: any }).coins == (migration_before.da
 assert(migration_record:GetRevision() == migration_before_revision,
 	"dry-run migration preview mutated the live mock Record")
 
+
+local transactional_record = Mock.new("TransactionTest", "global", "profile", {
+	schema_version = 1,
+	transactional_operations_enabled = true,
+})
+local transactional_open, transactional_open_message = transactional_record:Open({
+	coins = 10,
+	inventory = {},
+})
+assert(transactional_open == "success", tostring(transactional_open_message))
+
+local transact_result, transact_status, transact_message = transactional_record:TransactAsync(
+	"reward:daily:test",
+	function(data)
+		local next_data = table.clone(data)
+		next_data.coins += 100
+		return next_data, { coins_granted = 100 }
+	end,
+	{ request = { kind = "daily_reward", amount = 100 }, receipt_retention_seconds = 3600 }
+)
+assert(transact_status == "committed", tostring(transact_message))
+assert(transact_result.coins_granted == 100)
+assert(transactional_record:Get().coins == 110)
+
+local duplicate_result, duplicate_status, duplicate_message = transactional_record:TransactAsync(
+	"reward:daily:test",
+	function()
+		error("duplicate transaction reducer must not run")
+	end,
+	{ request = { amount = 100, kind = "daily_reward" }, receipt_retention_seconds = 3600 }
+)
+assert(duplicate_status == "duplicate", tostring(duplicate_message))
+assert(duplicate_result.coins_granted == 100)
+assert(transactional_record:Get().coins == 110, "duplicate transaction reapplied its reducer")
+
+local conflict_result, conflict_status = transactional_record:TransactAsync(
+	"reward:daily:test",
+	function(data)
+		local next_data = table.clone(data)
+		next_data.coins += 1000
+		return next_data, { coins_granted = 1000 }
+	end,
+	{ request = { kind = "daily_reward", amount = 1000 }, receipt_retention_seconds = 3600 }
+)
+assert(conflict_result == nil and conflict_status == "conflict")
+assert(transactional_record:Get().coins == 110, "conflicting transaction mutated profile data")
+
+local inbox_result, inbox_status, inbox_message = transactional_record:ApplyInboxAsync(
+	"mail:award:test",
+	"CoinAward",
+	{ amount = 7 },
+	function(data, payload)
+		local next_data = table.clone(data)
+		next_data.coins += payload.amount
+		return next_data, { applied = payload.amount }
+	end
+)
+assert(inbox_status == "committed", tostring(inbox_message))
+assert(inbox_result.applied == 7)
+local inbox_duplicate, inbox_duplicate_status = transactional_record:ApplyInboxAsync(
+	"mail:award:test",
+	"CoinAward",
+	{ amount = 7 },
+	function()
+		error("duplicate inbox reducer must not run")
+	end
+)
+assert(inbox_duplicate_status == "duplicate" and inbox_duplicate.applied == 7)
+assert(transactional_record:Get().coins == 117, "duplicate inbox delivery reapplied a profile mutation")
+
+local inbox_conflict, inbox_conflict_status = transactional_record:ApplyInboxAsync(
+	"mail:award:test",
+	"CoinAward",
+	{ amount = 9 },
+	function(data, payload)
+		local next_data = table.clone(data)
+		next_data.coins += payload.amount
+		return next_data
+	end
+)
+assert(inbox_conflict == nil and inbox_conflict_status == "conflict")
+assert(transactional_record:Get().coins == 117, "conflicting inbox message mutated profile data")
+
+local outbox_result, outbox_status, outbox_message = transactional_record:CommitWithOutboxAsync(
+	"gift:operation:test",
+	"GiftCoins",
+	{ amount = 3, recipient = "recipient" },
+	{
+		{
+			target_store = "TransactionTest",
+			target_scope = "global",
+			target_key = "recipient",
+			type = "CoinGift",
+			payload_version = 1,
+			data = { amount = 3 },
+		},
+	},
+	function(data, command)
+		local next_data = table.clone(data)
+		next_data.coins -= command.amount
+		return next_data, { queued = true }
+	end
+)
+assert(outbox_status == "committed", tostring(outbox_message))
+assert(outbox_result.queued == true)
+assert(transactional_record:Get().coins == 114)
+local durable_transaction = Mock.get_record_raw("TransactionTest", "global", "profile")
+assert(durable_transaction.implementation_version == 3, "transaction did not opt into envelope v3")
+assert(type(durable_transaction.sidecars) == "table", "transaction did not persist durable sidecars")
+assert(durable_transaction.sidecars.transaction_receipts["reward:daily:test"] ~= nil)
+assert(durable_transaction.sidecars.inbox_receipts["mail:award:test"] ~= nil)
+local outbox_count = 0
+for _, event in pairs(durable_transaction.sidecars.outbox_events) do
+	outbox_count += 1
+	assert(event.event_type == "CoinGift")
+	assert(event.payload_version == 1)
+	assert(event.state == "pending")
+end
+assert(outbox_count == 1, "outbox intent and profile mutation did not commit together")
+
+local reducer_yield_record = Mock.new("TransactionYieldTest", "global", "profile", {
+	schema_version = 1,
+	transactional_operations_enabled = true,
+})
+assert(reducer_yield_record:Open({ coins = 1 }) == "success")
+local yield_result, yield_status = reducer_yield_record:TransactAsync(
+	"yielding-operation",
+	function(data)
+		coroutine.yield()
+		return data
+	end,
+	{ request = { action = "yield" } }
+)
+assert(yield_result == nil and yield_status == "validation",
+	"yielding transaction reducers must abort before durable mutation")
+assert(reducer_yield_record:Get().coins == 1)
+
+local disabled_record = Mock.new("TransactionDisabledTest", "global", "profile", { schema_version = 1 })
+assert(disabled_record:Open({ coins = 1 }) == "success")
+local disabled_result, disabled_status = disabled_record:TransactAsync(
+	"disabled-operation",
+	function(data) return data end,
+	{ request = { action = "disabled" } }
+)
+assert(disabled_result == nil and disabled_status == "disabled",
+	"transaction APIs must remain disabled unless explicitly opted in")
+
+local ambiguous_record = Mock.new("TransactionAmbiguousTest", "global", "profile", {
+	schema_version = 1,
+	transactional_operations_enabled = true,
+})
+assert(ambiguous_record:Open({ coins = 4 }) == "success")
+Mock.set_update_commit_then_failures(1, "transaction response lost after durable commit")
+local ambiguous_result, ambiguous_status, ambiguous_message = ambiguous_record:TransactAsync(
+	"ambiguous-operation",
+	function(data)
+		local next_data = table.clone(data)
+		next_data.coins += 2
+		return next_data, { coins_granted = 2 }
+	end,
+	{ request = { action = "ambiguous", amount = 2 } }
+)
+assert(ambiguous_status == "committed", tostring(ambiguous_message))
+assert(ambiguous_result.coins_granted == 2)
+assert(ambiguous_record:Get().coins == 6,
+	"commit-then-response-loss must reconcile from the durable receipt without applying twice")
+
+
 Mock.reset()
 Shim.close()
