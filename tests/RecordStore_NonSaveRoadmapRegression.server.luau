@@ -829,7 +829,8 @@ assert(outbox_batch_after.revision == outbox_batch_before.revision,
 	"rejected outbox batch advanced the durable revision")
 assert(outbox_batch_after.data.coins == outbox_batch_before.data.coins,
 	"rejected outbox batch mutated profile data")
-assert(next(outbox_batch_after.sidecars.outbox_events) == nil,
+local outbox_batch_sidecars = outbox_batch_after.sidecars
+assert(outbox_batch_sidecars == nil or next(outbox_batch_sidecars.outbox_events) == nil,
 	"rejected outbox batch wrote outbox entries")
 outbox_batch_record:Close()
 

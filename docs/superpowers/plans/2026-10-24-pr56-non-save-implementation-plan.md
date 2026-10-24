@@ -37,9 +37,10 @@
 - [ ] Implement missing idempotent producer receipts and recovery for partial preparation/acknowledgement, without duplicating already implemented strict per-key ordering.
 - [ ] Add bounded operational APIs for recovery, capacity/status reporting, safe reclamation and resumable maintenance; preserve advisory-only semantics for separate indexes and MessagingService hints.
 - [ ] Add crash-window, competing-claim, capacity-full, duplicate-producer, stale-index and response-loss tests.
-- [x] Cover outbox batches over the 16-event limit and persistent sidecar encoded-size saturation, asserting failures do not advance the revision or mutate profile data.
 
 ### Slice 3: Same-profile inbox/outbox and idempotent transactions
+
+- [x] Cover outbox batches over the 16-event limit and persistent sidecar encoded-size saturation, asserting failures do not advance the revision or mutate profile data.
 
 - [x] Implement same-profile inbox mutation + receipt and source mutation + outbox intent within one authoritative profile-key UpdateAsync; regression coverage verifies the source mutation and outbox intent commit together.
 - [x] Add general idempotent transactions with canonical request identity, bounded results/receipts, duplicate/conflict/capacity/unknown outcomes and explicit retention guarantees.
