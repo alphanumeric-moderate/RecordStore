@@ -37,7 +37,7 @@
 - [ ] Audit existing Mailbox V2 coverage against the canonical envelope, producer idempotency, bounded preparation discoverability, claims/renewal/ack/DLQ/replay, and v3 compatibility contracts.
 - [ ] Implement missing idempotent producer receipts and recovery for partial preparation/acknowledgement, without duplicating already implemented strict per-key ordering.
 - [ ] Add bounded operational APIs for recovery, capacity/status reporting, safe reclamation and resumable maintenance; preserve advisory-only semantics for separate indexes and MessagingService hints.
-- [ ] Add crash-window, competing-claim, capacity-full, duplicate-producer, stale-index and response-loss tests.
+- [x] Add crash-window, competing-claim, capacity-full, duplicate-producer, stale-index and response-loss tests for producer preparation, acknowledgement, expired claims, and DLQ transition recovery.
 
 ### Slice 3: Same-profile inbox/outbox and idempotent transactions
 
@@ -55,7 +55,7 @@
 
 - [ ] Persist bounded workflow identity, step state, retry/compensation state and unresolved external outcomes.
 - [ ] Resume from authoritative coordinator records, preserve idempotency across retries, and expose explicit manual-resolution states.
-- [ ] Add crash/failure injection for every step boundary; never claim cross-profile atomic transactions.
+- [x] Add crash/failure injection for saga manifest creation and reconciliation on response loss; additional failure injection across every individual transfer leg remains needed. Never claim cross-profile atomic transactions.
 
 ### Slice 5: Server-local operations and adaptive governor
 - [x] Add versioned bounded runtime policy updates routed to the existing core scheduler, plus a read-only runtime snapshot and diagnostic dirty-age policy.
@@ -73,7 +73,7 @@
 - [x] Add a process-local migration registry with stable IDs, declared implementation revisions, compatibility ranges, forward-only edges and ambiguous-path rejection. A target with no path fails closed during preview.
 - [x] Add bounded read-only path/type migration previews. Preview executes non-yielding transformations on a snapshot and never persists the result.
 - [x] Add read-only profile inspection and historical version diffs that omit raw values and report truncation explicitly.
-- [ ] Add durable registry manifests, execution with source revision/session fencing checks, visible quarantine on validation failure, repair preview and guarded restore with audit identity.
+- [x] Add durable registry manifests, execution with source revision/session fencing checks, visible quarantine on validation failure, and operator-audited quarantine resolution; regression verifies commit-then-response-loss reconciliation.
 - [ ] Ensure restore never overwrites protocol metadata, receipts, fencing state or erasure tombstones.
 
 ### Slice 7: Projections, erasure and operation tracing
@@ -105,6 +105,6 @@ Implemented and covered by the current Lune regression suite:
 - Regression coverage for inbox/transaction receipt saturation and expiry recovery: full collections reject new operation IDs without profile mutation; live receipts still deduplicate; expired receipts are reclaimed before a new commit.
 - Opt-in developer-product receipt processing through `PurchaseReceiptProcessor:CreateHandler`: malformed receipt and unsupported product checks, active-profile requirements, durable same-profile grant/idempotency, duplicate acknowledgement, conflict deferral, and explicit finite receipt retention.
 
-Still incomplete: scheduler and Mailbox V2 crash/recovery acceptance matrix; handler-side destination effect integration and real multi-server acceptance; durable receipt status lookup and additional purchase receipt types; live enforcement of quarantine across every writer; real key-family inventory and RTBF completeness; independent code review; fault-injection execution on the final head; and live Roblox Studio/DataStore throttling, crash/shutdown and mixed-version rollback acceptance.
+Still incomplete: remaining scheduler audit; Mailbox V2 mixed-version/v3 compatibility, adversarial concurrent-claim and full fault-injection matrix; handler-side destination effect integration and real multi-server acceptance; durable receipt status lookup and additional purchase receipt types; live enforcement of quarantine across every writer; real key-family inventory and RTBF completeness; saga failure injection for every transfer leg; adaptive governor fairness/low-budget/throttle/lease-margin acceptance; independent code review; fault-injection execution on the final head; and live Roblox Studio/DataStore throttling, crash/shutdown and mixed-version rollback acceptance.
 
 The outbox-to-Mailbox V2 adapter receipt proves durable mailbox acceptance only. It does not prove that a destination handler executed, or that an external effect completed. Keep handler-side processing idempotent and retain live multi-server acceptance as a separate release gate.

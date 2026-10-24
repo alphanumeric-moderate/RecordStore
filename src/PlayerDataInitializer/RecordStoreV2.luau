@@ -905,6 +905,34 @@ local function new_migrations(options)
 			and value.store_name == step.store_name and value.from_version == step.from_version
 			and value.to_version == step.to_version and value.id == step.id and value.revision == step.revision
 	end
+	local function apply_manifest_patch(target, patch)
+		for key, field_value in pairs(patch) do
+			if key ~= "clear_fields" then target[key] = copy(field_value) end
+		end
+		if type(patch.clear_fields) == "table" then
+			for _, key in ipairs(patch.clear_fields) do
+				if type(key) == "string" then target[key] = nil end
+			end
+		end
+		return target
+	end
+	local function manifest_matches_patch(value, step, patch)
+		if not same_manifest(value, step) then return false end
+		if patch == nil then return true end
+		for key, expected in pairs(patch) do
+			if key ~= "clear_fields" then
+				local expected_ok, expected_text = pcall(canonical, expected)
+				local observed_ok, observed_text = pcall(canonical, value[key])
+				if not expected_ok or not observed_ok or expected_text ~= observed_text then return false end
+			end
+		end
+		if type(patch.clear_fields) == "table" then
+			for _, key in ipairs(patch.clear_fields) do
+				if type(key) == "string" and value[key] ~= nil then return false end
+			end
+		end
+		return true
+	end
 	local function save_manifest(step, patch)
 		if manifest_store == nil then
 			if require_durable_manifest then return false, "durable manifest store is required" end
@@ -916,9 +944,7 @@ local function new_migrations(options)
 			if old ~= nil then
 				if not same_manifest(old, step) then decision = "conflict"; return old end
 				local next_value = copy(old)
-				if patch ~= nil then
-					for key, field_value in pairs(patch) do next_value[key] = copy(field_value) end
-				end
+				if patch ~= nil then apply_manifest_patch(next_value, patch) end
 				decision = if patch == nil then "duplicate" else "committed"
 				return next_value
 			end
@@ -927,14 +953,16 @@ local function new_migrations(options)
 				to_version = step.to_version, id = step.id, revision = step.revision,
 				status = "registered", created_at = os.time(), updated_at = os.time(),
 			}
-			if patch ~= nil then for key, field_value in pairs(patch) do created[key] = copy(field_value) end end
+			if patch ~= nil then apply_manifest_patch(created, patch) end
 			decision = "committed"
 			return created
 		end)
 		if write_error then
-			local observed = adapter_call(manifest_store, "GetAsync", manifest_key(step))
-			if same_manifest(observed, step) then return true, "unknown_reconciled" end
-			return false, write_error
+			local observed, read_error = adapter_call(manifest_store, "GetAsync", manifest_key(step))
+			if read_error == nil and manifest_matches_patch(observed, step, patch) then
+				return true, "unknown_reconciled"
+			end
+			return false, read_error or write_error
 		end
 		if decision == "conflict" or not same_manifest(value, step) then
 			return false, "migration ID conflicts with its durable manifest"
@@ -1057,7 +1085,7 @@ local function new_migrations(options)
 				status = "committed", operation_id = operation_id, committed_at = os.time(),
 				updated_at = os.time(), committed_revision = if type(record.GetRevision) == "function" then record:GetRevision() else nil,
 				committed_generation = if type(record.GetGeneration) == "function" then record:GetGeneration() else nil,
-				last_error = nil,
+				clear_fields = { "last_error" },
 			})
 			if not manifest_updated then
 				return { code = "unknown", migration_id = step.id, message = "profile step is committed but manifest confirmation is unresolved: " .. tostring(manifest_message), completed_steps = completed }
