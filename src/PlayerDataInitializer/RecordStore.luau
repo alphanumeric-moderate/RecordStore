@@ -14437,9 +14437,9 @@ RecordStore._internals.profile_doctor = (function()
 			normalized.legacy_decoder
 		)
 		if read_result == "invalid" then return nil, "invalid", read_message end
-		local code = normalize_result_code(read_result) or "unknown"
+		local code: ResultCode = (normalize_result_code(read_result) or "unknown") :: ResultCode
 		local observed_at = session_now_unix(mock)
-		local classification = classify_read(snapshot, code, observed_at)
+		local classification: ProfileDoctorClassification = classify_read(snapshot, code, observed_at)
 		local node_count: number? = nil
 		local data_depth: number? = nil
 		local encoded_bytes: number? = nil
