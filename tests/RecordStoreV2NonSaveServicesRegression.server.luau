@@ -38,6 +38,14 @@ local function new_store()
 	return store
 end
 
+local function assert_leg_outcome(sagas_service, transfer_id, leg, state)
+	local status = sagas_service:GetStatus(transfer_id)
+	local outcome = type(status.leg_outcomes) == "table" and status.leg_outcomes[leg] or nil
+	expect(type(outcome) == "table" and outcome.state == state,
+		("transfer %s did not persist %s leg state %s"):format(transfer_id, leg, state))
+	return outcome
+end
+
 local policy_status, policy_message = V2.ApplyRuntimePolicy({
 	revision = 2,
 	max_dirty_age_seconds = 120,
@@ -407,14 +415,6 @@ local function inject_post_commit_unknown(record, suffix)
 		return result, status, message
 	end
 	return function() return not armed end
-end
-
-local function assert_leg_outcome(sagas_service, transfer_id, leg, state)
-	local status = sagas_service:GetStatus(transfer_id)
-	local outcome = type(status.leg_outcomes) == "table" and status.leg_outcomes[leg] or nil
-	expect(type(outcome) == "table" and outcome.state == state,
-		("transfer %s did not persist %s leg state %s"):format(transfer_id, leg, state))
-	return outcome
 end
 
 do
