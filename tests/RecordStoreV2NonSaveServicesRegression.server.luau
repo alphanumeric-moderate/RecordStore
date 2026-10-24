@@ -214,6 +214,9 @@ local migration_record = RecordStore.Mock.new("V2MigrationProfiles", "global", "
 local migration_open, migration_open_message = migration_record:Open({
 	cash = 10,
 	__recordstore_reserved_do_not_restore = "preserve",
+	__recordstore_legacy_receipts = { purchase_1 = "durable-receipt" },
+	__recordstore_fencing_state = { generation = 17 },
+	__recordstore_erasure_tombstone = { status = "completed" },
 })
 expect(migration_open == "created" or migration_open == "loaded", "migration profile open failed: " .. tostring(migration_open_message))
 local migration_manifest_store = new_store()
@@ -339,7 +342,13 @@ local stale_restore = V2.ProfileDoctor.Restore(
 )
 expect(stale_restore.code == "conflict", "restore accepted a stale profile revision")
 local restored = V2.ProfileDoctor.Restore(
-	migration_record, { cash = 99 }, migration_record:GetRevision(),
+	migration_record, {
+		cash = 99,
+		__recordstore_reserved_do_not_restore = "historical-overwrite",
+		__recordstore_legacy_receipts = { purchase_1 = "historical-receipt" },
+		__recordstore_fencing_state = { generation = 1 },
+		__recordstore_erasure_tombstone = { status = "cleared" },
+	}, migration_record:GetRevision(),
 	"restore-stable-1", "operator-1", "verified historical restore",
 	{
 		subject_user_id = 123456,
@@ -351,9 +360,16 @@ local restored = V2.ProfileDoctor.Restore(
 )
 expect(restored.code == "committed" and migration_record:Get().cash == 99,
 	"guarded restore failed to commit an audited historical value")
-expect(migration_record:Get()["__recordstore_reserved_do_not_restore"] == "preserve",
+local restored_data = migration_record:Get()
+expect(restored_data["__recordstore_reserved_do_not_restore"] == "preserve",
 	"historical restore overwrote RecordStore-reserved metadata")
-expect(migration_record:Get().cash ~= nil, "restored profile lost user data")
+expect(restored_data["__recordstore_legacy_receipts"].purchase_1 == "durable-receipt",
+	"historical restore overwrote durable receipt metadata")
+expect(restored_data["__recordstore_fencing_state"].generation == 17,
+	"historical restore overwrote session fencing metadata")
+expect(restored_data["__recordstore_erasure_tombstone"].status == "completed",
+	"historical restore removed or overwrote an erasure tombstone")
+expect(restored_data.cash == 99, "historical restore did not replace the intended user-data field")
 
 local profile_quarantine_store = new_store()
 local diagnosed_revision = migration_record:GetRevision()

@@ -10,6 +10,7 @@ local MAX_INBOX_RECEIPT_BYTES = 4096
 local MAX_TRACE_EVENTS = 2048
 local MAX_ERASURE_TEMPLATES = 100
 local MAX_ERASURE_ITEMS = 512
+local RESERVED_ROOT = "__recordstore_"
 local RESERVED = "__recordstore_v2_"
 
 local function finite(value)
@@ -18,6 +19,10 @@ end
 
 local function valid_text(value, maximum)
 	return type(value) == "string" and value ~= "" and #value <= maximum
+end
+
+local function is_reserved_data_key(key)
+	return type(key) == "string" and string.sub(key, 1, #RESERVED_ROOT) == RESERVED_ROOT
 end
 
 local function copy(value, depth, seen)
@@ -1240,8 +1245,8 @@ local function new_doctor(record_store)
 				error("profile data changed after restore preflight")
 			end
 			local merged = {}
-			for key, value in pairs(current) do if type(key) ~= "string" or not string.find(key, "^" .. RESERVED, 1) then merged[key] = copy(value) end end
-			for key, value in pairs(historical_data) do if type(key) ~= "string" or not string.find(key, "^" .. RESERVED, 1) then merged[key] = copy(value) end end
+			for key, value in pairs(current) do if not is_reserved_data_key(key) then merged[key] = copy(value) end end
+			for key, value in pairs(historical_data) do if not is_reserved_data_key(key) then merged[key] = copy(value) end end
 			local audit = merged[RESERVED .. "repair_audit"] or {}
 			if type(audit) ~= "table" then audit = {} end
 			table.insert(audit, { restore_id = restore_id, operator_id = operator_id, reason = reason, before_revision = expected_revision, at_unix = os.time(), result = "requested" })

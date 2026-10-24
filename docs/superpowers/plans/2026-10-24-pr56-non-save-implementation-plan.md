@@ -76,7 +76,7 @@
 - [x] Add bounded read-only path/type migration previews. Preview executes non-yielding transformations on a snapshot and never persists the result.
 - [x] Add read-only profile inspection and historical version diffs that omit raw values and report truncation explicitly.
 - [x] Add durable registry manifests, execution with source revision/session fencing checks, visible quarantine on validation failure, and operator-audited quarantine resolution; regression verifies commit-then-response-loss reconciliation.
-- [ ] Ensure restore never overwrites protocol metadata, receipts, fencing state or erasure tombstones.
+- [x] Ensure restore never overwrites protocol metadata, receipts, fencing state or erasure tombstones; regression injects conflicting historical values for each class.
 
 ### Slice 7: Projections, erasure and operation tracing
 - [x] Add opt-in durable event-driven projections, revision/idempotency checks, bounded rebuild cursors and durable uniqueness reservations.
