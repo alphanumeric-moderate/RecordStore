@@ -15133,7 +15133,7 @@ RecordStore._internals.transact = (function()
 					break
 				end
 				if verification_status ~= nil then
-					final_status = verification_status
+					final_status = verification_status :: TransactionStatus
 					break
 				end
 			end
@@ -15203,7 +15203,7 @@ RecordStore._internals.transact = (function()
 			complete_deferred_takeover(state)
 			return final_result, "duplicate", final_message
 		end
-		local status = final_status or "unknown"
+		local status: TransactionStatus = final_status or "unknown"
 		state.busy = false
 		state.current_operation_id = nil
 		if was_unknown or status == "unknown" then
