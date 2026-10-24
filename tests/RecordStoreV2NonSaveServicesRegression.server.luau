@@ -211,7 +211,10 @@ expect(compaction_store.values.checkpoint.status == "running" or compaction_stor
 local migration_record = RecordStore.Mock.new("V2MigrationProfiles", "global", "profile", {
 	schema_version = 1, transactional_operations_enabled = true,
 })
-local migration_open, migration_open_message = migration_record:Open({ cash = 10 })
+local migration_open, migration_open_message = migration_record:Open({
+	cash = 10,
+	__recordstore_reserved_do_not_restore = "preserve",
+})
 expect(migration_open == "created" or migration_open == "loaded", "migration profile open failed: " .. tostring(migration_open_message))
 local migration_manifest_store = new_store()
 local manifest_update = migration_manifest_store.UpdateAsync
@@ -307,13 +310,49 @@ local repair_preview = V2.ProfileDoctor.PreviewRepair(migration_record, {
 }, { expected_revision = migration_record:GetRevision() })
 expect(repair_preview.code == "success" and repair_preview.preview_only == true,
 	"profile repair preview did not remain read-only")
+local restore_revision = migration_record:GetRevision()
+local missing_authorizer = V2.ProfileDoctor.Restore(
+	migration_record, { cash = 99 }, restore_revision,
+	"restore-no-auth", "operator-1", "missing authorizer",
+	{ subject_user_id = 123456, is_erased = function() return false end }
+)
+expect(missing_authorizer.code == "disabled",
+	"restore did not fail closed when no application authorizer was supplied")
+local denied_restore = V2.ProfileDoctor.Restore(
+	migration_record, { cash = 99 }, restore_revision,
+	"restore-denied", "operator-1", "authorization should be denied",
+	{
+		subject_user_id = 123456,
+		is_erased = function() return false end,
+		authorize = function() return false, "operator is not authorized" end,
+	}
+)
+expect(denied_restore.code == "denied", "restore ignored an explicit authorization denial")
+local stale_restore = V2.ProfileDoctor.Restore(
+	migration_record, { cash = 99 }, restore_revision - 1,
+	"restore-stale-revision", "operator-1", "stale revision",
+	{
+		subject_user_id = 123456,
+		is_erased = function() return false end,
+		authorize = function() return true end,
+	}
+)
+expect(stale_restore.code == "conflict", "restore accepted a stale profile revision")
 local restored = V2.ProfileDoctor.Restore(
 	migration_record, { cash = 99 }, migration_record:GetRevision(),
 	"restore-stable-1", "operator-1", "verified historical restore",
-	{ subject_user_id = 123456, is_erased = function() return false end }
+	{
+		subject_user_id = 123456,
+		is_erased = function() return false end,
+		authorize = function(operator_id, reason, expected_revision, user_id)
+			return operator_id == "operator-1" and reason ~= "" and expected_revision ~= nil and user_id == 123456
+		end,
+	}
 )
 expect(restored.code == "committed" and migration_record:Get().cash == 99,
 	"guarded restore failed to commit an audited historical value")
+expect(migration_record:Get()["__recordstore_reserved_do_not_restore"] == "preserve",
+	"historical restore overwrote RecordStore-reserved metadata")
 expect(migration_record:Get().cash ~= nil, "restored profile lost user data")
 
 local profile_quarantine_store = new_store()
@@ -327,6 +366,15 @@ expect(quarantined_profile.code == "committed",
 local profile_quarantine_status = V2.ProfileDoctor.GetQuarantineStatusAsync(migration_record, profile_quarantine_store)
 expect(profile_quarantine_status.code == "success" and profile_quarantine_status.status == "quarantined",
 	"profile quarantine status could not be read durably")
+local blocked_writer = V2.ProfileDoctor.CheckWritableAsync(migration_record, profile_quarantine_store)
+expect(blocked_writer.code == "quarantined" and blocked_writer.allowed == false,
+	"quarantine writer gate allowed writes while the profile was quarantined")
+local fail_closed_writer = V2.ProfileDoctor.CheckWritableAsync(migration_record, {
+	GetAsync = function() error("injected quarantine read failure") end,
+	UpdateAsync = function() error("unexpected write") end,
+})
+expect(fail_closed_writer.allowed == false and fail_closed_writer.code == "unknown",
+	"quarantine writer gate allowed writes when status was unknown")
 local profile_quarantine_resolved = V2.ProfileDoctor.ResolveQuarantineAsync(
 	migration_record, profile_quarantine_store, "profile-quarantine-001",
 	"operator-1", "write paths inspected", migration_record:GetRevision()
@@ -335,6 +383,9 @@ expect(profile_quarantine_resolved.code == "committed",
 	"profile quarantine resolution failed: " .. tostring(profile_quarantine_resolved.code))
 expect(V2.ProfileDoctor.GetQuarantineStatusAsync(migration_record, profile_quarantine_store).status == "resolved",
 	"profile quarantine resolution was not persisted")
+local resumed_writer = V2.ProfileDoctor.CheckWritableAsync(migration_record, profile_quarantine_store)
+expect(resumed_writer.code == "success" and resumed_writer.allowed == true,
+	"writer gate remained blocked after an audited quarantine resolution")
 
 sender:Close()
 recipient:Close()

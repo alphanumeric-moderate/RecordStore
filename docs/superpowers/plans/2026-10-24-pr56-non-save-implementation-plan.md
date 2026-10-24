@@ -69,7 +69,8 @@
 
 ### Slice 6: Migration and Profile Doctor
 - [x] Add durable migration manifests with stable migration IDs/revisions, guarded execution through Record transactions, explicit failed-step quarantine, and operator-audited quarantine resolution.
-- [x] Add durable profile quarantine status/resolve APIs and keep repair preview read-only; restore is revision/session guarded and records operator ID plus reason.
+- [x] Add durable profile quarantine status/resolve APIs and keep repair preview read-only; restore now requires explicit authorization and erasure callbacks, binds the expected preflight data digest, and records operator ID plus reason.
+- [x] Add a fail-closed quarantine writer-check helper; integrating an atomic writer fence into every application write path remains a release blocker.
 
 - [x] Add a process-local migration registry with stable IDs, declared implementation revisions, compatibility ranges, forward-only edges and ambiguous-path rejection. A target with no path fails closed during preview.
 - [x] Add bounded read-only path/type migration previews. Preview executes non-yielding transformations on a snapshot and never persists the result.
@@ -106,6 +107,6 @@ Implemented and covered by the current Lune regression suite:
 - Regression coverage for inbox/transaction receipt saturation and expiry recovery: full collections reject new operation IDs without profile mutation; live receipts still deduplicate; expired receipts are reclaimed before a new commit.
 - Opt-in developer-product receipt processing through `PurchaseReceiptProcessor:CreateHandler`: malformed receipt and unsupported product checks, active-profile requirements, durable same-profile grant/idempotency, duplicate acknowledgement, conflict deferral, and explicit finite receipt retention.
 
-Still incomplete: remaining scheduler audit; Mailbox V2 mixed-version/v3 compatibility, adversarial concurrent-claim and full fault-injection matrix; handler-side destination effect integration and real multi-server acceptance; additional purchase receipt types; live enforcement of quarantine across every writer; real key-family inventory and RTBF completeness; saga failure injection for every transfer leg; adaptive governor fairness/low-budget/throttle/lease-margin acceptance; independent code review; fault-injection execution on the final head; and live Roblox Studio/DataStore throttling, crash/shutdown and mixed-version rollback acceptance.
+Still incomplete: remaining scheduler audit; Mailbox V2 mixed-version/v3 compatibility and full fault-injection matrix; handler-side destination effect integration and real multi-server acceptance; additional purchase receipt types; atomic quarantine writer fencing across every application write path; real user-key-family inventory and RTBF completeness; saga failure injection for every transfer leg; adaptive governor fairness/low-budget/throttle/lease-margin acceptance; independent code review; fault-injection execution on the final head; and live Roblox Studio/DataStore throttling, crash/shutdown and mixed-version rollback acceptance.
 
 The outbox-to-Mailbox V2 adapter receipt proves durable mailbox acceptance only. It does not prove that a destination handler executed, or that an external effect completed. Keep handler-side processing idempotent and retain live multi-server acceptance as a separate release gate.

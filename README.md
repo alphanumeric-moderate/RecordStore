@@ -512,7 +512,7 @@ The saga coordinator is a **recoverable multi-key workflow**, not a cross-key at
 
 Versioned runtime policy updates are routed to the current RecordStore scheduler policy API when scheduler fields are present. `max_dirty_age_seconds` is diagnostic/SLO policy; it does not create an unconditional save guarantee. The V2 facade does not register hidden request hooks or enable Mailbox V2 globally. Provide an explicit activation guard.
 
-Durable migration manifests and quarantine records help coordinate operators, but every game write path must enforce the quarantine state before mutating data. `ProfileDoctor.Restore` remains guarded by active session ownership, an expected revision, a stable restore ID, operator identity and reason; configure an application authorization callback for the operator boundary. These services remain opt-in and require real Roblox service/rollback acceptance before production enablement.
+Durable migration manifests and quarantine records help coordinate operators. `ProfileDoctor.Restore` now fails closed unless the application supplies an authorization callback and an erasure-status callback, uses active session ownership and expected revision, binds the transaction to the preflight profile digest, preserves reserved RecordStore keys, and records operator identity/reason. `ProfileDoctor.CheckWritableAsync` provides a fail-closed pre-write gate, but it is not an atomic fence by itself: every writer must integrate it alongside a durable writer-fencing protocol to prevent check/write races. These services remain opt-in and require real Roblox service/rollback acceptance before production enablement.
 
 ## Opt-in outbox-to-Mailbox V2 delivery
 

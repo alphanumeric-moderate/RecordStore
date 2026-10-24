@@ -1185,16 +1185,60 @@ local function new_doctor(record_store)
 		local stats = record_stats(record)
 		if stats.state ~= "active" then return { code = "fenced", message = "restore requires active ownership" } end
 		if stats.revision ~= expected_revision then return { code = "conflict", message = "revision changed after preview" } end
-		if type(options.is_erased) == "function" and options.subject_user_id ~= nil then
-			local erased, status = io_call(options.is_erased, options.subject_user_id)
-			if erased == true then return { code = "erased", message = "restore is blocked by erasure tombstone" } end
-			if erased == nil then return { code = "unknown", message = "erasure status unresolved", detail = status } end
+		if type(options.authorize) ~= "function" then
+			return { code = "disabled", message = "restore requires an explicit application authorization callback" }
 		end
+		if not finite(options.subject_user_id) or options.subject_user_id < 1
+			or math.floor(options.subject_user_id) ~= options.subject_user_id
+			or type(options.is_erased) ~= "function"
+		then
+			return { code = "invalid", message = "restore requires a UserId and a durable erasure-status callback" }
+		end
+		local authorized, authorization_error = io_call(
+			options.authorize,
+			operator_id,
+			reason,
+			expected_revision,
+			options.subject_user_id,
+			record
+		)
+		if authorized ~= true then
+			return {
+				code = if authorized == nil then "unknown" else "denied",
+				message = "restore authorization was not granted",
+				detail = authorization_error,
+			}
+		end
+		local erased, erasure_status = io_call(options.is_erased, options.subject_user_id)
+		if erased == true then return { code = "erased", message = "restore is blocked by erasure tombstone" } end
+		if erased ~= false then
+			return { code = "unknown", message = "erasure status unresolved; restore fails closed", detail = erasure_status }
+		end
+		local current_data, current_error = record_data(record)
+		if type(current_data) ~= "table" then
+			return { code = "unknown", message = "current profile snapshot is unavailable", detail = current_error }
+		end
+		local current_ok, current_text = pcall(canonical, current_data)
+		if not current_ok then return { code = "corrupt", message = tostring(current_text) } end
+		local expected_data_digest = digest(current_text)
 		local historical_ok, historical_text = pcall(canonical, historical_data)
 		if not historical_ok then return { code = "invalid", message = tostring(historical_text) } end
-		local request = { kind = "guarded_restore", restore_id = restore_id, operator_id = operator_id, reason = reason, expected_revision = expected_revision, historical_digest = digest(historical_text) }
+		local request = {
+			kind = "guarded_restore",
+			restore_id = restore_id,
+			operator_id = operator_id,
+			reason = reason,
+			expected_revision = expected_revision,
+			expected_data_digest = expected_data_digest,
+			subject_user_id = options.subject_user_id,
+			historical_digest = digest(historical_text),
+		}
 		local result = transaction_run(record, "rv2:restore:" .. digest(restore_id), request, function(current)
 			if type(current) ~= "table" then error("restore requires table profile") end
+			local current_ok, current_text = pcall(canonical, current)
+			if not current_ok or digest(current_text) ~= expected_data_digest then
+				error("profile data changed after restore preflight")
+			end
 			local merged = {}
 			for key, value in pairs(current) do if type(key) ~= "string" or not string.find(key, "^" .. RESERVED, 1) then merged[key] = copy(value) end end
 			for key, value in pairs(historical_data) do if type(key) ~= "string" or not string.find(key, "^" .. RESERVED, 1) then merged[key] = copy(value) end end
@@ -1256,6 +1300,19 @@ local function new_doctor(record_store)
 		if not value then return { code = "not_found", status = "not_quarantined" } end
 		if type(value) ~= "table" or value.identity_text ~= identity_text then return { code = "conflict" } end
 		return { code = "success", status = value.status, manifest = copy(value) }
+	end
+	function doctor.CheckWritableAsync(record, quarantine_store)
+		local status = doctor.GetQuarantineStatusAsync(record, quarantine_store)
+		if type(status) ~= "table" then
+			return { code = "unknown", allowed = false, message = "quarantine lookup returned no status" }
+		end
+		if status.code == "not_found" then return { code = "success", allowed = true, status = "not_quarantined" } end
+		if status.code ~= "success" then
+			return { code = "unknown", allowed = false, message = status.message or ("quarantine lookup returned " .. tostring(status.code)) }
+		end
+		if status.status == "resolved" then return { code = "success", allowed = true, status = "resolved" } end
+		if status.status == "quarantined" then return { code = "quarantined", allowed = false, manifest = status.manifest } end
+		return { code = "unknown", allowed = false, message = "unrecognized quarantine state" }
 	end
 	function doctor.ResolveQuarantineAsync(record, quarantine_store, quarantine_id, operator_id, reason, expected_revision)
 		if type(quarantine_store) ~= "table" or not valid_text(quarantine_id, 96)
@@ -1614,7 +1671,16 @@ local function new_erasure(store, families, options)
 	end
 	function coordinator:IsErased(user_id)
 		local status = self:GetStatus(user_id)
-		return status.status == "planned" or status.status == "in_progress" or status.status == "completed", status
+		if type(status) ~= "table" then return nil, { code = "unknown", message = "erasure status returned no record" } end
+		if status.code == "not_found" then return false, status end
+		if status.code == "unknown" or status.code == "conflict" or status.code == "corrupt" then
+			return nil, status
+		end
+		if status.status == "resolved" then return false, status end
+		if status.status == "planned" or status.status == "in_progress" or status.status == "completed" then
+			return true, status
+		end
+		return nil, { code = "unknown", message = "erasure manifest status is unrecognized", observed = status }
 	end
 	return coordinator
 end
