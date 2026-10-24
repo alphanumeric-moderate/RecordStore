@@ -13925,12 +13925,12 @@ local function make_record(name: string, scope: string, key: string, options: Op
 		ApplyInboxAsync = function(self: Record, message_id: string, message_type: string, payload: JsonValue, reducer: TransactionReducer, options: TransactionOptions?)
 			local result, status, message = transact_engine(self, "inbox", message_id, reducer, options, message_type, payload, nil)
 			sync_public(self)
-			return result, status, message
+			return result, status :: TransactionStatus, message
 		end,
 		CommitWithOutboxAsync = function(self: Record, commit_key: string, command_type: string, command_payload: JsonValue, outbox_events: { OutboxEventSpec }, reducer: TransactionReducer, options: TransactionOptions?)
 			local result, status, message = transact_engine(self, "outbox", commit_key, reducer, options, command_type, command_payload, outbox_events)
 			sync_public(self)
-			return result, status, message
+			return result, status :: TransactionStatus, message
 		end,
 		MessageAsync = message,
 		GetMailboxOwner = get_mailbox_owner,
@@ -14850,7 +14850,6 @@ RecordStore._internals.transact = (function()
 		local final_result: JsonValue? = nil
 		local final_status: TransactionStatus? = nil
 		local final_message: string? = nil
-		local next_revision = expected_revision + 1
 
 		for attempt = 1, attempts do
 			if now_local() >= deadline then
@@ -14861,12 +14860,10 @@ RecordStore._internals.transact = (function()
 			local decision = "not_started"
 			local decision_message: string? = nil
 			local decision_result: JsonValue? = nil
-			local decision_result_present = false
 			local returned, info, update_code, update_message = backend_update(state.backend, function(raw, info_before)
 				decision = "not_started"
 				decision_message = nil
 				decision_result = nil
-				decision_result_present = false
 				local transform_time = session_now_unix(state.backend.mock)
 				local envelope, parse_error, current_format = parse_envelope(raw)
 				if not current_format or envelope == nil then
@@ -14910,8 +14907,7 @@ RecordStore._internals.transact = (function()
 						end
 						decision = "duplicate"
 						decision_result = if old_receipt.result_present then copy_value(old_receipt.result) else nil
-						decision_result_present = old_receipt.result_present
-						return nil, nil, nil
+							return nil, nil, nil
 					end
 					decision = "conflict"
 					decision_message = "durable revision changed unexpectedly"
@@ -14932,7 +14928,6 @@ RecordStore._internals.transact = (function()
 					end
 					decision = "duplicate"
 					decision_result = if previous_receipt.result_present then copy_value(previous_receipt.result) else nil
-					decision_result_present = previous_receipt.result_present
 					return nil, nil, nil
 				end
 			local receipt_count = 0
@@ -15104,7 +15099,7 @@ RecordStore._internals.transact = (function()
 				if receipt.request_identity ~= request_identity then
 					final_status = "conflict"
 					final_message = "operation_id is bound to a different durable request"
-					return false, "conflict"
+					return false, "conflict" :: TransactionStatus
 				end
 				if not matches_session(candidate_envelope, token :: string, generation)
 					or candidate_envelope.session == nil
@@ -15112,12 +15107,12 @@ RecordStore._internals.transact = (function()
 				then
 					final_status = "fenced"
 					final_message = "transaction receipt exists but the active session fence no longer matches"
-					return false, "fenced"
+					return false, "fenced" :: TransactionStatus
 				end
 				if receipt.committed_revision > candidate_envelope.revision then
 					final_status = "unknown"
 					final_message = "durable transaction receipt refers to a future revision"
-					return false, "unknown"
+					return false, "unknown" :: TransactionStatus
 				end
 				confirmed = candidate_envelope
 				confirmed_info = candidate_info
@@ -15213,7 +15208,7 @@ RecordStore._internals.transact = (function()
 		state.current_operation_id = nil
 		if was_unknown or status == "unknown" then
 			state.state = "unknown"
-			state.pending_transaction = { operation_id = operation_id, kind = kind, request_identity = request_identity }
+			state.pending_transaction = { operation_id = operation_id, kind = kind :: string, request_identity = request_identity }
 			state.next_reconciliation = now_local() + 0.25
 			state.last_reconciliation_category = "transaction_outcome_unknown"
 		else
