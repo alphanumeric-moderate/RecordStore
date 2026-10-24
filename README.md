@@ -481,6 +481,29 @@ end
 
 The preview is a dry run only. It runs non-yielding migration callbacks against a read-only snapshot, validates each step, and returns bounded path/type changes without writing the migrated data. The registry and migration code are not persisted by RecordStore, and this API does not automatically migrate profiles during `Open`; guarded execution, durable registry manifests, quarantine, and crash-safe migration acceptance remain unfinished roadmap work.
 
+## Transactional inbox, idempotent transactions, and outbox delivery
+
+`Record:TransactAsync` and `Record:ApplyInboxAsync` are opt-in through `transactional_operations_enabled = true`. `Record:CommitWithOutboxAsync` commits the source-profile mutation, the operation receipt, and bounded outbox intents in one profile-key `UpdateAsync`; it does not itself deliver to destination profiles. 
+
+`Record:GetOutboxAsync(max_events?)` returns pending and unresolved events in creation-time/event-ID order. The page size defaults to 8 and is bounded at 16. `Record:DispatchOutboxAsync(dispatcher, max_events?)` invokes an application-supplied dispatcher for that bounded page and returns the number of deliveries whose receipt was confirmed.
+
+Use a stable event ID as the destination's idempotency key. The callback should return `true, durable_receipt_id` only after it can verify durable acceptance for that same event ID. A plain, non-durable acknowledgement is not sufficient.
+
+```lua
+local delivered_count, status, message = source:DispatchOutboxAsync(function(event)
+    -- Application-defined: enqueue with event.EventId as the stable idempotency key,
+    -- then verify the destination's durable receipt before returning true.
+    local accepted, durable_receipt_id = destination_enqueue_and_confirm(event.EventId, event)
+    return accepted, durable_receipt_id
+end, 8)
+```
+
+`false, reason` leaves the event pending. A callback exception or an acknowledgement without a valid receipt ID leaves the event unresolved (`unknown`) so the next attempt reuses the same event ID. Delivery is at-least-once; arbitrary external side effects are not exactly-once. The callback is application code and must make destination handling idempotent.
+
+These operations can read and update the source outbox while the source `Record` is closed. Outbox status updates are sidecar-only compare-and-update writes: they preserve profile data, revision, timestamps, session fields, write ID, and unknown-compatible top-level fields.
+
+`Record:PruneOutboxAsync(delivered_before_unix, max_events?)` explicitly removes only events with confirmed `delivered` state and `delivered_at` strictly earlier than the cutoff. The cutoff is a Unix timestamp in **seconds**, not milliseconds. Cleanup is bounded (at most 16 events per call); pending, unknown, and blocked events are never pruned by this API. Cleanup is not automatic.
+
 ## Benchmarks
 
 Performance is tracked with [CodSpeed](https://codspeed.io). The benchmarks run `RecordStore.Mock` scenarios outside Roblox with [Lune](https://github.com/lune-org/lune), a standalone Luau runtime. `bench/RobloxShim.luau` provides the small set of Roblox APIs the mock backend needs (`HttpService`, `DateTime`, `Enum`, `task`, ...).
