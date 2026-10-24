@@ -13836,9 +13836,7 @@ local function open(self: Record, default_data: JsonValue?, recreate: boolean?):
 	return normalize_result_code(result) or "unknown", message
 end
 
-local get_transaction_status_engine: (Record, string, JsonValue) -> TransactionReceiptStatus
-
-local function make_record(name: string, scope: string, key: string, options: Options, mock: boolean, transact_engine: (Record, string, string, TransactionReducer, TransactionOptions?, string?, JsonValue?, { OutboxEventSpec }?) -> (JsonValue?, TransactionStatus, string?)): Record
+local function make_record(name: string, scope: string, key: string, options: Options, mock: boolean, transact_engine: (Record, string, string, TransactionReducer, TransactionOptions?, string?, JsonValue?, { OutboxEventSpec }?) -> (JsonValue?, TransactionStatus, string?), transaction_status_engine: (Record, string, JsonValue) -> TransactionReceiptStatus): Record
 	local mode = if mock then "mock" else "live"
 	local id = HttpService:JSONEncode({ mode, name, scope, key })
 	local existing = records[id]
@@ -13981,7 +13979,7 @@ local function make_record(name: string, scope: string, key: string, options: Op
 			return result, status :: TransactionStatus, message
 		end,
 		GetTransactionStatusAsync = function(self: Record, operation_id: string, request: JsonValue): TransactionReceiptStatus
-			return get_transaction_status_engine(self, operation_id, request)
+			return transaction_status_engine(self, operation_id, request)
 		end,
 		ApplyInboxAsync = function(self: Record, message_id: string, message_type: string, payload: JsonValue, reducer: TransactionReducer, options: TransactionOptions?)
 			local result, status, message = transact_engine(self, "inbox", message_id, reducer, options, message_type, payload, nil)
@@ -17128,6 +17126,7 @@ end)()
 RecordStore.new = (function()
 	local normalize_options = RecordStore._internals.normalize_options
 	local transact_engine = RecordStore._internals.transact :: (Record, string, string, TransactionReducer, TransactionOptions?, string?, JsonValue?, { OutboxEventSpec }?) -> (JsonValue?, TransactionStatus, string?)
+	local transaction_status_engine = RecordStore._internals.get_transaction_status :: (Record, string, JsonValue) -> TransactionReceiptStatus
 	return function(name: string, scope: string, key: string, options: Options): Record
 	if closing then
 		error("RecordStore is shutting down", 2)
@@ -17144,7 +17143,7 @@ RecordStore.new = (function()
 	if valid_options == nil then
 		error("normalized options are missing", 2)
 	end
-	local record = make_record(name, scope, key, valid_options, false, transact_engine)
+	local record = make_record(name, scope, key, valid_options, false, transact_engine, transaction_status_engine)
 	start_scheduler()
 	return record
 	end
@@ -17153,6 +17152,7 @@ end)()
 RecordStore.Mock = (function()
 	local normalize_options = RecordStore._internals.normalize_options
 	local transact_engine = RecordStore._internals.transact :: (Record, string, string, TransactionReducer, TransactionOptions?, string?, JsonValue?, { OutboxEventSpec }?) -> (JsonValue?, TransactionStatus, string?)
+	local transaction_status_engine = RecordStore._internals.get_transaction_status :: (Record, string, JsonValue) -> TransactionReceiptStatus
 	local enqueue_mock = RecordStore._internals.enqueue_static.mock
 	local function mock_new(name: string, scope: string, key: string, options: Options): Record
 		if closing then
@@ -17173,7 +17173,7 @@ RecordStore.Mock = (function()
 		valid_options.messaging_enabled = false
 		valid_options.takeover_enabled = false
 		start_scheduler()
-		return make_record(name, scope, key, valid_options, true, transact_engine)
+		return make_record(name, scope, key, valid_options, true, transact_engine, transaction_status_engine)
 	end
 
 	local function read_async_mock(name: string, scope: string, key: string, operation_deadline: number?, legacy_decoder: LegacyDecoder?): (Snapshot?, ResultCode, string?)
