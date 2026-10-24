@@ -421,19 +421,19 @@ do
 	local source, target = new_leg_pair("V2SagaReserveResponseLoss")
 	local source_loss_seen = inject_post_commit_unknown(source, ":reserve")
 	local saga_service = V2.Sagas.new(new_store())
-	local initial = saga_service:TransferAsync("reserve-loss", source, target, 10, {
+	local initial = saga_service:TransferAsync("reserve-loss", source, target, 100, {
 		sender_id = "sender", recipient_id = "recipient",
 	})
 	expect(initial.code == "reconciliation_required",
 		"reserve response loss was not surfaced as unresolved: " .. tostring(initial.code))
-	expect(source:Get().Balance == 90 and target:Get().Balance == 25,
+	expect(source:Get().Balance == 0 and target:Get().Balance == 25,
 		"reserve response-loss fixture did not commit only the reservation leg")
 	expect(assert_leg_outcome(saga_service, "reserve-loss", "reserve", "unknown").attempts == 1,
 		"reserve response loss was not recorded durably")
-	local resumed = saga_service:TransferAsync("reserve-loss", source, target, 10, {
+	local resumed = saga_service:TransferAsync("reserve-loss", source, target, 100, {
 		sender_id = "sender", recipient_id = "recipient",
 	})
-	expect(source_loss_seen() and resumed.code == "settled" and source:Get().Balance == 90 and target:Get().Balance == 35,
+	expect(source_loss_seen() and resumed.code == "settled" and source:Get().Balance == 0 and target:Get().Balance == 125,
 		"reserve retry did not reconcile its stable operation ID without re-reserving")
 	expect(assert_leg_outcome(saga_service, "reserve-loss", "reserve", "committed").attempts == 2,
 		"reserve duplicate reconciliation did not update the durable leg outcome")
@@ -488,9 +488,17 @@ end
 
 do
 	local source, target = new_leg_pair("V2SagaRefundResponseLoss")
+	local saga_store = new_store()
+	local saga_service = V2.Sagas.new(saga_store)
 	local source_base = source.TransactAsync
 	local refund_loss_armed = true
+	local compensation_phase_was_durable_before_refund = false
 	source.TransactAsync = function(self, operation_id, reducer, options)
+		if type(operation_id) == "string" and string.sub(operation_id, -#":refund") == ":refund" then
+			compensation_phase_was_durable_before_refund = saga_service:GetStatus("refund-loss").phase == "compensation_pending"
+			expect(compensation_phase_was_durable_before_refund,
+				"refund operation started before compensation_pending was durable")
+		end
 		local result, status, message = source_base(self, operation_id, reducer, options)
 		if refund_loss_armed and type(operation_id) == "string"
 			and string.sub(operation_id, -#":refund") == ":refund" and status == "committed"
@@ -512,7 +520,6 @@ do
 		end
 		return target_base(self, operation_id, reducer, options)
 	end
-	local saga_service = V2.Sagas.new(new_store())
 	local initial = saga_service:TransferAsync("refund-loss", source, target, 10, {
 		sender_id = "sender", recipient_id = "recipient",
 	})

@@ -1850,12 +1850,8 @@ local function saga_coordinator(store, options)
 			}
 		end
 		if saga.phase == "requested" then
-			local data, read_error = record_data(sender)
-			if type(data) ~= "table" then return { code = "fenced", transfer_id = id, message = read_error } end
-			if not finite(data[balance_field]) or data[balance_field] < amount then
-				local rejected, code = mark("rejected", "rejected", "insufficient available balance")
-				return { code = if rejected then "rejected" else code, phase = "rejected", transfer_id = id }
-			end
+			-- The reservation transaction is the authoritative balance check. A read-before-write
+			-- check would reject a prior reservation after an ambiguous response loss.
 			local reserve = run_leg("reserve", sender, "rv2:transfer:" .. digest(id) .. ":reserve", { transfer_id = id, amount = amount, leg = "reserve", sender_id = sender_id }, function(current)
 				local next_data = copy(current)
 				local escrow = next_data[escrow_field] or {}
@@ -1893,6 +1889,14 @@ local function saga_coordinator(store, options)
 			end
 			if credit.code ~= "committed" and credit.code ~= "duplicate" then
 				local credit_error = credit.message or "recipient credit was rejected"
+				-- Persist compensation before the refund starts. A crash after refund commit must
+				-- resume through the same refund operation, never retry recipient credit first.
+				local pending, pending_code, pending_error = mark(
+					"compensation_pending", "reconciliation_required", credit_error
+				)
+				if type(pending) ~= "table" or pending.phase ~= "compensation_pending" then
+					return { code = pending_code or "unknown", transfer_id = id, message = pending_error }
+				end
 				local refund = refund_source()
 				if refund.code == "committed" or refund.code == "duplicate" then
 					local rejected, rejected_code, rejected_error = mark("rejected", "rejected", credit_error)
@@ -1902,14 +1906,14 @@ local function saga_coordinator(store, options)
 						message = if type(rejected) == "table" then rejected.last_error else rejected_error,
 					}
 				end
-				local pending, pending_code, pending_error = mark(
+				local still_pending, still_pending_code, still_pending_error = mark(
 					"compensation_pending", "reconciliation_required",
 					"recipient credit was rejected; source refund remains unresolved"
 				)
 				return {
-					code = if type(pending) == "table" then "reconciliation_required" else pending_code or "unknown",
+					code = if type(still_pending) == "table" then "reconciliation_required" else still_pending_code or "unknown",
 					transfer_id = id,
-					message = if type(pending) == "table" then pending.last_error else pending_error,
+					message = if type(still_pending) == "table" then still_pending.last_error else still_pending_error,
 				}
 			end
 			saga = mark("credited", "pending")
