@@ -1728,6 +1728,11 @@ local function new_read_coalescer(fetch, options)
 	return service
 end
 
+local function canonical_request(value)
+	local ok, result = pcall(canonical, value)
+	return if ok then result else nil
+end
+
 local function new_maintenance()
 	local service = {}
 	function service.AssessPayload(value, maximum_bytes)
@@ -1827,7 +1832,10 @@ function V2.new(record_store, mailbox_module, options)
 		DeliveryGuarantee = "at-least-once",
 		OrderingContract = "strict ordering_key is not enabled; priority is a hint among eligible messages",
 		Canonicalize = canonical,
-		Fingerprint = function(value) local ok, material = pcall(canonical, value); return if ok then digest(material) else nil end end,
+		Fingerprint = function(value)
+			local ok, material = pcall(canonical, value)
+			return if ok then digest(material) else nil
+		end,
 		Mailbox = {
 			new = function(store, owner, mailbox_options)
 				local merged_options = {}
