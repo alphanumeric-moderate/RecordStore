@@ -6409,12 +6409,6 @@ export type Record = {
 }
 
 local IMPLEMENTATION_VERSION = 2
-local MAX_READABLE_IMPLEMENTATION_VERSION = 3
-local TRANSACTION_IMPLEMENTATION_VERSION = 3
-local MAX_INBOX_RECEIPTS = 256
-local MAX_TRANSACTION_RECEIPTS = 256
-local MAX_OUTBOX_EVENTS = 128
-local MAX_ENVELOPE_SIDECAR_BYTES = 48_000
 local QUEUE_IMPLEMENTATION_VERSION = 3
 local DEFAULT_AUTOSAVE_INTERVAL = 300
 local DEFAULT_LEASE_DURATION = 180
@@ -8201,7 +8195,7 @@ local function parse_envelope(raw: unknown): (Envelope?, string?, boolean)
 		if not sidecars_valid then
 			return nil, "invalid transaction sidecars: " .. (sidecars_error or "unknown error"), false
 		end
-		parsed_sidecars = EnvelopeSidecarProtocol.clone(raw_sidecars)
+		parsed_sidecars = EnvelopeSidecarProtocol.clone(raw_sidecars :: EnvelopeSidecars)
 	elseif raw_sidecars ~= nil then
 		return nil, "version 2 envelope unexpectedly contains transaction sidecars", false
 	end
