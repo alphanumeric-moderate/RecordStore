@@ -229,6 +229,61 @@ local function test_ordering_is_opt_in_and_input_validation_is_side_effect_free(
 	assert(not ok, "strict ordering accepted an adapter without uncached authoritative reads")
 end
 
+local function test_producer_idempotency_conflict_and_preparation_response_loss()
+	local backing = MailboxV2.MockStore()
+	local route = nil
+	local lost_route_write = false
+	local store = {
+		GetAsync = function(_, key) return backing:GetAsync(key) end,
+		GetAsyncFresh = function(_, key) return backing:GetAsyncFresh(key) end,
+		UpdateAsync = function(_, key, transform)
+			if key == route and not lost_route_write then
+				lost_route_write = true
+				backing:FailNextUpdate("after")
+			end
+			return backing:UpdateAsync(key, transform)
+		end,
+		RemoveAsync = function(_, key) return backing:RemoveAsync(key) end,
+	}
+	local mailbox = new_mailbox({ strict_ordering_enabled = true }, store)
+	local route_error
+	route, route_error = mailbox:_route_key("producer-crash-window")
+	assert(route ~= nil, tostring(route_error))
+
+	local options = {
+		idempotency_key = "producer-crash-window",
+		ordering_key = "producer-crash-account",
+		priority = "normal",
+		available_at = now_ms,
+	}
+	local first = mailbox:EnqueueAsync("purchase", { sku = "item-A" }, options)
+	assert(lost_route_write, "test did not inject response loss on the canonical preparation write")
+	assert(first.code == "unknown",
+		"ambiguous canonical preparation write was not exposed as unknown: " .. tostring(first.code))
+
+	local recovery = mailbox:RecoverAsync()
+	assert(recovery.code == "success",
+		"bounded preparation recovery failed after canonical response loss: " .. tostring(recovery.error))
+	local delivery, delivery_result = mailbox:GetDeliveryAsync(route)
+	assert(delivery_result.code == "success" and delivery ~= nil,
+		"recovered producer receipt could not be read: " .. tostring(delivery_result.error))
+	assert(delivery.State == "ready", "recovered producer receipt did not reach ready")
+
+	local duplicate = mailbox:EnqueueAsync("purchase", { sku = "item-A" }, options)
+	assert(duplicate.code == "duplicate", "same producer request was not idempotent: " .. tostring(duplicate.code))
+	assert(duplicate.message_id == route, "duplicate producer request returned a different message ID")
+
+	local conflict = mailbox:EnqueueAsync("purchase", { sku = "item-B" }, options)
+	assert(conflict.code == "conflict", "reused producer key with a changed payload was not rejected")
+	local queue, queue_result = mailbox:GetQueueAsync()
+	assert(queue_result.code == "success", "queue could not be read after producer recovery")
+	local route_count = 0
+	for _, message in ipairs(queue) do
+		if message.Id == route then route_count += 1 end
+	end
+	assert(route_count == 1, "response-loss recovery or duplicate enqueue created multiple active placements")
+end
+
 local function test_priority_never_overtakes_an_earlier_ordered_message()
 	local mailbox = new_mailbox({ strict_ordering_enabled = true })
 	local earlier = enqueue(mailbox, "earlier", "priority-earlier", "account-alpha", "background")
@@ -713,6 +768,7 @@ test_injected_clock_and_guid_contracts_fail_closed()
 test_clock_is_never_called_inside_update_async_transform()
 test_ordering_is_opt_in_and_input_validation_is_side_effect_free()
 test_recordstore_installs_shared_scheduler_for_v2_claim_renewal()
+test_producer_idempotency_conflict_and_preparation_response_loss()
 test_priority_never_overtakes_an_earlier_ordered_message()
 test_delayed_predecessor_blocks_later_high_priority_work()
 test_retrying_predecessor_blocks_same_key_successor()
