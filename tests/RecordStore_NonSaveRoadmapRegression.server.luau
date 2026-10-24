@@ -457,6 +457,144 @@ for _, event in pairs(durable_transaction.sidecars.outbox_events) do
 end
 assert(outbox_count == 1, "outbox intent and profile mutation did not commit together")
 
+
+local pending_outbox_events, pending_outbox_status, pending_outbox_message = transactional_record:GetOutboxAsync()
+assert(pending_outbox_status == "success", "GetOutboxAsync status=" .. tostring(pending_outbox_status)
+	.. " message=" .. tostring(pending_outbox_message))
+assert(#pending_outbox_events == 1, "GetOutboxAsync must return the committed pending event")
+local pending_outbox_event = pending_outbox_events[1]
+assert(pending_outbox_event.EventId ~= "")
+assert(pending_outbox_event.EventType == "CoinGift")
+assert(pending_outbox_event.PayloadVersion == 1)
+assert(pending_outbox_event.Payload.amount == 3)
+assert(pending_outbox_event.DestinationProfileKey == "recipient")
+assert(pending_outbox_event.State == "pending")
+assert(pending_outbox_event.DestinationReceiptId == nil)
+
+local closed_result = transactional_record:Close()
+assert(transactional_record:GetState() == "closed",
+	"outbox delivery test must dispatch without an open profile session")
+local before_outbox_dispatch = Mock.get_record_raw("TransactionTest", "global", "profile")
+Mock.set_update_commit_then_failures(1, "outbox receipt update response lost after durable commit")
+local outbox_dispatch_calls = 0
+local outbox_delivered_count, outbox_dispatch_status, outbox_dispatch_message =
+	transactional_record:DispatchOutboxAsync(function(event)
+		outbox_dispatch_calls += 1
+		assert(event.EventId == pending_outbox_event.EventId, "dispatcher received a different event ID")
+		assert(event.EventType == "CoinGift")
+		return true, "mailbox-receipt:" .. event.EventId
+	end)
+assert(outbox_dispatch_status == "success", "DispatchOutboxAsync status="
+	.. tostring(outbox_dispatch_status) .. " message=" .. tostring(outbox_dispatch_message))
+assert(outbox_delivered_count == 1, "ambiguous outbox metadata write was not reconciled")
+assert(outbox_dispatch_calls == 1, "dispatcher callback should execute once for this batch")
+local after_outbox_dispatch = Mock.get_record_raw("TransactionTest", "global", "profile")
+local delivered_outbox_event = after_outbox_dispatch.sidecars.outbox_events[pending_outbox_event.EventId]
+assert(delivered_outbox_event.state == "delivered")
+assert(delivered_outbox_event.attempts == 1)
+assert(delivered_outbox_event.destination_receipt_id == "mailbox-receipt:" .. pending_outbox_event.EventId)
+assert(type(delivered_outbox_event.delivered_at) == "number")
+assert(after_outbox_dispatch.revision == before_outbox_dispatch.revision,
+	"sidecar delivery metadata must not increment the profile data revision")
+assert(after_outbox_dispatch.updated_at == before_outbox_dispatch.updated_at,
+	"sidecar delivery metadata must not alter the profile data timestamp")
+assert(after_outbox_dispatch.write_id == before_outbox_dispatch.write_id,
+	"sidecar delivery metadata must preserve the profile write ID")
+assert(after_outbox_dispatch.data.coins == before_outbox_dispatch.data.coins,
+	"sidecar delivery metadata must preserve profile data")
+local remaining_outbox_events, remaining_outbox_status = transactional_record:GetOutboxAsync()
+assert(remaining_outbox_status == "success" and #remaining_outbox_events == 0,
+	"confirmed events must no longer appear in the pending outbox")
+
+local no_prune_count, no_prune_status = transactional_record:PruneOutboxAsync(delivered_outbox_event.delivered_at)
+assert(no_prune_count == 0 and no_prune_status == "duplicate",
+	"retention cutoff is exclusive and must not prune at the exact delivery timestamp")
+local invalid_prune_count, invalid_prune_status = transactional_record:PruneOutboxAsync(math.huge)
+assert(invalid_prune_count == 0 and invalid_prune_status == "invalid",
+	"outbox retention timestamps must be finite Unix seconds")
+local pruned_count, prune_status, prune_message = transactional_record:PruneOutboxAsync(
+	delivered_outbox_event.delivered_at + 1
+)
+assert(prune_status == "success" and pruned_count == 1,
+	"PruneOutboxAsync did not remove the eligible delivered event: " .. tostring(prune_message))
+local after_outbox_prune = Mock.get_record_raw("TransactionTest", "global", "profile")
+assert(after_outbox_prune.sidecars.outbox_events[pending_outbox_event.EventId] == nil)
+assert(after_outbox_prune.sidecars.transaction_receipts["reward:daily:test"] ~= nil,
+	"outbox cleanup must not remove transaction idempotency receipts")
+assert(after_outbox_prune.revision == before_outbox_dispatch.revision)
+assert(after_outbox_prune.data.coins == before_outbox_dispatch.data.coins)
+local invalid_outbox_events, invalid_outbox_status = transactional_record:GetOutboxAsync(0)
+assert(#invalid_outbox_events == 0 and invalid_outbox_status == "invalid",
+	"outbox reads must reject a zero-size batch")
+
+local outbox_retry_record = Mock.new("OutboxRetryTest", "global", "profile", {
+	schema_version = 1,
+	transactional_operations_enabled = true,
+})
+local outbox_retry_open, outbox_retry_open_message = outbox_retry_record:Open({ coins = 5 })
+assert(outbox_retry_open == "success" or outbox_retry_open == "created",
+	"outbox retry profile open status=" .. tostring(outbox_retry_open)
+		.. " message=" .. tostring(outbox_retry_open_message))
+local retry_commit_result, retry_commit_status, retry_commit_message = outbox_retry_record:CommitWithOutboxAsync(
+	"gift:retry:test",
+	"GiftCoins",
+	{ amount = 2, recipient = "retry-recipient" },
+	{
+		{
+			target_store = "OutboxDestination",
+			target_scope = "global",
+			target_key = "retry-recipient",
+			type = "CoinGift",
+			payload_version = 1,
+			data = { amount = 2 },
+		},
+	},
+	function(data, command)
+		local next_data = table.clone(data)
+		next_data.coins -= command.amount
+		return next_data, { queued = true }
+	end
+)
+assert(retry_commit_status == "committed", "retry outbox commit status="
+	.. tostring(retry_commit_status) .. " message=" .. tostring(retry_commit_message))
+assert(retry_commit_result.queued == true)
+local retry_events, retry_events_status = outbox_retry_record:GetOutboxAsync()
+assert(retry_events_status == "success" and #retry_events == 1)
+local retry_event_id = retry_events[1].EventId
+local unknown_delivery_count, unknown_delivery_status = outbox_retry_record:DispatchOutboxAsync(function(event)
+	assert(event.EventId == retry_event_id, "unknown delivery retry changed the stable event ID")
+	error("transport disconnected after request submission")
+end)
+assert(unknown_delivery_count == 0 and unknown_delivery_status == "unknown",
+	"dispatcher exceptions must produce an unknown delivery outcome")
+local unknown_delivery_raw = Mock.get_record_raw("OutboxRetryTest", "global", "profile")
+local unknown_delivery_event = unknown_delivery_raw.sidecars.outbox_events[retry_event_id]
+assert(unknown_delivery_event.state == "unknown" and unknown_delivery_event.attempts == 1,
+	"ambiguous delivery must stay recoverable with an attempt count")
+
+local rejected_count, rejected_status = outbox_retry_record:DispatchOutboxAsync(function(event)
+	assert(event.EventId == retry_event_id, "rejected delivery changed the stable event ID")
+	return false, "destination temporarily unavailable"
+end)
+assert(rejected_count == 0 and rejected_status == "retry_exhausted",
+	"a definitive destination refusal must leave the event retryable")
+local rejected_raw = Mock.get_record_raw("OutboxRetryTest", "global", "profile")
+local rejected_event = rejected_raw.sidecars.outbox_events[retry_event_id]
+assert(rejected_event.state == "pending" and rejected_event.attempts == 2)
+assert(rejected_event.last_error == "destination temporarily unavailable")
+
+local retry_delivered_count, retry_delivered_status = outbox_retry_record:DispatchOutboxAsync(function(event)
+	assert(event.EventId == retry_event_id, "successful retry changed the stable event ID")
+	return true, "destination-receipt:retry"
+end)
+assert(retry_delivered_count == 1 and retry_delivered_status == "success")
+local retry_delivered_raw = Mock.get_record_raw("OutboxRetryTest", "global", "profile")
+local retry_delivered_event = retry_delivered_raw.sidecars.outbox_events[retry_event_id]
+assert(retry_delivered_event.state == "delivered")
+assert(retry_delivered_event.attempts == 3)
+assert(retry_delivered_event.destination_receipt_id == "destination-receipt:retry")
+
+
 local reducer_yield_record = Mock.new("TransactionYieldTest", "global", "profile", {
 	schema_version = 1,
 	transactional_operations_enabled = true,
