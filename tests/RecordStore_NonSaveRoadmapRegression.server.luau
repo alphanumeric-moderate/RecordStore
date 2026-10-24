@@ -788,5 +788,111 @@ end
 exercise_receipt_capacity_and_retention("transaction")
 exercise_receipt_capacity_and_retention("inbox")
 
+local outbox_batch_record = Mock.new("OutboxBatchLimitTest", "global", "profile", {
+	schema_version = 1,
+	transactional_operations_enabled = true,
+})
+local outbox_batch_open, outbox_batch_open_message = outbox_batch_record:Open({ coins = 0 })
+assert(outbox_batch_open == "created" or outbox_batch_open == "loaded" or outbox_batch_open == "success",
+	"outbox batch-limit profile open status=" .. tostring(outbox_batch_open)
+		.. " message=" .. tostring(outbox_batch_open_message))
+local outbox_batch_before = Mock.get_record_raw("OutboxBatchLimitTest", "global", "profile")
+local oversized_batch = {}
+for index = 1, 17 do
+	oversized_batch[index] = {
+		target_store = "OutboxBatchDestination",
+		target_scope = "global",
+		target_key = "recipient-" .. tostring(index),
+		type = "BatchLimitCheck",
+		payload_version = 1,
+		data = { index = index },
+	}
+end
+local oversized_reducer_calls = 0
+local oversized_result, oversized_status = outbox_batch_record:CommitWithOutboxAsync(
+	"outbox-batch-over-limit",
+	"BatchLimitCheck",
+	{ count = #oversized_batch },
+	oversized_batch,
+	function(data)
+		oversized_reducer_calls += 1
+		local next_data = table.clone(data)
+		next_data.coins += 1
+		return next_data
+	end
+)
+assert(oversized_result == nil and oversized_status == "invalid",
+	"outbox batch exceeding 16 events must be rejected")
+assert(oversized_reducer_calls == 0, "outbox batch validation failure invoked the reducer")
+local outbox_batch_after = Mock.get_record_raw("OutboxBatchLimitTest", "global", "profile")
+assert(outbox_batch_after.revision == outbox_batch_before.revision,
+	"rejected outbox batch advanced the durable revision")
+assert(outbox_batch_after.data.coins == outbox_batch_before.data.coins,
+	"rejected outbox batch mutated profile data")
+assert(next(outbox_batch_after.sidecars.outbox_events) == nil,
+	"rejected outbox batch wrote outbox entries")
+outbox_batch_record:Close()
+
+local sidecar_record = Mock.new("OutboxSidecarSaturationTest", "global", "profile", {
+	schema_version = 1,
+	transactional_operations_enabled = true,
+})
+local sidecar_open, sidecar_open_message = sidecar_record:Open({ grants = 0 })
+assert(sidecar_open == "created" or sidecar_open == "loaded" or sidecar_open == "success",
+	"outbox sidecar profile open status=" .. tostring(sidecar_open)
+		.. " message=" .. tostring(sidecar_open_message))
+local sidecar_payload = string.rep("x", 1500)
+local sidecar_success_count = 0
+local sidecar_capacity_reached = false
+for index = 1, 20 do
+	local commit_key = "sidecar-saturation-" .. tostring(index)
+	local before_attempt = Mock.get_record_raw("OutboxSidecarSaturationTest", "global", "profile")
+	local _, status, message = sidecar_record:CommitWithOutboxAsync(
+		commit_key,
+		"SidecarSaturation",
+		{ index = index },
+		{
+			{
+				target_store = "OutboxSidecarDestination",
+				target_scope = "global",
+				target_key = "recipient",
+				type = "LargePayload",
+				payload_version = 1,
+				data = sidecar_payload,
+			},
+		},
+		function(data)
+			local next_data = table.clone(data)
+			next_data.grants += 1
+			return next_data
+		end
+	)
+	if status == "committed" then
+		sidecar_success_count += 1
+	elseif status == "capacity" then
+		sidecar_capacity_reached = true
+		local after_rejection = Mock.get_record_raw("OutboxSidecarSaturationTest", "global", "profile")
+		assert(after_rejection.revision == before_attempt.revision,
+			"sidecar saturation rejection advanced the durable revision")
+		assert(after_rejection.data.grants == before_attempt.data.grants,
+			"sidecar saturation rejection mutated profile data")
+		assert(string.find(message or "", "encoded-size limit", 1, true) ~= nil,
+			"sidecar saturation must report the encoded-size boundary: " .. tostring(message))
+		break
+	else
+		error("outbox sidecar saturation returned unexpected status " .. tostring(status)
+			.. ": " .. tostring(message))
+	end
+end
+assert(sidecar_capacity_reached, "sidecar saturation did not enforce the encoded-size limit")
+assert(sidecar_success_count > 0 and sidecar_success_count < 20,
+	"sidecar saturation boundary was not reached between commits")
+local sidecar_raw = Mock.get_record_raw("OutboxSidecarSaturationTest", "global", "profile")
+local sidecar_entries = 0
+for _ in pairs(sidecar_raw.sidecars.outbox_events) do sidecar_entries += 1 end
+assert(sidecar_entries == sidecar_success_count,
+	"sidecar capacity failure persisted an event without a committed receipt")
+sidecar_record:Close()
+
 Mock.reset()
 Shim.close()
