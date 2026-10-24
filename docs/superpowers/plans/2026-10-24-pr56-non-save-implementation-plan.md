@@ -41,8 +41,8 @@
 ### Slice 3: Same-profile inbox/outbox and idempotent transactions
 
 - [x] Implement same-profile inbox mutation + receipt and source mutation + outbox intent within one authoritative profile-key UpdateAsync; regression coverage verifies the source mutation and outbox intent commit together.
-- [ ] Add general idempotent transactions with canonical request identity, bounded results/receipts, duplicate/conflict/capacity/unknown outcomes and explicit retention guarantees.
-- [ ] Add bounded outbox fan-out with per-destination receipts and resumable cleanup.
+- [x] Add general idempotent transactions with canonical request identity, bounded results/receipts, duplicate/conflict/capacity/unknown outcomes and explicit retention guarantees.
+- [x] Add bounded outbox reads and callback-based at-least-once dispatch with per-event destination receipt IDs, unknown-outcome reconciliation, and bounded retention cleanup.
 - [ ] Add purchase receipt processing as an opt-in adapter; never auto-register or replace MarketplaceService callbacks.
 
 ### Slice 4: Recoverable saga coordinator
@@ -87,6 +87,7 @@ Implemented and covered by the current Lune regression suite:
 - Profile Doctor point-in-time inspection and bounded historical version diffs with path/type-only output.
 - Process-local migration registration with stable IDs/implementation revisions, compatibility validation, forward-only edges, ambiguity rejection, and read-only migration previews.
 - Opt-in same-profile idempotent transactions and inbox application with bounded durable receipts, duplicate/conflict handling, reducer yield rejection, and unknown-write reconciliation.
-- Atomic source-profile mutation plus durable outbox-intent creation through `CommitWithOutboxAsync`; the API persists intent only and does not yet deliver events to destination profiles.
+- Atomic source-profile mutation plus durable outbox-intent creation through `CommitWithOutboxAsync`.
+- Bounded `GetOutboxAsync`, `DispatchOutboxAsync`, and `PruneOutboxAsync` APIs: stable event IDs, verified destination receipt IDs, sidecar-only raw-envelope writes, closed-source dispatch, bounded pages/cleanup, and explicit unknown/pending states.
 
-Still incomplete: scheduler audit items and full mailbox producer/recovery acceptance matrix; receipt capacity/retention fault coverage; bounded outbox delivery with per-destination receipts and cleanup; purchase receipt adapter; recoverable saga orchestration; adaptive runtime policy APIs; resumable retention/offline maintenance; durable migration manifests and guarded execution/quarantine/restore; durable indexes/materialized views; erasure inventory/coordinator; and correlated operation tracing. Live Roblox service and rollout acceptance remains a separate release gate.
+Still incomplete: scheduler audit items and full mailbox producer/recovery acceptance matrix; receipt capacity/retention fault coverage; an application-specific destination adapter that integrates Mailbox V2 and verifies destination receipts; purchase receipt adapter; recoverable saga orchestration; adaptive runtime policy APIs; resumable retention/offline maintenance; durable migration manifests and guarded execution/quarantine/restore; durable indexes/materialized views; erasure inventory/coordinator; and correlated operation tracing. Live Roblox service and rollout acceptance remains a separate release gate.
