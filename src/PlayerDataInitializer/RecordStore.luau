@@ -15146,7 +15146,7 @@ RecordStore._internals.transact = (function()
 					break
 				end
 				if verification_status ~= nil then
-					final_status = verification_status
+					final_status = verification_status :: TransactionStatus
 					break
 				end
 				local latest, latest_error, latest_format = parse_envelope(raw_after)
