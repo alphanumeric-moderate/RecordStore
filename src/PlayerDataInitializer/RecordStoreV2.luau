@@ -1878,25 +1878,54 @@ local function new_maintenance()
 			budget_ms = math.clamp(math.floor(budget_ms or 25), 1, 1000)
 			if type(config.next_page) ~= "function" or type(config.inspect) ~= "function" or type(config.delete_if_generation) ~= "function" or type(config.persist_progress) ~= "function" then return { code = "invalid", message = "compactor requires page, inspect, generation-aware delete, and checkpoint adapters" } end
 			local start = os.clock() * 1000
-			local items, next_cursor, complete = io_call(config.next_page, self.cursor, max_items)
-			if type(items) ~= "table" then self.status = "unknown"; return { code = "unknown", cursor = self.cursor } end
 			local before_cursor = self.cursor
+			local function checkpoint(status, cursor)
+				local persisted, persist_error = io_call(config.persist_progress, cursor, self.processed, self.removed, status)
+				if persisted ~= true then
+					self.status = "unknown"
+					self.last_error = persist_error
+					return false, persist_error
+				end
+				return true, nil
+			end
+			local items, next_cursor, complete = io_call(config.next_page, before_cursor, max_items)
+			if type(items) ~= "table" then
+				self.status = "unknown"
+				self.last_error = "page adapter returned no item list"
+				checkpoint(self.status, before_cursor)
+				return { code = "unknown", cursor = before_cursor, message = self.last_error }
+			end
+			if #items > max_items then
+				return { code = "capacity", cursor = before_cursor, message = "page adapter exceeded the requested item bound" }
+			end
 			self.status = "running"
 			for _, item in ipairs(items) do
 				if os.clock() * 1000 - start >= budget_ms then self.status = "paused"; break end
 				local inspected, inspect_error = io_call(config.inspect, item)
-				if type(inspected) ~= "table" or inspected.status == "unknown" then self.status = "unknown"; self.last_error = inspect_error; return { code = "unknown", cursor = before_cursor, message = inspect_error or "inspection unresolved" } end
+				if type(inspected) ~= "table" or inspected.status == "unknown" then
+					self.status = "unknown"
+					self.last_error = inspect_error or "inspection unresolved"
+					checkpoint(self.status, before_cursor)
+					return { code = "unknown", cursor = before_cursor, message = self.last_error }
+				end
 				if inspected.eligible == true and inspected.dependencies_clear == true then
 					local action, action_error = io_call(config.delete_if_generation, item, inspected.generation)
-					if action == "unknown" then self.status = "unknown"; self.last_error = action_error; return { code = "unknown", cursor = before_cursor, message = action_error or "delete unresolved" } end
+					if action == "unknown" then
+						self.status = "unknown"
+						self.last_error = action_error or "delete unresolved"
+						checkpoint(self.status, before_cursor)
+						return { code = "unknown", cursor = before_cursor, message = self.last_error }
+					end
 					if action == "deleted" then self.removed += 1 end
 				end
 				self.processed += 1
 			end
-			if self.status ~= "paused" then self.cursor = next_cursor end
-			local persisted, persist_error = io_call(config.persist_progress, self.cursor, self.processed, self.removed, self.status)
-			if persisted ~= true then self.status = "unknown"; self.last_error = persist_error; return { code = "unknown", cursor = before_cursor, message = persist_error or "checkpoint unresolved" } end
-			if complete == true or next_cursor == nil then self.status = "completed" elseif self.status ~= "paused" then self.status = "incomplete" end
+			if self.status ~= "paused" then
+				self.cursor = next_cursor
+				self.status = if complete == true or next_cursor == nil then "completed" else "incomplete"
+			end
+			local persisted, persist_error = checkpoint(self.status, self.cursor)
+			if not persisted then return { code = "unknown", cursor = before_cursor, message = persist_error or "checkpoint unresolved" } end
 			return { code = self.status, cursor = self.cursor, processed = self.processed, removed = self.removed }
 		end
 		function compactor:Resume(cursor) self.cursor = cursor or self.cursor; self.status = "incomplete"; return true end

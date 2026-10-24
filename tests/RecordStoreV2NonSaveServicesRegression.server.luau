@@ -205,8 +205,31 @@ local compacted = compactor:RunStep(16, 500)
 expect(compacted.code == "completed" and compacted.processed == 2 and compacted.removed == 1,
 	"bounded compactor did not report its progress")
 expect(#removed == 1 and removed[1].generation == 4, "compactor deleted an ineligible generation")
-expect(compaction_store.values.checkpoint.status == "running" or compaction_store.values.checkpoint.status == "completed",
-	"compactor did not persist progress")
+expect(compaction_store.values.checkpoint.status == "completed",
+	"compactor checkpoint did not persist its final completion status")
+
+local unknown_compaction_store = new_store()
+local unknown_compactor = V2.Maintenance.NewCompactor({
+	next_page = function(cursor)
+		return { { key = "uncertain", generation = 2 } }, cursor, false
+	end,
+	inspect = function()
+		return { status = "unknown" }, "injected inspection uncertainty"
+	end,
+	delete_if_generation = function() error("unknown inspection must not reach delete adapter") end,
+	persist_progress = function(cursor, processed, removed_count, status)
+		unknown_compaction_store.values.checkpoint = {
+			cursor = cursor, processed = processed, removed = removed_count, status = status,
+		}
+		return true
+	end,
+})
+local unknown_compacted = unknown_compactor:RunStep(1, 500)
+expect(unknown_compacted.code == "unknown", "compactor hid an unresolved inspection")
+expect(unknown_compaction_store.values.checkpoint.status == "unknown",
+	"compactor failed to durably checkpoint its unresolved state")
+expect(unknown_compaction_store.values.checkpoint.cursor == nil,
+	"compactor advanced its cursor after an unresolved inspection")
 
 local migration_record = RecordStore.Mock.new("V2MigrationProfiles", "global", "profile", {
 	schema_version = 1, transactional_operations_enabled = true,

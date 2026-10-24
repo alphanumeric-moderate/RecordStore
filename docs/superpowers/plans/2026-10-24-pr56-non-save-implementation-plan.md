@@ -60,7 +60,7 @@
 
 ### Slice 5: Server-local operations and adaptive governor
 - [x] Add versioned bounded runtime policy updates routed to the existing core scheduler, plus a read-only runtime snapshot and diagnostic dirty-age policy.
-- [x] Add resumable bounded maintenance compaction with persisted cursors and generation-aware delete callbacks; real service effects remain behind application adapters.
+- [x] Add resumable bounded maintenance compaction with persisted cursors and generation-aware delete callbacks; checkpoint status now matches terminal/paused/unknown outcomes, unresolved inspection/delete results keep the cursor, and oversized pages are rejected before processing.
 
 - [ ] Add versioned bounded runtime policies and read-only health/runtime snapshots on top of the current scheduler/governor.
 - [ ] Preserve the internal critical persistence reserve and keep adaptive changes opt-in.
