@@ -28,6 +28,41 @@ Mock.set_test_clock(function()
 	return 1000
 end)
 
+local scheduler_enabled, scheduler_enable_message = RecordStore.set_scheduler_enabled(true)
+assert(scheduler_enabled, "could not enable scheduler for reserved work-class regression: "
+	.. tostring(scheduler_enable_message))
+local reserved_scheduler_aliases = {
+	{ label = "lease-renewal lane", field = "lane", value = "lease_renewal" },
+	{ label = "lease-renewal operation class", field = "operation_class", value = "lease_renewal" },
+	{ label = "profile-release operation class", field = "operation_class", value = "profile_release" },
+	{ label = "critical operation class", field = "operation_class", value = "critical" },
+	{ label = "profile-save operation class", field = "operation_class", value = "profile_save" },
+	{ label = "lease-renewal work class", field = "work_class", value = "lease_renewal" },
+	{ label = "profile-release work class", field = "work_class", value = "profile_release" },
+	{ label = "critical work class", field = "work_class", value = "critical" },
+	{ label = "profile-save work class", field = "work_class", value = "profile_save" },
+	{ label = "critical service class", field = "service_class", value = "critical" },
+}
+for index, reserved_alias in ipairs(reserved_scheduler_aliases) do
+	local options = {
+		lane = "normal",
+		work_class = "maintenance",
+		operation_class = "update_async",
+		service_class = "normal",
+	}
+	options[reserved_alias.field] = reserved_alias.value
+	local scheduled = RecordStore.schedule_work(
+		"reserved-alias-owner",
+		"reserved-alias-" .. tostring(index),
+		function()
+			error("reserved scheduler work-class alias bypassed the admission guard")
+		end,
+		options
+	)
+	assert(scheduled.code == "invalid", reserved_alias.label .. " bypassed reserved-work validation")
+end
+RecordStore.set_scheduler_enabled(false)
+
 local function seed_record(key, session, tombstone)
 	local envelope = {
 		implementation_version = 2,
