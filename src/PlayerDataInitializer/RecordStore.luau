@@ -6448,7 +6448,7 @@ local MAX_METADATA_KEY_LENGTH = 50
 local MAX_METADATA_VALUE_LENGTH = 250
 local MAX_MESSAGE_TYPE_LENGTH = 100
 local MESSAGE_SUBSCRIBE_RETRY = 10
-local QUEUE_OWNERSHIP_SAFETY_WINDOW = 5
+local _QUEUE_OWNERSHIP_SAFETY_WINDOW = 5
 
 local server_id = game.JobId
 if server_id == "" then
@@ -7152,11 +7152,139 @@ local function restore_non_finite_numbers(
 	return result, nil
 end
 
+local EnvelopeSidecarProtocol = (function()
+	local MAX_READABLE_IMPLEMENTATION_VERSION = 3
+	local TRANSACTION_IMPLEMENTATION_VERSION = 3
+	local MAX_INBOX_RECEIPTS = 256
+	local MAX_TRANSACTION_RECEIPTS = 256
+	local MAX_OUTBOX_EVENTS = 128
+	local MAX_ENVELOPE_SIDECAR_BYTES = 48_000
+
+	local function empty(): EnvelopeSidecars
+		return {
+			version = 1,
+			inbox_receipts = {},
+			transaction_receipts = {},
+			outbox_events = {},
+		}
+	end
+
+	local function clone(sidecars: EnvelopeSidecars?): EnvelopeSidecars?
+		if sidecars == nil then return nil end
+		local copied = copy_value(sidecars :: JsonValue)
+		if type(copied) ~= "table" then return nil end
+		return copied :: EnvelopeSidecars
+	end
+
+	local function validate(value: unknown): (boolean, string?)
+		if type(value) ~= "table" then return false, "sidecars must be a table" end
+		local sidecars = value :: { [string]: unknown }
+		if sidecars.version ~= 1 then return false, "unsupported sidecar protocol version" end
+		local inbox = sidecars.inbox_receipts
+		local transactions = sidecars.transaction_receipts
+		local outbox = sidecars.outbox_events
+		if type(inbox) ~= "table" or type(transactions) ~= "table" or type(outbox) ~= "table" then
+			return false, "sidecar collections must be tables"
+		end
+		local inbox_receipts = inbox :: { [string]: unknown }
+		local transaction_receipts = transactions :: { [string]: unknown }
+		local outbox_events = outbox :: { [string]: unknown }
+		local inbox_count = 0
+		for id, raw_receipt in inbox_receipts do
+			inbox_count += 1
+			if inbox_count > MAX_INBOX_RECEIPTS then return false, "inbox receipt capacity exceeded" end
+			if type(id) ~= "string" or id == "" or #id > 256 or type(raw_receipt) ~= "table" then
+				return false, "inbox receipt identity is invalid"
+			end
+			local receipt = raw_receipt :: { [string]: unknown }
+			if type(receipt.request_identity) ~= "string" or receipt.request_identity == ""
+				or #receipt.request_identity > 16_384
+				or type(receipt.result_present) ~= "boolean"
+				or (receipt.result_present and receipt.result == nil)
+				or (not receipt.result_present and receipt.result ~= nil)
+				or type(receipt.committed_revision) ~= "number"
+				or not math.isfinite(receipt.committed_revision)
+				or math.floor(receipt.committed_revision) ~= receipt.committed_revision
+				or receipt.committed_revision < 0
+				or type(receipt.created_at) ~= "number" or not math.isfinite(receipt.created_at)
+				or type(receipt.expires_at) ~= "number" or not math.isfinite(receipt.expires_at)
+				or receipt.expires_at <= receipt.created_at
+			then
+				return false, "inbox receipt metadata is invalid"
+			end
+		end
+		local transaction_count = 0
+		for id, raw_receipt in transaction_receipts do
+			transaction_count += 1
+			if transaction_count > MAX_TRANSACTION_RECEIPTS then return false, "transaction receipt capacity exceeded" end
+			if type(id) ~= "string" or id == "" or #id > 256 or type(raw_receipt) ~= "table" then
+				return false, "transaction receipt identity is invalid"
+			end
+			local receipt = raw_receipt :: { [string]: unknown }
+			if type(receipt.request_identity) ~= "string" or receipt.request_identity == ""
+				or #receipt.request_identity > 16_384
+				or type(receipt.result_present) ~= "boolean"
+				or (receipt.result_present and receipt.result == nil)
+				or (not receipt.result_present and receipt.result ~= nil)
+				or type(receipt.committed_revision) ~= "number"
+				or not math.isfinite(receipt.committed_revision)
+				or math.floor(receipt.committed_revision) ~= receipt.committed_revision
+				or receipt.committed_revision < 0
+				or type(receipt.created_at) ~= "number" or not math.isfinite(receipt.created_at)
+				or type(receipt.expires_at) ~= "number" or not math.isfinite(receipt.expires_at)
+				or receipt.expires_at <= receipt.created_at
+			then
+				return false, "transaction receipt metadata is invalid"
+			end
+		end
+		local outbox_count = 0
+		for id, raw_event in outbox_events do
+			outbox_count += 1
+			if outbox_count > MAX_OUTBOX_EVENTS then return false, "outbox capacity exceeded" end
+			if type(id) ~= "string" or id == "" or #id > 256 or type(raw_event) ~= "table" then
+				return false, "outbox event identity is invalid"
+			end
+			local event = raw_event :: { [string]: unknown }
+			if event.id ~= id or type(event.event_type) ~= "string" or event.event_type == "" or #event.event_type > 100
+				or type(event.destination_store_name) ~= "string" or event.destination_store_name == "" or #event.destination_store_name > 50
+				or type(event.destination_scope) ~= "string" or #event.destination_scope > 50
+				or type(event.destination_profile_key) ~= "string" or event.destination_profile_key == "" or #event.destination_profile_key > 50
+				or type(event.created_at) ~= "number" or not math.isfinite(event.created_at)
+				or type(event.attempts) ~= "number" or not math.isfinite(event.attempts)
+				or math.floor(event.attempts) ~= event.attempts or event.attempts < 0
+				or (event.state ~= "pending" and event.state ~= "delivered" and event.state ~= "unknown" and event.state ~= "blocked")
+				or (type(event.payload) ~= "table" and type(event.payload) ~= "string"
+					and type(event.payload) ~= "number" and type(event.payload) ~= "boolean")
+			then
+				return false, "outbox event metadata is invalid"
+			end
+		end
+		local encoded_ok, encoded = pcall(function()
+			return HttpService:JSONEncode(sidecars)
+		end)
+		if not encoded_ok or type(encoded) ~= "string" then
+			return false, "sidecars cannot be encoded as JSON"
+		end
+		if #encoded > MAX_ENVELOPE_SIDECAR_BYTES then
+			return false, "sidecars exceed the configured encoded-size limit"
+		end
+		return true, nil
+	end
+
+	return {
+		max_readable_version = MAX_READABLE_IMPLEMENTATION_VERSION,
+		transaction_version = TRANSACTION_IMPLEMENTATION_VERSION,
+		empty = empty,
+		clone = clone,
+		validate = validate,
+	}
+end)()
+
 local prepared_envelope_cache: any = setmetatable({}, { __mode = "k" })
 
 local function encode_envelope_for_storage(envelope: Envelope): JsonValue
 	local stored: { [string]: JsonValue } = {
-		implementation_version = if envelope.sidecars ~= nil then TRANSACTION_IMPLEMENTATION_VERSION else envelope.implementation_version,
+		implementation_version = if envelope.sidecars ~= nil then EnvelopeSidecarProtocol.transaction_version else envelope.implementation_version,
 		schema_version = envelope.schema_version,
 		revision = envelope.revision,
 		fencing_generation = envelope.fencing_generation,
@@ -7859,133 +7987,7 @@ local function get_string_field(value: unknown, key: string): unknown
 	if type(value) ~= "table" then return nil end
 	return rawget(value :: any, key)
 end
-local EnvelopeSidecarProtocol = (function()
-	local MAX_READABLE_IMPLEMENTATION_VERSION = 3
-	local TRANSACTION_IMPLEMENTATION_VERSION = 3
-	local MAX_INBOX_RECEIPTS = 256
-	local MAX_TRANSACTION_RECEIPTS = 256
-	local MAX_OUTBOX_EVENTS = 128
-	local MAX_ENVELOPE_SIDECAR_BYTES = 48_000
 
-	local function empty(): EnvelopeSidecars
-		return {
-			version = 1,
-			inbox_receipts = {},
-			transaction_receipts = {},
-			outbox_events = {},
-		}
-	end
-
-	local function clone(sidecars: EnvelopeSidecars?): EnvelopeSidecars?
-		if sidecars == nil then return nil end
-		local copied = copy_value(sidecars :: JsonValue)
-		if type(copied) ~= "table" then return nil end
-		return copied :: EnvelopeSidecars
-	end
-
-	local function validate(value: unknown): (boolean, string?)
-		if type(value) ~= "table" then return false, "sidecars must be a table" end
-		local sidecars = value :: { [string]: unknown }
-		if sidecars.version ~= 1 then return false, "unsupported sidecar protocol version" end
-		local inbox = sidecars.inbox_receipts
-		local transactions = sidecars.transaction_receipts
-		local outbox = sidecars.outbox_events
-		if type(inbox) ~= "table" or type(transactions) ~= "table" or type(outbox) ~= "table" then
-			return false, "sidecar collections must be tables"
-		end
-		local inbox_receipts = inbox :: { [string]: unknown }
-		local transaction_receipts = transactions :: { [string]: unknown }
-		local outbox_events = outbox :: { [string]: unknown }
-		local inbox_count = 0
-		for id, raw_receipt in inbox_receipts do
-			inbox_count += 1
-			if inbox_count > MAX_INBOX_RECEIPTS then return false, "inbox receipt capacity exceeded" end
-			if type(id) ~= "string" or id == "" or #id > 256 or type(raw_receipt) ~= "table" then
-				return false, "inbox receipt identity is invalid"
-			end
-			local receipt = raw_receipt :: { [string]: unknown }
-			if type(receipt.request_identity) ~= "string" or receipt.request_identity == ""
-				or #receipt.request_identity > 16_384
-				or type(receipt.result_present) ~= "boolean"
-				or (receipt.result_present and receipt.result == nil)
-				or (not receipt.result_present and receipt.result ~= nil)
-				or type(receipt.committed_revision) ~= "number"
-				or not math.isfinite(receipt.committed_revision)
-				or math.floor(receipt.committed_revision) ~= receipt.committed_revision
-				or receipt.committed_revision < 0
-				or type(receipt.created_at) ~= "number" or not math.isfinite(receipt.created_at)
-				or type(receipt.expires_at) ~= "number" or not math.isfinite(receipt.expires_at)
-				or receipt.expires_at <= receipt.created_at
-			then
-				return false, "inbox receipt metadata is invalid"
-			end
-		end
-		local transaction_count = 0
-		for id, raw_receipt in transaction_receipts do
-			transaction_count += 1
-			if transaction_count > MAX_TRANSACTION_RECEIPTS then return false, "transaction receipt capacity exceeded" end
-			if type(id) ~= "string" or id == "" or #id > 256 or type(raw_receipt) ~= "table" then
-				return false, "transaction receipt identity is invalid"
-			end
-			local receipt = raw_receipt :: { [string]: unknown }
-			if type(receipt.request_identity) ~= "string" or receipt.request_identity == ""
-				or #receipt.request_identity > 16_384
-				or type(receipt.result_present) ~= "boolean"
-				or (receipt.result_present and receipt.result == nil)
-				or (not receipt.result_present and receipt.result ~= nil)
-				or type(receipt.committed_revision) ~= "number"
-				or not math.isfinite(receipt.committed_revision)
-				or math.floor(receipt.committed_revision) ~= receipt.committed_revision
-				or receipt.committed_revision < 0
-				or type(receipt.created_at) ~= "number" or not math.isfinite(receipt.created_at)
-				or type(receipt.expires_at) ~= "number" or not math.isfinite(receipt.expires_at)
-				or receipt.expires_at <= receipt.created_at
-			then
-				return false, "transaction receipt metadata is invalid"
-			end
-		end
-		local outbox_count = 0
-		for id, raw_event in outbox_events do
-			outbox_count += 1
-			if outbox_count > MAX_OUTBOX_EVENTS then return false, "outbox capacity exceeded" end
-			if type(id) ~= "string" or id == "" or #id > 256 or type(raw_event) ~= "table" then
-				return false, "outbox event identity is invalid"
-			end
-			local event = raw_event :: { [string]: unknown }
-			if event.id ~= id or type(event.event_type) ~= "string" or event.event_type == "" or #event.event_type > 100
-				or type(event.destination_store_name) ~= "string" or event.destination_store_name == "" or #event.destination_store_name > 50
-				or type(event.destination_scope) ~= "string" or #event.destination_scope > 50
-				or type(event.destination_profile_key) ~= "string" or event.destination_profile_key == "" or #event.destination_profile_key > 50
-				or type(event.created_at) ~= "number" or not math.isfinite(event.created_at)
-				or type(event.attempts) ~= "number" or not math.isfinite(event.attempts)
-				or math.floor(event.attempts) ~= event.attempts or event.attempts < 0
-				or (event.state ~= "pending" and event.state ~= "delivered" and event.state ~= "unknown" and event.state ~= "blocked")
-				or (type(event.payload) ~= "table" and type(event.payload) ~= "string"
-					and type(event.payload) ~= "number" and type(event.payload) ~= "boolean")
-			then
-				return false, "outbox event metadata is invalid"
-			end
-		end
-		local encoded_ok, encoded = pcall(function()
-			return HttpService:JSONEncode(sidecars)
-		end)
-		if not encoded_ok or type(encoded) ~= "string" then
-			return false, "sidecars cannot be encoded as JSON"
-		end
-		if #encoded > MAX_ENVELOPE_SIDECAR_BYTES then
-			return false, "sidecars exceed the configured encoded-size limit"
-		end
-		return true, nil
-	end
-
-	return {
-		max_readable_version = MAX_READABLE_IMPLEMENTATION_VERSION,
-		transaction_version = TRANSACTION_IMPLEMENTATION_VERSION,
-		empty = empty,
-		clone = clone,
-		validate = validate,
-	}
-end)()
 
 local function parse_envelope(raw: unknown): (Envelope?, string?, boolean)
 	if raw == nil then
