@@ -6084,7 +6084,7 @@ export type MockQueueClaim = {
 
 export type TransactionStatus =
 	"committed" | "duplicate" | "conflict" | "capacity" | "fenced" | "retryable"
-	| "unknown" | "disabled" | "invalid" | "validation"
+	| "unknown" | "disabled" | "invalid" | "validation" | "corrupt"
 
 export type TransactionOptions = {
 	request: JsonValue?,
@@ -13778,7 +13778,9 @@ local function open(self: Record, default_data: JsonValue?, recreate: boolean?):
 end
 
 local function make_record(name: string, scope: string, key: string, options: Options, mock: boolean): Record
-	local transact_engine = RecordStore._internals.transact
+	local transact_engine = RecordStore._internals.transact :: (
+		Record, string, string, TransactionReducer, TransactionOptions?, string?, JsonValue?, { OutboxEventSpec }?
+	) -> (JsonValue?, TransactionStatus, string?)
 	local mode = if mock then "mock" else "live"
 	local id = HttpService:JSONEncode({ mode, name, scope, key })
 	local existing = records[id]
@@ -13918,7 +13920,7 @@ local function make_record(name: string, scope: string, key: string, options: Op
 		TransactAsync = function(self: Record, operation_id: string, reducer: TransactionReducer, options: TransactionOptions)
 			local result, status, message = transact_engine(self, "transaction", operation_id, reducer, options, nil, nil, nil)
 			sync_public(self)
-			return result, status, message
+			return result, status :: TransactionStatus, message
 		end,
 		ApplyInboxAsync = function(self: Record, message_id: string, message_type: string, payload: JsonValue, reducer: TransactionReducer, options: TransactionOptions?)
 			local result, status, message = transact_engine(self, "inbox", message_id, reducer, options, message_type, payload, nil)
@@ -15066,9 +15068,19 @@ RecordStore._internals.transact = (function()
 
 			if update_code ~= nil and update_code ~= "unknown" then
 				local mapped = normalize_result_code(update_code) or "unknown"
-				final_status = if mapped == "fenced" or mapped == "corrupt" or mapped == "future_schema"
-					then "fenced" elseif mapped == "validation" or mapped == "invalid" then mapped :: TransactionStatus
-					else "retryable"
+				if mapped == "fenced" or mapped == "future_schema" then
+					final_status = "fenced"
+				elseif mapped == "corrupt" then
+					final_status = "corrupt"
+				elseif mapped == "validation" then
+					final_status = "validation"
+				elseif mapped == "invalid" then
+					final_status = "invalid"
+				elseif mapped == "unknown" then
+					final_status = "unknown"
+				else
+					final_status = "retryable"
+				end
 				final_message = update_message
 				if final_status ~= nil then break end
 			end
@@ -15081,7 +15093,7 @@ RecordStore._internals.transact = (function()
 				break
 			end
 
-			local function verify_committed(candidate: unknown, candidate_info: BackendInfo?): boolean
+			local function verify_committed(candidate: unknown, candidate_info: BackendInfo?): (boolean, TransactionStatus?)
 				local candidate_envelope, candidate_error, candidate_format = parse_envelope(candidate)
 				if not candidate_format or candidate_envelope == nil then
 					final_message = candidate_error or "transaction response was not a valid envelope"
@@ -15092,7 +15104,7 @@ RecordStore._internals.transact = (function()
 				if receipt.request_identity ~= request_identity then
 					final_status = "conflict"
 					final_message = "operation_id is bound to a different durable request"
-					return false
+					return false, "conflict"
 				end
 				if not matches_session(candidate_envelope, token :: string, generation)
 					or candidate_envelope.session == nil
@@ -15100,17 +15112,17 @@ RecordStore._internals.transact = (function()
 				then
 					final_status = "fenced"
 					final_message = "transaction receipt exists but the active session fence no longer matches"
-					return false
+					return false, "fenced"
 				end
 				if receipt.committed_revision > candidate_envelope.revision then
 					final_status = "unknown"
 					final_message = "durable transaction receipt refers to a future revision"
-					return false
+					return false, "unknown"
 				end
 				confirmed = candidate_envelope
 				confirmed_info = candidate_info
 				final_result = if receipt.result_present then copy_value(receipt.result) else nil
-				return true
+				return true, nil
 			end
 
 			if decision == "duplicate" then
@@ -15119,19 +15131,29 @@ RecordStore._internals.transact = (function()
 				final_message = nil
 				break
 			end
-			if returned ~= nil and verify_committed(returned, info) then
-				final_status = "committed"
-				break
-			end
-			if final_status == "conflict" or final_status == "fenced" then break end
-
-			local raw_after, info_after, read_code, read_message = backend_get(state.backend, false, deadline, state)
-			if read_code == nil and raw_after ~= nil then
-				if verify_committed(raw_after, info_after) then
+			if returned ~= nil then
+				local verified, verification_status = verify_committed(returned, info)
+				if verified then
 					final_status = "committed"
 					break
 				end
-				if final_status == "conflict" or final_status == "fenced" then break end
+				if verification_status ~= nil then
+					final_status = verification_status
+					break
+				end
+			end
+
+			local raw_after, info_after, read_code, read_message = backend_get(state.backend, false, deadline, state)
+			if read_code == nil and raw_after ~= nil then
+				local verified, verification_status = verify_committed(raw_after, info_after)
+				if verified then
+					final_status = "committed"
+					break
+				end
+				if verification_status ~= nil then
+					final_status = verification_status
+					break
+				end
 				local latest, latest_error, latest_format = parse_envelope(raw_after)
 				if latest_format and latest ~= nil and latest.revision ~= expected_revision then
 					final_status = "conflict"
@@ -15154,7 +15176,7 @@ RecordStore._internals.transact = (function()
 			if confirmed_receipt == nil or confirmed_receipt.request_identity ~= request_identity then
 				state.busy = false
 				state.state = "unknown"
-				state.pending_transaction = { operation_id = operation_id, kind = kind, request_identity = request_identity }
+				state.pending_transaction = { operation_id = operation_id, kind = kind :: string, request_identity = request_identity }
 				state.next_reconciliation = now_local() + 0.25
 				return nil, "unknown", "transaction write was observed without a matching durable receipt"
 			end
@@ -15174,7 +15196,6 @@ RecordStore._internals.transact = (function()
 			if kind == "inbox" or kind == "outbox" or kind == "transaction" then
 				enqueue_change_observation(state, old_data, state.data, write_id, kind)
 			end
-			observe(state, "transaction", final_status or "committed", operation_id)
 			complete_deferred_takeover(state)
 			return final_result, final_status or "committed", nil
 		end
@@ -15184,7 +15205,6 @@ RecordStore._internals.transact = (function()
 			state.state = "active"
 			state.current_operation_id = nil
 			state.pending_transaction = nil
-			observe(state, "transaction", "duplicate", operation_id)
 			complete_deferred_takeover(state)
 			return final_result, "duplicate", final_message
 		end
@@ -15200,7 +15220,6 @@ RecordStore._internals.transact = (function()
 			state.state = "active"
 			state.pending_transaction = nil
 		end
-		observe(state, "transaction", status, final_message)
 		return nil, status, final_message
 	end
 end)()
