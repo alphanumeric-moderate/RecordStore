@@ -15279,6 +15279,431 @@ RecordStore._internals.transact = (function()
 	end
 end)()
 
+outbox_engine = (function()
+	local protocol = prepared_envelope_cache._sidecar_protocol
+	local MAX_OUTBOX_API_BATCH = 16
+	local DEFAULT_OUTBOX_API_BATCH = 8
+	local DEFAULT_OUTBOX_PRUNE_BATCH = 16
+
+	local function normalize_limit(value: number?, default_value: number): (number?, string?)
+		local selected: unknown = if value == nil then default_value else value
+		if type(selected) ~= "number" or not math.isfinite(selected)
+			or math.floor(selected) ~= selected or selected < 1 or selected > MAX_OUTBOX_API_BATCH
+		then
+			return nil, "max_events must be an integer from 1 to " .. tostring(MAX_OUTBOX_API_BATCH)
+		end
+		return selected :: number, nil
+	end
+
+	local function parse_error_code(message: string?): ResultCode
+		local detail = string.lower(message or "")
+		if string.find(detail, "future") ~= nil or string.find(detail, "newer implementation") ~= nil then
+			return "future_schema"
+		end
+		if string.find(detail, "legacy") ~= nil then
+			return "legacy"
+		end
+		return "corrupt"
+	end
+
+	local function sanitize_error(message: string?): string
+		local safe = string.gsub(message or "destination did not confirm durable acceptance", "[^ -~]", "?")
+		return string.sub(safe, 1, MAX_QUEUE_ERROR_LENGTH)
+	end
+
+	local function to_public_event(event: OutboxEventRecord): OutboxEvent
+		local payload = copy_value(event.payload)
+		if payload == nil then error("durable outbox payload could not be copied", 2) end
+		return {
+			EventId = event.id,
+			EventType = event.event_type,
+			PayloadVersion = event.payload_version,
+			Payload = payload,
+			DestinationStoreName = event.destination_store_name,
+			DestinationScope = event.destination_scope,
+			DestinationProfileKey = event.destination_profile_key,
+			DestinationUserId = event.destination_user_id,
+			CorrelationId = event.correlation_id,
+			CausationId = event.causation_id,
+			CreatedAt = event.created_at,
+			Attempts = event.attempts,
+			State = event.state,
+			LastError = event.last_error,
+			DeliveredAt = event.delivered_at,
+			DestinationReceiptId = event.destination_receipt_id,
+		}
+	end
+
+	local function get_entries(self: Record, max_events: number?): ({ any }, ResultCode, string?)
+		local state = private[self]
+		if state == nil or state.retired then return {}, "invalid", "record does not exist or has been retired" end
+		local limit, limit_error = normalize_limit(max_events, DEFAULT_OUTBOX_API_BATCH)
+		if limit == nil then return {}, "invalid", limit_error end
+		local deadline, deadline_error = resolve_operation_deadline(state.options.operation_deadline)
+		if deadline == nil then return {}, "invalid", deadline_error end
+		local raw, _, read_code, read_message = backend_get(state.backend, false, deadline, nil)
+		if read_code ~= nil then
+			return {}, normalize_result_code(read_code) or "unknown", read_message
+		end
+		if raw == nil then return {}, "not_found", "source profile does not exist" end
+		local envelope, parse_error, current_format = parse_envelope(raw)
+		if not current_format then return {}, parse_error_code(parse_error), parse_error end
+		if envelope == nil then return {}, "corrupt", parse_error or "source profile envelope is invalid" end
+		if envelope.sidecars == nil or envelope.implementation_version < protocol.transaction_version then
+			return {}, "success", nil
+		end
+
+		local entries: { any } = {}
+		for _, event in pairs(envelope.sidecars.outbox_events) do
+			if event.state == "pending" or event.state == "unknown" then
+				local copied = copy_value(event)
+				if type(copied) ~= "table" then return {}, "corrupt", "outbox event could not be copied" end
+				local stored = copied :: OutboxEventRecord
+				entries[#entries + 1] = { stored = stored, public = to_public_event(stored) }
+			end
+		end
+		table.sort(entries, function(left, right)
+			local a = left.stored :: OutboxEventRecord
+			local b = right.stored :: OutboxEventRecord
+			if a.created_at ~= b.created_at then return a.created_at < b.created_at end
+			return a.id < b.id
+		end)
+		while #entries > limit do table.remove(entries) end
+		return entries, "success", nil
+	end
+
+	local function get(self: Record, max_events: number?): ({ OutboxEvent }, ResultCode, string?)
+		local entries, code, message = get_entries(self, max_events)
+		local result: { OutboxEvent } = {}
+		for _, entry in ipairs(entries) do result[#result + 1] = entry.public :: OutboxEvent end
+		return result, code, message
+	end
+
+	local function read_current_event(
+		state: InternalState, event_id: string, expected_request_identity: string, deadline: number
+	): (OutboxEventRecord?, ResultCode?, string?)
+		local raw, _, read_code, read_message = backend_get(state.backend, false, deadline, nil)
+		if read_code ~= nil then return nil, normalize_result_code(read_code) or "unknown", read_message end
+		if raw == nil then return nil, "not_found", "source profile does not exist" end
+		local envelope, parse_error, current_format = parse_envelope(raw)
+		if not current_format then return nil, parse_error_code(parse_error), parse_error end
+		if envelope == nil then return nil, "corrupt", parse_error or "source profile envelope is invalid" end
+		if envelope.sidecars == nil or envelope.implementation_version < protocol.transaction_version then
+			return nil, "disabled", "source profile does not contain transactional sidecars"
+		end
+		local current = envelope.sidecars.outbox_events[event_id]
+		if current == nil then return nil, "not_found", "outbox event no longer exists" end
+		if current.request_identity ~= expected_request_identity then
+			return nil, "conflict", "outbox event identity changed during dispatch"
+		end
+		return current, nil, nil
+	end
+
+	local function update_event(
+		self: Record, expected_event: OutboxEventRecord, target_state: "pending" | "unknown" | "delivered",
+		receipt_id: string?, reason: string?
+	): (ResultCode, string?, boolean)
+		local state = private[self]
+		if state == nil or state.retired then return "invalid", "record does not exist or has been retired", false end
+		if target_state == "delivered"
+			and (type(receipt_id) ~= "string" or receipt_id == "" or #receipt_id > 256)
+		then
+			return "validation", "a confirmed delivery requires a non-empty destination receipt ID of at most 256 bytes", false
+		end
+		local deadline, deadline_error = resolve_operation_deadline(state.options.operation_deadline)
+		if deadline == nil then return "invalid", deadline_error, false end
+		local occurred_at = session_now_unix(state.backend.mock)
+		local sanitized_error = sanitize_error(reason)
+		local decision: ResultCode? = nil
+		local decision_message: string? = nil
+		local confirmed_delivery = false
+
+		local _, _, update_code, update_message = backend_update(state.backend, function(raw, info)
+			if raw == nil then
+				decision = "not_found"
+				decision_message = "source profile does not exist"
+				return nil, nil, nil
+			end
+			local envelope, parse_error, current_format = parse_envelope(raw)
+			if not current_format then
+				decision = parse_error_code(parse_error)
+				decision_message = parse_error
+				return nil, nil, nil
+			end
+			if envelope == nil then
+				decision = "corrupt"
+				decision_message = parse_error or "source profile envelope is invalid"
+				return nil, nil, nil
+			end
+			if envelope.sidecars == nil or envelope.implementation_version < protocol.transaction_version then
+				decision = "disabled"
+				decision_message = "source profile does not contain transactional sidecars"
+				return nil, nil, nil
+			end
+			local sidecars = protocol.clone(envelope.sidecars)
+			if sidecars == nil then
+				decision = "corrupt"
+				decision_message = "source profile sidecars could not be copied"
+				return nil, nil, nil
+			end
+			local current = sidecars.outbox_events[expected_event.id]
+			if current == nil then
+				decision = "not_found"
+				decision_message = "outbox event no longer exists"
+				return nil, nil, nil
+			end
+			if current.request_identity ~= expected_event.request_identity then
+				decision = "conflict"
+				decision_message = "outbox event identity changed during dispatch"
+				return nil, nil, nil
+			end
+			if current.state == "delivered" then
+				if target_state == "delivered" and current.destination_receipt_id ~= receipt_id then
+					decision = "conflict"
+					decision_message = "the event was delivered with a different destination receipt ID"
+					return nil, nil, nil
+				end
+				decision = "duplicate"
+				confirmed_delivery = true
+				return nil, nil, nil
+			end
+			if current.state == "blocked" then
+				decision = "disabled"
+				decision_message = "outbox event is blocked pending operator review"
+				return nil, nil, nil
+			end
+
+			local updated_value = copy_value(current)
+			if type(updated_value) ~= "table" then
+				decision = "corrupt"
+				decision_message = "outbox event could not be copied"
+				return nil, nil, nil
+			end
+			local updated = updated_value :: OutboxEventRecord
+			updated.attempts += 1
+			updated.state = target_state
+			updated.last_error = if target_state == "delivered" then nil else sanitized_error
+			updated.destination_receipt_id = if target_state == "delivered" then receipt_id else nil
+			updated.delivered_at = if target_state == "delivered" then occurred_at else nil
+			sidecars.outbox_events[expected_event.id] = updated
+
+			local sidecars_valid, sidecars_error = protocol.validate(sidecars)
+			if not sidecars_valid then
+				decision = if string.find(sidecars_error or "", "capacity") ~= nil then "capacity" else "validation"
+				decision_message = sidecars_error
+				return nil, nil, nil
+			end
+			local raw_value = copy_value(raw)
+			if type(raw_value) ~= "table" then
+				decision = "corrupt"
+				decision_message = "source envelope could not be copied for a sidecar-only update"
+				return nil, nil, nil
+			end
+			(raw_value :: { [string]: any }).sidecars = sidecars
+			local raw_valid, raw_error = validate_serialized_size(raw_value)
+			if not raw_valid then
+				decision = "validation"
+				decision_message = raw_error
+				return nil, nil, nil
+			end
+			decision = "success"
+			return {
+				[INTERNAL_RAW_ENVELOPE_UPDATE] = true,
+				raw_value = raw_value,
+			}, clone_user_ids(if info ~= nil then info.UserIds else envelope.user_ids or state.user_ids),
+				clone_metadata(if info ~= nil then info.RawMetadata else state.metadata)
+		end, deadline, nil)
+
+		if update_code == "unknown" then
+			local current, _, read_message = read_current_event(
+				state, expected_event.id, expected_event.request_identity, deadline
+			)
+			if current ~= nil and current.state == "delivered" then
+				if target_state == "delivered" and current.destination_receipt_id ~= receipt_id then
+					return "conflict", "the event was delivered with a different destination receipt ID", false
+				end
+				return "success", nil, true
+			end
+			return "unknown", read_message or update_message or "outbox update outcome remains unknown", false
+		end
+		if update_code ~= nil then
+			return normalize_result_code(update_code) or "unknown", update_message, false
+		end
+		if decision == "duplicate" then return "duplicate", nil, confirmed_delivery end
+		if decision ~= "success" then
+			return decision or "unknown", decision_message or update_message, false
+		end
+		return "success", nil, target_state == "delivered"
+	end
+
+	local function dispatch(
+		self: Record, dispatcher: OutboxDispatcher, max_events: number?
+	): (number, ResultCode, string?)
+		if type(dispatcher) ~= "function" then return 0, "invalid", "dispatcher must be a function" end
+		local entries, read_code, read_message = get_entries(self, max_events)
+		if read_code ~= "success" then return 0, read_code, read_message end
+		local delivered_count = 0
+		local failed_count = 0
+		local ambiguous = false
+		local first_error: string? = nil
+
+		for _, entry in ipairs(entries) do
+			local stored = entry.stored :: OutboxEventRecord
+			local public = entry.public :: OutboxEvent
+			local callback_ok, accepted, receipt_id = pcall(dispatcher, public)
+			local target_state: "pending" | "unknown" | "delivered"
+			local reason: string?
+			if not callback_ok then
+				target_state = "unknown"
+				reason = tostring(accepted)
+				ambiguous = true
+			elseif accepted == true then
+				if type(receipt_id) == "string" and receipt_id ~= "" and #receipt_id <= 256 then
+					target_state = "delivered"
+				else
+					target_state = "unknown"
+					reason = "destination acknowledged without a valid durable receipt ID"
+					ambiguous = true
+				end
+			else
+				target_state = "pending"
+				reason = if type(receipt_id) == "string" then receipt_id else "destination did not confirm acceptance"
+			end
+
+			local status, status_message, confirmed = update_event(
+				self, stored, target_state, if target_state == "delivered" then receipt_id else nil, reason
+			)
+			if confirmed then
+				delivered_count += 1
+			elseif status == "success" then
+				if target_state == "pending" then failed_count += 1 end
+				first_error = first_error or reason or status_message
+			elseif status == "duplicate" then
+				first_error = first_error or status_message
+			else
+				first_error = first_error or status_message or "outbox delivery status could not be confirmed"
+				if status == "unknown" then return delivered_count, "unknown", first_error end
+				if status == "fenced" or status == "corrupt" or status == "future_schema"
+					or status == "legacy" or status == "invalid" or status == "conflict"
+					or status == "budget" or status == "busy" or status == "retry_exhausted"
+					or status == "disabled" or status == "not_found"
+				then
+					return delivered_count, status, first_error
+				end
+			end
+		end
+		if ambiguous then return delivered_count, "unknown", first_error end
+		if failed_count > 0 then return delivered_count, "retry_exhausted", first_error end
+		return delivered_count, "success", nil
+	end
+
+	local function prune(
+		self: Record, delivered_before_unix: number, max_events: number?
+	): (number, ResultCode, string?)
+		local state = private[self]
+		if state == nil or state.retired then return 0, "invalid", "record does not exist or has been retired" end
+		if type(delivered_before_unix) ~= "number" or not math.isfinite(delivered_before_unix) then
+			return 0, "invalid", "delivered_before_unix must be a finite Unix timestamp in seconds"
+		end
+		local limit_value: unknown = if max_events == nil then DEFAULT_OUTBOX_PRUNE_BATCH else max_events
+		if type(limit_value) ~= "number" or not math.isfinite(limit_value)
+			or math.floor(limit_value) ~= limit_value or limit_value < 1 or limit_value > MAX_OUTBOX_API_BATCH
+		then
+			return 0, "invalid", "max_events must be an integer from 1 to " .. tostring(MAX_OUTBOX_API_BATCH)
+		end
+		local limit = limit_value :: number
+		local deadline, deadline_error = resolve_operation_deadline(state.options.operation_deadline)
+		if deadline == nil then return 0, "invalid", deadline_error end
+		local decision: ResultCode? = nil
+		local decision_message: string? = nil
+		local removed_count = 0
+		local _, _, update_code, update_message = backend_update(state.backend, function(raw, info)
+			if raw == nil then
+				decision = "not_found"
+				decision_message = "source profile does not exist"
+				return nil, nil, nil
+			end
+			local envelope, parse_error, current_format = parse_envelope(raw)
+			if not current_format then
+				decision = parse_error_code(parse_error)
+				decision_message = parse_error
+				return nil, nil, nil
+			end
+			if envelope == nil then
+				decision = "corrupt"
+				decision_message = parse_error or "source profile envelope is invalid"
+				return nil, nil, nil
+			end
+			if envelope.sidecars == nil or envelope.implementation_version < protocol.transaction_version then
+				decision = "success"
+				removed_count = 0
+				return nil, nil, nil
+			end
+			local sidecars = protocol.clone(envelope.sidecars)
+			if sidecars == nil then
+				decision = "corrupt"
+				decision_message = "source profile sidecars could not be copied"
+				return nil, nil, nil
+			end
+			local eligible: { { id: string, delivered_at: number } } = {}
+			for id, event in pairs(sidecars.outbox_events) do
+				if event.state == "delivered" and event.delivered_at ~= nil
+					and event.delivered_at < delivered_before_unix
+				then
+					eligible[#eligible + 1] = { id = id, delivered_at = event.delivered_at }
+				end
+			end
+			table.sort(eligible, function(left, right)
+				if left.delivered_at ~= right.delivered_at then return left.delivered_at < right.delivered_at end
+				return left.id < right.id
+			end)
+			local count = math.min(limit, #eligible)
+			if count == 0 then
+				decision = "duplicate"
+				decision_message = "no delivered outbox events are eligible for the requested retention cutoff"
+				removed_count = 0
+				return nil, nil, nil
+			end
+			for index = 1, count do sidecars.outbox_events[eligible[index].id] = nil end
+			local sidecars_valid, sidecars_error = protocol.validate(sidecars)
+			if not sidecars_valid then
+				decision = if string.find(sidecars_error or "", "capacity") ~= nil then "capacity" else "validation"
+				decision_message = sidecars_error
+				return nil, nil, nil
+			end
+			local raw_value = copy_value(raw)
+			if type(raw_value) ~= "table" then
+				decision = "corrupt"
+				decision_message = "source envelope could not be copied for a sidecar-only update"
+				return nil, nil, nil
+			end
+			(raw_value :: { [string]: any }).sidecars = sidecars
+			local raw_valid, raw_error = validate_serialized_size(raw_value)
+			if not raw_valid then
+				decision = "validation"
+				decision_message = raw_error
+				return nil, nil, nil
+			end
+			removed_count = count
+			decision = "success"
+			return {
+				[INTERNAL_RAW_ENVELOPE_UPDATE] = true,
+				raw_value = raw_value,
+			}, clone_user_ids(if info ~= nil then info.UserIds else envelope.user_ids or state.user_ids),
+				clone_metadata(if info ~= nil then info.RawMetadata else state.metadata)
+		end, deadline, nil)
+		if update_code == "unknown" then
+			return 0, "unknown", update_message or "outbox cleanup outcome remains unknown; inspect again before retrying"
+		end
+		if update_code ~= nil then return 0, normalize_result_code(update_code) or "unknown", update_message end
+		if decision == "success" then return removed_count, "success", nil end
+		if decision == "duplicate" then return 0, "duplicate", decision_message end
+		return 0, decision or "unknown", decision_message or update_message
+	end
+
+	return { get = get, dispatch = dispatch, prune = prune }
+end)()
+
 RecordStore._internals.get_session_status_internal = function(
 	name: string,
 	scope: string,
