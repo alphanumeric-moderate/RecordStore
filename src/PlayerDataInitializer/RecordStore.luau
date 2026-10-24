@@ -6103,6 +6103,27 @@ export type OutboxEventSpec = {
 	causation_id: string?,
 }
 
+export type OutboxEvent = {
+	EventId: string,
+	EventType: string,
+	PayloadVersion: number,
+	Payload: JsonValue,
+	DestinationStoreName: string,
+	DestinationScope: string,
+	DestinationProfileKey: string,
+	DestinationUserId: number?,
+	CorrelationId: string?,
+	CausationId: string?,
+	CreatedAt: number,
+	Attempts: number,
+	State: "pending" | "delivered" | "unknown" | "blocked",
+	LastError: string?,
+	DeliveredAt: number?,
+	DestinationReceiptId: string?,
+}
+
+export type OutboxDispatcher = (event: OutboxEvent) -> (boolean, string?)
+
 export type TransactionReducer = (JsonValue?, JsonValue?) -> (JsonValue?, JsonValue?)
 
 export type Options = {
@@ -6179,6 +6200,7 @@ type OutboxEventRecord = {
 	state: "pending" | "delivered" | "unknown" | "blocked",
 	last_error: string?,
 	delivered_at: number?,
+	destination_receipt_id: string?,
 }
 
 type EnvelopeSidecars = {
@@ -6421,6 +6443,9 @@ export type Record = {
 	TransactAsync: (self: Record, operation_id: string, reducer: TransactionReducer, options: TransactionOptions) -> (JsonValue?, TransactionStatus, string?),
 	ApplyInboxAsync: (self: Record, message_id: string, message_type: string, payload: JsonValue, reducer: TransactionReducer, options: TransactionOptions?) -> (JsonValue?, TransactionStatus, string?),
 	CommitWithOutboxAsync: (self: Record, commit_key: string, command_type: string, command_payload: JsonValue, outbox_events: { OutboxEventSpec }, reducer: TransactionReducer, options: TransactionOptions?) -> (JsonValue?, TransactionStatus, string?),
+	GetOutboxAsync: (self: Record, max_events: number?) -> ({ OutboxEvent }, ResultCode, string?),
+	DispatchOutboxAsync: (self: Record, dispatcher: OutboxDispatcher, max_events: number?) -> (number, ResultCode, string?),
+	PruneOutboxAsync: (self: Record, delivered_before_unix: number, max_events: number?) -> (number, ResultCode, string?),
 	MessageAsync: (self: Record, message_type: string, data: JsonValue?) -> (ResultCode, string?),
 	GetIdentity: (self: Record) -> { [string]: unknown },
 	GetMailboxOwner: (self: Record) -> { [string]: unknown },
@@ -6489,8 +6514,9 @@ local closing = false
 local scheduler_started = false
 local shutdown_started = false
 local active_requests = 0
+local outbox_engine: any = nil
 local records: { [string]: Record } = {}
-local private: { [Record]: InternalState } = {}
+local private: { [Record]: InternalState } = {
 local active_records: { [Record]: boolean } = {}
 local recovery_records: { [Record]: boolean } = {}
 local recovery_in_flight = false
@@ -7290,6 +7316,17 @@ prepared_envelope_cache._sidecar_protocol = (function()
 				or (event.state ~= "pending" and event.state ~= "delivered" and event.state ~= "unknown" and event.state ~= "blocked")
 				or (type(event.payload) ~= "table" and type(event.payload) ~= "string"
 					and type(event.payload) ~= "number" and type(event.payload) ~= "boolean")
+				or (event.destination_receipt_id ~= nil
+					and (type(event.destination_receipt_id) ~= "string"
+						or event.destination_receipt_id == "" or #event.destination_receipt_id > 256))
+				or (event.delivered_at ~= nil
+					and (type(event.delivered_at) ~= "number" or not math.isfinite(event.delivered_at)))
+				or (event.state == "delivered"
+					and (type(event.delivered_at) ~= "number" or not math.isfinite(event.delivered_at)
+						or type(event.destination_receipt_id) ~= "string"
+						or event.destination_receipt_id == "" or #event.destination_receipt_id > 256))
+				or (event.state ~= "delivered"
+					and (event.delivered_at ~= nil or event.destination_receipt_id ~= nil))
 			then
 				return false, "outbox event metadata is invalid"
 			end
@@ -7421,11 +7458,16 @@ local function encode_envelope_for_storage(envelope: Envelope): JsonValue
 	return stored
 end
 
+local INTERNAL_RAW_ENVELOPE_UPDATE = "__rs_raw_envelope_update"
+
 local function encode_backend_update_value(value: unknown): unknown
 	if type(value) ~= "table" then
 		return value
 	end
 	local candidate = value :: { [string]: unknown }
+	if candidate[INTERNAL_RAW_ENVELOPE_UPDATE] == true then
+		return candidate.raw_value
+	end
 	if candidate.implementation_version ~= nil
 		and candidate.schema_version ~= nil
 		and candidate.revision ~= nil
@@ -13928,6 +13970,21 @@ local function make_record(name: string, scope: string, key: string, options: Op
 			local result, status, message = transact_engine(self, "outbox", commit_key, reducer, options, command_type, command_payload, outbox_events)
 			sync_public(self)
 			return result, status :: TransactionStatus, message
+		end,
+		GetOutboxAsync = function(self: Record, max_events: number?)
+			local engine = outbox_engine
+			if engine == nil then return {}, "invalid", "outbox API is not initialized" end
+			return engine.get(self, max_events)
+		end,
+		DispatchOutboxAsync = function(self: Record, dispatcher: OutboxDispatcher, max_events: number?)
+			local engine = outbox_engine
+			if engine == nil then return 0, "invalid", "outbox API is not initialized" end
+			return engine.dispatch(self, dispatcher, max_events)
+		end,
+		PruneOutboxAsync = function(self: Record, delivered_before_unix: number, max_events: number?)
+			local engine = outbox_engine
+			if engine == nil then return 0, "invalid", "outbox API is not initialized" end
+			return engine.prune(self, delivered_before_unix, max_events)
 		end,
 		MessageAsync = message,
 		GetMailboxOwner = get_mailbox_owner,
