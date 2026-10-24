@@ -7152,7 +7152,9 @@ local function restore_non_finite_numbers(
 	return result, nil
 end
 
-local EnvelopeSidecarProtocol = (function()
+local prepared_envelope_cache: any = setmetatable({}, { __mode = "k" })
+
+prepared_envelope_cache._sidecar_protocol = (function()
 	local MAX_READABLE_IMPLEMENTATION_VERSION = 3
 	local TRANSACTION_IMPLEMENTATION_VERSION = 3
 	local MAX_INBOX_RECEIPTS = 256
@@ -7280,11 +7282,11 @@ local EnvelopeSidecarProtocol = (function()
 	}
 end)()
 
-local prepared_envelope_cache: any = setmetatable({}, { __mode = "k" })
+
 
 local function encode_envelope_for_storage(envelope: Envelope): JsonValue
 	local stored: { [string]: JsonValue } = {
-		implementation_version = if envelope.sidecars ~= nil then EnvelopeSidecarProtocol.transaction_version else envelope.implementation_version,
+		implementation_version = if envelope.sidecars ~= nil then prepared_envelope_cache._sidecar_protocol.transaction_version else envelope.implementation_version,
 		schema_version = envelope.schema_version,
 		revision = envelope.revision,
 		fencing_generation = envelope.fencing_generation,
@@ -8185,19 +8187,19 @@ local function parse_envelope(raw: unknown): (Envelope?, string?, boolean)
 	if type(implementation_version) ~= "number" or not math.isfinite(implementation_version) or math.floor(implementation_version) ~= implementation_version then
 		return nil, "invalid implementation version", false
 	end
-	if implementation_version > EnvelopeSidecarProtocol.max_readable_version then
+	if implementation_version > prepared_envelope_cache._sidecar_protocol.max_readable_version then
 		return nil, "future implementation version", false
 	end
 	local parsed_sidecars: EnvelopeSidecars? = nil
-	if implementation_version >= EnvelopeSidecarProtocol.transaction_version then
+	if implementation_version >= prepared_envelope_cache._sidecar_protocol.transaction_version then
 		if raw_sidecars == nil then
 			return nil, "version 3 envelope is missing transaction sidecars", false
 		end
-		local sidecars_valid, sidecars_error = EnvelopeSidecarProtocol.validate(raw_sidecars)
+		local sidecars_valid, sidecars_error = prepared_envelope_cache._sidecar_protocol.validate(raw_sidecars)
 		if not sidecars_valid then
 			return nil, "invalid transaction sidecars: " .. (sidecars_error or "unknown error"), false
 		end
-		parsed_sidecars = EnvelopeSidecarProtocol.clone(raw_sidecars :: EnvelopeSidecars)
+		parsed_sidecars = prepared_envelope_cache._sidecar_protocol.clone(raw_sidecars :: EnvelopeSidecars)
 	elseif raw_sidecars ~= nil then
 		return nil, "version 2 envelope unexpectedly contains transaction sidecars", false
 	end
@@ -8485,16 +8487,16 @@ end
 
 local function validate_envelope(envelope: Envelope): (boolean, string?)
 	prepared_envelope_cache[envelope] = nil
-	if envelope.implementation_version > EnvelopeSidecarProtocol.max_readable_version then
+	if envelope.implementation_version > prepared_envelope_cache._sidecar_protocol.max_readable_version then
 		return false, "envelope implementation version is not readable"
 	end
 	if envelope.sidecars ~= nil then
-		if envelope.implementation_version < EnvelopeSidecarProtocol.transaction_version then
+		if envelope.implementation_version < prepared_envelope_cache._sidecar_protocol.transaction_version then
 			return false, "transaction sidecars require implementation version 3"
 		end
-		local sidecars_valid, sidecars_error = EnvelopeSidecarProtocol.validate(envelope.sidecars)
+		local sidecars_valid, sidecars_error = prepared_envelope_cache._sidecar_protocol.validate(envelope.sidecars)
 		if not sidecars_valid then return false, sidecars_error end
-	elseif envelope.implementation_version >= EnvelopeSidecarProtocol.transaction_version then
+	elseif envelope.implementation_version >= prepared_envelope_cache._sidecar_protocol.transaction_version then
 		return false, "version 3 envelope is missing transaction sidecars"
 	end
 	local prepared = encode_envelope_for_storage(envelope)
@@ -9851,7 +9853,7 @@ local function save_internal(state: InternalState, reason: string?, operation_de
 				implementation_version = envelope.implementation_version,
 				schema_version = state.options.schema_version,
 				revision = target_revision,
-				sidecars = EnvelopeSidecarProtocol.clone(envelope.sidecars),
+				sidecars = prepared_envelope_cache._sidecar_protocol.clone(envelope.sidecars),
 				fencing_generation = generation,
 				created_at = envelope.created_at,
 				updated_at = transform_time,
@@ -11968,7 +11970,7 @@ local function delete_record(self: Record): (ResultCode, string?)
 				implementation_version = envelope.implementation_version,
 				schema_version = state.options.schema_version,
 				revision = target_revision,
-				sidecars = EnvelopeSidecarProtocol.clone(envelope.sidecars),
+				sidecars = prepared_envelope_cache._sidecar_protocol.clone(envelope.sidecars),
 				fencing_generation = next_generation,
 				created_at = envelope.created_at,
 				updated_at = transform_time,
@@ -12455,7 +12457,7 @@ local function open_internal(state: InternalState, default_data: JsonValue?, rec
 				implementation_version = envelope.implementation_version,
 				schema_version = state.options.schema_version,
 				revision = if envelope.tombstone ~= nil then envelope.revision + 1 else envelope.revision,
-				sidecars = EnvelopeSidecarProtocol.clone(envelope.sidecars),
+				sidecars = prepared_envelope_cache._sidecar_protocol.clone(envelope.sidecars),
 				fencing_generation = next_generation,
 				created_at = if envelope.created_at > 0 then envelope.created_at else commit_time,
 				updated_at = commit_time,
@@ -12766,7 +12768,7 @@ local function renew_internal(state: InternalState): (ResultCode, string?)
 				implementation_version = envelope.implementation_version,
 				schema_version = envelope.schema_version,
 				revision = envelope.revision,
-				sidecars = EnvelopeSidecarProtocol.clone(envelope.sidecars),
+				sidecars = prepared_envelope_cache._sidecar_protocol.clone(envelope.sidecars),
 				fencing_generation = generation,
 				created_at = envelope.created_at,
 				updated_at = transform_time,
@@ -13055,7 +13057,7 @@ local function reconcile_unknown_release_internal(state: InternalState): (Result
 			implementation_version = current.implementation_version,
 			schema_version = state.options.schema_version,
 			revision = pending.target_revision,
-			sidecars = EnvelopeSidecarProtocol.clone(current.sidecars),
+			sidecars = prepared_envelope_cache._sidecar_protocol.clone(current.sidecars),
 			fencing_generation = pending.fencing_generation,
 			created_at = current.created_at,
 			updated_at = transform_time,
@@ -13291,7 +13293,7 @@ local function reconcile_unknown_internal(state: InternalState): (ResultCode, st
 			implementation_version = current.implementation_version,
 			schema_version = if pending.kind == "save" then state.options.schema_version else current.schema_version,
 			revision = if pending.kind == "save" then pending.target_revision else current.revision,
-			sidecars = EnvelopeSidecarProtocol.clone(current.sidecars),
+			sidecars = prepared_envelope_cache._sidecar_protocol.clone(current.sidecars),
 			fencing_generation = pending.fencing_generation,
 			created_at = current.created_at,
 			updated_at = transform_time,
@@ -13500,7 +13502,7 @@ close_internal = function(state: InternalState, shutdown: boolean): (ResultCode,
 				implementation_version = envelope.implementation_version,
 				schema_version = state.options.schema_version,
 				revision = target_revision,
-				sidecars = EnvelopeSidecarProtocol.clone(envelope.sidecars),
+				sidecars = prepared_envelope_cache._sidecar_protocol.clone(envelope.sidecars),
 				fencing_generation = generation,
 				created_at = envelope.created_at,
 				updated_at = transform_time,
