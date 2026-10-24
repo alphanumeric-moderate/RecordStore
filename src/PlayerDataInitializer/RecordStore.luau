@@ -13836,6 +13836,8 @@ local function open(self: Record, default_data: JsonValue?, recreate: boolean?):
 	return normalize_result_code(result) or "unknown", message
 end
 
+local get_transaction_status_engine: (Record, string, JsonValue) -> TransactionReceiptStatus
+
 local function make_record(name: string, scope: string, key: string, options: Options, mock: boolean, transact_engine: (Record, string, string, TransactionReducer, TransactionOptions?, string?, JsonValue?, { OutboxEventSpec }?) -> (JsonValue?, TransactionStatus, string?)): Record
 	local mode = if mock then "mock" else "live"
 	local id = HttpService:JSONEncode({ mode, name, scope, key })
@@ -13979,7 +13981,7 @@ local function make_record(name: string, scope: string, key: string, options: Op
 			return result, status :: TransactionStatus, message
 		end,
 		GetTransactionStatusAsync = function(self: Record, operation_id: string, request: JsonValue): TransactionReceiptStatus
-			return RecordStore._internals.get_transaction_status(self, operation_id, request) :: TransactionReceiptStatus
+			return get_transaction_status_engine(self, operation_id, request)
 		end,
 		ApplyInboxAsync = function(self: Record, message_id: string, message_type: string, payload: JsonValue, reducer: TransactionReducer, options: TransactionOptions?)
 			local result, status, message = transact_engine(self, "inbox", message_id, reducer, options, message_type, payload, nil)
@@ -15301,7 +15303,7 @@ RecordStore._internals.transact = (function()
 	end
 end)()
 
-RecordStore._internals.get_transaction_status = function(
+get_transaction_status_engine = function(
 	self: Record,
 	operation_id: string,
 	request: JsonValue
