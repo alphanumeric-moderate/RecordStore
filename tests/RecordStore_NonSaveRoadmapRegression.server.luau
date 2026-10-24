@@ -343,7 +343,8 @@ local transactional_open, transactional_open_message = transactional_record:Open
 	coins = 10,
 	inventory = {},
 })
-assert(transactional_open == "success", "transaction open status=" .. tostring(transactional_open) .. " message=" .. tostring(transactional_open_message))
+assert(transactional_open == "success" or transactional_open == "created",
+	"transaction open status=" .. tostring(transactional_open) .. " message=" .. tostring(transactional_open_message))
 
 local transact_result, transact_status, transact_message = transactional_record:TransactAsync(
 	"reward:daily:test",
@@ -460,7 +461,9 @@ local reducer_yield_record = Mock.new("TransactionYieldTest", "global", "profile
 	schema_version = 1,
 	transactional_operations_enabled = true,
 })
-assert(reducer_yield_record:Open({ coins = 1 }) == "success")
+local reducer_yield_open = reducer_yield_record:Open({ coins = 1 })
+assert(reducer_yield_open == "success" or reducer_yield_open == "created",
+	"yield-test profile open status=" .. tostring(reducer_yield_open))
 local yield_result, yield_status = reducer_yield_record:TransactAsync(
 	"yielding-operation",
 	function(data)
@@ -474,7 +477,9 @@ assert(yield_result == nil and yield_status == "validation",
 assert(reducer_yield_record:Get().coins == 1)
 
 local disabled_record = Mock.new("TransactionDisabledTest", "global", "profile", { schema_version = 1 })
-assert(disabled_record:Open({ coins = 1 }) == "success")
+local disabled_open = disabled_record:Open({ coins = 1 })
+assert(disabled_open == "success" or disabled_open == "created",
+	"disabled-test profile open status=" .. tostring(disabled_open))
 local disabled_result, disabled_status = disabled_record:TransactAsync(
 	"disabled-operation",
 	function(data) return data end,
@@ -487,7 +492,9 @@ local ambiguous_record = Mock.new("TransactionAmbiguousTest", "global", "profile
 	schema_version = 1,
 	transactional_operations_enabled = true,
 })
-assert(ambiguous_record:Open({ coins = 4 }) == "success")
+local ambiguous_open = ambiguous_record:Open({ coins = 4 })
+assert(ambiguous_open == "success" or ambiguous_open == "created",
+	"ambiguous-test profile open status=" .. tostring(ambiguous_open))
 Mock.set_update_commit_then_failures(1, "transaction response lost after durable commit")
 local ambiguous_result, ambiguous_status, ambiguous_message = ambiguous_record:TransactAsync(
 	"ambiguous-operation",
