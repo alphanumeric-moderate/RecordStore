@@ -607,3 +607,12 @@ To enable it:
 The workflow publishes a baseline on pushes to `main` and compares pull requests against their base branch. Pull-request runs fail on a Bencher alert once the configured statistical threshold has enough baseline samples. If `BENCHER_PROJECT` is not configured, the Bencher job is skipped. If `BENCHER_API_KEY` is missing, its benchmark and reporting steps are skipped without affecting CodSpeed or the regression checks.
 
 References: [Bencher GitHub Actions](https://bencher.dev/docs/how-to/github-actions/) · [Hyperfine adapter](https://bencher.dev/docs/explanation/adapters/#-shell-hyperfine).
+
+
+## User-data erasure and RTBF
+
+The generic erasure coordinator is an orchestration primitive, not a discovery mechanism. Each family must supply a complete inventory callback, explicit exact templates for DataStore name/scope/key, an exhaustive-inventory acknowledgement, a durable writer-fence callback, a dependency check, and a generation-aware delete/redaction callback. Templates cannot omit name or scope as wildcards. Empty scope is allowed when it is the actual platform default.
+
+Planning is non-destructive. Execution returns `coverage_unverified` and performs no deletions unless every declared family inventory and template is verified. Writer fences are checked before the bounded run and again immediately before each deletion. A completed manifest that lacks `rtbf_coverage_verified = true` is not proof of erasure; status consumers return an unresolved coverage result instead of asserting that the subject is erased.
+
+These checks do **not** establish complete RTBF for an application until its real user-associated store/key inventory and all writer/recreation paths have been wired to the family adapters and accepted against live Roblox DataStore behavior. Keep the RTBF-completeness claim blocked until that application-specific acceptance has passed.
