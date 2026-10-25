@@ -308,3 +308,213 @@ record.TransactAsync = original_transact
 record.GetTransactionStatusAsync = original_status_lookup
 
 record:Close()
+
+
+-- Optional external authority adds a globally shared PurchaseId identity fence.
+-- This regression is intentionally deferred until all implementation is present.
+local authority_store = {}
+local authority_faults = {
+	drop_commit_response_once = false,
+	fail_status_once = false,
+}
+local function authority_copy(entry)
+	if entry == nil then return nil end
+	return table.clone(entry)
+end
+local function authority_identity(purchase_id, player_id, product_id, status)
+	return {
+		PurchaseId = purchase_id,
+		PlayerId = player_id,
+		ProductId = product_id,
+		Status = status,
+	}
+end
+local authority = {}
+function authority:ClaimAsync(purchase_id, player_id, product_id)
+	local current = authority_store[purchase_id]
+	if current ~= nil and (current.PlayerId ~= player_id or current.ProductId ~= product_id) then
+		return authority_identity(purchase_id, player_id, product_id, "conflict")
+	end
+	if current ~= nil then return authority_copy(current) end
+	current = authority_identity(purchase_id, player_id, product_id, "claimed")
+	authority_store[purchase_id] = current
+	return authority_copy(current)
+end
+function authority:CommitAsync(purchase_id, player_id, product_id, outcome)
+	local current = authority_store[purchase_id]
+	if current == nil then return nil, "claim does not exist" end
+	if current.PlayerId ~= player_id or current.ProductId ~= product_id then
+		return authority_identity(purchase_id, player_id, product_id, "conflict")
+	end
+	if current.Status == "claimed" then
+		current.Status = "committed"
+		current.Outcome = outcome
+	end
+	if authority_faults.drop_commit_response_once then
+		authority_faults.drop_commit_response_once = false
+		return nil, "injected lost commit response"
+	end
+	return authority_copy(current)
+end
+function authority:GetStatusAsync(purchase_id, player_id, product_id)
+	if authority_faults.fail_status_once then
+		authority_faults.fail_status_once = false
+		return nil, "injected status outage"
+	end
+	local current = authority_store[purchase_id]
+	if current == nil then return nil, "not_found" end
+	if current.PlayerId ~= player_id or current.ProductId ~= product_id then
+		return authority_identity(purchase_id, player_id, product_id, "conflict")
+	end
+	return authority_copy(current)
+end
+function authority:BackfillAsync(purchase_id, player_id, product_id)
+	local current = authority_store[purchase_id]
+	if current ~= nil and (current.PlayerId ~= player_id or current.ProductId ~= product_id) then
+		return authority_identity(purchase_id, player_id, product_id, "conflict")
+	end
+	if current ~= nil then return authority_copy(current) end
+	current = authority_identity(purchase_id, player_id, product_id, "committed")
+	current.Outcome = "historical"
+	authority_store[purchase_id] = current
+	local imported = authority_copy(current)
+	imported.Status = "imported"
+	return imported
+end
+
+local authority_record = Mock.new("PurchaseExternalAuthorityRegression", "global", "player-321", {
+	schema_version = 1,
+	user_ids = { 321 },
+	autosave_interval = 1000,
+	lease_duration = 180,
+	lease_renewal = 60,
+	transactional_operations_enabled = true,
+})
+local authority_open, authority_open_message = authority_record:Open({
+	coins = 0,
+	purchase_ledger = {},
+})
+expect(authority_open == "created" or authority_open == "loaded", tostring(authority_open_message))
+local authority_grants = 0
+local authority_processor = ReceiptProcessor.new({
+	get_record = function(user_id)
+		return if user_id == 321 then authority_record else nil
+	end,
+	receipt_retention_seconds = 1,
+	permanent_purchase_ledger_key = "purchase_ledger",
+	permanent_purchase_ledger_capacity = 16,
+	permanent_purchase_ledger_migration_complete = true,
+	external_purchase_authority = authority,
+	external_purchase_authority_migration_complete = true,
+	on_diagnostic = function(diagnostic) table.insert(diagnostics, diagnostic) end,
+})
+local authority_handler = authority_processor:CreateHandler({
+	[2001] = function(data)
+		authority_grants += 1
+		local changed = table.clone(data)
+		changed.coins += 50
+		return changed, { granted = 50 }
+	end,
+	[2002] = function(data)
+		local changed = table.clone(data)
+		changed.coins += 500
+		return changed, { granted = 500 }
+	end,
+})
+local external_purchase = {
+	PurchaseId = "global-authority-001",
+	PlayerId = 321,
+	ProductId = 2001,
+}
+expect(authority_handler(external_purchase) == Enum.ProductPurchaseDecision.PurchaseGranted,
+	"external-authority receipt did not commit")
+expect(authority_grants == 1 and authority_record:Get().coins == 50,
+	"external-authority receipt did not grant exactly once")
+expect(authority_store[external_purchase.PurchaseId].Status == "committed"
+	and authority_store[external_purchase.PurchaseId].Outcome == "granted",
+	"external authority did not durably commit the profile grant")
+expect(authority_handler(external_purchase) == Enum.ProductPurchaseDecision.PurchaseGranted,
+	"committed external-authority duplicate was not acknowledged")
+expect(authority_grants == 1 and authority_record:Get().coins == 50,
+	"duplicate external-authority receipt granted twice")
+
+local rebound_purchase = table.clone(external_purchase)
+rebound_purchase.ProductId = 2002
+expect(authority_handler(rebound_purchase) == Enum.ProductPurchaseDecision.NotProcessedYet,
+	"global PurchaseId rebound to a different product was acknowledged")
+expect(authority_record:Get().coins == 50 and authority_grants == 1,
+	"global PurchaseId conflict mutated profile data")
+expect(diagnostics[#diagnostics].category == "external_purchase_conflict",
+	"global PurchaseId conflict was not diagnosed")
+
+-- Simulate a committed external write whose response and immediate status lookup
+-- are lost. The next receipt delivery must reconcile without granting twice.
+local uncertain_external = {
+	PurchaseId = "global-authority-ambiguous-001",
+	PlayerId = 321,
+	ProductId = 2001,
+}
+authority_faults.drop_commit_response_once = true
+authority_faults.fail_status_once = true
+expect(authority_handler(uncertain_external) == Enum.ProductPurchaseDecision.NotProcessedYet,
+	"unconfirmed external commit was acknowledged despite lost response and status")
+expect(authority_store[uncertain_external.PurchaseId].Status == "committed",
+	"fault fixture failed to preserve the committed authority row")
+expect(authority_handler(uncertain_external) == Enum.ProductPurchaseDecision.PurchaseGranted,
+	"retry did not reconcile the already committed external receipt")
+expect(authority_grants == 2 and authority_record:Get().coins == 100,
+	"ambiguous external commit retry re-granted the profile transaction")
+
+local historical_batch = {
+	{ PurchaseId = "external-historical-001", PlayerId = 321, ProductId = 2001 },
+}
+local history_result = authority_processor:BackfillExternalAuthorityAsync(historical_batch, 1)
+expect(history_result.code == "complete" and history_result.backfilled_count == 1,
+	"external historical PurchaseId backfill did not complete")
+local before_historical = authority_record:Get().coins
+expect(authority_handler(historical_batch[1]) == Enum.ProductPurchaseDecision.PurchaseGranted,
+	"historical external authority entry was not acknowledged")
+expect(authority_record:Get().coins == before_historical and authority_grants == 2,
+	"historical PurchaseId backfill accidentally granted the product again")
+local conflicting_history = {
+	{ PurchaseId = "external-history-conflict", PlayerId = 321, ProductId = 2001 },
+	{ PurchaseId = "external-history-conflict", PlayerId = 322, ProductId = 2001 },
+}
+local conflict_backfill = authority_processor:BackfillExternalAuthorityAsync(conflicting_history, 2)
+expect(conflict_backfill.code == "conflict",
+	"external backfill accepted conflicting PurchaseId identities in a single batch")
+expect(authority_store["external-history-conflict"] == nil,
+	"external backfill wrote before validating the entire batch")
+
+local blocked_authority_processor = ReceiptProcessor.new({
+	get_record = function(user_id)
+		return if user_id == 321 then authority_record else nil
+	end,
+	receipt_retention_seconds = 60,
+	permanent_purchase_ledger_key = "purchase_ledger",
+	permanent_purchase_ledger_capacity = 16,
+	permanent_purchase_ledger_migration_complete = true,
+	external_purchase_authority = authority,
+	external_purchase_authority_migration_complete = false,
+	on_diagnostic = function(diagnostic) table.insert(diagnostics, diagnostic) end,
+})
+local blocked_authority_handler = blocked_authority_processor:CreateHandler({
+	[2001] = function(data)
+		local changed = table.clone(data)
+		changed.coins += 900
+		return changed, { granted = 900 }
+	end,
+})
+local blocked_authority_receipt = {
+	PurchaseId = "external-migration-block",
+	PlayerId = 321,
+	ProductId = 2001,
+}
+expect(blocked_authority_handler(blocked_authority_receipt) == Enum.ProductPurchaseDecision.NotProcessedYet,
+	"external authority receipt was processed before historical migration was confirmed")
+expect(authority_store[blocked_authority_receipt.PurchaseId] == nil,
+	"external authority claim was created before its migration gate passed")
+expect(diagnostics[#diagnostics].category == "external_purchase_authority_migration_required",
+	"external migration gate failure was not diagnosed")
+
+expect(authority_record:Close() == "closed", "external authority fixture profile did not close")
