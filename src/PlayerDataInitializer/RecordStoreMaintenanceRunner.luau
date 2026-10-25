@@ -93,6 +93,7 @@ function Runner.new(maintenance, config)
 		initial_cursor = cursor,
 		initial_processed = processed,
 		initial_removed = removed,
+		allow_dry_run = mode == "dry_run",
 		next_page = config.next_page,
 		inspect = config.inspect,
 		delete_if_generation = function(item, generation)
