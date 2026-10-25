@@ -11487,7 +11487,7 @@ export type ErasureStatus = {
 	SourceGeneration: number?,
 	SourceRevision: number?,
 	Version: string?,
-	UpdatedTime: number?,
+	UpdatedAt: number?,
 }
 
 export type ErasurePurgeProgress = {
@@ -12079,6 +12079,25 @@ local function get_erasure_status_internal(
 			Version = nil,
 		}, "not_found", nil
 	end
+	local quarantine_marker, quarantine_present, quarantine_error = parse_quarantine_fence(raw)
+	if quarantine_present then
+		if quarantine_marker == nil then return nil, "corrupt", quarantine_error or "quarantine fence is corrupt" end
+		if quarantine_marker.store_name ~= name or quarantine_marker.scope ~= scope or quarantine_marker.profile_key ~= key then
+			return nil, "conflict", "quarantine fence identity does not match the requested key"
+		end
+		if info ~= nil and not user_ids_include(info.UserIds, user_id) then
+			return nil, "conflict", "quarantined profile UserIds do not contain the requested UserId"
+		end
+		return {
+			UserId = user_id,
+			Exists = true,
+			Erased = false,
+			Generation = quarantine_marker.source_generation,
+			Revision = quarantine_marker.source_revision,
+			Version = if info ~= nil then info.Version else nil,
+			UpdatedTime = if info ~= nil then info.UpdatedTime else nil,
+		}, "success", nil
+	end
 	local marker, marker_present, marker_error = parse_erasure_fence(raw)
 	if marker_present then
 		if marker == nil then return nil, "corrupt", marker_error or "erasure fence is corrupt" end
@@ -12180,27 +12199,52 @@ local function erase_user_data_internal(
 		local source_generation = 0
 		local source_revision = 0
 		if raw ~= nil then
-			local envelope, parse_error, current_format = parse_envelope(raw)
-			if not current_format then
-				decision = if parse_error == "legacy payload" then "legacy"
-					elseif parse_error == "future implementation version" then "future_schema" else "corrupt"
-				decision_message = parse_error or "stored envelope is invalid"
-				return nil, nil, nil
+			local quarantine_marker, quarantine_present, quarantine_error = parse_quarantine_fence(raw)
+			if quarantine_present then
+				if quarantine_marker == nil then
+					decision = "corrupt"
+					decision_message = quarantine_error or "quarantine fence is corrupt"
+					return nil, nil, nil
+				end
+				if quarantine_marker.store_name ~= name or quarantine_marker.scope ~= scope
+					or quarantine_marker.profile_key ~= key
+				then
+					decision = "conflict"
+					decision_message = "quarantine fence identity does not match the requested erasure key"
+					return nil, nil, nil
+				end
+				local stored_user_ids = if info ~= nil then info.UserIds
+					else clone_user_ids(get_string_field(raw, "user_ids") :: { number }?)
+				if not user_ids_include(stored_user_ids, user_id) then
+					decision = "conflict"
+					decision_message = "quarantined profile UserIds do not contain the requested UserId"
+					return nil, nil, nil
+				end
+				source_generation = quarantine_marker.source_generation
+				source_revision = quarantine_marker.source_revision
+			else
+				local envelope, parse_error, current_format = parse_envelope(raw)
+				if not current_format then
+					decision = if parse_error == "legacy payload" then "legacy"
+						elseif parse_error == "future implementation version" then "future_schema" else "corrupt"
+					decision_message = parse_error or "stored envelope is invalid"
+					return nil, nil, nil
+				end
+				if envelope == nil then
+					decision = "corrupt"
+					decision_message = parse_error or "stored envelope is missing"
+					return nil, nil, nil
+				end
+				local stored_user_ids = if info ~= nil then info.UserIds
+					elseif envelope.user_ids ~= nil then envelope.user_ids else {}
+				if not user_ids_include(stored_user_ids, user_id) then
+					decision = "conflict"
+					decision_message = "stored profile UserIds do not contain the requested UserId"
+					return nil, nil, nil
+				end
+				source_generation = envelope.fencing_generation
+				source_revision = envelope.revision
 			end
-			if envelope == nil then
-				decision = "corrupt"
-				decision_message = parse_error or "stored envelope is missing"
-				return nil, nil, nil
-			end
-			local stored_user_ids = if info ~= nil then info.UserIds
-				elseif envelope.user_ids ~= nil then envelope.user_ids else {}
-			if not user_ids_include(stored_user_ids, user_id) then
-				decision = "conflict"
-				decision_message = "stored profile UserIds do not contain the requested UserId"
-				return nil, nil, nil
-			end
-			source_generation = envelope.fencing_generation
-			source_revision = envelope.revision
 		end
 		if expected_generation ~= nil and source_generation ~= expected_generation then
 			decision = "conflict"
