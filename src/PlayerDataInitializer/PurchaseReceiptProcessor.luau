@@ -236,8 +236,13 @@ local function create_handler(
 			if ledger_key == nil then
 				return grant_reducer(current_data, receipt_context)
 			end
-			local function ledger_result(ledger_status: string): RecordStore.JsonValue
-				return { [PERMANENT_LEDGER_RESULT_KEY] = ledger_status }
+			local function ledger_result(ledger_status: string, grant_result: RecordStore.JsonValue?): RecordStore.JsonValue
+				return {
+					[PERMANENT_LEDGER_RESULT_KEY] = {
+						status = ledger_status,
+						grant_result = grant_result,
+					},
+				}
 			end
 			if type(current_data) ~= "table" then
 				return current_data, ledger_result("corrupt")
@@ -293,7 +298,7 @@ local function create_handler(
 			}
 			local committed_data = table.clone(next_data :: { [string]: RecordStore.JsonValue })
 			committed_data[ledger_key] = ledger
-			return committed_data, result
+			return committed_data, ledger_result("granted", result)
 		end
 
 		local transaction_ok, _result, status, message = pcall(function()
@@ -307,9 +312,11 @@ local function create_handler(
 			)
 		end)
 		local function defer_for_permanent_ledger(result_value: unknown): boolean
-			if type(result_value) ~= "table" then return false end
-			local ledger_status = (result_value :: { [string]: unknown })[PERMANENT_LEDGER_RESULT_KEY]
-			if ledger_status == "duplicate" then return false end
+			if config.permanent_purchase_ledger_key == nil or type(result_value) ~= "table" then return false end
+			local marker = (result_value :: { [string]: unknown })[PERMANENT_LEDGER_RESULT_KEY]
+			if type(marker) ~= "table" then return false end
+			local ledger_status = (marker :: { [string]: unknown }).status
+			if ledger_status == "granted" or ledger_status == "duplicate" then return false end
 			if ledger_status == "conflict" or ledger_status == "capacity"
 				or ledger_status == "corrupt" or ledger_status == "invalid_grant"
 			then
