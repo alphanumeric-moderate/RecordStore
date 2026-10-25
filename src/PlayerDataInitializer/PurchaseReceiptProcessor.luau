@@ -164,8 +164,8 @@ local function normalize_config(config: unknown): NormalizedConfig
 	then
 		error("external_purchase_authority must implement ClaimAsync, CommitAsync, GetStatusAsync, and BackfillAsync", 3)
 	end
-	if external_authority ~= nil and (ledger_key == nil or ledger_migration_complete ~= true) then
-		error("external_purchase_authority requires the migrated permanent per-profile ledger so grant outcomes are recoverable", 3)
+	if external_authority ~= nil and ledger_key == nil then
+		error("external_purchase_authority requires permanent_purchase_ledger_key so grant outcomes are recoverable", 3)
 	end
 	if ledger_key == nil then
 		if ledger_capacity ~= nil then
