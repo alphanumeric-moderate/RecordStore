@@ -2056,6 +2056,11 @@ local function new_erasure(store, families, options)
 		return result, nil
 	end
 	local function validate_plan_manifest(manifest, user_id)
+		if not finite(manifest.cursor) or math.floor(manifest.cursor) ~= manifest.cursor
+			or manifest.cursor < 0 or not finite(manifest.completed_count)
+			or math.floor(manifest.completed_count) ~= manifest.completed_count
+			or manifest.completed_count < 0 or manifest.completed_count ~= manifest.cursor
+		then return false, "corrupt", "erasure cursor and completed count disagree" end
 		local entries = manifest.entries
 		if type(entries) ~= "table" or #entries > MAX_ERASURE_ITEMS or key_count(entries) ~= #entries then
 			return false, "corrupt", "erasure entries are not a bounded dense array"
@@ -2111,7 +2116,7 @@ local function new_erasure(store, families, options)
 			if not matched then return false, "coverage_unverified", "planned locator no longer matches a verified RTBF template" end
 		end
 		local coverage = manifest.coverage
-		if type(coverage) ~= "table" or key_count(coverage) ~= #self.families then
+		if type(coverage) ~= "table" or key_count(coverage) ~= #families then
 			return false, "coverage_unverified", "coverage rows do not match the declared family inventory"
 		end
 		for family_name in pairs(coverage) do
@@ -2119,7 +2124,10 @@ local function new_erasure(store, families, options)
 				return false, "coverage_unverified", "coverage contains an undeclared family"
 			end
 		end
-		for _, family in ipairs(self.families) do
+		if manifest.status == "completed" and manifest.cursor ~= #entries then
+			return false, "corrupt", "completed erasure manifest cursor is not at the end of its inventory"
+		end
+		for _, family in ipairs(families) do
 			local row = coverage[family.name]
 			if family.templates_verified ~= true or type(row) ~= "table"
 				or row.status ~= "template_verified_by_integrator" or row.inventory_complete ~= true
