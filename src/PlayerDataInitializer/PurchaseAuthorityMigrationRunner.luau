@@ -47,7 +47,8 @@ export type Config = {
 	page_size: number?,
 	inventory_manifest_id: string,
 	expected_purchase_count: number,
-	verify_complete_inventory: (string, string, number, number) -> (boolean, string?),
+	expected_inventory_digest: string,
+	verify_complete_inventory: (string, string, number, number, string, string) -> (boolean, string?),
 }
 
 export type RunResult = {
@@ -61,6 +62,8 @@ export type RunResult = {
 	done: boolean,
 	inventory_manifest_id: string,
 	expected_purchase_count: number,
+	expected_inventory_digest: string,
+	observed_inventory_digest: string,
 	inventory_verified: boolean,
 	message: string?,
 }
@@ -74,6 +77,8 @@ type Checkpoint = {
 	done: boolean,
 	inventory_manifest_id: string,
 	expected_purchase_count: number,
+	expected_inventory_digest: string,
+	inventory_digest: string,
 	inventory_verified: boolean,
 	pages_processed: number,
 	purchases_processed: number,
@@ -92,7 +97,8 @@ type NormalizedConfig = {
 	page_size: number,
 	inventory_manifest_id: string,
 	expected_purchase_count: number,
-	verify_complete_inventory: (string, string, number, number) -> (boolean, string?),
+	expected_inventory_digest: string,
+	verify_complete_inventory: (string, string, number, number, string, string) -> (boolean, string?),
 }
 
 local MAX_PAGE_SIZE = 16
@@ -111,6 +117,62 @@ local function nonnegative_integer(value: unknown): boolean
 	return type(value) == "number" and math.isfinite(value) and value >= 0 and math.floor(value) == value
 end
 
+local CHECKPOINT_VERSION = 2
+local HASH_MODULUS = 4294967296
+local EMPTY_INVENTORY_DIGEST = "811c9dc585ebca77c2b2ae3d27d4eb2f"
+
+local function valid_digest(value: unknown): boolean
+	return type(value) == "string" and #value == 32 and string.match(value, "^[0-9a-f]+$") ~= nil
+end
+
+local function positive_integer(value: unknown): boolean
+	return type(value) == "number" and math.isfinite(value) and value >= 1 and math.floor(value) == value
+end
+
+local function compute_inventory_digest(purchases: { HistoricalPurchase }, initial_digest: string?): (string?, string?)
+	local seed = if initial_digest == nil then EMPTY_INVENTORY_DIGEST else initial_digest
+	if not valid_digest(seed) then return nil, "starting inventory digest is malformed" end
+	local state = {
+		h1 = tonumber(string.sub(seed, 1, 8), 16),
+		h2 = tonumber(string.sub(seed, 9, 16), 16),
+		h3 = tonumber(string.sub(seed, 17, 24), 16),
+		h4 = tonumber(string.sub(seed, 25, 32), 16),
+	}
+	local count = #purchases
+	local seen = 0
+	for index in pairs(purchases) do
+		if type(index) ~= "number" or not math.isfinite(index)
+			or math.floor(index) ~= index or index < 1 or index > count
+		then
+			return nil, "inventory digest input must be a dense purchase array"
+		end
+		seen += 1
+	end
+	if seen ~= count then return nil, "inventory digest input must be a dense purchase array" end
+	for _, purchase in ipairs(purchases) do
+		if type(purchase) ~= "table" then return nil, "inventory digest row must be a table" end
+		local purchase_id = purchase.PurchaseId
+		local player_id = purchase.PlayerId
+		local product_id = purchase.ProductId
+		if not valid_text(purchase_id, 247) or string.find(purchase_id :: string, "%c") ~= nil
+			or not positive_integer(player_id) or not positive_integer(product_id)
+		then
+			return nil, "inventory digest row has a malformed PurchaseId, PlayerId or ProductId"
+		end
+		local material = tostring(#(purchase_id :: string)) .. ":" .. (purchase_id :: string)
+			.. ":" .. tostring(player_id) .. ":" .. tostring(product_id) .. ";"
+		for index = 1, #material do
+			local byte = string.byte(material, index)
+			state.h1 = ((state.h1 :: number) * 33 + byte) % HASH_MODULUS
+			state.h2 = ((state.h2 :: number) * 65599 + byte) % HASH_MODULUS
+			state.h3 = ((state.h3 :: number) * 257 + byte) % HASH_MODULUS
+			state.h4 = ((state.h4 :: number) * 131071 + byte) % HASH_MODULUS
+		end
+	end
+	return string.format("%08x%08x%08x%08x",
+		state.h1, state.h2, state.h3, state.h4), nil
+end
+
 local function copy_checkpoint(value: Checkpoint): Checkpoint
 	return {
 		version = value.version,
@@ -121,6 +183,8 @@ local function copy_checkpoint(value: Checkpoint): Checkpoint
 		done = value.done,
 		inventory_manifest_id = value.inventory_manifest_id,
 		expected_purchase_count = value.expected_purchase_count,
+		expected_inventory_digest = value.expected_inventory_digest,
+		inventory_digest = value.inventory_digest,
 		inventory_verified = value.inventory_verified,
 		pages_processed = value.pages_processed,
 		purchases_processed = value.purchases_processed,
@@ -135,20 +199,24 @@ local function valid_checkpoint(raw: unknown, config: NormalizedConfig): (Checkp
 	for key in pairs(value) do
 		if key ~= "version" and key ~= "job_id" and key ~= "source_revision"
 			and key ~= "revision" and key ~= "cursor" and key ~= "done"
-			and key ~= "inventory_manifest_id" and key ~= "expected_purchase_count" and key ~= "inventory_verified"
+			and key ~= "inventory_manifest_id" and key ~= "expected_purchase_count"
+			and key ~= "expected_inventory_digest" and key ~= "inventory_digest" and key ~= "inventory_verified"
 			and key ~= "pages_processed" and key ~= "purchases_processed"
 			and key ~= "backfilled_count" and key ~= "duplicate_count"
 		then
 			return nil, "checkpoint contains an unsupported field"
 		end
 	end
-	if value.version ~= 1 or value.job_id ~= config.job_id
+	if value.version ~= CHECKPOINT_VERSION or value.job_id ~= config.job_id
 		or value.source_revision ~= config.source_revision
 		or value.inventory_manifest_id ~= config.inventory_manifest_id
 		or value.expected_purchase_count ~= config.expected_purchase_count
+		or value.expected_inventory_digest ~= config.expected_inventory_digest
+		or not valid_digest(value.inventory_digest)
 		or type(value.inventory_verified) ~= "boolean"
 		or value.inventory_verified ~= value.done
-		or (value.done and value.purchases_processed ~= config.expected_purchase_count)
+		or (value.done and (value.purchases_processed ~= config.expected_purchase_count
+			or value.inventory_digest ~= config.expected_inventory_digest))
 		or not nonnegative_integer(value.revision)
 		or not valid_cursor(value.cursor) or type(value.done) ~= "boolean"
 		or not nonnegative_integer(value.pages_processed)
@@ -164,7 +232,7 @@ local function valid_checkpoint(raw: unknown, config: NormalizedConfig): (Checkp
 		return nil, "checkpoint counters do not reconcile"
 	end
 	return {
-		version = 1,
+		version = CHECKPOINT_VERSION,
 		job_id = value.job_id :: string,
 		source_revision = value.source_revision :: string,
 		revision = value.revision :: number,
@@ -172,6 +240,8 @@ local function valid_checkpoint(raw: unknown, config: NormalizedConfig): (Checkp
 		done = value.done :: boolean,
 		inventory_manifest_id = value.inventory_manifest_id :: string,
 		expected_purchase_count = value.expected_purchase_count :: number,
+		expected_inventory_digest = value.expected_inventory_digest :: string,
+		inventory_digest = value.inventory_digest :: string,
 		inventory_verified = value.inventory_verified :: boolean,
 		pages_processed = value.pages_processed :: number,
 		purchases_processed = value.purchases_processed :: number,
@@ -190,6 +260,8 @@ local function same_checkpoint(left: Checkpoint?, right: Checkpoint): boolean
 		and left.done == right.done
 		and left.inventory_manifest_id == right.inventory_manifest_id
 		and left.expected_purchase_count == right.expected_purchase_count
+		and left.expected_inventory_digest == right.expected_inventory_digest
+		and left.inventory_digest == right.inventory_digest
 		and left.inventory_verified == right.inventory_verified
 		and left.pages_processed == right.pages_processed
 		and left.purchases_processed == right.purchases_processed
@@ -204,7 +276,8 @@ local function normalize_config(value: unknown): NormalizedConfig
 		if key ~= "job_id" and key ~= "source_revision" and key ~= "source"
 			and key ~= "processor" and key ~= "checkpoint_store" and key ~= "checkpoint_key"
 			and key ~= "initial_cursor" and key ~= "page_size"
-			and key ~= "inventory_manifest_id" and key ~= "expected_purchase_count" and key ~= "verify_complete_inventory"
+			and key ~= "inventory_manifest_id" and key ~= "expected_purchase_count"
+			and key ~= "expected_inventory_digest" and key ~= "verify_complete_inventory"
 		then
 			error("unsupported purchase migration runner option: " .. tostring(key), 3)
 		end
@@ -230,7 +303,8 @@ local function normalize_config(value: unknown): NormalizedConfig
 	if not valid_text(fields.checkpoint_key, 50) then error("checkpoint_key must be 1 to 50 bytes", 3) end
 	if not valid_text(fields.inventory_manifest_id, 128) then error("inventory_manifest_id must be 1 to 128 bytes", 3) end
 	if not nonnegative_integer(fields.expected_purchase_count) then error("expected_purchase_count must be a non-negative integer", 3) end
-	if type(fields.verify_complete_inventory) ~= "function" then error("verify_complete_inventory must verify an immutable inventory manifest", 3) end
+	if not valid_digest(fields.expected_inventory_digest) then error("expected_inventory_digest must be a 32-character lowercase hexadecimal digest", 3) end
+	if type(fields.verify_complete_inventory) ~= "function" then error("verify_complete_inventory must verify an immutable inventory manifest and digest", 3) end
 	if not valid_cursor(fields.initial_cursor) then error("initial_cursor exceeds the 512-byte cursor limit", 3) end
 	local page_size = if fields.page_size == nil then 16 else fields.page_size
 	if type(page_size) ~= "number" or not math.isfinite(page_size)
@@ -249,8 +323,13 @@ local function normalize_config(value: unknown): NormalizedConfig
 		page_size = page_size :: number,
 		inventory_manifest_id = fields.inventory_manifest_id :: string,
 		expected_purchase_count = fields.expected_purchase_count :: number,
-		verify_complete_inventory = fields.verify_complete_inventory :: (string, string, number, number) -> (boolean, string?),
+		expected_inventory_digest = fields.expected_inventory_digest :: string,
+		verify_complete_inventory = fields.verify_complete_inventory :: (string, string, number, number, string, string) -> (boolean, string?),
 	})
+end
+
+function MigrationRunner.ComputeInventoryDigest(purchases: { HistoricalPurchase }, initial_digest: string?): (string?, string?)
+	return compute_inventory_digest(purchases, initial_digest)
 end
 
 function MigrationRunner.new(config: Config)
@@ -264,11 +343,13 @@ function MigrationRunner.new(config: Config)
 		if read_error ~= nil then return nil, tostring(read_error) end
 		if raw == nil then
 			return {
-				version = 1,
+				version = CHECKPOINT_VERSION,
 				job_id = normalized.job_id,
 				source_revision = normalized.source_revision,
 				inventory_manifest_id = normalized.inventory_manifest_id,
 				expected_purchase_count = normalized.expected_purchase_count,
+				expected_inventory_digest = normalized.expected_inventory_digest,
+				inventory_digest = EMPTY_INVENTORY_DIGEST,
 				inventory_verified = false,
 				revision = 0,
 				cursor = normalized.initial_cursor,
@@ -326,6 +407,8 @@ function MigrationRunner.new(config: Config)
 			done = checkpoint.done,
 			inventory_manifest_id = checkpoint.inventory_manifest_id,
 			expected_purchase_count = checkpoint.expected_purchase_count,
+			expected_inventory_digest = checkpoint.expected_inventory_digest,
+			observed_inventory_digest = checkpoint.inventory_digest,
 			inventory_verified = checkpoint.inventory_verified,
 			message = message,
 		}
@@ -347,6 +430,8 @@ function MigrationRunner.new(config: Config)
 				done = false,
 				inventory_manifest_id = normalized.inventory_manifest_id,
 				expected_purchase_count = normalized.expected_purchase_count,
+				expected_inventory_digest = normalized.expected_inventory_digest,
+				inventory_digest = EMPTY_INVENTORY_DIGEST,
 				inventory_verified = false,
 				message = read_error or "migration checkpoint is unavailable",
 			}
@@ -361,11 +446,13 @@ function MigrationRunner.new(config: Config)
 		then
 			local checkpoint = read_checkpoint()
 			local safe_checkpoint = checkpoint or {
-				version = 1,
+				version = CHECKPOINT_VERSION,
 				job_id = normalized.job_id,
 				source_revision = normalized.source_revision,
 				inventory_manifest_id = normalized.inventory_manifest_id,
 				expected_purchase_count = normalized.expected_purchase_count,
+				expected_inventory_digest = normalized.expected_inventory_digest,
+				inventory_digest = EMPTY_INVENTORY_DIGEST,
 				inventory_verified = false,
 				revision = 0,
 				cursor = normalized.initial_cursor,
@@ -382,7 +469,7 @@ function MigrationRunner.new(config: Config)
 			local checkpoint, checkpoint_error = read_checkpoint()
 			if checkpoint == nil then
 				local empty: Checkpoint = {
-					version = 1,
+					version = CHECKPOINT_VERSION,
 					job_id = normalized.job_id,
 					source_revision = normalized.source_revision,
 					inventory_manifest_id = normalized.inventory_manifest_id,
@@ -443,6 +530,10 @@ function MigrationRunner.new(config: Config)
 			end
 			local next_cursor = page_fields.next_cursor :: string?
 			local done = page_fields.done :: boolean
+			local observed_inventory_digest, digest_error = compute_inventory_digest(items, checkpoint.inventory_digest)
+			if observed_inventory_digest == nil then
+				return result("invalid", checkpoint, digest_error or "historical inventory digest could not be computed")
+			end
 			local proposed_purchase_count = checkpoint.purchases_processed + item_count
 			if proposed_purchase_count > normalized.expected_purchase_count then
 				return result("incomplete_inventory", checkpoint, "historical source exceeded the declared PurchaseId manifest count; cursor was not advanced")
@@ -451,12 +542,17 @@ function MigrationRunner.new(config: Config)
 				if proposed_purchase_count ~= normalized.expected_purchase_count then
 					return result("incomplete_inventory", checkpoint, "terminal source page does not reconcile to the declared PurchaseId manifest count; terminal cursor was not advanced")
 				end
+				if observed_inventory_digest ~= normalized.expected_inventory_digest then
+					return result("incomplete_inventory", checkpoint, "terminal PurchaseId rows do not match the declared inventory digest; terminal cursor was not advanced")
+				end
 				local verify_ok, verified, verify_error = pcall(
 					normalized.verify_complete_inventory,
 					normalized.inventory_manifest_id,
 					normalized.source_revision,
 					normalized.expected_purchase_count,
-					proposed_purchase_count
+					proposed_purchase_count,
+					normalized.expected_inventory_digest,
+					observed_inventory_digest
 				)
 				if not verify_ok or verified ~= true then
 					return result("incomplete_inventory", checkpoint,
@@ -492,11 +588,13 @@ function MigrationRunner.new(config: Config)
 						backfill_result.message or "historical PurchaseId batch result did not reconcile; cursor was not advanced")
 				end
 				local next_checkpoint: Checkpoint = {
-					version = 1,
+					version = CHECKPOINT_VERSION,
 					job_id = normalized.job_id,
 					source_revision = normalized.source_revision,
 					inventory_manifest_id = normalized.inventory_manifest_id,
 					expected_purchase_count = normalized.expected_purchase_count,
+					expected_inventory_digest = normalized.expected_inventory_digest,
+					inventory_digest = observed_inventory_digest,
 					inventory_verified = done,
 					revision = checkpoint.revision + 1,
 					cursor = next_cursor,
@@ -512,11 +610,13 @@ function MigrationRunner.new(config: Config)
 				end
 			else
 				local next_checkpoint: Checkpoint = {
-					version = 1,
+					version = CHECKPOINT_VERSION,
 					job_id = normalized.job_id,
 					source_revision = normalized.source_revision,
 					inventory_manifest_id = normalized.inventory_manifest_id,
 					expected_purchase_count = normalized.expected_purchase_count,
+					expected_inventory_digest = normalized.expected_inventory_digest,
+					inventory_digest = observed_inventory_digest,
 					inventory_verified = done,
 					revision = checkpoint.revision + 1,
 					cursor = next_cursor,
@@ -536,11 +636,13 @@ function MigrationRunner.new(config: Config)
 		local checkpoint, checkpoint_error = read_checkpoint()
 		if checkpoint == nil then
 			local empty: Checkpoint = {
-				version = 1,
+				version = CHECKPOINT_VERSION,
 				job_id = normalized.job_id,
 				source_revision = normalized.source_revision,
 				inventory_manifest_id = normalized.inventory_manifest_id,
 				expected_purchase_count = normalized.expected_purchase_count,
+				expected_inventory_digest = normalized.expected_inventory_digest,
+				inventory_digest = EMPTY_INVENTORY_DIGEST,
 				inventory_verified = false,
 				revision = 0,
 				cursor = normalized.initial_cursor,
