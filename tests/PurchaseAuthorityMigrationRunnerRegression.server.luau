@@ -360,6 +360,40 @@ do
 		"runner read or imported source purchases after rejecting an inconsistent terminal checkpoint")
 end
 
+-- A persisted checkpoint must have a positive revision; revision zero is only the in-memory empty state.
+do
+	local calls = { count = 0 }
+	local backing = make_checkpoint_store()
+	local source = make_source({
+		["<initial>"] = page({ purchase("revision-zero-001") }, nil, true),
+	}, "snapshot-revision-zero", calls)
+	local job_id = "historical-import-revision-zero"
+	backing.values["purchase-migration:" .. job_id] = {
+		version = 2,
+		job_id = job_id,
+		source_revision = source.source_revision,
+		revision = 0,
+		cursor = nil,
+		done = true,
+		inventory_manifest_id = "manifest:" .. source.source_revision,
+		expected_purchase_count = source.inventory_count,
+		expected_inventory_digest = source.inventory_digest,
+		inventory_digest = source.inventory_digest,
+		inventory_verified = true,
+		pages_processed = 0,
+		purchases_processed = source.inventory_count,
+		backfilled_count = source.inventory_count,
+		duplicate_count = 0,
+	}
+	local runner = new_runner(job_id, source, make_processor(), backing)
+	local status = runner:GetStatusAsync()
+	expect(status.code == "unknown" and status.done == false,
+		"runner accepted a completed durable checkpoint with revision zero")
+	local result = runner:RunBatchAsync(1)
+	expect(result.code == "unknown" and calls.count == 0,
+		"runner read historical purchases after rejecting a revision-zero checkpoint")
+end
+
 -- Corrupt durable checkpoints are surfaced as unknown and never silently reset
 -- the cursor to the beginning of an existing migration.
 do
