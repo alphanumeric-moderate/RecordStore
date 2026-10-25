@@ -883,6 +883,47 @@ expect(#deleted_items == 2 and deleted_items[1].key == "Player_123456"
 	"erasure failed to invoke each generation-aware deletion adapter")
 expect(erasure:GetStatus(123456).status == "completed", "erasure manifest status was not durable")
 
+do -- A successful delete with a lost response must replay as idempotent absence.
+	local deleted = false
+	local delete_attempts = 0
+	local replay_store = new_store()
+	local replay_erasure = V2.Erasure.new(replay_store, {
+		{
+			name = "replay_family",
+			templates = { { name = "PlayerData", scope = "global", key = "Player_{user_id}" } },
+			templates_verified = true,
+			inventory = function(user_id)
+				return {
+					{ name = "PlayerData", scope = "global", key = "Player_" .. tostring(user_id), generation = 7 },
+				}, true
+			end,
+			fence_user = function() return true end,
+			dependencies_clear = function() return true end,
+			redact_or_delete_if_generation = function(item, user_id, erasure_id)
+				delete_attempts += 1
+				if not deleted then
+					deleted = true
+					return "unknown", "injected response loss after deletion"
+				end
+				return "already_absent"
+			end,
+		},
+	}, { verify_templates = function() return true end })
+	local replay_plan = replay_erasure:PlanAsync(785, "erase-delete-response-loss")
+	expect(replay_plan.rtbf_coverage_verified == true,
+		"delete-response-loss regression could not create a verified erasure plan")
+	local uncertain_delete = replay_erasure:ExecuteAsync(785, "erase-delete-response-loss", 1)
+	expect(uncertain_delete.code == "unknown" and uncertain_delete.cursor == 0
+		and replay_erasure:GetStatus(785).status == "unknown",
+		"erasure did not preserve the old cursor after a lost delete response")
+	local replayed_delete = replay_erasure:ExecuteAsync(785, "erase-delete-response-loss", 1)
+	expect(replayed_delete.code == "committed" and replayed_delete.completed_count == 1
+		and replay_erasure:GetStatus(785).status == "completed",
+		"erasure could not advance after an idempotent already-absent replay")
+	expect(delete_attempts == 2,
+		"erasure did not retry the unresolved delete with the same durable entry")
+end
+
 do -- scope RTBF coverage and write-gate regression locals
 -- The ordinary read deliberately returns a stale "missing" view. Erasure gates
 -- must use the authoritative read adapter or they can permit recreation.
