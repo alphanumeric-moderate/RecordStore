@@ -5,7 +5,10 @@ local HttpService = game:GetService("HttpService")
 local MessagingService = game:GetService("MessagingService")
 local RecordStore = {}
 
--- Erasure fences must be unreadable to older writers so a stale server cannot recreate erased data.
+-- Durable same-key fences are deliberately newer than this writer. Older RecordStore
+-- releases fail closed rather than treating a quarantined/enclosed key as writable.
+local QUARANTINE_FENCE_IMPLEMENTATION_VERSION = 2147483646
+local QUARANTINE_FENCE_FIELD = "__recordstore_quarantine_fence_v1"
 local ERASURE_FENCE_IMPLEMENTATION_VERSION = 2147483647
 local ERASURE_FENCE_FIELD = "__recordstore_erasure_fence"
 local MAX_ERASURE_HISTORY_SCAN = 1024
@@ -8712,6 +8715,11 @@ local function parse_envelope(raw: unknown): (Envelope?, string?, boolean)
 	if type(raw) ~= "table" then
 		return nil, "legacy payload", false
 	end
+	if get_string_field(raw, QUARANTINE_FENCE_FIELD) ~= nil
+		or get_string_field(raw, "implementation_version") == QUARANTINE_FENCE_IMPLEMENTATION_VERSION
+	then
+		return nil, "future implementation version", false
+	end
 	local stored_implementation_version = get_string_field(raw, "implementation_version")
 	local stored_fencing_generation = get_string_field(raw, "fencing_generation")
 	local legacy_generation = get_string_field(raw, "generation")
@@ -11489,6 +11497,30 @@ export type ErasurePurgeProgress = {
 	Complete: boolean,
 	CurrentVersion: string?,
 	RetentionUntil: number?,
+}
+
+export type QuarantineFenceStatus = {
+	Exists: boolean,
+	Quarantined: boolean,
+	Phase: string?,
+	QuarantineId: string?,
+	StoreName: string?,
+	Scope: string?,
+	ProfileKey: string?,
+	SourceGeneration: number?,
+	SourceRevision: number?,
+	OperatorId: string?,
+	Reason: string?,
+	CreatedAt: number?,
+	UpdatedTime: number?,
+	ResolutionId: string?,
+	ResolutionOperatorId: string?,
+	ResolutionReason: string?,
+	ResolutionAt: number?,
+	Version: string?,
+	CurrentGeneration: number?,
+	CurrentRevision: number?,
+	CurrentWriteId: string?,
 }
 
 type ErasureFenceMarker = {
