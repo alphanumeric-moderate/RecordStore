@@ -105,6 +105,7 @@ local loaded_outbox_consumer_adapter: any = nil
 local loaded_recordstore_v2: any = nil
 local loaded_player_data_erasure: any = nil
 local loaded_purchase_datastore_authority: any = nil
+local loaded_purchase_authority_migration_runner: any = nil
 
 local RecordStoreInstance = table.freeze({ Name = "RecordStore", ClassName = "ModuleScript" })
 local PurchaseReceiptProcessorInstance = table.freeze({ Name = "PurchaseReceiptProcessor", ClassName = "ModuleScript" })
@@ -113,6 +114,7 @@ local OutboxMailboxAdapterInstance = table.freeze({ Name = "RecordStoreOutboxMai
 local OutboxConsumerAdapterInstance = table.freeze({ Name = "RecordStoreOutboxConsumerAdapter", ClassName = "ModuleScript" })
 local PlayerDataErasureInstance = table.freeze({ Name = "PlayerDataErasure", ClassName = "ModuleScript" })
 local PurchaseDataStoreAuthorityInstance = table.freeze({ Name = "PurchaseDataStoreAuthority", ClassName = "ModuleScript" })
+local PurchaseAuthorityMigrationRunnerInstance = table.freeze({ Name = "PurchaseAuthorityMigrationRunner", ClassName = "ModuleScript" })
 local PlayerDataInitializer = {
 	RecordStore = RecordStoreInstance,
 	PurchaseReceiptProcessor = PurchaseReceiptProcessorInstance,
@@ -121,6 +123,7 @@ local PlayerDataInitializer = {
 	RecordStoreV2 = RecordStoreV2Instance,
 	PlayerDataErasure = PlayerDataErasureInstance,
 	PurchaseDataStoreAuthority = PurchaseDataStoreAuthorityInstance,
+	PurchaseAuthorityMigrationRunner = PurchaseAuthorityMigrationRunnerInstance,
 }
 function PlayerDataInitializer:WaitForChild(name: string): any
 	local child = self[name]
@@ -214,6 +217,17 @@ local function load_receipt_processor(): any
 	return loaded_receipt_processor
 end
 
+local function load_purchase_authority_migration_runner(): any
+	if loaded_purchase_authority_migration_runner ~= nil then return loaded_purchase_authority_migration_runner end
+	local module_environment = table.clone(Shim.environment)
+	module_environment.script = { Parent = PlayerDataInitializer }
+	local chunk = luau.load(fs.readFile("src/PlayerDataInitializer/PurchaseAuthorityMigrationRunner.luau"), {
+		debugName = "PurchaseAuthorityMigrationRunner", environment = module_environment,
+	})
+	loaded_purchase_authority_migration_runner = chunk()
+	return loaded_purchase_authority_migration_runner
+end
+
 local function load_purchase_datastore_authority(): any
 	if loaded_purchase_datastore_authority ~= nil then return loaded_purchase_datastore_authority end
 	local module_environment = table.clone(Shim.environment)
@@ -291,6 +305,7 @@ local function shim_require(target: any)
 	if target == RecordStoreV2Instance then return load_recordstore_v2() end
 	if target == PlayerDataErasureInstance then return load_player_data_erasure() end
 	if target == PurchaseDataStoreAuthorityInstance then return load_purchase_datastore_authority() end
+	if target == PurchaseAuthorityMigrationRunnerInstance then return load_purchase_authority_migration_runner() end
 	return require(target)
 end
 
