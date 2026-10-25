@@ -245,13 +245,30 @@ expect(not pcall(function()
 		permanent_purchase_ledger_capacity = 2,
 	})
 end), "ledger capacity was accepted without an application data field")
-expect(not pcall(function()
-	ReceiptProcessor.new({
-		get_record = function() return ledger_record end,
-		receipt_retention_seconds = 60,
-		permanent_purchase_ledger_key = "purchase_ledger",
-	})
-end), "permanent purchase ledger was enabled without explicit history-migration acknowledgement")
+local blocked_ledger_processor = ReceiptProcessor.new({
+	get_record = function() return ledger_record end,
+	receipt_retention_seconds = 60,
+	permanent_purchase_ledger_key = "purchase_ledger",
+	on_diagnostic = function(diagnostic) table.insert(diagnostics, diagnostic) end,
+})
+local blocked_ledger_handler = blocked_ledger_processor:CreateHandler({
+	[1001] = function(data)
+		local changed = table.clone(data)
+		changed.coins += 500
+		return changed, { granted = 500 }
+	end,
+})
+local blocked_ledger_decision = blocked_ledger_handler({
+	PurchaseId = "permanent-migration-gate",
+	PlayerId = 123,
+	ProductId = 1001,
+})
+expect(blocked_ledger_decision == Enum.ProductPurchaseDecision.NotProcessedYet,
+	"permanent-ledger receipt was acknowledged before historical PurchaseId reconciliation")
+expect(ledger_record:Get().coins == 20 and ledger_grants == 2,
+	"receipt without historical-migration acknowledgement mutated profile data")
+expect(diagnostics[#diagnostics].category == "permanent_purchase_ledger_migration_required",
+	"blocked permanent-ledger receipt was not diagnosed")
 expect(not pcall(function()
 	ReceiptProcessor.new({
 		get_record = function() return ledger_record end,
