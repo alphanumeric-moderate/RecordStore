@@ -11670,6 +11670,11 @@ local function erase_user_data_internal(
 				decision_message = "profile is already permanently fenced by a different erasure"
 				return nil, nil, nil
 			end
+			if expected_generation ~= nil and existing_marker.source_generation ~= expected_generation then
+				decision = "conflict"
+				decision_message = "erasure fence was installed for a different source generation"
+				return nil, nil, nil
+			end
 			decision = "success"
 			return nil, nil, nil
 		end
@@ -11733,6 +11738,9 @@ local function erase_user_data_internal(
 			name, scope, key, user_id, deadline - now_local(), mock
 		)
 		if status_code == "success" and observed ~= nil and observed.Erased and observed.ErasureId == erasure_id then
+			if expected_generation ~= nil and observed.SourceGeneration ~= expected_generation then
+				return nil, "conflict", "ambiguous erasure committed for a different source generation"
+			end
 			return observed, "success", nil
 		end
 		if status_code == "conflict" then return nil, "conflict", status_message end
@@ -11754,6 +11762,9 @@ local function erase_user_data_internal(
 	if status_code ~= "success" or status == nil or not status.Erased or status.ErasureId ~= erasure_id then
 		return nil, status_code == "not_found" and "unknown" or status_code,
 			status_message or "erasure fence was not confirmed by an uncached read"
+	end
+	if expected_generation ~= nil and status.SourceGeneration ~= expected_generation then
+		return nil, "conflict", "confirmed erasure fence source generation does not match the requested generation"
 	end
 	return status, "success", nil
 end
