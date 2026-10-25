@@ -271,5 +271,30 @@ do -- Validate generation-aware deletes in execute mode across resumable per-key
 		"execute mode did not persist durable progress after each key")
 end
 
-print("[OfflineMaintenanceRunner] dry-run, resume, checkpoint response-loss, fencing, and execute-mode generation checks passed.")
+do -- Reject inconsistent page completion metadata before advancing durable progress.
+	local function bad_page_compactor(completion_value, cursor_value)
+		local checkpoint_calls = 0
+		local candidate = V2.Maintenance.NewCompactor({
+			next_page = function() return {}, cursor_value, completion_value end,
+			inspect = function() return { status = "success", eligible = false, dependencies_clear = true } end,
+			delete_if_generation = function() return "skipped" end,
+			persist_progress = function() checkpoint_calls += 1; return true end,
+		})
+		local result = candidate:RunStep(1, 100)
+		return result, candidate:Stats(), checkpoint_calls
+	end
+
+	local complete_with_cursor, complete_stats, complete_checkpoints =
+		bad_page_compactor(true, "cursor-after-completion")
+	expect(complete_with_cursor.code == "invalid" and complete_stats.cursor == nil
+		and complete_stats.processed == 0 and complete_checkpoints == 0,
+		"compactor accepted a terminal page with a cursor and could skip future inventory")
+	local non_boolean_completion, non_boolean_stats, non_boolean_checkpoints =
+		bad_page_compactor("complete", nil)
+	expect(non_boolean_completion.code == "invalid" and non_boolean_stats.cursor == nil
+		and non_boolean_stats.processed == 0 and non_boolean_checkpoints == 0,
+		"compactor accepted a non-boolean completion flag")
+end
+
+print("[OfflineMaintenanceRunner] dry-run, resume, checkpoint response-loss, fencing, execute-mode generation checks, and invalid-page rejection passed.")
 Shim.close()
