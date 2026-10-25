@@ -101,6 +101,7 @@ local loaded_scheduler_module: any = nil
 local loaded_mailbox_module: any = nil
 local loaded_receipt_processor: any = nil
 local loaded_outbox_mailbox_adapter: any = nil
+local loaded_outbox_consumer_adapter: any = nil
 local loaded_recordstore_v2: any = nil
 local loaded_player_data_erasure: any = nil
 
@@ -108,11 +109,13 @@ local RecordStoreInstance = table.freeze({ Name = "RecordStore", ClassName = "Mo
 local PurchaseReceiptProcessorInstance = table.freeze({ Name = "PurchaseReceiptProcessor", ClassName = "ModuleScript" })
 local RecordStoreV2Instance = table.freeze({ Name = "RecordStoreV2", ClassName = "ModuleScript" })
 local OutboxMailboxAdapterInstance = table.freeze({ Name = "RecordStoreOutboxMailboxAdapter", ClassName = "ModuleScript" })
+local OutboxConsumerAdapterInstance = table.freeze({ Name = "RecordStoreOutboxConsumerAdapter", ClassName = "ModuleScript" })
 local PlayerDataErasureInstance = table.freeze({ Name = "PlayerDataErasure", ClassName = "ModuleScript" })
 local PlayerDataInitializer = {
 	RecordStore = RecordStoreInstance,
 	PurchaseReceiptProcessor = PurchaseReceiptProcessorInstance,
 	RecordStoreOutboxMailboxAdapter = OutboxMailboxAdapterInstance,
+	RecordStoreOutboxConsumerAdapter = OutboxConsumerAdapterInstance,
 	RecordStoreV2 = RecordStoreV2Instance,
 	PlayerDataErasure = PlayerDataErasureInstance,
 }
@@ -183,6 +186,17 @@ local function load_outbox_mailbox_adapter(): any
 	})
 	loaded_outbox_mailbox_adapter = chunk()
 	return loaded_outbox_mailbox_adapter
+end
+
+local function load_outbox_consumer_adapter(): any
+	if loaded_outbox_consumer_adapter ~= nil then return loaded_outbox_consumer_adapter end
+	local module_environment = table.clone(Shim.environment)
+	module_environment.script = { Parent = PlayerDataInitializer }
+	local chunk = luau.load(fs.readFile("src/PlayerDataInitializer/RecordStoreOutboxConsumerAdapter.luau"), {
+		debugName = "RecordStoreOutboxConsumerAdapter", environment = module_environment,
+	})
+	loaded_outbox_consumer_adapter = chunk()
+	return loaded_outbox_consumer_adapter
 end
 
 local function load_receipt_processor(): any
@@ -259,6 +273,7 @@ local function shim_require(target: any)
 		return load_receipt_processor()
 	end
 	if target == OutboxMailboxAdapterInstance then return load_outbox_mailbox_adapter() end
+	if target == OutboxConsumerAdapterInstance then return load_outbox_consumer_adapter() end
 	if target == RecordStoreV2Instance then return load_recordstore_v2() end
 	if target == PlayerDataErasureInstance then return load_player_data_erasure() end
 	return require(target)
