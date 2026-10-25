@@ -2158,8 +2158,23 @@ local function new_erasure(store, families, options)
 		local manifest, message = adapter_call(store, "GetAsync", key)
 		if message then return { code = "unknown", message = message } end
 		if type(manifest) ~= "table" or manifest.user_id ~= user_id or manifest.erasure_id ~= erasure_id then return { code = "not_found" } end
-		if manifest.status == "completed" then return { code = "committed", completed_count = manifest.completed_count or 0, cursor = manifest.cursor, rtbf_coverage_verified = manifest.rtbf_coverage_verified } end
+		if manifest.version ~= 1 or type(manifest.entries) ~= "table" or type(manifest.coverage) ~= "table"
+			or not finite(manifest.cursor) or math.floor(manifest.cursor) ~= manifest.cursor
+			or manifest.cursor < 0 or manifest.cursor > #manifest.entries
+			or not finite(manifest.completed_count) or math.floor(manifest.completed_count) ~= manifest.completed_count
+			or manifest.completed_count < 0
+		then return { code = "corrupt", message = "erasure manifest failed execution validation" } end
 		if manifest.status == "resolved" then return { code = "resolved", completed_count = manifest.completed_count or 0, cursor = manifest.cursor } end
+		if manifest.rtbf_coverage_verified ~= true then
+			return {
+				code = "coverage_unverified",
+				cursor = manifest.cursor or 0,
+				completed_count = manifest.completed_count or 0,
+				rtbf_coverage_verified = false,
+				message = "destructive erasure is blocked until every family inventory and template is verified",
+			}
+		end
+		if manifest.status == "completed" then return { code = "committed", completed_count = manifest.completed_count or 0, cursor = manifest.cursor, rtbf_coverage_verified = true } end
 		for _, family in ipairs(self.families) do
 			if type(family.fence_user) ~= "function" or type(family.redact_or_delete_if_generation) ~= "function" then return { code = "unsupported", message = "family needs writer fence and generation-aware delete/redact" } end
 			local fenced, fence_error = io_call(family.fence_user, user_id, erasure_id)
@@ -2169,6 +2184,18 @@ local function new_erasure(store, families, options)
 		for index = cursor + 1, math.min(#manifest.entries, cursor + max_items) do
 			local entry, family = manifest.entries[index], by_name[manifest.entries[index].family]
 			if not family then return { code = "corrupt", message = "unknown family in erasure plan" } end
+			-- Fences can expire or be revoked while a bounded batch is running. Recheck
+			-- at the per-item deletion boundary; the delete adapter must still compare
+			-- the observed generation atomically with its mutation.
+			local item_fenced, item_fence_error = io_call(family.fence_user, user_id, erasure_id)
+			if item_fenced ~= true then
+				return {
+					code = "retryable",
+					cursor = index - 1,
+					completed_count = completed,
+					message = item_fence_error or "writer fence was lost before generation-aware deletion",
+				}
+			end
 			if type(family.dependencies_clear) == "function" then
 				local clear, dependency_error = io_call(family.dependencies_clear, entry.item, user_id)
 				if clear ~= true then return { code = "blocked", cursor = index - 1, message = dependency_error or "live dependency blocks deletion" } end
@@ -2261,6 +2288,13 @@ local function new_erasure(store, families, options)
 			return nil, status
 		end
 		if status.status == "resolved" then return false, status end
+		if status.status == "completed" and status.rtbf_coverage_verified ~= true then
+			return nil, {
+				code = "coverage_unverified",
+				message = "manifest says completed but does not prove exhaustive RTBF coverage",
+				observed = status,
+			}
+		end
 		if status.status == "planned" or status.status == "in_progress" or status.status == "completed" then
 			return true, status
 		end
