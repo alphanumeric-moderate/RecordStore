@@ -1502,6 +1502,35 @@ local function saga_coordinator(store, options)
 		end
 		return true
 	end
+	local SAGA_PHASES = {
+		requested = true, reserved = true, credit_pending = true, credited = true,
+		compensation_pending = true, settled = true, rejected = true,
+		manual_resolution_required = true,
+	}
+	local SAGA_STATUSES = {
+		pending = true, reconciliation_required = true, settled = true,
+		rejected = true, manual_resolution_required = true,
+	}
+	local function valid_saga_record_shape(value)
+		if type(value) ~= "table" or value.version ~= 1
+			or not valid_text(value.transfer_id, 128)
+			or not valid_text(value.request_material, MAX_REQUEST_BYTES)
+			or SAGA_PHASES[value.phase] ~= true or SAGA_STATUSES[value.status] ~= true
+			or not finite(value.created_at) or value.created_at < 0
+			or not finite(value.updated_at) or value.updated_at < 0
+			or not finite(value.attempts) or value.attempts < 0
+			or math.floor(value.attempts) ~= value.attempts
+			or value.attempts > 9_007_199_254_740_991
+			or not valid_transition_history(value.transition_history)
+			or not valid_saga_leg_outcomes(value.leg_outcomes)
+		then return false end
+		if value.last_error ~= nil and (type(value.last_error) ~= "string" or #value.last_error > 256) then
+			return false
+		end
+		if value.manual_resolution ~= nil and type(value.manual_resolution) ~= "table" then return false end
+		if value.phase == "manual_resolution_required" and type(value.manual_resolution) ~= "table" then return false end
+		return true
+	end
 	local function update_saga(id, request, mutate)
 		local material = canonical(request)
 		local key, now = "rv2s-" .. digest(id), os.time()
@@ -1509,7 +1538,11 @@ local function saga_coordinator(store, options)
 		local value, message = adapter_call(store, "UpdateAsync", key, function(old)
 			decision = nil
 			candidate = nil
-			if old ~= nil and (type(old) ~= "table" or old.transfer_id ~= id or old.request_material ~= material) then decision = "conflict"; return old end
+			if old ~= nil then
+				if type(old) ~= "table" then decision = "corrupt"; return old end
+				if old.transfer_id ~= id or old.request_material ~= material then decision = "conflict"; return old end
+				if not valid_saga_record_shape(old) then decision = "corrupt"; return old end
+			end
 			local state = if type(old) == "table" then copy(old) else {
 				version = 1, transfer_id = id, request_material = material, phase = "requested",
 				status = "pending", created_at = now, attempts = 0, transition_history = {},
@@ -1543,6 +1576,7 @@ local function saga_coordinator(store, options)
 			end
 			changed.transition_history = history
 			changed.updated_at = now
+			if not valid_saga_record_shape(changed) then decision = "corrupt"; return nil end
 			candidate = copy(changed)
 			decision = "committed"
 			return changed
@@ -1569,9 +1603,12 @@ local function saga_coordinator(store, options)
 		if message then return { code = "unknown", message = message } end
 		if not value then return { code = "not_found" } end
 		if value.transfer_id ~= id then return { code = "conflict", message = "saga route collision" } end
-		if not valid_saga_leg_outcomes(value.leg_outcomes) then return { code = "corrupt", transfer_id = id, message = "saga per-leg outcome ledger is malformed" } end
-		value.code = value.status or "unknown"
-		return copy(value)
+		if not valid_saga_record_shape(value) then
+			return { code = "corrupt", transfer_id = id, message = "durable saga record failed schema/state validation" }
+		end
+		local snapshot = copy(value)
+		snapshot.code = snapshot.status or "unknown"
+		return snapshot
 	end
 	function api:RequireManualResolutionAsync(id, request, expected_phase, expected_status, manual_request_id, operator_id, reason)
 		if not valid_text(id, 128) or type(request) ~= "table" or request.transfer_id ~= id
@@ -1782,6 +1819,23 @@ local function saga_coordinator(store, options)
 		local function run_leg(leg, record, operation_id, leg_request, reducer)
 			local leg_material, material_error = request_material(leg_request)
 			if not leg_material then return { code = "invalid", message = material_error } end
+			local fingerprint = digest(leg_material)
+			local prior_outcomes = saga.leg_outcomes
+			if type(prior_outcomes) == "table" then
+				local prior = prior_outcomes[leg]
+				if prior ~= nil then
+					if type(prior) ~= "table" or prior.operation_id ~= operation_id
+						or prior.request_fingerprint ~= fingerprint
+					then
+						return { code = "conflict", message = "persisted saga leg identity does not match this operation" }
+					end
+					-- The coordinator's committed-leg outcome outlives finite transaction
+					-- receipts; use it rather than depending on receipt retention forever.
+					if prior.state == "committed" then
+						return { code = "duplicate", leg_outcome = copy(prior) }
+					end
+				end
+			end
 			local result = transaction_run(record, operation_id, leg_request, reducer)
 			local leg_state = if result.code == "committed" or result.code == "duplicate"
 				then "committed" elseif result.code == "unknown" then "unknown" else "failed"
@@ -1792,9 +1846,9 @@ local function saga_coordinator(store, options)
 				local outcomes = current.leg_outcomes or {}
 				if type(outcomes) ~= "table" then return nil, "corrupt" end
 				local prior = outcomes[leg]
-				local fingerprint = digest(leg_material)
+				local persisted_fingerprint = digest(leg_material)
 				if prior ~= nil and (type(prior) ~= "table" or prior.operation_id ~= operation_id
-					or prior.request_fingerprint ~= fingerprint)
+					or prior.request_fingerprint ~= persisted_fingerprint)
 				then return nil, "conflict" end
 				outcomes[leg] = {
 					operation_id = operation_id,
@@ -1865,9 +1919,22 @@ local function saga_coordinator(store, options)
 				return next_data
 			end)
 			if reserve.code ~= "committed" and reserve.code ~= "duplicate" then
-				local phase = if reserve.code == "unknown" then "reconciliation_required" else "rejected"
-				local marked, marked_code = mark("requested", phase, reserve.message)
-				return { code = if marked then phase else marked_code, transfer_id = id, message = reserve.message }
+				if reserve.code == "unknown" then
+					local marked, marked_code = mark("requested", "reconciliation_required", reserve.message)
+					return { code = if marked then "reconciliation_required" else marked_code or "unknown", transfer_id = id, message = reserve.message }
+				end
+				if reserve.code == "retryable" or reserve.code == "capacity"
+					or reserve.code == "fenced" or reserve.code == "busy" or reserve.code == "budget"
+				then
+					local marked, marked_code = mark("requested", "pending", reserve.message)
+					return { code = if marked then reserve.code else marked_code or "unknown", transfer_id = id, message = reserve.message }
+				end
+				local rejected, rejected_code, rejected_error = mark("rejected", "rejected", reserve.message)
+				return {
+					code = if type(rejected) == "table" then "rejected" else rejected_code or "unknown",
+					transfer_id = id,
+					message = if type(rejected) == "table" then rejected.last_error else rejected_error,
+				}
 			end
 			saga = mark("reserved", "pending")
 			if type(saga) ~= "table" or saga.phase ~= "reserved" then return { code = "unknown", transfer_id = id, message = "reservation committed but saga state is unresolved" } end
@@ -1889,6 +1956,15 @@ local function saga_coordinator(store, options)
 			if credit.code == "unknown" then
 				local marked, code = mark("credit_pending", "reconciliation_required", credit.message)
 				return { code = if marked then "reconciliation_required" else code, transfer_id = id, message = credit.message }
+			end
+			if credit.code == "retryable" or credit.code == "capacity"
+				or credit.code == "fenced" or credit.code == "busy" or credit.code == "budget"
+			then
+				-- A temporary destination outage or closed profile does not prove that
+				-- credit is permanently rejected. Keep the reservation and retry this
+				-- exact credit operation before considering compensation.
+				local marked, code = mark("credit_pending", "pending", credit.message)
+				return { code = if marked then credit.code else code or "unknown", transfer_id = id, message = credit.message }
 			end
 			if credit.code ~= "committed" and credit.code ~= "duplicate" then
 				local credit_error = credit.message or "recipient credit was rejected"
