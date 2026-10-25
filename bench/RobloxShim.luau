@@ -106,6 +106,7 @@ local loaded_recordstore_v2: any = nil
 local loaded_player_data_erasure: any = nil
 local loaded_purchase_datastore_authority: any = nil
 local loaded_purchase_authority_migration_runner: any = nil
+local loaded_maintenance_roblox_adapter: any = nil
 
 local RecordStoreInstance = table.freeze({ Name = "RecordStore", ClassName = "ModuleScript" })
 local PurchaseReceiptProcessorInstance = table.freeze({ Name = "PurchaseReceiptProcessor", ClassName = "ModuleScript" })
@@ -115,6 +116,7 @@ local OutboxConsumerAdapterInstance = table.freeze({ Name = "RecordStoreOutboxCo
 local PlayerDataErasureInstance = table.freeze({ Name = "PlayerDataErasure", ClassName = "ModuleScript" })
 local PurchaseDataStoreAuthorityInstance = table.freeze({ Name = "PurchaseDataStoreAuthority", ClassName = "ModuleScript" })
 local PurchaseAuthorityMigrationRunnerInstance = table.freeze({ Name = "PurchaseAuthorityMigrationRunner", ClassName = "ModuleScript" })
+local RecordStoreMaintenanceRobloxAdapterInstance = table.freeze({ Name = "RecordStoreMaintenanceRobloxAdapter", ClassName = "ModuleScript" })
 local PlayerDataInitializer = {
 	RecordStore = RecordStoreInstance,
 	PurchaseReceiptProcessor = PurchaseReceiptProcessorInstance,
@@ -124,6 +126,7 @@ local PlayerDataInitializer = {
 	PlayerDataErasure = PlayerDataErasureInstance,
 	PurchaseDataStoreAuthority = PurchaseDataStoreAuthorityInstance,
 	PurchaseAuthorityMigrationRunner = PurchaseAuthorityMigrationRunnerInstance,
+	RecordStoreMaintenanceRobloxAdapter = RecordStoreMaintenanceRobloxAdapterInstance,
 }
 function PlayerDataInitializer:WaitForChild(name: string): any
 	local child = self[name]
@@ -228,6 +231,17 @@ local function load_purchase_authority_migration_runner(): any
 	return loaded_purchase_authority_migration_runner
 end
 
+local function load_maintenance_roblox_adapter(): any
+	if loaded_maintenance_roblox_adapter ~= nil then return loaded_maintenance_roblox_adapter end
+	local module_environment = table.clone(Shim.environment)
+	module_environment.script = { Parent = PlayerDataInitializer }
+	local chunk = luau.load(fs.readFile("src/PlayerDataInitializer/RecordStoreMaintenanceRobloxAdapter.luau"), {
+		debugName = "RecordStoreMaintenanceRobloxAdapter", environment = module_environment,
+	})
+	loaded_maintenance_roblox_adapter = chunk()
+	return loaded_maintenance_roblox_adapter
+end
+
 local function load_purchase_datastore_authority(): any
 	if loaded_purchase_datastore_authority ~= nil then return loaded_purchase_datastore_authority end
 	local module_environment = table.clone(Shim.environment)
@@ -306,6 +320,7 @@ local function shim_require(target: any)
 	if target == PlayerDataErasureInstance then return load_player_data_erasure() end
 	if target == PurchaseDataStoreAuthorityInstance then return load_purchase_datastore_authority() end
 	if target == PurchaseAuthorityMigrationRunnerInstance then return load_purchase_authority_migration_runner() end
+	if target == RecordStoreMaintenanceRobloxAdapterInstance then return load_maintenance_roblox_adapter() end
 	return require(target)
 end
 
