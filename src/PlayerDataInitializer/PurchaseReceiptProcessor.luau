@@ -512,6 +512,7 @@ local function backfill_permanent_ledger(
 	local purchase_id_by_index: { [number]: string } = {}
 	local player_id_by_index: { [number]: number } = {}
 	local product_id_by_index: { [number]: number } = {}
+	local seen_purchases: { [string]: { player_id: number, product_id: number } } = {}
 	for index = 1, count do
 		local item = purchases[index]
 		if type(item) ~= "table" then
@@ -538,6 +539,17 @@ local function backfill_permanent_ledger(
 			result.failed_index = index
 			return result
 		end
+		local previous = seen_purchases[purchase_id :: string]
+		if previous ~= nil and (previous.player_id ~= player_id or previous.product_id ~= product_id) then
+			result.code = "conflict"
+			result.message = "the same PurchaseId appears in this batch with conflicting PlayerId or ProductId"
+			result.failed_index = index
+			return result
+		end
+		seen_purchases[purchase_id :: string] = {
+			player_id = player_id :: number,
+			product_id = product_id :: number,
+		}
 		purchase_id_by_index[index] = purchase_id :: string
 		player_id_by_index[index] = player_id :: number
 		product_id_by_index[index] = product_id :: number
