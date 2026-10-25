@@ -126,5 +126,94 @@ expect(blocked.code == "unknown",
 expect(#delete_calls == 0,
 	"runner deleted data after its writer fence was lost before the destructive operation")
 
-print("[OfflineMaintenanceRunner] bounded pages, dry-run isolation, resume, checkpoint response-loss reconciliation, and writer-fence checks passed.")
+do -- Validate generation-aware deletes in execute mode across resumable per-key checkpoints.
+	local execute_rows = {
+		{ key = "a-expired", generation = 1, eligible = true },
+		{ key = "b-active", generation = 2, eligible = false },
+		{ key = "c-race", generation = 3, eligible = true },
+		{ key = "d-expired", generation = 4, eligible = true },
+	}
+	local execute_checkpoint = nil
+	local delete_outcomes = {}
+	local changed_race_generation = false
+	local function execute_next_page(cursor, maximum)
+		local page = {}
+		for _, row in ipairs(execute_rows) do
+			if cursor == nil or row.key > cursor then
+				table.insert(page, copy(row))
+				if #page >= maximum then break end
+			end
+		end
+		local last_key = if #page > 0 then page[#page].key else cursor
+		local more = false
+		if last_key ~= nil then
+			for _, row in ipairs(execute_rows) do
+				if row.key > last_key then more = true; break end
+			end
+		else
+			more = #execute_rows > 0
+		end
+		return page, if more then last_key else nil, not more
+	end
+	local live_config = {
+		job_id = "execute-success",
+		mode = "execute",
+		next_page = execute_next_page,
+		inspect = function(item)
+			return {
+				status = "success",
+				eligible = item.eligible,
+				dependencies_clear = true,
+				generation = item.generation,
+			}
+		end,
+		delete_if_generation = function(item, generation)
+			for index, row in ipairs(execute_rows) do
+				if row.key == item.key then
+					if row.key == "c-race" and not changed_race_generation then
+						row.generation += 1
+						changed_race_generation = true
+					end
+					if row.generation ~= generation then
+						table.insert(delete_outcomes, { key = item.key, outcome = "skipped" })
+						return "skipped"
+					end
+					table.remove(execute_rows, index)
+					table.insert(delete_outcomes, { key = item.key, outcome = "deleted" })
+					return "deleted"
+				end
+			end
+			return "already_absent"
+		end,
+		load_checkpoint = function() return copy(execute_checkpoint) end,
+		persist_checkpoint = function(checkpoint, expected_revision)
+			local current_revision = if execute_checkpoint == nil then 0 else execute_checkpoint.revision
+			if current_revision ~= expected_revision then return false, "checkpoint revision conflict" end
+			execute_checkpoint = copy(checkpoint)
+			return true
+		end,
+		authorize = function() return true end,
+		assert_fence = function() return true end,
+	}
+	local live_runner = Runner.new(V2.Maintenance, live_config)
+	local live_result = live_runner:Run(8, 1, 500)
+	local stats = live_runner:Stats()
+	expect(live_result.code == "completed" and stats.status == "completed",
+		"execute-mode runner failed to complete a bounded generation-aware scan")
+	expect(stats.processed == 4 and stats.removed == 2 and #delete_outcomes == 3,
+		"execute-mode counters did not reflect processed, deleted, and skipped rows")
+	expect(delete_outcomes[1].key == "a-expired" and delete_outcomes[1].outcome == "deleted"
+		and delete_outcomes[2].key == "c-race" and delete_outcomes[2].outcome == "skipped"
+		and delete_outcomes[3].key == "d-expired" and delete_outcomes[3].outcome == "deleted",
+		"execute mode did not preserve generation-change protection")
+	expect(#execute_rows == 2 and execute_rows[1].key == "b-active"
+		and execute_rows[2].key == "c-race" and execute_rows[2].generation == 4,
+		"execute mode deleted an ineligible row or a generation that changed after inspection")
+	expect(execute_checkpoint ~= nil and execute_checkpoint.status == "completed"
+		and execute_checkpoint.revision == 4 and execute_checkpoint.processed == 4
+		and execute_checkpoint.removed == 2,
+		"execute mode did not persist durable progress after each key")
+end
+
+print("[OfflineMaintenanceRunner] dry-run, resume, checkpoint response-loss, fencing, and execute-mode generation checks passed.")
 Shim.close()
