@@ -11479,6 +11479,7 @@ export type ErasureStatus = {
 	SourceGeneration: number?,
 	SourceRevision: number?,
 	Version: string?,
+	UpdatedTime: number?,
 }
 
 export type ErasurePurgeProgress = {
@@ -11603,6 +11604,7 @@ local function get_erasure_status_internal(
 			SourceGeneration = marker.source_generation,
 			SourceRevision = marker.source_revision,
 			Version = if info ~= nil then info.Version else nil,
+			UpdatedTime = if info ~= nil then info.UpdatedTime else nil,
 		}, "success", nil
 	end
 	local envelope, parse_error, current_format = parse_envelope(raw)
@@ -11624,6 +11626,7 @@ local function get_erasure_status_internal(
 		Generation = envelope.fencing_generation,
 		Revision = envelope.revision,
 		Version = if info ~= nil then info.Version else nil,
+		UpdatedTime = if info ~= nil then info.UpdatedTime else nil,
 	}, "success", nil
 end
 
@@ -11817,22 +11820,21 @@ local function purge_erased_versions_internal(
 	end
 	local current_found = false
 	local historical_version_found = false
-	local fence_created_ms: number? = nil
 	for _, entry in ipairs(entries) do
-		if entry.Version == current_version then
-			current_found = true
-			fence_created_ms = entry.CreatedTime
-		else
-			historical_version_found = true
-		end
+		if entry.Version == current_version then current_found = true
+		else historical_version_found = true end
 	end
 	if not current_found then
 		return nil, "conflict", "the durable erasure fence version is missing from version history"
 	end
-	if not finite_erasure_number(fence_created_ms) or (fence_created_ms :: number) < 0 then
-		return nil, "unknown", "the durable erasure fence has no verified platform creation timestamp"
+	local fence_updated_ms = status.UpdatedTime
+	if not finite_erasure_number(fence_updated_ms) or (fence_updated_ms :: number) < 0 then
+		return nil, "unknown", "the durable erasure fence has no verified platform update timestamp"
 	end
-	local retention_until = math.ceil((fence_created_ms :: number) / 1000) + 30 * 24 * 60 * 60
+	-- Superseded backups expire 30 days after the write that superseded them.
+	-- Use the fence's UpdatedTime, not the version's CreatedTime: writes inside
+	-- one UTC hour can update an existing version without creating a new version.
+	local retention_until = math.ceil((fence_updated_ms :: number) / 1000) + 30 * 24 * 60 * 60
 	if not mock and historical_version_found then
 		if session_now_unix(false) < retention_until then
 			return {
@@ -11844,8 +11846,14 @@ local function purge_erased_versions_internal(
 				RetentionUntil = retention_until,
 			}, "success", nil
 		end
-		return nil, "unsupported",
-			"historical versions remain after the documented 30-day automatic retention window; purge remains incomplete and requires platform investigation"
+		return {
+			UserId = user_id,
+			ErasureId = erasure_id,
+			Removed = 0,
+			Complete = false,
+			CurrentVersion = current_version,
+			RetentionUntil = retention_until,
+		}, "success", nil
 	end
 	local removed = 0
 	for _, entry in ipairs(entries) do
