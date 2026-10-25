@@ -53,6 +53,8 @@ local function create_profile(user_id, initial_kills)
 		local save_result, save_message = record:Save()
 		expect(save_result == "saved", "mock profile save failed: " .. tostring(save_message))
 	end
+	local close_result, close_message = record:Close()
+	expect(close_result == "closed", "mock profile close failed: " .. tostring(close_message))
 	return record, key
 end
 
@@ -123,8 +125,6 @@ do
 	local recreate_result = replacement:Open({ kills = 999, equipped = "Default", admin = false }, true)
 	expect(recreate_result == "future_schema",
 		"Open(recreate=true) recreated a permanently erased profile")
-	expect(replacement:Close() ~= nil, "replacement record close should return a result")
-	replacement:Close()
 
 	local idempotent, idempotent_code = RecordStore.Mock.erase_user_data_async(
 		"PlayerData_Test1", "global", key, user_id, "erase-generation-101",
@@ -182,7 +182,6 @@ do
 	local open_result = late_join:Open({ kills = 0, equipped = "Default", admin = false })
 	expect(open_result == "future_schema",
 		"late first-time join recreated a key already fenced by erasure")
-	late_join:Close()
 end
 
 -- End-to-end integration through the generic manifest coordinator. The known
@@ -235,7 +234,7 @@ do
 	)
 	expect(latest == nil and latest_code == "future_schema",
 		"coordinator completion left a readable profile value")
-	record:Close()
+	-- The profile session was closed before planning to keep this fixture deterministic.
 end
 
 RecordStore.Mock.reset()
