@@ -25,6 +25,9 @@ local function new_store()
 	function store:GetAsync(key)
 		return clone(self.values[key]), nil
 	end
+	function store:GetAsyncFresh(key)
+		return clone(self.values[key]), nil
+	end
 	function store:UpdateAsync(key, transform)
 		self.update_calls += 1
 		local next_value = transform(clone(self.values[key]))
@@ -881,6 +884,34 @@ expect(#deleted_items == 2 and deleted_items[1].key == "Player_123456"
 expect(erasure:GetStatus(123456).status == "completed", "erasure manifest status was not durable")
 
 do -- scope RTBF coverage and write-gate regression locals
+-- The ordinary read deliberately returns a stale "missing" view. Erasure gates
+-- must use the authoritative read adapter or they can permit recreation.
+do
+	local durable_store = new_store()
+	durable_store.values["rv2erase-u782"] = {
+		version = 1,
+		user_id = 782,
+		erasure_id = "erase-stale-cache",
+		status = "planned",
+		cursor = 0,
+		completed_count = 0,
+		entries = {},
+		coverage = {},
+		rtbf_coverage_verified = false,
+	}
+	local stale_store = {
+		GetAsync = function() return nil, nil end,
+		GetAsyncFresh = function(_, key) return durable_store:GetAsyncFresh(key) end,
+		UpdateAsync = function(_, key, transform) return durable_store:UpdateAsync(key, transform) end,
+	}
+	local stale_erasure = V2.Erasure.new(stale_store, {}, {
+		verify_templates = function() return true end,
+	})
+	local blocked_stale, stale_status = stale_erasure:ShouldBlockWrites(782)
+	expect(blocked_stale == true and stale_status.status == "planned",
+		"erasure write gate trusted a cached missing view instead of an authoritative planned manifest")
+end
+
 expect(not pcall(function()
 	V2.Erasure.new(new_store(), {
 		{
