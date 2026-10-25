@@ -419,7 +419,12 @@ function Acceleration.new(options)
 		if not self.enabled or not self.running or self.memory_map == nil then
 			return { code = "disabled", processed = 0 }
 		end
-		max_items = math.clamp(math.floor(max_items or 32), 1, self.max_memory_hint_slots)
+		if max_items == nil then max_items = math.min(32, self.max_memory_hint_slots) end
+		if not finite(max_items) or math.floor(max_items) ~= max_items or max_items < 1
+			or max_items > self.max_memory_hint_slots
+		then
+			return { code = "invalid", processed = 0, message = "max_items must be an integer within configured MemoryStore hint slots" }
+		end
 		local ok, rows = pcall(function()
 			return self.memory_map:GetRangeAsync(self.sort_ascending, max_items)
 		end)

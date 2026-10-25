@@ -2998,8 +2998,15 @@ local function new_maintenance()
 		then error("initial maintenance counters must be non-negative integers", 2) end
 		local compactor = { status = "idle", cursor = config.initial_cursor, processed = initial_processed, removed = initial_removed, last_error = nil }
 		function compactor:RunStep(max_items, budget_ms)
-			max_items = math.clamp(math.floor(max_items or 32), 1, 256)
-			local _soft_budget_ms = math.clamp(math.floor(budget_ms or 25), 1, 1000)
+			if max_items == nil then max_items = 32 end
+			if budget_ms == nil then budget_ms = 25 end
+			if not finite(max_items) or math.floor(max_items) ~= max_items or max_items < 1 or max_items > 256 then
+				return { code = "invalid", cursor = self.cursor, message = "max_items must be an integer from 1 to 256" }
+			end
+			if not finite(budget_ms) or math.floor(budget_ms) ~= budget_ms or budget_ms < 1 or budget_ms > 1000 then
+				return { code = "invalid", cursor = self.cursor, message = "budget_ms must be an integer from 1 to 1000" }
+			end
+			local _soft_budget_ms = budget_ms
 			if type(config.next_page) ~= "function" or type(config.inspect) ~= "function" or type(config.delete_if_generation) ~= "function" or type(config.persist_progress) ~= "function" then return { code = "invalid", message = "compactor requires page, inspect, generation-aware delete, and checkpoint adapters" } end
 			-- The cursor commits whole pages; the max_items bound is the hard
 			-- work limit for this step. A caller that needs a wall-time target must

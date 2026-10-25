@@ -162,6 +162,12 @@ function Runner.new(maintenance, config)
 
 	local runner = { job_id = config.job_id, mode = mode, status = status }
 	function runner:Step(max_items, budget_ms)
+		if max_items ~= nil and (not valid_integer(max_items, 1) or max_items > 256) then
+			return { code = "invalid", job_id = config.job_id, mode = mode, message = "max_items must be an integer from 1 to 256" }
+		end
+		if budget_ms ~= nil and (not valid_integer(budget_ms, 1) or budget_ms > 1000) then
+			return { code = "invalid", job_id = config.job_id, mode = mode, message = "budget_ms must be an integer from 1 to 1000" }
+		end
 		if self.status == "completed" then
 			return { code = "completed", job_id = config.job_id, mode = mode, cursor = cursor }
 		end
@@ -187,9 +193,21 @@ function Runner.new(maintenance, config)
 		return output
 	end
 	function runner:Run(max_steps, batch_size, budget_ms)
-		local step_limit = math.clamp(math.floor(max_steps or 8), 1, 64)
-		local size = math.clamp(math.floor(batch_size or 1), 1, 256)
-		local per_step_budget = math.clamp(math.floor(budget_ms or 25), 1, 1000)
+		if max_steps == nil then max_steps = 8 end
+		if batch_size == nil then batch_size = 1 end
+		if budget_ms == nil then budget_ms = 25 end
+		if not valid_integer(max_steps, 1) or max_steps > 64 then
+			return { code = "invalid", job_id = config.job_id, mode = mode, message = "max_steps must be an integer from 1 to 64" }
+		end
+		if not valid_integer(batch_size, 1) or batch_size > 256 then
+			return { code = "invalid", job_id = config.job_id, mode = mode, message = "batch_size must be an integer from 1 to 256" }
+		end
+		if not valid_integer(budget_ms, 1) or budget_ms > 1000 then
+			return { code = "invalid", job_id = config.job_id, mode = mode, message = "budget_ms must be an integer from 1 to 1000" }
+		end
+		local step_limit = max_steps
+		local size = batch_size
+		local per_step_budget = budget_ms
 		local started_at = os.clock() * 1000
 		local result = { code = "yielded", job_id = config.job_id, mode = mode }
 		for step = 1, step_limit do
