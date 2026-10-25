@@ -968,6 +968,9 @@ expect(checkpoint_lost.code == "unknown" and checkpoint_lost.cursor == "cursor-a
 	"checkpoint failure after deletion did not return the last durable cursor")
 expect(checkpoint_loss_compactor:Stats().cursor == "cursor-a",
 	"in-memory compaction cursor advanced after its durable checkpoint failed")
+expect(checkpoint_loss_compactor:Stats().processed == 0
+	and checkpoint_loss_compactor:Stats().removed == 0,
+	"in-memory compaction counters advanced after their durable checkpoint failed")
 expect(durable_cursor == "cursor-a" and delete_applied,
 	"checkpoint-loss fixture did not separate the committed delete from the durable cursor")
 local checkpoint_retried = checkpoint_loss_compactor:RunStep(1, 500)
