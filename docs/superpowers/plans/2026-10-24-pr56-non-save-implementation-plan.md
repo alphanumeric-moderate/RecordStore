@@ -60,7 +60,8 @@
 - [x] Add inbox/transaction receipt-capacity and expiry-recovery tests; surface encoded-sidecar-size exhaustion as capacity while preserving profile data and valid duplicate receipts.
 - [x] Add an opt-in legacy developer-product receipt handler factory with receipt/product validation, active-session checks, same-profile durable idempotency, and no implicit MarketplaceService registration.
 - [x] Add identity-bound, read-only durable transaction receipt status lookup with committed/not-found/expired/conflict/unknown outcomes; the purchase adapter consults it before deferring an uncertain transaction.
-- [ ] Add additional receipt-type adapters and live-platform acceptance for purchase processing.
+- [x] Add an opt-in bounded permanent per-profile purchase-ID ledger for developer products. The ledger and grant mutation commit in the same profile transaction, survive finite transaction-receipt expiry, reject ID rebinding and fail closed at capacity or corruption; the README documents the configuration and limits.
+- [ ] Add additional receipt-type adapters if required by the application and complete live-platform acceptance for purchase processing.
 
 ### Slice 4: Recoverable saga coordinator
 - [x] Add an opt-in durable cross-profile transfer saga with stable operation IDs, reservation/credit/settlement phases, compensation, durable status, and explicit unresolved outcomes.
@@ -75,7 +76,8 @@
 
 - [x] Add versioned bounded runtime policies and read-only health/runtime snapshots on top of the current scheduler/governor; this duplicates the checked runtime-policy/snapshot item above and has been reconciled with its existing regression coverage.
 - [x] Preserve the internal critical persistence reserve and keep adaptive changes opt-in. Existing scheduler tests confirm generic work cannot consume reserved critical capacity; runtime policy changes are versioned and explicitly applied.
-- [ ] Complete the offline maintenance runner and real retention-compaction acceptance. A regression now verifies that a confirmed deletion followed by checkpoint failure retains the last durable in-memory cursor and safely retries the same page; live retention behavior and an independently invokable offline runner remain open.
+- [x] Add an independently invokable bounded maintenance runner with dry-run default, authorization and durable writer-fence requirements for execution, revision-checked checkpoints, exact response-loss reconciliation and resumable job IDs. Application-owned page, inspection, dependency and generation-aware delete adapters remain mandatory; the runner does not infer the live keyspace.
+- [ ] Complete real retention-compaction acceptance. The compactor has checkpoint-failure replay coverage; live storage behavior and acceptance with the real application adapters remain open.
 - [x] Add fairness, low-budget, throttle, lease-margin, pause/resume and bounded-progress regressions to the common Lune runner. The advanced scheduler suite covers request-budget recovery, pause/resume and kill-switch behavior; the focused scheduler slice checks high-lane flood fairness, low-budget critical preference, circuit cooldown recovery, and lease-margin renewal selection.
 
 ### Slice 6: Migration and Profile Doctor
@@ -101,8 +103,8 @@
 
 ### Slice 8: Verification and merge gates
 
-- [ ] Run all Luau checks and Lune regression stages for every delivered slice.
-- [ ] Complete fault-injection and focused CodSpeed evidence for every durable protocol/maintenance path. Mailbox V2 producer/acknowledgement and future-schema cases now have focused fault coverage; maintenance adds checkpoint-failure replay coverage. Saga tests inject response loss after reserve, credit, refund and settle, including the refund-before-credit retry hazard, but all durable paths still need a complete final-head evidence run.
+- [ ] Run all Luau checks and Lune regression stages for every delivered slice, including the new standalone maintenance-runner regression on the final head.
+- [ ] Complete fault-injection and focused CodSpeed evidence for every durable protocol/maintenance path. Mailbox V2 producer/acknowledgement/future-schema interleavings, compaction checkpoint replay, independent maintenance-runner checkpoint recovery and purchase-ledger expiry/conflict/capacity are covered by focused regression stages. Saga leg fault injection and a complete final-head benchmark/evidence run remain outstanding.
 - [ ] Complete independent code review and inspect every changed file.
 - [ ] Keep live Roblox Studio/DataStore multi-server, throttling/cache, crash/shutdown, mixed-version rollout/rollback and RTBF template acceptance explicitly blocked until executed in a real test experience.
 
@@ -118,6 +120,6 @@ Implemented and covered by the current Lune regression suite:
 - Regression coverage for inbox/transaction receipt saturation and expiry recovery: full collections reject new operation IDs without profile mutation; live receipts still deduplicate; expired receipts are reclaimed before a new commit.
 - Opt-in developer-product receipt processing through `PurchaseReceiptProcessor:CreateHandler`: malformed receipt and unsupported product checks, active-profile requirements, durable same-profile grant/idempotency, duplicate acknowledgement, conflict deferral, and explicit finite receipt retention.
 
-Still incomplete: mixed-version/V3 compatibility and rollback acceptance; handler-side destination effect integration and real multi-server acceptance; additional purchase receipt types and permanent entitlement semantics where required; atomic quarantine writer fencing across every application write path; real user-key-family inventory and RTBF completeness; complete fault-injection execution for every durable saga leg and maintenance path; adaptive governor fairness/low-budget/throttle/lease-margin acceptance; independent review; full final-head verification and focused CodSpeed evidence for all durable protocols; and live Roblox Studio/DataStore throttling, crash/shutdown and mixed-version rollback acceptance.
+Still incomplete: mixed-version/V3 compatibility and rollback acceptance; handler-side destination effect integration and real multi-server acceptance; additional receipt adapters if the application uses other purchase types; atomic quarantine writer fencing across every application write path; real user-key-family inventory and RTBF completeness; complete fault-injection across every durable saga leg and real retention path; adaptive governor fairness/low-budget/throttle/lease-margin acceptance; independent review of all changed files; final-head regression and benchmark evidence for every durable protocol; and live Roblox Studio/DataStore throttling, cache behavior, crashes/shutdown, mixed-version rollback, purchase fulfillment and RTBF template acceptance. The permanent purchase ledger is bounded and per-profile, not global.
 
 The outbox-to-Mailbox V2 adapter receipt proves durable mailbox acceptance only. It does not prove that a destination handler executed, or that an external effect completed. Keep handler-side processing idempotent and retain live multi-server acceptance as a separate release gate.
