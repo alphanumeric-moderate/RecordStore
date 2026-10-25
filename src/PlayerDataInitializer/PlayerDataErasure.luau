@@ -289,6 +289,9 @@ local function new(manifest_store: any, options: Options?): any
 	local v2 = record_store_v2.new(record_store, mailbox)
 	return v2.Erasure.new(manifest_store, families, {
 		verify_templates = config.verify_templates,
+		require_inventory_attestation = true,
+		application_inventory_manifest_id = config.application_inventory_manifest_id,
+		writer_inventory_verified = config.writer_inventory_verified == true,
 	})
 end
 
