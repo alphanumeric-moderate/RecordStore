@@ -103,6 +103,9 @@ function Runner.new(maintenance, config)
 			end
 			local allowed, guard_error = guard()
 			if not allowed then return "unknown", guard_error end
+			-- assert_fence is only a preflight. The application adapter must also
+			-- atomically verify the durable job fence and generation in its mutation;
+			-- otherwise the fence could be revoked between this check and deletion.
 			local action, action_error = call(config.delete_if_generation, item, generation)
 			if action ~= "deleted" and action ~= "already_absent" and action ~= "skipped" and action ~= "unknown" then
 				return "unknown", action_error or "unsupported delete adapter result"
