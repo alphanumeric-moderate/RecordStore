@@ -11789,6 +11789,9 @@ local function purge_erased_versions_internal(
 	if type(erasure_id) ~= "string" or erasure_id == "" or #erasure_id > 96 then
 		return nil, "invalid", "erasure_id must be 1 to 96 bytes"
 	end
+	if allow_deprecated_remove_version ~= nil and type(allow_deprecated_remove_version) ~= "boolean" then
+		return nil, "invalid", "allow_deprecated_remove_version must be a boolean"
+	end
 	local limit = if max_versions == nil then 16 else max_versions
 	if not finite_erasure_number(limit) or math.floor(limit) ~= limit or limit < 1 or limit > 64 then
 		return nil, "invalid", "max_versions must be an integer from 1 to 64"
