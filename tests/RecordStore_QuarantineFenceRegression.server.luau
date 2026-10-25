@@ -200,6 +200,12 @@ local orphaned_fence, orphaned_code = RecordStore.Mock.quarantine_profile_writes
 expect(orphaned_code == "success" and orphaned_fence ~= nil and orphaned_fence.Quarantined == true,
 	"failed to create the simulated fence-before-manifest crash state")
 local recovery_manifest_store = new_store()
+local changed_orphan_decision = V2.ProfileDoctor.QuarantineAsync(
+	recovery_identity, recovery_manifest_store, "quarantine-identity-recovery",
+	"operator-3", "attempt to replace the original durable reason", before_recovery_fence.CurrentRevision
+)
+expect(changed_orphan_decision.code == "conflict",
+	"orphaned durable quarantine accepted a different operator decision under the same ID")
 local recovered_quarantine = V2.ProfileDoctor.QuarantineAsync(
 	recovery_identity, recovery_manifest_store, "quarantine-identity-recovery",
 	"operator-3", "recover after server restart", before_recovery_fence.CurrentRevision
