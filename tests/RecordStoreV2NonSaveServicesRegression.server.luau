@@ -859,6 +859,12 @@ expect(erasure_plan.code == "success" and erasure_plan.rtbf_coverage_verified ==
 local partial_erasure = erasure:ExecuteAsync(123456, "erase-stable-1", 1)
 expect(partial_erasure.code == "incomplete" and partial_erasure.cursor == 1,
 	"bounded erasure execution did not checkpoint its first item")
+local partial_is_erased, partial_status = erasure:IsErased(123456)
+expect(partial_is_erased == false and partial_status.status == "in_progress",
+	"IsErased reported success while erasure was only partially complete")
+local partial_write_blocked, partial_gate = erasure:ShouldBlockWrites(123456)
+expect(partial_write_blocked == true and partial_gate.status == "in_progress",
+	"write gate did not remain blocked while bounded erasure was in progress")
 local retried_erasure_plan = erasure:PlanAsync(123456, "erase-stable-1")
 expect(retried_erasure_plan.cursor == 1 and #retried_erasure_plan.entries == 2
 	and retried_erasure_plan.status == "in_progress",
@@ -907,8 +913,11 @@ expect(unmatched_execution.code == "coverage_unverified" and unmatched_deleted =
 expect(unmatched_erasure:GetStatus(777).status == "planned",
 	"unverified erasure advanced its durable manifest")
 local unmatched_is_erased, unmatched_status = unmatched_erasure:IsErased(777)
-expect(unmatched_is_erased == true and unmatched_status.status == "planned",
-	"planned erasure did not continue to fence restoration while coverage is unresolved")
+expect(unmatched_is_erased == false and unmatched_status.status == "planned",
+	"unverified planned erasure was incorrectly reported as completed")
+local unmatched_write_blocked, unmatched_gate = unmatched_erasure:ShouldBlockWrites(777)
+expect(unmatched_write_blocked == true and unmatched_gate.status == "planned",
+	"planned erasure did not continue to fence writes while coverage is unresolved")
 
 local legacy_completed_store = new_store()
 legacy_completed_store.values["rv2erase-u780"] = {
@@ -922,6 +931,10 @@ local legacy_completed_erasure = V2.Erasure.new(legacy_completed_store, {}, {
 local legacy_erased, legacy_erasure_status = legacy_completed_erasure:IsErased(780)
 expect(legacy_erased == nil and legacy_erasure_status.code == "coverage_unverified",
 	"legacy completed manifest without RTBF coverage proof was reported as erased")
+local legacy_write_blocked, legacy_gate_status = legacy_completed_erasure:ShouldBlockWrites(780)
+expect(legacy_write_blocked == true and legacy_gate_status.code == "coverage_unverified"
+	and legacy_gate_status.write_blocked == true,
+	"legacy completed manifest without coverage proof did not keep writes/recreation blocked")
 local legacy_execute = legacy_completed_erasure:ExecuteAsync(780, "legacy-incomplete-completion", 8)
 expect(legacy_execute.code == "coverage_unverified",
 	"legacy completed manifest without RTBF coverage proof was reported as committed")
