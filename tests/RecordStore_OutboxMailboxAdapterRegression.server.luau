@@ -93,6 +93,23 @@ local denied = AdapterModule.new({
 })
 expect(not denied.Dispatch(event), "explicit rollout denial was ignored")
 expect(diagnostics[#diagnostics].category == "destination_mailbox_unavailable", "rollout denial was not diagnosed")
+
+local malformed_time = table.clone(event)
+malformed_time.CreatedAt = math.huge
+expect(not adapter.Dispatch(malformed_time), "outbox adapter accepted a non-finite event timestamp")
+expect(diagnostics[#diagnostics].category == "invalid_event", "invalid timestamp was not rejected before destination lookup")
+local malformed_trace = table.clone(event)
+malformed_trace.CorrelationId = {}
+expect(not adapter.Dispatch(malformed_trace), "outbox adapter accepted non-string correlation metadata")
+expect(diagnostics[#diagnostics].category == "invalid_event", "invalid trace metadata was not diagnosed")
+local non_dispatchable = table.clone(event)
+non_dispatchable.State = "delivered"
+expect(not adapter.Dispatch(non_dispatchable), "outbox adapter dispatched an event outside pending/unknown state")
+expect(diagnostics[#diagnostics].category == "invalid_event", "invalid dispatch state was not diagnosed")
+local missing_payload = table.clone(event)
+missing_payload.Payload = nil
+expect(not adapter.Dispatch(missing_payload), "outbox adapter accepted an event with no payload")
+
 destination:Close()
 Mock.reset()
 Shim.close()
