@@ -431,7 +431,7 @@ function MigrationRunner.new(config: Config)
 				inventory_manifest_id = normalized.inventory_manifest_id,
 				expected_purchase_count = normalized.expected_purchase_count,
 				expected_inventory_digest = normalized.expected_inventory_digest,
-				inventory_digest = EMPTY_INVENTORY_DIGEST,
+				observed_inventory_digest = EMPTY_INVENTORY_DIGEST,
 				inventory_verified = false,
 				message = read_error or "migration checkpoint is unavailable",
 			}
@@ -474,6 +474,8 @@ function MigrationRunner.new(config: Config)
 					source_revision = normalized.source_revision,
 					inventory_manifest_id = normalized.inventory_manifest_id,
 					expected_purchase_count = normalized.expected_purchase_count,
+					expected_inventory_digest = normalized.expected_inventory_digest,
+					inventory_digest = EMPTY_INVENTORY_DIGEST,
 					inventory_verified = false,
 					revision = 0,
 					cursor = normalized.initial_cursor,
