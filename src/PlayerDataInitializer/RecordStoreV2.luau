@@ -2754,9 +2754,11 @@ local function new_maintenance()
 		local compactor = { status = "idle", cursor = config.initial_cursor, processed = initial_processed, removed = initial_removed, last_error = nil }
 		function compactor:RunStep(max_items, budget_ms)
 			max_items = math.clamp(math.floor(max_items or 32), 1, 256)
-			budget_ms = math.clamp(math.floor(budget_ms or 25), 1, 1000)
+			local _soft_budget_ms = math.clamp(math.floor(budget_ms or 25), 1, 1000)
 			if type(config.next_page) ~= "function" or type(config.inspect) ~= "function" or type(config.delete_if_generation) ~= "function" or type(config.persist_progress) ~= "function" then return { code = "invalid", message = "compactor requires page, inspect, generation-aware delete, and checkpoint adapters" } end
-			local start = os.clock() * 1000
+			-- The cursor commits whole pages; the max_items bound is the hard
+			-- work limit for this step. A caller that needs a wall-time target must
+			-- yield between completed steps, never halfway through this page.
 			local before_cursor = self.cursor
 			local before_processed = self.processed
 			local before_removed = self.removed
@@ -2786,15 +2788,9 @@ local function new_maintenance()
 			end
 			self.status = "running"
 			for _, item in ipairs(items) do
-				-- The durable cursor describes page boundaries. Checking time after
-				-- some items in a multi-item page would checkpoint counters while keeping
-				-- the old cursor, so resuming can replay rows and inflate progress.
-				-- Enforce the cooperative deadline only for a single-item page; otherwise
-				-- finish the bounded page before advancing its cursor.
-				if #items == 1 and os.clock() * 1000 - start >= budget_ms then
-					self.status = "paused"
-					break
-				end
+				-- Do not interrupt a fetched page after any item has been visited:
+				-- a page-level cursor cannot encode a partially processed page. The
+				-- runner enforces its cooperative budget between checkpointed steps.
 				local inspected, inspect_error = io_call(config.inspect, item)
 				if type(inspected) ~= "table" or inspected.status == "unknown" then
 					self.status = "unknown"
