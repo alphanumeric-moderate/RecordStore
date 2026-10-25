@@ -11905,7 +11905,7 @@ local function quarantine_profile_writes_internal(
 		if observed.SourceGeneration ~= expected_generation or observed.SourceRevision ~= expected_revision then
 			return nil, "conflict", "existing quarantine fence was installed from a different source revision"
 		end
-		return observed, if update_code == nil then "success" else "success", nil
+		return observed, "success", nil
 	end
 	if status_code == "success" and observed ~= nil and not observed.Quarantined then
 		if observed.CurrentGeneration ~= expected_generation or observed.CurrentRevision ~= expected_revision then
@@ -12037,9 +12037,6 @@ local function release_quarantine_fence_internal(
 	)
 	if status_code == "success" and observed ~= nil and not observed.Quarantined then
 		if observed.CurrentWriteId == release_write_id then return observed, "success", nil end
-		if observed.CurrentGeneration ~= nil and observed.CurrentGeneration >= 2
-			and observed.CurrentWriteId == release_write_id
-		then return observed, "success", nil end
 		return nil, "conflict", "quarantine fence is absent but the release write identity could not be confirmed"
 	end
 	if status_code == "success" and observed ~= nil and observed.Quarantined then
@@ -19453,6 +19450,42 @@ RecordStore.Mock = (function()
 		)
 	end
 
+	local function mock_get_quarantine_fence_status_async(
+		name: string, scope: string, key: string, operation_deadline: number?
+	): (QuarantineFenceStatus?, ResultCode, string?)
+		return get_quarantine_fence_status_internal(name, scope, key, operation_deadline, true)
+	end
+
+	local function mock_quarantine_profile_writes_async(
+		name: string, scope: string, key: string, quarantine_id: string, operator_id: string,
+		reason: string, expected_generation: number, expected_revision: number,
+		operation_deadline: number?
+	): (QuarantineFenceStatus?, ResultCode, string?)
+		return quarantine_profile_writes_internal(
+			name, scope, key, quarantine_id, operator_id, reason,
+			expected_generation, expected_revision, operation_deadline, true
+		)
+	end
+
+	local function mock_mark_quarantine_release_pending_async(
+		name: string, scope: string, key: string, quarantine_id: string, resolution_id: string,
+		operator_id: string, reason: string, expected_revision: number?, operation_deadline: number?
+	): (QuarantineFenceStatus?, ResultCode, string?)
+		return mark_quarantine_release_pending_internal(
+			name, scope, key, quarantine_id, resolution_id, operator_id, reason,
+			expected_revision, operation_deadline, true
+		)
+	end
+
+	local function mock_release_quarantine_fence_async(
+		name: string, scope: string, key: string, quarantine_id: string,
+		resolution_id: string, operation_deadline: number?
+	): (QuarantineFenceStatus?, ResultCode, string?)
+		return release_quarantine_fence_internal(
+			name, scope, key, quarantine_id, resolution_id, operation_deadline, true
+		)
+	end
+
 	local function mock_get_record_version_raw(name: string, scope: string, key: string, version: string): unknown
 		local store = get_mock_store(name, scope)
 		local entry = store[key]
@@ -19635,6 +19668,10 @@ RecordStore.Mock = (function()
 		get_erasure_status_async = mock_get_erasure_status_async,
 		erase_user_data_async = mock_erase_user_data_async,
 		purge_erased_versions_async = mock_purge_erased_versions_async,
+		get_quarantine_fence_status_async = mock_get_quarantine_fence_status_async,
+		quarantine_profile_writes_async = mock_quarantine_profile_writes_async,
+		mark_quarantine_release_pending_async = mock_mark_quarantine_release_pending_async,
+		release_quarantine_fence_async = mock_release_quarantine_fence_async,
 		claim_queue_message = mock_claim_queue_message,
 		dead_letter_queue_message = mock_dead_letter_queue_message,
 		list_versions_async = list_versions_mock,
