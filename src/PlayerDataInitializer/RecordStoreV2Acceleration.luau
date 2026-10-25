@@ -217,7 +217,7 @@ function Acceleration.new(options)
 		subscriptions = {}, seen_events = {}, seen_order = {}, sequence = 0,
 		metrics = {
 			published = 0, publish_errors = 0, memory_write_errors = 0, memory_poll_errors = 0,
-			received = 0, invalid_messages = 0, coalesced = 0, dropped_at_capacity = 0,
+			memory_remove_errors = 0, received = 0, invalid_messages = 0, coalesced = 0, dropped_at_capacity = 0,
 			callbacks_run = 0, callback_errors = 0, seen_duplicates = 0, subscribe_errors = 0,
 		},
 	}
@@ -437,6 +437,17 @@ function Acceleration.new(options)
 				then
 					self:_receive(shard, payload)
 					processed += 1
+				end
+				-- Sorted-map entries are a bounded best-effort hint queue. Remove each
+				-- observed slot after attempting delivery, including malformed entries,
+				-- or a stale first page will starve newer hints indefinitely. A concurrent
+				-- overwrite can be lost here by design; durable polling is the fallback.
+				local memory_key = row.key or row.Key
+				if type(memory_key) == "string" and memory_key ~= "" and #memory_key <= 128 then
+					local remove_ok = pcall(function()
+						self.memory_map:RemoveAsync(memory_key)
+					end)
+					if not remove_ok then self.metrics.memory_remove_errors += 1 end
 				end
 			end
 		end
