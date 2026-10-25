@@ -242,5 +242,44 @@ end)
 assert(not sparse_ok and string.find(tostring(sparse_error), "dense", 1, true) ~= nil,
 	"adapter accepted a sparse family inventory instead of rejecting incomplete enumeration")
 
+local runner_store = service:GetDataStore("RunnerProfiles", "global")
+runner_store.data.Profile_1 = {
+	generation = 7,
+	eligible = true,
+	dependencies_clear = true,
+	maintenance_job_id = "maintenance-runner-integration",
+}
+runner_store.data.Profile_2 = {
+	generation = 8,
+	eligible = true,
+	dependencies_clear = true,
+	maintenance_job_id = "maintenance-runner-integration",
+}
+local RecordStore = Shim.load()
+local V2Module = luau.load(fs.readFile("src/PlayerDataInitializer/RecordStoreV2.luau"), {
+	debugName = "RecordStoreV2",
+})()
+local V2 = V2Module.new(RecordStore, RecordStore.MailboxV2)
+local Runner = luau.load(fs.readFile("src/PlayerDataInitializer/RecordStoreMaintenanceRunner.luau"), {
+	debugName = "RecordStoreMaintenanceRunner",
+})()
+local runner_config = make_config(service, {
+	make_family("runner-profiles", "RunnerProfiles", "Profile_"),
+})
+runner_config.job_id = "maintenance-runner-integration"
+runner_config.catalog_revision = "runner-inventory-v1"
+runner_config.checkpoint_key = "maintenance-runner-integration"
+runner_config.maintenance = V2.Maintenance
+runner_config.maintenance_runner = Runner
+local runner_adapter = AdapterModule.new(runner_config)
+local runner = runner_adapter:NewRunner()
+local run_result = runner:Run(8, 1, 500)
+assert(run_result.code == "completed" and run_result.would_delete == 2 and run_result.removed == 0,
+	"NewRunner did not wire the multi-family DataStore adapter into a bounded dry run")
+assert(runner:Stats().processed == 2,
+	"the integrated dry run did not preserve processed-item progress")
+assert(runner_store.data.Profile_1.tombstone ~= true and runner_store.data.Profile_2.tombstone ~= true,
+	"dry-run integration unexpectedly mutated profile records")
+
 print("RecordStoreMaintenanceDataStoreAdapter regression checks passed")
 Shim.close()
