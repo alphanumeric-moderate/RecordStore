@@ -2723,7 +2723,13 @@ local function new_maintenance()
 				self.status = if complete == true or next_cursor == nil then "completed" else "incomplete"
 			end
 			local persisted, persist_error = checkpoint(self.status, self.cursor)
-			if not persisted then return { code = "unknown", cursor = before_cursor, message = persist_error or "checkpoint unresolved" } end
+			if not persisted then
+				-- The durable checkpoint did not advance, so keep the in-memory cursor
+				-- aligned with the last confirmed checkpoint. Generation-aware deletes
+				-- make replay of this page safe after ambiguous deletion outcomes.
+				self.cursor = before_cursor
+				return { code = "unknown", cursor = before_cursor, message = persist_error or "checkpoint unresolved" }
+			end
 			return { code = self.status, cursor = self.cursor, processed = self.processed, removed = self.removed }
 		end
 		function compactor:Resume(cursor) self.cursor = cursor or self.cursor; self.status = "incomplete"; return true end

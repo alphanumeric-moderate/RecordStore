@@ -75,7 +75,7 @@
 
 - [x] Add versioned bounded runtime policies and read-only health/runtime snapshots on top of the current scheduler/governor; this duplicates the checked runtime-policy/snapshot item above and has been reconciled with its existing regression coverage.
 - [x] Preserve the internal critical persistence reserve and keep adaptive changes opt-in. Existing scheduler tests confirm generic work cannot consume reserved critical capacity; runtime policy changes are versioned and explicitly applied.
-- [ ] Complete the offline maintenance runner and real retention-compaction acceptance. Bounded session/lease diagnostics and resumable, generation-aware compaction orchestration exist; live retention behavior and an independently invokable offline runner remain open.
+- [ ] Complete the offline maintenance runner and real retention-compaction acceptance. A regression now verifies that a confirmed deletion followed by checkpoint failure retains the last durable in-memory cursor and safely retries the same page; live retention behavior and an independently invokable offline runner remain open.
 - [x] Add fairness, low-budget, throttle, lease-margin, pause/resume and bounded-progress regressions to the common Lune runner. The advanced scheduler suite covers request-budget recovery, pause/resume and kill-switch behavior; the focused scheduler slice checks high-lane flood fairness, low-budget critical preference, circuit cooldown recovery, and lease-margin renewal selection.
 
 ### Slice 6: Migration and Profile Doctor
@@ -102,7 +102,7 @@
 ### Slice 8: Verification and merge gates
 
 - [ ] Run all Luau checks and Lune regression stages for every delivered slice.
-- [ ] Complete fault-injection and focused CodSpeed evidence for every durable protocol/maintenance path. The V2 transaction adapter now has direct public-contract regression coverage; saga tests inject response loss after reserve, credit, refund and settle, including the refund-before-credit retry hazard.
+- [ ] Complete fault-injection and focused CodSpeed evidence for every durable protocol/maintenance path. Mailbox V2 producer/acknowledgement and future-schema cases now have focused fault coverage; maintenance adds checkpoint-failure replay coverage. Saga tests inject response loss after reserve, credit, refund and settle, including the refund-before-credit retry hazard, but all durable paths still need a complete final-head evidence run.
 - [ ] Complete independent code review and inspect every changed file.
 - [ ] Keep live Roblox Studio/DataStore multi-server, throttling/cache, crash/shutdown, mixed-version rollout/rollback and RTBF template acceptance explicitly blocked until executed in a real test experience.
 

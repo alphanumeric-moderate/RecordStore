@@ -860,6 +860,50 @@ expect(#removed == 1 and removed[1].generation == 4, "compactor deleted an ineli
 expect(compaction_store.values.checkpoint.status == "completed",
 	"compactor checkpoint did not persist its final completion status")
 
+local checkpoint_loss_store = new_store()
+local checkpoint_calls = 0
+local delete_applied = false
+local requested_cursors = {}
+local durable_cursor = "cursor-a"
+local checkpoint_loss_compactor = V2.Maintenance.NewCompactor({
+	initial_cursor = "cursor-a",
+	next_page = function(cursor, maximum)
+		table.insert(requested_cursors, cursor)
+		return { { key = "checkpoint-loss", generation = 9 } }, "cursor-b", false
+	end,
+	inspect = function(item)
+		return { status = "success", eligible = true, dependencies_clear = true, generation = item.generation }
+	end,
+	delete_if_generation = function(item, generation)
+		if delete_applied then return "already_absent" end
+		delete_applied = true
+		return "deleted"
+	end,
+	persist_progress = function(cursor, processed, removed_count, status)
+		checkpoint_calls += 1
+		if checkpoint_calls == 1 then return false, "injected checkpoint write failure after deletion" end
+		durable_cursor = cursor
+		checkpoint_loss_store.values.checkpoint = {
+			cursor = cursor, processed = processed, removed = removed_count, status = status,
+		}
+		return true
+	end,
+})
+local checkpoint_lost = checkpoint_loss_compactor:RunStep(1, 500)
+expect(checkpoint_lost.code == "unknown" and checkpoint_lost.cursor == "cursor-a",
+	"checkpoint failure after deletion did not return the last durable cursor")
+expect(checkpoint_loss_compactor:Stats().cursor == "cursor-a",
+	"in-memory compaction cursor advanced after its durable checkpoint failed")
+expect(durable_cursor == "cursor-a" and delete_applied,
+	"checkpoint-loss fixture did not separate the committed delete from the durable cursor")
+local checkpoint_retried = checkpoint_loss_compactor:RunStep(1, 500)
+expect(#requested_cursors == 2 and requested_cursors[1] == "cursor-a" and requested_cursors[2] == "cursor-a",
+	"compactor skipped the uncheckpointed page on same-process retry")
+expect(checkpoint_retried.code == "incomplete" and checkpoint_retried.cursor == "cursor-b",
+	"compactor did not advance after a retry durably checkpointed the page")
+expect(durable_cursor == "cursor-b" and checkpoint_loss_store.values.checkpoint.cursor == "cursor-b",
+	"retry failed to persist the recovered compaction cursor")
+
 local unknown_compaction_store = new_store()
 local unknown_compactor = V2.Maintenance.NewCompactor({
 	next_page = function(cursor)
