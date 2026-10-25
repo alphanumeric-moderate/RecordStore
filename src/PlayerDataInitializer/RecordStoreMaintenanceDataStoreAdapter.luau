@@ -164,7 +164,23 @@ function Adapter.new(config: Config)
 		error("catalog_revision must be 1 to 80 bytes and must not contain |", 2)
 	end
 	if type(config.families) ~= "table" or #config.families < 1 or #config.families > MAX_FAMILIES then
-		error("families must contain 1 to 128 explicit DataStore key families", 2)
+		error("families must be a dense array containing 1 to 128 explicit DataStore key families", 2)
+	end
+	local family_count = #config.families
+	local observed_family_count = 0
+	for family_index in pairs(config.families) do
+		if type(family_index) ~= "number"
+			or not math.isfinite(family_index)
+			or math.floor(family_index) ~= family_index
+			or family_index < 1
+			or family_index > family_count
+		then
+			error("families must be a dense array", 2)
+		end
+		observed_family_count += 1
+	end
+	if observed_family_count ~= family_count then
+		error("families must be a dense array", 2)
 	end
 	if not valid_text(config.checkpoint_store_name, MAX_NAME_BYTES)
 		or type(config.checkpoint_scope) == "string" and #config.checkpoint_scope > MAX_NAME_BYTES
@@ -188,7 +204,13 @@ function Adapter.new(config: Config)
 			return Instance.new(class_name)
 		end
 	end
-	local families = table.clone(config.families)
+	local families: { Family } = table.create(family_count)
+	for index, family in ipairs(config.families) do
+		if type(family) ~= "table" then
+			error("family " .. tostring(index) .. " must be a table", 2)
+		end
+		families[index] = table.freeze(table.clone(family)) :: Family
+	end
 	local family_by_name: { [string]: Family } = {}
 	local store_cache: { [string]: any } = {}
 	local all_family_names: { [string]: boolean } = {}
