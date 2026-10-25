@@ -562,6 +562,158 @@ do
 	expect(source:Close() == "closed" and target:Close() == "closed", "refund response-loss records did not close")
 end
 
+local function inject_precommit_unknown(record, suffix)
+	local original = record.TransactAsync
+	local armed = true
+	record.TransactAsync = function(self, operation_id, reducer, options)
+		if armed and type(operation_id) == "string"
+			and string.sub(operation_id, -#suffix) == suffix
+		then
+			armed = false
+			return nil, "unknown", "injected pre-commit uncertainty for " .. suffix
+		end
+		return original(self, operation_id, reducer, options)
+	end
+	return function() return not armed end
+end
+
+-- Pre-commit uncertainty must retry the same stable operation ID and commit each
+-- transfer leg at most once, just like a response lost after the durable commit.
+do
+	local source, target = new_leg_pair("V2SagaReservePrecommit")
+	local fault_seen = inject_precommit_unknown(source, ":reserve")
+	local saga_service = V2.Sagas.new(new_store())
+	local initial = saga_service:TransferAsync("reserve-precommit", source, target, 10, {
+		sender_id = "sender", recipient_id = "recipient",
+	})
+	expect(initial.code == "reconciliation_required",
+		"pre-commit reserve uncertainty was not surfaced as unresolved: " .. tostring(initial.code))
+	expect(source:Get().Balance == 100 and target:Get().Balance == 25,
+		"pre-commit reserve fault mutated a profile")
+	expect(assert_leg_outcome(saga_service, "reserve-precommit", "reserve", "unknown").attempts == 1,
+		"pre-commit reserve uncertainty was not persisted as unknown")
+	local resumed = saga_service:TransferAsync("reserve-precommit", source, target, 10, {
+		sender_id = "sender", recipient_id = "recipient",
+	})
+	expect(fault_seen() and resumed.code == "settled"
+		and source:Get().Balance == 90 and target:Get().Balance == 35,
+		"reserve retry did not recover from a pre-commit failure without duplicating a leg")
+	expect(assert_leg_outcome(saga_service, "reserve-precommit", "reserve", "committed").attempts == 2,
+		"reserve retry did not reconcile the stable operation ID")
+	expect(source:Close() == "closed" and target:Close() == "closed",
+		"pre-commit reserve records did not close")
+end
+
+do
+	local source, target = new_leg_pair("V2SagaCreditPrecommit")
+	local fault_seen = inject_precommit_unknown(target, ":credit")
+	local saga_service = V2.Sagas.new(new_store())
+	local initial = saga_service:TransferAsync("credit-precommit", source, target, 10, {
+		sender_id = "sender", recipient_id = "recipient",
+	})
+	expect(initial.code == "reconciliation_required",
+		"pre-commit credit uncertainty was not surfaced as unresolved: " .. tostring(initial.code))
+	expect(source:Get().Balance == 90 and target:Get().Balance == 25,
+		"pre-commit credit fault did not preserve only the durable reservation")
+	expect(assert_leg_outcome(saga_service, "credit-precommit", "credit", "unknown").attempts == 1,
+		"pre-commit credit uncertainty was not persisted as unknown")
+	local resumed = saga_service:TransferAsync("credit-precommit", source, target, 10, {
+		sender_id = "sender", recipient_id = "recipient",
+	})
+	expect(fault_seen() and resumed.code == "settled"
+		and source:Get().Balance == 90 and target:Get().Balance == 35,
+		"credit retry did not recover from a pre-commit failure without granting twice")
+	expect(assert_leg_outcome(saga_service, "credit-precommit", "credit", "committed").attempts == 2,
+		"credit retry did not reconcile the stable operation ID")
+	expect(source:Close() == "closed" and target:Close() == "closed",
+		"pre-commit credit records did not close")
+end
+
+do
+	local source, target = new_leg_pair("V2SagaSettlePrecommit")
+	local fault_seen = inject_precommit_unknown(source, ":settle")
+	local saga_service = V2.Sagas.new(new_store())
+	local initial = saga_service:TransferAsync("settle-precommit", source, target, 10, {
+		sender_id = "sender", recipient_id = "recipient",
+	})
+	expect(initial.code == "reconciliation_required",
+		"pre-commit settlement uncertainty was not surfaced as unresolved: " .. tostring(initial.code))
+	expect(source:Get().Balance == 90 and target:Get().Balance == 35
+		and type((source:Get().__recordstore_v2_escrow or {})["settle-precommit"]) == "table",
+		"pre-commit settlement fault did not preserve the unsettled escrow")
+	expect(assert_leg_outcome(saga_service, "settle-precommit", "settle", "unknown").attempts == 1,
+		"pre-commit settlement uncertainty was not persisted as unknown")
+	local resumed = saga_service:TransferAsync("settle-precommit", source, target, 10, {
+		sender_id = "sender", recipient_id = "recipient",
+	})
+	expect(fault_seen() and resumed.code == "settled"
+		and source:Get().Balance == 90 and target:Get().Balance == 35
+		and (source:Get().__recordstore_v2_escrow or {})["settle-precommit"] == nil,
+		"settlement retry did not finish the existing transfer without applying a second credit")
+	expect(assert_leg_outcome(saga_service, "settle-precommit", "settle", "committed").attempts == 2,
+		"settlement retry did not reconcile the stable operation ID")
+	expect(source:Close() == "closed" and target:Close() == "closed",
+		"pre-commit settlement records did not close")
+end
+
+do
+	local source, target = new_leg_pair("V2SagaRefundPrecommit")
+	local saga_service = V2.Sagas.new(new_store())
+	local source_base = source.TransactAsync
+	local refund_fault_armed = true
+	local compensation_was_durable = false
+	source.TransactAsync = function(self, operation_id, reducer, options)
+		if type(operation_id) == "string" and string.sub(operation_id, -#":refund") == ":refund" then
+			compensation_was_durable = saga_service:GetStatus("refund-precommit").phase == "compensation_pending"
+			expect(compensation_was_durable,
+				"refund pre-commit fault was reached before compensation_pending was durable")
+			if refund_fault_armed then
+				refund_fault_armed = false
+				return nil, "unknown", "injected pre-commit refund failure"
+			end
+		end
+		return source_base(self, operation_id, reducer, options)
+	end
+	local target_base = target.TransactAsync
+	local credit_attempts, reject_credit_once = 0, true
+	target.TransactAsync = function(self, operation_id, reducer, options)
+		if type(operation_id) == "string" and string.sub(operation_id, -#":credit") == ":credit" then
+			credit_attempts += 1
+			if reject_credit_once then
+				reject_credit_once = false
+				return nil, "invalid", "injected definitive credit rejection"
+			end
+		end
+		return target_base(self, operation_id, reducer, options)
+	end
+	local initial = saga_service:TransferAsync("refund-precommit", source, target, 10, {
+		sender_id = "sender", recipient_id = "recipient",
+	})
+	expect(initial.code == "reconciliation_required"
+		and saga_service:GetStatus("refund-precommit").phase == "compensation_pending",
+		"pre-commit refund fault did not leave the saga in compensation_pending")
+	expect(compensation_was_durable and source:Get().Balance == 90
+		and target:Get().Balance == 25
+		and type((source:Get().__recordstore_v2_escrow or {})["refund-precommit"]) == "table",
+		"pre-commit refund failure changed balances or lost the reservation")
+	expect(assert_leg_outcome(saga_service, "refund-precommit", "credit", "failed").attempts == 1
+		and assert_leg_outcome(saga_service, "refund-precommit", "refund", "unknown").attempts == 1,
+		"pre-commit refund and failed credit outcomes were not durably recorded")
+	local resumed = saga_service:TransferAsync("refund-precommit", source, target, 10, {
+		sender_id = "sender", recipient_id = "recipient",
+	})
+	expect(refund_fault_armed == false and resumed.code == "rejected"
+		and saga_service:GetStatus("refund-precommit").phase == "rejected",
+		"refund retry did not recover from a pre-commit failure")
+	expect(credit_attempts == 1 and source:Get().Balance == 100 and target:Get().Balance == 25
+		and (source:Get().__recordstore_v2_escrow or {})["refund-precommit"] == nil,
+		"refund recovery retried credit or failed to restore the sender exactly once")
+	expect(assert_leg_outcome(saga_service, "refund-precommit", "refund", "committed").attempts == 2,
+		"refund retry did not reconcile the stable operation ID")
+	expect(source:Close() == "closed" and target:Close() == "closed",
+		"pre-commit refund records did not close")
+end
+
 local projection_store = new_store()
 local projections = V2.Projections.new(projection_store)
 local registered = projections:Register("balance_projection_v1", 1, function(current, event)
