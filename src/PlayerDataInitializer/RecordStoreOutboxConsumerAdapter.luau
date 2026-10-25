@@ -291,10 +291,19 @@ function OutboxConsumerAdapter.new(config: Config): Processor
 		handler_context: unknown
 	): (boolean, string?)
 		local event, event_error = validate_envelope(payload, snapshot, identity)
-		if event == nil then return false, event_error or "event envelope validation failed" end
+		if event == nil then
+			emit(normalized, "destination_event_rejected", nil, "invalid", event_error)
+			return false, event_error or "event envelope validation failed"
+		end
 		local handler = normalized.handlers[snapshot.Type :: string]
-		if handler == nil then return false, "no destination handler is registered for this event type" end
+		if handler == nil then
+			emit(normalized, "destination_handler_missing", event.source_event_id, "unsupported",
+				"no destination handler is registered for this event type")
+			return false, "no destination handler is registered for this event type"
+		end
 		if event.payload_version ~= handler.payload_version then
+			emit(normalized, "destination_payload_version_unsupported", event.source_event_id, "unsupported",
+				"destination handler payload version does not match the event version")
 			return false, "destination handler payload version does not match the event version"
 		end
 		if type(snapshot.Id) ~= "string" or snapshot.Id == ""
@@ -399,7 +408,7 @@ function OutboxConsumerAdapter.new(config: Config): Processor
 			return {
 				code = row.code :: string,
 				processed = if row.code == "processed" then 1 else 0,
-				message_id = if type(row.route) == "string" then row.route else nil,
+				message_id = if type(row.message_id) == "string" then row.message_id else nil,
 				message = if type(row.error) == "string" then row.error
 					elseif type(row.message) == "string" then row.message else nil,
 				native_code = row.code :: string,
