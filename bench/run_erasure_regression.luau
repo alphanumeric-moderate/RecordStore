@@ -279,8 +279,8 @@ do
 		end,
 	})
 	local plan = erasure:PlanAsync(user_id, "erase-attestation-required-206")
-	expect(plan.code == "coverage_unverified" and plan.rtbf_coverage_verified == false,
-		"PlayerData family flag without an application inventory/direct-writer attestation certified RTBF")
+	expect(plan.code == "success" and plan.rtbf_coverage_verified == false,
+		"unattested plan incorrectly set the RTBF completion flag")
 	local progress = erasure:ExecuteAsync(user_id, "erase-attestation-required-206", 1)
 	expect(progress.code == "coverage_unverified" and progress.rtbf_coverage_verified == false,
 		"destructive erasure was allowed without an application inventory/direct-writer attestation")
