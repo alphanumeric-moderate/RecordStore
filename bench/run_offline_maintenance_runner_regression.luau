@@ -80,6 +80,13 @@ expect(#delete_calls == 0 and dry_result.would_delete == 1,
 expect(durable_checkpoint ~= nil and durable_checkpoint.job_id == "dry-run-1"
 	and durable_checkpoint.revision == 1 and durable_checkpoint.cursor == "row:1",
 	"dry-run did not persist an identity-bound checkpoint")
+
+local exposed_checkpoint = dry:GetCheckpoint()
+expect(exposed_checkpoint ~= nil and exposed_checkpoint.cursor == "row:1",
+	"runner did not return its last durable checkpoint")
+exposed_checkpoint.cursor = "row:999"
+expect(dry:GetCheckpoint().cursor == "row:1",
+	"mutating a returned checkpoint snapshot changed runner state")
 local resumed_dry = Runner.new(V2.Maintenance, common_config("dry-run-1", "dry_run"))
 local dry_complete = resumed_dry:Run(8, 1, 500)
 expect(dry_complete.code == "completed" and #delete_calls == 0,
