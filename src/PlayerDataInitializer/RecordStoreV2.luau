@@ -2705,6 +2705,14 @@ local function new_erasure(store, families, options)
 		error("erasure coordinator requires GetAsyncFresh and UpdateAsync; cached reads cannot authorize erasure state changes", 2)
 	end
 	if options == nil then options = {} elseif type(options) ~= "table" then error("erasure options must be a table", 2) end
+	if options.require_inventory_attestation ~= nil and type(options.require_inventory_attestation) ~= "boolean" then error("require_inventory_attestation must be a boolean", 2) end
+	if options.writer_inventory_verified ~= nil and type(options.writer_inventory_verified) ~= "boolean" then error("writer_inventory_verified must be a boolean", 2) end
+	local require_inventory_attestation = options.require_inventory_attestation == true
+	local application_inventory_manifest_id = options.application_inventory_manifest_id
+	local writer_inventory_verified = options.writer_inventory_verified == true
+	if application_inventory_manifest_id ~= nil and not valid_text(application_inventory_manifest_id, 128) then
+		error("application_inventory_manifest_id must be 1 to 128 bytes", 2)
+	end
 	if families == nil then families = {} elseif type(families) ~= "table" then error("erasure families must be an array", 2) end
 	local family_count = #families
 	if family_count < 1 then
@@ -2793,6 +2801,15 @@ local function new_erasure(store, families, options)
 		end
 		if manifest.rtbf_coverage_verified ~= true then
 			return false, "coverage_unverified", "manifest does not contain verified exhaustive RTBF coverage"
+		end
+		if require_inventory_attestation and (
+			manifest.inventory_attestation_required ~= true
+			or manifest.application_inventory_manifest_id ~= application_inventory_manifest_id
+			or manifest.writer_inventory_verified ~= true
+			or writer_inventory_verified ~= true
+			or not valid_text(application_inventory_manifest_id, 128)
+		) then
+			return false, "coverage_unverified", "application inventory manifest changed or direct-writer fencing attestation is missing"
 		end
 		local rendered = coordinator:RenderTemplates(user_id)
 		local snapshot = manifest.template_snapshot
@@ -2920,13 +2937,20 @@ local function new_erasure(store, families, options)
 		local snapshot_ok = pcall(canonical, rendered)
 		local template_snapshot = if snapshot_ok then copy(rendered) else nil
 		local verified = #self.families > 0 and template_snapshot ~= nil
+		local inventory_attestation_ok = not require_inventory_attestation
+			or (writer_inventory_verified and valid_text(application_inventory_manifest_id, 128))
+		if not inventory_attestation_ok then verified = false end
 		for _, row in pairs(coverage) do
 			if row.status ~= "template_verified_by_integrator" or row.inventory_complete ~= true or row.unmatched_count ~= 0 then verified = false end
 		end
 		local manifest = {
 			version = 1, user_id = user_id, erasure_id = erasure_id, status = "planned", cursor = 0,
 			completed_count = 0, entries = entries, coverage = coverage, template_snapshot = template_snapshot,
-			rtbf_coverage_verified = verified and template_ok == true, created_at = os.time(), updated_at = os.time(),
+			inventory_attestation_required = require_inventory_attestation,
+			application_inventory_manifest_id = application_inventory_manifest_id,
+			writer_inventory_verified = writer_inventory_verified,
+			rtbf_coverage_verified = verified and template_ok == true and inventory_attestation_ok,
+			created_at = os.time(), updated_at = os.time(),
 		}
 		local value, message = adapter_call(store, "UpdateAsync", manifest_key(user_id), function(old)
 			if old ~= nil then
