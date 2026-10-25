@@ -120,6 +120,7 @@
 
 - [x] Add opt-in durable projection rebuild manifests with stable rebuild/snapshot identity, bounded page processing, persisted cursors and counts, exact ambiguous-write reconciliation, status inspection, restart/resume coverage, and strict complete/cursor contract validation. The source adapter must pin the same immutable snapshot for every page; source-specific platform acceptance remains a release gate.
 - [ ] Connect the generic erasure coordinator to the application's actual user-associated key families; supply exhaustive inventories, verified templates, generation-aware actions, and writer/recreation fences for every active write path. The generic bounded plan/execution/status API exists, but the real user-key inventory and exhaustive application wiring are not implemented.
+- [x] Reject an erasure coordinator with zero declared key families; an empty family set must never be accepted as exhaustive RTBF coverage.
 - [ ] Keep the RTBF-completeness claim blocked until templates cover every user-associated key layout and the real platform acceptance test passes.
 - [x] Add bounded correlated operation traces with unique per-event IDs, cross-process-safe merge/deduplication, explicit `process_local` / `durable_store` / `durable_store_and_local` evidence labels, durability summaries, and payload/identity redaction.
 

@@ -2119,6 +2119,9 @@ local function new_erasure(store, families, options)
 	if options == nil then options = {} elseif type(options) ~= "table" then error("erasure options must be a table", 2) end
 	if families == nil then families = {} elseif type(families) ~= "table" then error("erasure families must be an array", 2) end
 	local family_count = #families
+	if family_count < 1 then
+		error("erasure coordinator requires at least one explicitly inventoried user-key family; empty coverage cannot prove RTBF completeness", 2)
+	end
 	if family_count > MAX_ERASURE_TEMPLATES or key_count(families) ~= family_count then
 		error("erasure families must be a dense array within the template limit", 2)
 	end
