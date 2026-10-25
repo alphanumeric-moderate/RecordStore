@@ -2783,8 +2783,27 @@ local function new_maintenance()
 				checkpoint(self.status, before_cursor)
 				return { code = "unknown", cursor = before_cursor, message = self.last_error }
 			end
-			if #items > max_items then
+			local item_count = #items
+			local seen_items = 0
+			for item_index in pairs(items) do
+				if type(item_index) ~= "number" or not finite(item_index)
+					or math.floor(item_index) ~= item_index or item_index < 1 or item_index > item_count
+				then
+					return { code = "invalid", cursor = before_cursor, message = "page adapter must return a dense item array" }
+				end
+				seen_items += 1
+			end
+			if seen_items ~= item_count then
+				return { code = "invalid", cursor = before_cursor, message = "page adapter must return a dense item array" }
+			end
+			if item_count > max_items then
 				return { code = "capacity", cursor = before_cursor, message = "page adapter exceeded the requested item bound" }
+			end
+			if next_cursor ~= nil and (type(next_cursor) ~= "string" or next_cursor == "" or #next_cursor > 512) then
+				return { code = "invalid", cursor = before_cursor, message = "page cursor must be a non-empty string of at most 512 bytes" }
+			end
+			if complete == false and (next_cursor == nil or next_cursor == before_cursor) then
+				return { code = "invalid", cursor = before_cursor, message = "incomplete page must provide an advancing cursor" }
 			end
 			self.status = "running"
 			for _, item in ipairs(items) do
@@ -2792,21 +2811,41 @@ local function new_maintenance()
 				-- a page-level cursor cannot encode a partially processed page. The
 				-- runner enforces its cooperative budget between checkpointed steps.
 				local inspected, inspect_error = io_call(config.inspect, item)
-				if type(inspected) ~= "table" or inspected.status == "unknown" then
+				if type(inspected) ~= "table" or inspected.status ~= "success" then
+					-- No partial page counters may be committed against the old cursor.
+					-- Earlier generation-aware deletes can safely replay on the same page.
+					self.cursor = before_cursor
+					self.processed = before_processed
+					self.removed = before_removed
 					self.status = "unknown"
-					self.last_error = inspect_error or "inspection unresolved"
+					self.last_error = inspect_error or (if type(inspected) == "table" then tostring(inspected.message or "inspection did not return success") else "inspection unresolved")
 					checkpoint(self.status, before_cursor)
 					return { code = "unknown", cursor = before_cursor, message = self.last_error }
 				end
 				if inspected.eligible == true and inspected.dependencies_clear == true then
 					local action, action_error = io_call(config.delete_if_generation, item, inspected.generation)
+					if action ~= "deleted" and action ~= "already_absent" and action ~= "skipped" and action ~= "unknown" then
+						self.cursor = before_cursor
+						self.processed = before_processed
+						self.removed = before_removed
+						self.status = "unknown"
+						self.last_error = action_error or ("delete adapter returned an unsupported outcome: " .. tostring(action))
+						checkpoint(self.status, before_cursor)
+						return { code = "unknown", cursor = before_cursor, message = self.last_error }
+					end
 					if action == "unknown" then
+						self.cursor = before_cursor
+						self.processed = before_processed
+						self.removed = before_removed
 						self.status = "unknown"
 						self.last_error = action_error or "delete unresolved"
 						checkpoint(self.status, before_cursor)
 						return { code = "unknown", cursor = before_cursor, message = self.last_error }
 					end
-					if action == "deleted" then self.removed += 1 end
+					-- Count already_absent as removed for progress accounting: it is the
+					-- idempotent replay result after a prior delete committed but the page
+					-- checkpoint did not. A generation mismatch remains "skipped".
+					if action == "deleted" or action == "already_absent" then self.removed += 1 end
 				end
 				self.processed += 1
 			end
