@@ -94,6 +94,34 @@ local dry_complete = resumed_dry:Run(8, 1, 500)
 expect(dry_complete.code == "completed" and #delete_calls == 0,
 	"dry-run did not resume from its durable checkpoint without deleting data")
 
+-- Reject malformed durable state rather than allowing a forged completed checkpoint
+-- to skip remaining inventory.
+do
+	local saved_checkpoint = durable_checkpoint
+	durable_checkpoint = {
+		version = 1, job_id = "forged-complete", revision = 1, cursor = "row:1",
+		processed = 1, removed = 0, status = "completed",
+	}
+	expect(not pcall(function()
+		Runner.new(V2.Maintenance, common_config("forged-complete", "dry_run"))
+	end), "runner accepted a completed checkpoint with an unfinished cursor")
+	durable_checkpoint = {
+		version = 1, job_id = "forged-counts", revision = 2, cursor = nil,
+		processed = 1, removed = 2, status = "completed",
+	}
+	expect(not pcall(function()
+		Runner.new(V2.Maintenance, common_config("forged-counts", "dry_run"))
+	end), "runner accepted a checkpoint whose removed count exceeds processed work")
+	durable_checkpoint = {
+		version = 1, job_id = "forged-status", revision = 3, cursor = "row:1",
+		processed = 1, removed = 0, status = "future_status",
+	}
+	expect(not pcall(function()
+		Runner.new(V2.Maintenance, common_config("forged-status", "dry_run"))
+	end), "runner accepted an unknown checkpoint status")
+	durable_checkpoint = saved_checkpoint
+end
+
 -- Execute mode cannot be constructed without both authorization and a durable writer fence.
 expect(not pcall(function()
 	Runner.new(V2.Maintenance, common_config("unguarded", "execute"))
