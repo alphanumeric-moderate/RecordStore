@@ -289,6 +289,10 @@ local function create_handler(
 			if type(next_data) ~= "table" then
 				return current_data, ledger_result("invalid_grant")
 			end
+			local next_data_dictionary = next_data :: { [string]: RecordStore.JsonValue }
+			for next_key in pairs(next_data_dictionary) do
+				if type(next_key) ~= "string" then return current_data, ledger_result("invalid_grant") end
+			end
 			ledger[validated_purchase_id] = {
 				player_id = validated_player_id,
 				product_id = validated_product_id,
@@ -309,9 +313,19 @@ local function create_handler(
 			)
 		end)
 		local function defer_for_permanent_ledger(result_value: unknown): boolean
-			if config.permanent_purchase_ledger_key == nil or type(result_value) ~= "table" then return false end
-			local marker = (result_value :: { [string]: unknown })[PERMANENT_LEDGER_RESULT_KEY]
-			if type(marker) ~= "table" then return false end
+			if config.permanent_purchase_ledger_key == nil then return false end
+			local marker = if type(result_value) == "table"
+				then (result_value :: { [string]: unknown })[PERMANENT_LEDGER_RESULT_KEY]
+				else nil
+			if type(marker) ~= "table" then
+				-- Older transaction receipts created before the permanent-ledger option
+				-- cannot prove that the application ledger was populated. Do not silently
+				-- acknowledge them and risk re-granting after the finite sidecar expires.
+				emit_diagnostic(config, "permanent_purchase_ledger_marker_missing", "unknown",
+					"transaction receipt predates or lacks the permanent-ledger result marker; operator reconciliation is required",
+					validated_product_id)
+				return true
+			end
 			local ledger_status = (marker :: { [string]: unknown }).status
 			if ledger_status == "granted" or ledger_status == "duplicate" then return false end
 			if ledger_status == "conflict" or ledger_status == "capacity"
@@ -325,7 +339,9 @@ local function create_handler(
 					"permanent purchase ledger did not authorize a new grant", validated_product_id)
 				return true
 			end
-			return false
+			emit_diagnostic(config, "permanent_purchase_ledger_marker_missing", "unknown",
+				"unrecognized permanent-ledger marker; operator reconciliation is required", validated_product_id)
+			return true
 		end
 		if transaction_ok and (status == "committed" or status == "duplicate") then
 			if defer_for_permanent_ledger(_result) then return not_processed_yet end
