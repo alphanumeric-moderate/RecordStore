@@ -47,6 +47,10 @@ end
 
 local function make_source(pages, revision, calls)
 	local source = {}
+	local inventory_count = 0
+	for _, source_page in pairs(pages) do inventory_count += #source_page.items end
+	source.inventory_count = inventory_count
+	source.source_revision = revision
 	function source:read_page(cursor, maximum)
 		calls.count += 1
 		calls.last_cursor = cursor
@@ -97,13 +101,22 @@ end
 local function new_runner(job_id, source, processor, checkpoint_store, revision, initial_cursor)
 	return RunnerModule.new({
 		job_id = job_id,
-		source_revision = revision or "snapshot-v1",
+		source_revision = revision or source.source_revision or "snapshot-v1",
 		source = source,
 		processor = processor,
 		checkpoint_store = checkpoint_store,
 		checkpoint_key = "purchase-migration:" .. job_id,
 		initial_cursor = initial_cursor,
 		page_size = 16,
+		inventory_manifest_id = "manifest:" .. (revision or source.source_revision or "snapshot-v1"),
+		expected_purchase_count = source.inventory_count,
+		verify_complete_inventory = function(manifest_id, source_revision, expected_count, observed_count)
+			return manifest_id == "manifest:" .. source.source_revision
+				and source_revision == source.source_revision
+				and expected_count == source.inventory_count
+				and observed_count == source.inventory_count,
+				"fixture inventory manifest mismatch"
+		end,
 	})
 end
 
