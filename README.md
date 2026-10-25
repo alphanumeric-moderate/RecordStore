@@ -74,7 +74,8 @@ The repository also includes:
 - `src/PlayerDataInitializer/RecordStoreOutboxMailboxAdapter.luau`: source outbox dispatch to a destination Mailbox V2, with exact durable enqueue receipt verification.
 - `src/PlayerDataInitializer/RecordStoreOutboxConsumerAdapter.luau`: destination message worker that applies registered versioned reducers through a durable Inbox receipt before acknowledging delivery.
 - `src/PlayerDataInitializer/PurchaseReceiptProcessor.luau` and `PurchaseDataStoreAuthority.luau`: opt-in developer-product receipt processing with bounded per-profile idempotency and an optional global PurchaseId authority.
-- `src/PlayerDataInitializer/PurchaseAuthorityMigrationRunner.luau`: resumable, bounded import of an application-enumerated historical PurchaseId snapshot with uncached durable checkpoints; unresolved batches never advance the cursor.
+- `src/PlayerDataInitializer/PurchaseAuthorityMigrationRunner.luau`: resumable, bounded import of an application-enumerated historical PurchaseId snapshot with uncached durable checkpoints, source count and rolling digest reconciliation; unresolved batches never advance the cursor.
+- `src/PlayerDataInitializer/RecordStoreMaintenanceRobloxAdapter.luau`: paged real DataStore key enumeration, uncached inspection, and revision-checked checkpoint adapters for the bounded maintenance runner. Generation-aware deletion remains explicitly application supplied.
 - `src/PlayerDataInitializer/IntegerInfinityValue.luau`: a `NumberValue` factory that rounds finite values to integers while preserving positive infinity, negative infinity, and NaN. The default `kills` field uses this type so non-finite values are not silently replaced with zero.
 - `InfiniteMath.format(value, options?)`: the shared abbreviation formatter for native and InfiniteMath numbers. Formatting never changes stored values.
 - `src/PlayerDataInitializer/InfiniteMathValue.luau`: an adapter for the vendored InfiniteMath Revised module. It persists the number's normalized `first`/`second` pair inside a versioned JSON envelope and provides `get`/`set` helpers for a replicated StringValue backing instance. With the default schema, this adapter is not required during startup; `PlayerDataCore` loads it only when an `InfiniteMathValue` field is configured or used.
@@ -752,6 +753,8 @@ The native DataStore adapter checks per-server read/write request budgets and fa
 
 The external authority's single-call backfill and the processor's bounded \`BackfillExternalAuthorityAsync(batch, max_items)\` cover the durable identity transition, but an application still has to enumerate its real source of historical purchases. \`PurchaseAuthorityMigrationRunner\` composes that batch API with an application-supplied paged reader and a durable compare-and-update checkpoint store. The reader must represent a stable source snapshot and return the same declared \`source_revision\` on every page. The checkpoint key must be shared by all workers using the same \`job_id\`.
 
+Before constructing the runner, independently export the entire historical source and review a manifest containing the snapshot revision, manifest ID, exact row count, ordered digest, source-selection rules, and reconciliation evidence. Use \`PurchaseAuthorityMigrationRunner.ComputeInventoryDigest(rows)\` to compute the deterministic rolling checksum over the exact ordered (PurchaseId, PlayerId, ProductId) rows that the source will return. This is a non-cryptographic reconciliation checksum, not a signed or collision-resistant proof; the application-supplied verifier must compare the immutable reviewed manifest against the expected and observed digests and counts.
+
 ~~~lua
 local PurchaseAuthorityMigrationRunner = require(
     game:GetService("ServerScriptService").PlayerDataInitializer.PurchaseAuthorityMigrationRunner
@@ -759,7 +762,19 @@ local PurchaseAuthorityMigrationRunner = require(
 
 local migration = PurchaseAuthorityMigrationRunner.new({
     job_id = "purchase-authority-backfill-2026-10",
-    source_revision = "historical-receipts-export-v4",
+    source_revision = reviewed_manifest.source_revision,
+    inventory_manifest_id = reviewed_manifest.id,
+    expected_purchase_count = reviewed_manifest.row_count,
+    expected_inventory_digest = reviewed_manifest.ordered_digest,
+    verify_complete_inventory = function(manifest_id, source_revision, expected_count,
+        observed_count, expected_digest, observed_digest)
+        return manifest_id == reviewed_manifest.id
+            and source_revision == reviewed_manifest.source_revision
+            and expected_count == reviewed_manifest.row_count
+            and observed_count == reviewed_manifest.row_count
+            and expected_digest == reviewed_manifest.ordered_digest
+            and observed_digest == reviewed_manifest.ordered_digest
+    end,
     source = historical_purchase_source,
     processor = processor,
     checkpoint_store = durable_checkpoint_store,
@@ -769,11 +784,11 @@ local migration = PurchaseAuthorityMigrationRunner.new({
 
 local progress = migration:RunBatchAsync(2)
 -- Repeat RunBatchAsync on later worker turns while progress.code == "incomplete".
--- Enable the production migration flags only after progress.code == "completed"
--- and the source inventory has been independently reconciled.
+-- Enable the production migration flags only after the full source is reconciled,
+-- progress.code == "completed", and real fulfillment behavior is accepted.
 ~~~
 
-The source implements \`read_page(cursor, maximum)\` and returns \`{items, next_cursor, done, source_revision}\`. The checkpoint adapter implements \`GetAsyncFresh(key)\` and atomic \`UpdateAsync(key, transform)\`. Each invocation processes at most 8 pages and each source page at most 16 PurchaseIds. A partially imported or ambiguous batch leaves the cursor unchanged; replay is safe because the authority import is idempotent. The runner rejects a non-advancing cursor, malformed/dense-page violations, a changed source revision, and corrupt or conflicting checkpoints. It cannot prove that an application has found every historical purchase; the source inventory and migration completion declaration still require operator reconciliation and live-platform acceptance.
+The source implements \`read_page(cursor, maximum)\` and returns \`{items, next_cursor, done, source_revision}\`. The checkpoint adapter implements \`GetAsyncFresh(key)\` and atomic \`UpdateAsync(key, transform)\`. Each invocation processes at most 8 pages and each source page at most 16 PurchaseIds. A partially imported or ambiguous batch leaves the cursor unchanged; replay is safe because the authority import is idempotent. The runner rejects a non-advancing cursor, malformed/dense-page violations, a changed source revision, corrupt or conflicting checkpoints, terminal row-count mismatch, and terminal digest mismatch. The independent historical source and manifest still require operator reconciliation and live-platform acceptance. See [historical PurchaseId inventory reconciliation](docs/purchase-inventory-reconciliation.md).
 
 
 ## Optional cross-server mailbox wake-ups
@@ -864,8 +879,11 @@ local coordinator = PlayerDataErasure.new(manifest_store_adapter, {
     -- Set true only after auditing every user-key layout owned by PlayerDataCore.
     profile_family_verified = false,
 
-    -- Historical cleanup uses a deprecated Roblox API; default stays fail-closed.
-    allow_deprecated_remove_version = false,
+    -- Bind the durable plan to a reviewed complete application key-family manifest.
+    application_inventory_manifest_id = nil,
+
+    -- Keep false until every direct writer/recreation path is independently audited and fenced.
+    writer_inventory_verified = false,
 
     -- Verify the rendered templates against independent, deployment-specific evidence.
     verify_templates = function(user_id, rendered_templates)
@@ -884,13 +902,13 @@ end
 
 The default configuration deliberately does not certify RTBF coverage. Replace the example verification callback only after the full application's key families and templates have been independently audited. Every `additional_families` entry must provide complete inventory, exact templates, a durable writer fence, dependency checks, and a generation-aware action that validates the same erasure fence atomically with its mutation. Keep `ShouldBlockWrites(user_id)` fail-closed when manifest state is missing, corrupt, or uncertain.
 
-This adapter covers one known profile family; it cannot discover arbitrary DataStores or verify application-owned secondary keys. It does not make the overall application RTBF-complete. Historical-version removal, cross-server kick timing, stale-server behavior, and the full erasure flow still require acceptance in a real Roblox test experience before any completeness claim.
+This adapter covers one known profile family; it cannot discover arbitrary DataStores or verify application-owned secondary keys. The new inventory-manifest ID and writer-audit attestation are required by the adapter but do not create evidence by themselves. It does not make the overall application RTBF-complete. Historical-version retention, cross-server kick timing, stale-server behavior, and the full erasure flow still require acceptance in a real Roblox test experience before any completeness claim. Maintain the external inventory and direct-writer audit in [the RTBF application inventory guide](docs/rtbf-application-inventory.md).
 
 
 ## Independent maintenance runner
 
 `RecordStoreMaintenanceRunner` is an opt-in runner around `RecordStoreV2.Maintenance.NewCompactor`. It defaults to `dry_run`; `execute` mode refuses construction without both application authorization and a durable writer-fence callback. The runner rechecks authorization/fencing before a step and immediately before each generation-aware delete. Its checkpoint adapter must atomically compare the expected revision, persist the next revision, cursor, processed/removed counts and status, and return whether that write was confirmed.
 
-The application must supply `next_page(cursor, maximum)`, `inspect(item)`, `delete_if_generation(item, generation)`, `load_checkpoint()`, and `persist_checkpoint(checkpoint, expected_revision)` adapters. `inspect` must report an explicit status, eligibility, dependency-clear result, and observed generation. The deletion adapter must atomically compare the current generation against the inspected generation and revalidate the same durable writer fence as part of that mutation; a separate `assert_fence` call alone has a time-of-check/time-of-use race. Execute-mode delete outcomes are `deleted`, `already_absent`, `skipped`, and `unknown`; `dry_run` is only accepted when the runner explicitly enables dry-run mode, never from an execute-mode adapter. Unresolved or unsupported outcomes stop progress and preserve the prior page cursor. The `removed` counter counts eligible items confirmed absent (`deleted` or idempotent `already_absent`), not only physical deletions performed during the current attempt.
+The reusable `src/PlayerDataInitializer/RecordStoreMaintenanceRobloxAdapter.luau` implements bounded `ListKeysAsync` pagination, uncached `GetAsync` inspection, and revision-CAS checkpoints in a separate store. The application must still supply `is_eligible`, `dependencies_clear`, and `atomic_delete_if_generation(store, item, expected_generation, job_id)`. The delete callback must atomically compare the current generation and enforce the durable job fence within the protected mutation; a separate `assert_fence` call alone has a time-of-check/time-of-use race. The adapter deliberately has no unsafe default delete. Execute-mode delete outcomes are `deleted`, `already_absent`, `skipped`, and `unknown`; unresolved or unsupported outcomes stop progress and preserve the prior page cursor. The `removed` counter counts eligible items confirmed absent (`deleted` or idempotent `already_absent`), not only physical deletions performed during the current attempt. See [maintenance adapter integration](docs/maintenance-adapter-integration.md).
 
 `runner:Run(max_steps, batch_size, budget_ms)` defaults to at most eight steps, one key per checkpoint, and a 25 ms cooperative target. Single-key checkpoints are recommended for destructive operations. Multi-key pages are completed before advancing the page-level cursor. `budget_ms` is enforced between fully checkpointed steps; a slow page read or deletion can exceed the target, after which the runner yields without rereading or replaying work whose checkpoint was confirmed. Reuse the same stable `job_id` to resume the same inventory, and never reuse it for another job. The runner does not enumerate arbitrary DataStores, supply the application's key-family inventory, or implement a production delete adapter. Live Roblox storage validation remains a separate release gate.
