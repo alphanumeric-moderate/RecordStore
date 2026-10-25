@@ -376,7 +376,7 @@ function Runner.new(config: Config)
 			return { code = "invalid", message = "max_items must be an integer from 1 to 100" }
 		end
 		self.busy = true
-		local ok_call, output = pcall(function()
+		local ok_call, output = pcall(function(): { code: string, message: string?, checkpoint: Checkpoint? }
 			local checkpoint, checkpoint_error = ensure_checkpoint()
 			if checkpoint_error ~= nil or checkpoint == nil then
 				return { code = "unknown", message = checkpoint_error or "migration checkpoint is unavailable" }
@@ -407,7 +407,7 @@ function Runner.new(config: Config)
 	function self:Activate()
 		if self.busy then return { code = "busy" } end
 		self.busy = true
-		local ok_call, output = pcall(function()
+		local ok_call, output = pcall(function(): { code: string, message: string?, checkpoint: Checkpoint? }
 			local checkpoint, checkpoint_error = load()
 			if checkpoint_error ~= nil or checkpoint == nil then
 				return { code = "unknown", message = checkpoint_error or "migration checkpoint is unavailable" }
@@ -445,7 +445,7 @@ function Runner.new(config: Config)
 		return output
 	end
 
-	function self:GetStatus()
+	function self:GetStatus(): (Checkpoint?, string?)
 		local checkpoint, load_error = load()
 		if load_error ~= nil then return nil, load_error end
 		return checkpoint, nil

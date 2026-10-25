@@ -15019,6 +15019,7 @@ local function make_record(name: string, scope: string, key: string, options: Op
 	return record
 end
 
+rawset(RecordStore, "_scheduler_runtime", (function()
 local scheduler_governor = RecordStoreScheduler.new({
 	now_ms = function() return now_local() * 1000 end,
 	now_unix = now_unix,
@@ -15629,6 +15630,8 @@ RecordStore.shutdown = function()
 		task.wait(0.05)
 	end
 end
+	return { start = start_scheduler }
+end)())
 
 RecordStore._internals = {}
 RecordStore._internals.transact = (function()
@@ -18123,6 +18126,7 @@ RecordStore.new = (function()
 	local normalize_options = RecordStore._internals.normalize_options
 	local transact_engine = RecordStore._internals.transact :: (Record, string, string, TransactionReducer, TransactionOptions?, string?, JsonValue?, { OutboxEventSpec }?) -> (JsonValue?, TransactionStatus, string?)
 	local transaction_status_engine = (RecordStore._internals :: { [string]: any }).get_transaction_status :: (Record, string, JsonValue) -> TransactionReceiptStatus
+	local start_scheduler: () -> () = ((RecordStore :: any)._scheduler_runtime).start
 	return function(name: string, scope: string, key: string, options: Options): Record
 	if closing then
 		error("RecordStore is shutting down", 2)
@@ -18150,6 +18154,7 @@ RecordStore.Mock = (function()
 	local transact_engine = RecordStore._internals.transact :: (Record, string, string, TransactionReducer, TransactionOptions?, string?, JsonValue?, { OutboxEventSpec }?) -> (JsonValue?, TransactionStatus, string?)
 	local transaction_status_engine = (RecordStore._internals :: { [string]: any }).get_transaction_status :: (Record, string, JsonValue) -> TransactionReceiptStatus
 	local enqueue_mock = RecordStore._internals.enqueue_static.mock
+	local start_scheduler: () -> () = ((RecordStore :: any)._scheduler_runtime).start
 	local function mock_new(name: string, scope: string, key: string, options: Options): Record
 		if closing then
 			error("RecordStore is shutting down", 2)
@@ -18564,6 +18569,7 @@ game:BindToClose(RecordStore.shutdown)
 table.freeze(RecordStore._internals.enqueue_static)
 table.freeze(RecordStore._internals)
 rawset(RecordStore, "_internals", nil)
+rawset(RecordStore, "_scheduler_runtime", nil)
 table.freeze(RecordStore)
 
 return RecordStore
