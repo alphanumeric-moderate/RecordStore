@@ -7014,6 +7014,8 @@ export type Record = {
 
 local IMPLEMENTATION_VERSION = 2
 local QUEUE_IMPLEMENTATION_VERSION = 3
+local MAILBOX_V2_FREEZE_VERSION = QUEUE_IMPLEMENTATION_VERSION + 1
+local MAILBOX_V2_FREEZE_MARKER = "RecordStore.MailboxV2Freeze.v1"
 local DEFAULT_AUTOSAVE_INTERVAL = 300
 local DEFAULT_LEASE_DURATION = 180
 local DEFAULT_LEASE_RENEWAL = 60
@@ -9349,6 +9351,27 @@ local function parse_queue_envelope(
 		return nil, "durable queue is corrupt", false
 	end
 	local implementation_version = get_string_field(raw, "implementation_version")
+	if type(implementation_version) == "number" and implementation_version > QUEUE_IMPLEMENTATION_VERSION then
+		local owner = get_string_field(raw, "owner")
+		if type(owner) ~= "table" then
+			return nil, "durable queue uses an unsupported future implementation version", false
+		end
+		local owner_name = get_string_field(owner, "name")
+		local owner_scope = get_string_field(owner, "scope")
+		local owner_key = get_string_field(owner, "key")
+		if type(owner_name) ~= "string" or type(owner_scope) ~= "string" or type(owner_key) ~= "string" then
+			return nil, "durable queue uses an unsupported future implementation version", false
+		end
+		if owner_name ~= expected_owner.name or owner_scope ~= expected_owner.scope or owner_key ~= expected_owner.key then
+			return nil, "durable queue belongs to a different record identity", true
+		end
+		if implementation_version == MAILBOX_V2_FREEZE_VERSION
+			and get_string_field(raw, "migration_marker") == MAILBOX_V2_FREEZE_MARKER
+		then
+			return nil, "durable queue is frozen for Mailbox V2 migration; legacy queue writes are disabled", false
+		end
+		return nil, "durable queue uses an unsupported future implementation version", false
+	end
 	if type(implementation_version) ~= "number" or (implementation_version ~= 2 and implementation_version ~= QUEUE_IMPLEMENTATION_VERSION) then
 		return nil, "durable queue is corrupt", false
 	end
@@ -9460,7 +9483,12 @@ local function read_queue_after_update(
 	end
 	local queue, parse_message, owner_mismatch = parse_queue_envelope(value, owner)
 	if queue == nil then
-		return nil, if owner_mismatch then "conflict" else "corrupt", parse_message or "durable queue is corrupt"
+		local detail = parse_message or "durable queue is corrupt"
+		local code: ResultCode = if owner_mismatch then "conflict"
+			elseif string.find(detail, "unsupported future implementation version", 1, true) ~= nil then "future_schema"
+			elseif string.find(detail, "frozen for Mailbox V2 migration", 1, true) ~= nil then "migration"
+			else "corrupt"
+		return nil, code, detail
 	end
 	return queue, nil, nil
 end
@@ -9566,6 +9594,372 @@ local function queue_size_error(queue: QueueEnvelope, max_bytes: number): string
 	end
 	return nil
 end
+
+-- Mailbox V2 migration source bridge. The source queue remains in the same
+-- q2 key and is frozen by a future-version marker written atomically with
+-- UpdateAsync. Every source read below bypasses the read cache.
+type MailboxV2MigrationStatus = {
+	MigrationId: string,
+	FrozenAt: number,
+	SourceImplementationVersion: number,
+	ActiveCount: number,
+	DeadLetterCount: number,
+}
+
+type MailboxV2MigrationContext = {
+	backend: Backend,
+	owner: QueueOwner,
+	migration_id: string,
+	deadline: number,
+	max_bytes: number,
+}
+
+local function mailbox_v2_migration_context(
+	name: string,
+	scope: string,
+	key: string,
+	migration_id: string,
+	queue_store_name: string?,
+	max_queue_bytes: number?,
+	operation_deadline: number?,
+	mock: boolean
+): (MailboxV2MigrationContext?, ResultCode?, string?)
+	local valid_identity, identity_error = validate_store_identity(name, scope, key)
+	if not valid_identity then return nil, "invalid", identity_error end
+	if type(migration_id) ~= "string" or migration_id == "" or #migration_id > 96 then
+		return nil, "invalid", "migration_id must be 1 to 96 bytes"
+	end
+	local selected_store = queue_store_name or DEFAULT_QUEUE_STORE_NAME
+	if type(selected_store) ~= "string" or selected_store == "" or #selected_store > 50 then
+		return nil, "invalid", "queue_store_name must be 1 to 50 characters"
+	end
+	local max_bytes = max_queue_bytes or DEFAULT_QUEUE_MAX_BYTES
+	if type(max_bytes) ~= "number" or not math.isfinite(max_bytes) or math.floor(max_bytes) ~= max_bytes
+		or max_bytes < 1 or max_bytes > MAX_DATASTORE_BYTES
+	then
+		return nil, "invalid", "max_queue_bytes must be an integer from 1 to the DataStore value limit"
+	end
+	local deadline, deadline_error = resolve_operation_deadline(operation_deadline)
+	if deadline == nil then return nil, "invalid", deadline_error end
+	return {
+		backend = make_backend(selected_store, scope, make_queue_key_v2(name, scope, key), mock),
+		owner = make_queue_owner(name, scope, key),
+		migration_id = migration_id,
+		deadline = deadline,
+		max_bytes = max_bytes,
+	}, nil, nil
+end
+
+local function has_reserved_mailbox_v2_ids(queue: QueueEnvelope): boolean
+	for _, item in ipairs(queue.messages) do
+		local prefix = string.sub(item.id, 1, 4)
+		if prefix == "m2i-" or prefix == "m2g-" or prefix == "m2l-" then return true end
+	end
+	for _, item in ipairs(queue.dead_letters) do
+		local prefix = string.sub(item.id, 1, 4)
+		if prefix == "m2i-" or prefix == "m2g-" or prefix == "m2l-" then return true end
+	end
+	return false
+end
+
+local function inspect_mailbox_v2_freeze_marker(
+	raw: unknown,
+	owner: QueueOwner,
+	migration_id: string
+): (QueueEnvelope?, MailboxV2MigrationStatus?, ResultCode?, string?)
+	if type(raw) ~= "table" then
+		return nil, nil, "migration", "legacy durable queue is not frozen for Mailbox V2"
+	end
+	local marker = raw :: { [string]: unknown }
+	local version = get_string_field(marker, "implementation_version")
+	if version ~= MAILBOX_V2_FREEZE_VERSION
+		or get_string_field(marker, "migration_marker") ~= MAILBOX_V2_FREEZE_MARKER
+	then
+		if type(version) == "number" and version > QUEUE_IMPLEMENTATION_VERSION then
+			return nil, nil, "future_schema", "queue has an unsupported future migration marker version"
+		end
+		return nil, nil, "migration", "legacy durable queue has not been frozen for Mailbox V2"
+	end
+	local marker_owner = get_string_field(marker, "owner")
+	if type(marker_owner) ~= "table" then
+		return nil, nil, "corrupt", "Mailbox V2 freeze marker has no owner"
+	end
+	local owner_name = get_string_field(marker_owner, "name")
+	local owner_scope = get_string_field(marker_owner, "scope")
+	local owner_key = get_string_field(marker_owner, "key")
+	if type(owner_name) ~= "string" or type(owner_scope) ~= "string" or type(owner_key) ~= "string" then
+		return nil, nil, "corrupt", "Mailbox V2 freeze owner is malformed"
+	end
+	if owner_name ~= owner.name or owner_scope ~= owner.scope or owner_key ~= owner.key then
+		return nil, nil, "conflict", "frozen queue belongs to a different record identity"
+	end
+	local stored_migration_id = get_string_field(marker, "migration_id")
+	if type(stored_migration_id) ~= "string" or stored_migration_id == "" or #stored_migration_id > 96 then
+		return nil, nil, "corrupt", "Mailbox V2 freeze marker has an invalid migration ID"
+	end
+	if stored_migration_id ~= migration_id then
+		return nil, nil, "conflict", "legacy queue is frozen by a different migration ID"
+	end
+	local frozen_at = get_string_field(marker, "frozen_at")
+	local source_version = get_string_field(marker, "source_implementation_version")
+	if type(frozen_at) ~= "number" or not math.isfinite(frozen_at) or frozen_at < 0
+		or (source_version ~= 2 and source_version ~= QUEUE_IMPLEMENTATION_VERSION)
+	then
+		return nil, nil, "corrupt", "Mailbox V2 freeze metadata is malformed"
+	end
+
+	local source = table.clone(marker)
+	source.implementation_version = source_version
+	source.migration_marker = nil
+	source.migration_id = nil
+	source.source_implementation_version = nil
+	source.frozen_at = nil
+	local queue, parse_error, owner_mismatch = parse_queue_envelope(source, owner)
+	if queue == nil then
+		return nil, nil, if owner_mismatch then "conflict" else "corrupt", parse_error or "frozen source queue is invalid"
+	end
+	local status: MailboxV2MigrationStatus = {
+		MigrationId = stored_migration_id,
+		FrozenAt = frozen_at,
+		SourceImplementationVersion = source_version,
+		ActiveCount = #queue.messages,
+		DeadLetterCount = #queue.dead_letters,
+	}
+	return queue, status, nil, nil
+end
+
+local function build_mailbox_v2_freeze_candidate(
+	raw: unknown,
+	owner: QueueOwner,
+	migration_id: string,
+	frozen_at: number,
+	max_bytes: number
+): (unknown?, ResultCode?, string?)
+	if type(raw) == "table" then
+		local marker = raw :: { [string]: unknown }
+		if get_string_field(marker, "implementation_version") == MAILBOX_V2_FREEZE_VERSION
+			and get_string_field(marker, "migration_marker") == MAILBOX_V2_FREEZE_MARKER
+		then
+			local _, _, existing_code, existing_message = inspect_mailbox_v2_freeze_marker(marker, owner, migration_id)
+			if existing_code == nil then return nil, nil, nil end
+			return nil, existing_code, existing_message
+		end
+	end
+
+	local queue, parse_error, owner_mismatch = parse_queue_envelope(raw, owner)
+	if queue == nil then
+		if owner_mismatch then return nil, "conflict", parse_error end
+		if string.find(parse_error or "", "unsupported future implementation version", 1, true) ~= nil then
+			return nil, "future_schema", parse_error
+		end
+		return nil, "corrupt", parse_error or "legacy queue failed validation; no freeze marker was written"
+	end
+	if has_reserved_mailbox_v2_ids(queue) then
+		return nil, "conflict", "legacy queue contains an ID in a reserved Mailbox V2 namespace; source was not frozen"
+	end
+	if type(raw) == "table" then
+		local original = raw :: { [string]: unknown }
+		if original.migration_marker ~= nil or original.migration_id ~= nil
+			or original.source_implementation_version ~= nil or original.frozen_at ~= nil
+		then
+			return nil, "conflict", "legacy queue uses a reserved migration-marker field; source was not changed"
+		end
+	end
+
+	local source: { [string]: unknown }
+	local source_version: number
+	if type(raw) == "table" then
+		source = table.clone(raw :: { [string]: unknown })
+		source_version = get_string_field(raw, "implementation_version") :: number
+	else
+		source = {
+			owner = owner,
+			messages = {},
+			dead_letters = {},
+		}
+		source_version = QUEUE_IMPLEMENTATION_VERSION
+	end
+	source.implementation_version = MAILBOX_V2_FREEZE_VERSION
+	source.migration_marker = MAILBOX_V2_FREEZE_MARKER
+	source.migration_id = migration_id
+	source.source_implementation_version = source_version
+	source.frozen_at = frozen_at
+	local candidate = (source :: unknown) :: QueueEnvelope
+	local size_error = queue_size_error(candidate, max_bytes)
+	if size_error ~= nil then return nil, "capacity", size_error end
+	return source, nil, nil
+end
+
+local function begin_mailbox_v2_migration_internal(
+	name: string,
+	scope: string,
+	key: string,
+	migration_id: string,
+	queue_store_name: string?,
+	max_queue_bytes: number?,
+	operation_deadline: number?,
+	mock: boolean
+): (ResultCode, string?)
+	local context, context_error, context_message = mailbox_v2_migration_context(
+		name, scope, key, migration_id, queue_store_name, max_queue_bytes, operation_deadline, mock
+	)
+	if context == nil then return context_error or "invalid", context_message end
+	local frozen_at = queue_now_unix(mock)
+	if not math.isfinite(frozen_at) or frozen_at < 0 then
+		return "invalid", "queue clock returned an invalid Unix timestamp"
+	end
+
+	local _, _, update_code, update_message = backend_update(context.backend, function(current_raw)
+		local candidate = build_mailbox_v2_freeze_candidate(
+			current_raw, context.owner, context.migration_id, frozen_at, context.max_bytes
+		)
+		return candidate
+	end, context.deadline, nil)
+
+	-- The durable state, not UpdateAsync's possibly ambiguous response, decides.
+	local fresh, _, read_code, read_message = backend_get(context.backend, false, context.deadline, nil)
+	if read_code ~= nil then
+		return "unknown", "could not verify Mailbox V2 freeze marker: " .. (read_message or read_code)
+	end
+	local _, status, inspect_code, inspect_message =
+		inspect_mailbox_v2_freeze_marker(fresh, context.owner, context.migration_id)
+	if status ~= nil then return "success", nil end
+	if inspect_code == "conflict" then return "conflict", inspect_message end
+
+	local _, candidate_code, candidate_message = build_mailbox_v2_freeze_candidate(
+		fresh, context.owner, context.migration_id, frozen_at, context.max_bytes
+	)
+	if candidate_code ~= nil then return candidate_code, candidate_message end
+	if update_code ~= nil then return normalize_result_code(update_code) or "unknown", update_message or inspect_message end
+	return "unknown", "freeze update returned without a durable freeze marker"
+end
+
+local function get_mailbox_v2_migration_status_internal(
+	name: string,
+	scope: string,
+	key: string,
+	migration_id: string,
+	queue_store_name: string?,
+	max_queue_bytes: number?,
+	operation_deadline: number?,
+	mock: boolean
+): (MailboxV2MigrationStatus?, ResultCode, string?)
+	local context, context_error, context_message = mailbox_v2_migration_context(
+		name, scope, key, migration_id, queue_store_name, max_queue_bytes, operation_deadline, mock
+	)
+	if context == nil then return nil, context_error or "invalid", context_message end
+	local raw, _, code, message = backend_get(context.backend, false, context.deadline, nil)
+	if code ~= nil then return nil, normalize_result_code(code) or "unknown", message end
+	local _, status, marker_code, marker_message =
+		inspect_mailbox_v2_freeze_marker(raw, context.owner, context.migration_id)
+	if status == nil then return nil, marker_code or "migration", marker_message end
+	return status, "success", nil
+end
+
+local function get_mailbox_v2_migration_source_page_internal(
+	name: string,
+	scope: string,
+	key: string,
+	migration_id: string,
+	kind: string,
+	cursor: string?,
+	limit: number,
+	queue_store_name: string?,
+	max_queue_bytes: number?,
+	operation_deadline: number?,
+	mock: boolean
+): ({ [number]: { [string]: unknown } }?, string?, boolean, ResultCode, string?)
+	if kind ~= "active" and kind ~= "dead_letter" then
+		return nil, nil, false, "invalid", "kind must be active or dead_letter"
+	end
+	if type(limit) ~= "number" or not math.isfinite(limit) or math.floor(limit) ~= limit or limit < 1 or limit > 100 then
+		return nil, nil, false, "invalid", "page limit must be an integer from 1 to 100"
+	end
+	local offset = 0
+	if cursor ~= nil then
+		local parsed = if type(cursor) == "string" then tonumber(cursor) else nil
+		if type(parsed) ~= "number" or not math.isfinite(parsed) or math.floor(parsed) ~= parsed or parsed < 0
+			or tostring(parsed) ~= cursor
+		then
+			return nil, nil, false, "invalid", "migration cursor must be a canonical non-negative integer string"
+		end
+		offset = parsed
+	end
+	local context, context_error, context_message = mailbox_v2_migration_context(
+		name, scope, key, migration_id, queue_store_name, max_queue_bytes, operation_deadline, mock
+	)
+	if context == nil then return nil, nil, false, context_error or "invalid", context_message end
+	local raw, _, code, message = backend_get(context.backend, false, context.deadline, nil)
+	if code ~= nil then return nil, nil, false, normalize_result_code(code) or "unknown", message end
+	local queue, _, marker_code, marker_message =
+		inspect_mailbox_v2_freeze_marker(raw, context.owner, context.migration_id)
+	if queue == nil then return nil, nil, false, marker_code or "migration", marker_message end
+	local source: { any } = if kind == "active" then queue.messages else queue.dead_letters
+	if offset > #source then return nil, nil, false, "conflict", "migration cursor exceeds the frozen source length" end
+	local amount = math.min(limit, #source - offset)
+	local page: { [number]: { [string]: unknown } } = {}
+	for index = 1, amount do
+		local item = source[offset + index]
+		local legacy_item: { [string]: unknown } = {
+			id = item.id,
+			type = item.type,
+			data = copy_value(item.data),
+			attempts = item.attempts,
+			total_attempts = item.total_attempts,
+			replay_count = item.replay_count,
+			last_replay_token = item.last_replay_token,
+			sender_job_id = item.sender_job_id,
+			created_at = item.created_at,
+			locked_until = item.locked_until,
+		}
+		if kind == "dead_letter" then
+			local dead_letter = item :: DeadLetterItem
+			legacy_item.dead_lettered_at = dead_letter.dead_lettered_at
+			legacy_item.last_error = dead_letter.last_error
+			legacy_item.terminal_lock_token = dead_letter.terminal_lock_token
+		end
+		page[index] = legacy_item
+	end
+	local next_offset = offset + amount
+	local complete = next_offset >= #source
+	return page, if complete then nil else tostring(next_offset), complete, "success", nil
+end
+
+local function mailbox_v2_migration_api(mock: boolean)
+	return {
+		begin_mailbox_v2_migration_async = function(
+			name: string, scope: string, key: string, migration_id: string,
+			queue_store_name: string?, max_queue_bytes: number?, operation_deadline: number?
+		): (ResultCode, string?)
+			return begin_mailbox_v2_migration_internal(
+				name, scope, key, migration_id, queue_store_name, max_queue_bytes, operation_deadline, mock
+			)
+		end,
+		get_mailbox_v2_migration_status_async = function(
+			name: string, scope: string, key: string, migration_id: string,
+			queue_store_name: string?, max_queue_bytes: number?, operation_deadline: number?
+		): (MailboxV2MigrationStatus?, ResultCode, string?)
+			return get_mailbox_v2_migration_status_internal(
+				name, scope, key, migration_id, queue_store_name, max_queue_bytes, operation_deadline, mock
+			)
+		end,
+		get_mailbox_v2_migration_source_page_async = function(
+			name: string, scope: string, key: string, migration_id: string, kind: string,
+			cursor: string?, limit: number, queue_store_name: string?, max_queue_bytes: number?, operation_deadline: number?
+		): ({ [number]: { [string]: unknown } }?, string?, boolean, ResultCode, string?)
+			return get_mailbox_v2_migration_source_page_internal(
+				name, scope, key, migration_id, kind, cursor, limit,
+				queue_store_name, max_queue_bytes, operation_deadline, mock
+			)
+		end,
+	}
+end
+
+local mailbox_v2_migration_production = mailbox_v2_migration_api(false)
+RecordStore.begin_mailbox_v2_migration_async = mailbox_v2_migration_production.begin_mailbox_v2_migration_async
+RecordStore.get_mailbox_v2_migration_status_async = mailbox_v2_migration_production.get_mailbox_v2_migration_status_async
+RecordStore.get_mailbox_v2_migration_source_page_async = mailbox_v2_migration_production.get_mailbox_v2_migration_source_page_async
+
 
 local function normalize_queue_error(message: string): string
 	local printable = string.gsub(message, "[^ -~]", "?")
@@ -17652,6 +18046,11 @@ RecordStore.enqueue_async = (function()
 	end
 end)()
 
+local mailbox_v2_migration_production = mailbox_v2_migration_api(false)
+RecordStore.begin_mailbox_v2_migration_async = mailbox_v2_migration_production.begin_mailbox_v2_migration_async
+RecordStore.get_mailbox_v2_migration_status_async = mailbox_v2_migration_production.get_mailbox_v2_migration_status_async
+RecordStore.get_mailbox_v2_migration_source_page_async = mailbox_v2_migration_production.get_mailbox_v2_migration_source_page_async
+
 RecordStore.new = (function()
 	local normalize_options = RecordStore._internals.normalize_options
 	local transact_engine = RecordStore._internals.transact :: (Record, string, string, TransactionReducer, TransactionOptions?, string?, JsonValue?, { OutboxEventSpec }?) -> (JsonValue?, TransactionStatus, string?)
@@ -17955,6 +18354,7 @@ RecordStore.Mock = (function()
 		return closing
 	end
 
+	local mock_mailbox_v2_migration_api = mailbox_v2_migration_api(true)
 	local Mock = {
 		new = mock_new,
 		reconcile = function(record: Record): (ResultCode, string?)
@@ -18021,6 +18421,9 @@ RecordStore.Mock = (function()
 		enqueue_async = function(name: string, scope: string, key: string, message_type: string, data: JsonValue?, queue_store_name: string?, operation_deadline: number?): (ResultCode, string?)
 			return enqueue_mock(name, scope, key, message_type, data, queue_store_name, operation_deadline)
 		end,
+		begin_mailbox_v2_migration_async = mock_mailbox_v2_migration_api.begin_mailbox_v2_migration_async,
+		get_mailbox_v2_migration_status_async = mock_mailbox_v2_migration_api.get_mailbox_v2_migration_status_async,
+		get_mailbox_v2_migration_source_page_async = mock_mailbox_v2_migration_api.get_mailbox_v2_migration_source_page_async,
 		seed_queue_raw = function(name: string, scope: string, key: string, value: unknown, queue_store_name: string?): (ResultCode, string?)
 			return mock_seed_queue_value(name, scope, key, value, false, queue_store_name)
 		end,

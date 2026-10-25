@@ -144,7 +144,7 @@ local function legacy_fields(item: LegacyMessage): (string?, string?, any, numbe
 	local replay = if finite(item.replay_count) then item.replay_count else 0
 	local created_seconds = if finite(item.created_at) then item.created_at else item.CreatedAt
 	local error_message = if type(item.last_error) == "string" then item.last_error else item.LastError
-	if not valid_text(id, 50) or not valid_text(message_type, 100)
+	if not valid_text(id, 100) or not valid_text(message_type, 100)
 		or not finite(created_seconds) or created_seconds < 0 or created_seconds > 9_007_199_254_740
 		or not finite(attempts) or attempts < 0 or math.floor(attempts) ~= attempts
 		or not finite(total) or total < attempts or math.floor(total) ~= total
@@ -329,7 +329,7 @@ function Runner.new(config: Config)
 			local item = items[index]
 			if type(item) ~= "table" then return nil, "legacy page contains a non-table message" end
 			local id = if type(item.id) == "string" then item.id else item.Id
-			if not valid_text(id, 50) then return nil, "legacy page contains an invalid public message ID" end
+			if not valid_text(id, 100) then return nil, "legacy page contains an invalid public message ID" end
 			local imported_ok, imported_result = adapter_call(
 				if checkpoint.phase == "active" then self.mailbox.ImportLegacyAsync else self.mailbox.ImportLegacyDeadLetterAsync,
 				self.mailbox, item, self.migration_id
@@ -345,7 +345,7 @@ function Runner.new(config: Config)
 			end
 			local verified, verify_error = verify_import(item, if checkpoint.phase == "active" then "ready" else "dead_lettered")
 			if not verified then return nil, verify_error end
-			if not valid_text(id, 50) then return nil, "legacy page contains an invalid public message ID" end
+			if not valid_text(id, 100) then return nil, "legacy page contains an invalid public message ID" end
 		end
 
 		local phase = checkpoint.phase
