@@ -246,32 +246,16 @@ function MigrationRunner.new(config: Config)
 	end
 
 	local function persist_checkpoint(expected_revision: number, target: Checkpoint): (string, string?)
-		local decision = "unknown"
 		local call_ok, _, update_error = pcall(function()
 			return normalized.checkpoint_store:UpdateAsync(normalized.checkpoint_key, function(raw)
-				decision = "unknown"
 				if raw == nil then
-					if expected_revision ~= 0 then
-						decision = "conflict"
-						return nil
-					end
-					decision = "committed"
+					if expected_revision ~= 0 then return nil end
 					return copy_checkpoint(target)
 				end
-				local current, validation_error = valid_checkpoint(raw, normalized)
-				if current == nil then
-					decision = "corrupt"
-					return nil
-				end
-				if same_checkpoint(current, target) then
-					decision = "duplicate"
-					return nil
-				end
-				if current.revision ~= expected_revision then
-					decision = "conflict"
-					return nil
-				end
-				decision = "committed"
+				local current = valid_checkpoint(raw, normalized)
+				if current == nil then return nil end
+				if same_checkpoint(current, target) then return nil end
+				if current.revision ~= expected_revision then return nil end
 				return copy_checkpoint(target)
 			end)
 		end)
@@ -287,7 +271,10 @@ function MigrationRunner.new(config: Config)
 		if not call_ok or update_error ~= nil or read_error ~= nil then
 			return "unknown", tostring(update_error or read_error or "checkpoint update outcome is unresolved")
 		end
-		return decision, "durable checkpoint was not confirmed: " .. decision
+		if readback ~= nil and readback.revision ~= expected_revision then
+			return "conflict", "checkpoint revision changed before the migration cursor was committed"
+		end
+		return "unknown", "durable checkpoint was not confirmed by an uncached read"
 	end
 
 	local function result(code: string, checkpoint: Checkpoint, message: string?): RunResult
