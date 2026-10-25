@@ -1045,6 +1045,7 @@ do -- Corrupt manifests and forged coverage flags must not trigger erasure write
 	expect(verified_plan.rtbf_coverage_verified == true,
 		"forged-coverage regression failed to create an initially verified plan")
 	local stored_plan = forged_store.values["rv2erase-u783"]
+	stored_plan.status = "completed"
 	stored_plan.coverage.forged_family.status = "inventory_incomplete"
 	stored_plan.coverage.forged_family.inventory_complete = false
 	local forged_result = forged_erasure:ExecuteAsync(783, "forged-coverage", 8)
