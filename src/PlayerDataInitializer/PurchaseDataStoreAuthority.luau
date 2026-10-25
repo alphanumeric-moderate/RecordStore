@@ -20,6 +20,11 @@ export type StoreAdapter = {
 	UpdateAsync: (self: StoreAdapter, key: string, transform: (unknown) -> unknown?) -> (unknown, string?),
 }
 
+export type RequestRunner = (
+	operation: string,
+	call: () -> (unknown, string?)
+) -> (unknown, string?)
+
 export type Options = {
 	store_name: string,
 	scope: string?,
@@ -27,6 +32,7 @@ export type Options = {
 	store_adapter: StoreAdapter?,
 	now_unix: (() -> number)?,
 	get_request_budget: ((string) -> number)?,
+	request_runner: RequestRunner?,
 }
 
 type NormalizedOptions = {
@@ -37,6 +43,7 @@ type NormalizedOptions = {
 	is_injected: boolean,
 	now_unix: () -> number,
 	get_request_budget: ((string) -> number)?,
+	request_runner: RequestRunner?,
 }
 
 type Authority = {
@@ -186,30 +193,43 @@ local function make_native_store(store: any, options: NormalizedOptions): StoreA
 		if available < 1 then return false, "request budget exhausted for " .. kind end
 		return true, nil
 	end
-	function adapter:GetAsyncFresh(key: string): (unknown, string?)
-		local allowed, budget_error = has_budget("read")
-		if not allowed then return nil, budget_error end
-		local get_options = Instance.new("DataStoreGetOptions")
-		get_options.UseCache = false
-		local ok, value = pcall(function()
-			return store:GetAsync(key, get_options)
-		end)
-		if not ok then return nil, "fresh authority read failed: " .. tostring(value) end
-		return value, nil
-	end
-	function adapter:UpdateAsync(key: string, transform: (unknown) -> unknown?): (unknown, string?)
+	local function run_request(kind: string, call: () -> (unknown, string?)): (unknown, string?)
+		if options.request_runner ~= nil then
+			local ok, value, message = pcall(options.request_runner, kind, call)
+			if not ok then return nil, "request runner raised: " .. tostring(value) end
+			if message ~= nil then return nil, tostring(message) end
+			return value, nil
+		end
 		local read_allowed, read_error = has_budget("read")
 		if not read_allowed then return nil, read_error end
-		local write_allowed, write_error = has_budget("write")
-		if not write_allowed then return nil, write_error end
-		local ok, value = pcall(function()
-			return store:UpdateAsync(key, function(raw)
-				-- Caller transforms only inspect one value and return a new row or nil.
-				return transform(raw)
+		if kind == "update" then
+			local write_allowed, write_error = has_budget("write")
+			if not write_allowed then return nil, write_error end
+		end
+		return call()
+	end
+	function adapter:GetAsyncFresh(key: string): (unknown, string?)
+		local get_options = Instance.new("DataStoreGetOptions")
+		get_options.UseCache = false
+		return run_request("read", function()
+			local ok, value = pcall(function()
+				return store:GetAsync(key, get_options)
 			end)
+			if not ok then return nil, "fresh authority read failed: " .. tostring(value) end
+			return value, nil
 		end)
-		if not ok then return nil, "authority UpdateAsync outcome is uncertain: " .. tostring(value) end
-		return value, nil
+	end
+	function adapter:UpdateAsync(key: string, transform: (unknown) -> unknown?): (unknown, string?)
+		return run_request("update", function()
+			local ok, value = pcall(function()
+				return store:UpdateAsync(key, function(raw)
+					-- Caller transforms only inspect one value and return a new row or nil.
+					return transform(raw)
+				end)
+			end)
+			if not ok then return nil, "authority UpdateAsync outcome is uncertain: " .. tostring(value) end
+			return value, nil
+		end)
 	end
 	return adapter
 end
@@ -220,6 +240,7 @@ local function normalize_options(config: unknown): NormalizedOptions
 	for key in pairs(fields) do
 		if key ~= "store_name" and key ~= "scope" and key ~= "key_prefix"
 			and key ~= "store_adapter" and key ~= "now_unix" and key ~= "get_request_budget"
+			and key ~= "request_runner"
 		then
 			error("unsupported PurchaseDataStoreAuthority option: " .. tostring(key), 3)
 		end
@@ -247,6 +268,12 @@ local function normalize_options(config: unknown): NormalizedOptions
 	if fields.get_request_budget ~= nil and type(fields.get_request_budget) ~= "function" then
 		error("get_request_budget must be a function when provided", 3)
 	end
+	if fields.request_runner ~= nil and type(fields.request_runner) ~= "function" then
+		error("request_runner must be a function when provided", 3)
+	end
+	if fields.request_runner ~= nil and fields.store_adapter ~= nil then
+		error("request_runner is for the native DataStore adapter; injected store_adapter owns its own request policy", 3)
+	end
 	local normalized: NormalizedOptions = {
 		store_name = store_name :: string,
 		scope = scope :: string,
@@ -255,6 +282,7 @@ local function normalize_options(config: unknown): NormalizedOptions
 		is_injected = fields.store_adapter ~= nil,
 		now_unix = fields.now_unix :: (() -> number)? or os.time,
 		get_request_budget = fields.get_request_budget :: ((string) -> number)?,
+		request_runner = fields.request_runner :: RequestRunner?,
 	}
 	if normalized.is_injected ~= true then
 		local ok, store = pcall(function()
