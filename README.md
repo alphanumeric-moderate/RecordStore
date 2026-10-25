@@ -71,6 +71,9 @@ The repository also includes:
 - `src/PlayerDataInitializer/PlayerData.luau`: the shared controller ModuleScript required by the initializer and gameplay scripts.
 - `src/PlayerDataInitializer/PlayerDataCore.luau`: a configurable player session, leaderstats, persistence, retry, and shutdown controller.
 - `src/PlayerDataInitializer/RecordStore.luau`: the persistence, session ownership, versioning and recovery API, including its bounded request governor, scheduling policy, dispatcher, and durable Mailbox V2 implementation.
+- `src/PlayerDataInitializer/RecordStoreOutboxMailboxAdapter.luau`: source outbox dispatch to a destination Mailbox V2, with exact durable enqueue receipt verification.
+- `src/PlayerDataInitializer/RecordStoreOutboxConsumerAdapter.luau`: destination message worker that applies registered versioned reducers through a durable Inbox receipt before acknowledging delivery.
+- `src/PlayerDataInitializer/PurchaseReceiptProcessor.luau` and `PurchaseDataStoreAuthority.luau`: opt-in developer-product receipt processing with bounded per-profile idempotency and an optional global PurchaseId authority.
 - `src/PlayerDataInitializer/IntegerInfinityValue.luau`: a `NumberValue` factory that rounds finite values to integers while preserving positive infinity, negative infinity, and NaN. The default `kills` field uses this type so non-finite values are not silently replaced with zero.
 - `InfiniteMath.format(value, options?)`: the shared abbreviation formatter for native and InfiniteMath numbers. Formatting never changes stored values.
 - `src/PlayerDataInitializer/InfiniteMathValue.luau`: an adapter for the vendored InfiniteMath Revised module. It persists the number's normalized `first`/`second` pair inside a versioned JSON envelope and provides `get`/`set` helpers for a replicated StringValue backing instance. With the default schema, this adapter is not required during startup; `PlayerDataCore` loads it only when an `InfiniteMathValue` field is configured or used.
@@ -538,6 +541,39 @@ The destination receipt is the stable Mailbox V2 message ID. The source outbox i
 
 This is **durable mailbox acceptance**, not proof that the destination's eventual handler ran or that an arbitrary external side effect completed. Keep destination handlers idempotent, check `payload_version`, and treat external effects as at-least-once. The adapter never enables Mailbox V2 globally; the application supplies the rollout/activation guard.
 
+### Destination outbox consumer
+
+`src/PlayerDataInitializer/RecordStoreOutboxConsumerAdapter.luau` closes the destination-profile mutation path. Register a reducer for each supported event type and payload version, then call `ProcessBatchAsync(record, limit)` from a dedicated worker/maintenance loop. The reducer is a pure, non-yielding transformation passed into `RecordStoreV2.Inbox.ApplyAsync`; the source event ID is the durable Inbox idempotency key. The worker acknowledges a Mailbox V2 message only after the destination Inbox transaction returns `committed` or `duplicate`. If a profile write is uncertain, the message claim is lost, the destination locator does not match, or the payload version is unsupported, the worker leaves the message retryable. A redelivery after a successful mutation is safe because Inbox deduplicates the same exact event request.
+
+Do **not** call the consumer from `Record:ProcessQueueAsync()`. That method holds the Record queue mutex, which rejects a nested Inbox transaction. The consumer creates a separate Mailbox V2 instance for durable claim processing while still checking the active Record identity and explicit `activation_guard`. This does not make arbitrary external effects atomic: have the destination reducer record state and any next-step outbox intent together, then perform external effects through another idempotent adapter.
+
+```lua
+local Consumer = require(
+    game:GetService("ServerScriptService").PlayerDataInitializer.RecordStoreOutboxConsumerAdapter
+)
+local consumer = Consumer.new({
+    activation_guard = function(record, operation)
+        return record:GetState() == "active" and record:IsOpen()
+    end,
+    handlers = {
+        CreditBalance = {
+            payload_version = 1,
+            reduce = function(data, payload, event)
+                local updated = table.clone(data)
+                updated.coins += payload.amount
+                updated.last_event_id = event.EventId
+                return updated
+            end,
+        },
+    },
+})
+
+-- Call from a dedicated worker, not from record:ProcessQueueAsync().
+local progress = consumer:ProcessBatchAsync(active_records[destination_key], 8)
+```
+
+The adapter and its regression cases are wired into the final Lune runner but are still awaiting the deferred final verification phase and live multi-server acceptance.
+
 ```lua
 local adapter = RecordStoreOutboxMailboxAdapter.new({
     get_record = function(event)
@@ -597,7 +633,7 @@ After the bounded historical backfill and reconciliation completes, live receipt
 
 ### External durable PurchaseId authority
 
-An optional **external_purchase_authority** contract is available for experiences that need PurchaseId uniqueness across different player profiles. It is an adapter interface, not a built-in DataStore/Open Cloud service. The application must provide a globally shared, strongly consistent durable implementation with atomic operations and uncached status reads.
+An optional **external_purchase_authority** enforces PurchaseId identity across different player profiles. The repository includes `src/PlayerDataInitializer/PurchaseDataStoreAuthority.luau`, a concrete DataStore-backed implementation for all servers in one Roblox experience. Use a dedicated DataStore name/scope for this ledger. It maps each PurchaseId to a bounded key, stores the full ID in the durable row to detect hash collisions, uses atomic `UpdateAsync` for claims/commits, and confirms status through `GetAsync` with `DataStoreGetOptions.UseCache = false`. A hash collision, malformed row, conflicting player/product tuple, exhausted request budget, or unresolved write fails closed.
 
 The adapter implements **ClaimAsync(purchase_id, player_id, product_id)**, **CommitAsync(purchase_id, player_id, product_id, outcome)**, **GetStatusAsync(purchase_id, player_id, product_id)**, and **BackfillAsync(purchase_id, player_id, product_id)**. Every returned record contains the requested PurchaseId, PlayerId, ProductId, Status, and optional Outcome. For conflicting tuples, return a Status of **conflict** record echoing the requested tuple; do not disguise a conflict as a timeout or return an unvalidated record shape.
 
@@ -606,20 +642,34 @@ The adapter implements **ClaimAsync(purchase_id, player_id, product_id)**, **Com
 Configure both the existing per-profile ledger and the external authority:
 
 ~~~lua
+local PurchaseDataStoreAuthority = require(
+    game:GetService("ServerScriptService").PlayerDataInitializer.PurchaseDataStoreAuthority
+)
+local PurchaseReceiptProcessor = require(
+    game:GetService("ServerScriptService").PlayerDataInitializer.PurchaseReceiptProcessor
+)
+
+local authority = PurchaseDataStoreAuthority.new({
+    store_name = "ExperiencePurchaseAuthority",
+    scope = "global",
+    -- Optional: route direct DataStore calls through the application's shared request governor.
+    -- request_runner = request_runner,
+})
+
 local processor = PurchaseReceiptProcessor.new({
     get_record = get_active_record,
     receipt_retention_seconds = 30 * 24 * 60 * 60,
     permanent_purchase_ledger_key = "purchase_ledger",
     permanent_purchase_ledger_capacity = 8192,
     permanent_purchase_ledger_migration_complete = true,
-    external_purchase_authority = purchase_authority_adapter,
+    external_purchase_authority = authority,
     external_purchase_authority_migration_complete = true,
 })
 ~~~
 
 The two migration flags are operator assertions, not proof. Before enabling live grants, enumerate and reconcile the relevant historical PurchaseIds, use BackfillPermanentLedgerAsync against each owning active profile, and use BackfillExternalAuthorityAsync to import global history in bounded batches of at most 16. Persist source cursors externally and retry ambiguous batches using the same IDs. Set both flags only after both histories have been exhaustively reconciled. The local transaction records the profile grant and its per-profile receipt; the external authority is committed afterward. If the external commit is uncertain, the handler returns NotProcessedYet unless an uncached status read confirms completion, and the next delivery reconciles without running the reducer again.
 
-No production external-authority adapter or live service acceptance is included here. Until the application supplies and independently reviews that adapter and validates its multi-server behavior, the contract must not be described as production global uniqueness.
+The native DataStore adapter checks per-server read/write request budgets and fails fast instead of waiting when exhausted. `request_runner` is an optional hook for integration with the application's shared governor; it receives `read` or `update` plus a callback returning `(value, error)` and must preserve bounded admission and error semantics. An injected `store_adapter` is useful for deterministic regression scenarios but must itself provide atomic updates and truly uncached reads. The adapter does not itself enumerate historical PurchaseIds or set either migration flag. Those flags are operator assertions, and historical import plus cross-server response-loss behavior still require acceptance in a real Roblox experience.
 
 
 ## Optional cross-server mailbox wake-ups
