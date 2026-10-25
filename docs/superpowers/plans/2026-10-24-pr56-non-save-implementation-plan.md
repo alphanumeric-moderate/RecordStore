@@ -79,7 +79,8 @@
 - [x] Add identity-bound, read-only durable transaction receipt status lookup with committed/not-found/expired/conflict/unknown outcomes; the purchase adapter consults it before deferring an uncertain transaction.
 - [x] Add an opt-in bounded permanent per-profile purchase-ID ledger for developer products. The ledger and grant mutation commit in the same profile transaction, survive finite transaction-receipt expiry, reject ID rebinding and fail closed at capacity or corruption. Enabling it requires `permanent_purchase_ledger_migration_complete = true`, an operator declaration that historical PurchaseIds were backfilled or no earlier purchase history needs importing; the declaration is not independent proof. The ledger is per-profile, so global lifetime uniqueness needs a separate durable entitlement authority.
 - [x] Keep receipt processing scoped to the PR #39 legacy developer-product `ProcessReceipt` contract; unrelated purchase types are not required by the current design.
-- [ ] Complete live-platform purchase acceptance and historical PurchaseId backfill or configure an external entitlement authority when historical or global uniqueness is required.
+- [x] Add bounded `BackfillPermanentLedgerAsync` for application-supplied historical PurchaseId batches. It validates active profile/UserId ownership, commits ledger entries without a grant, reconciles unknown transaction outcomes, and defers live receipt grants while the migration gate is false.
+- [ ] Complete live-platform purchase acceptance and enumerate/reconcile all required historical PurchaseIds, or configure an external entitlement authority when historical/global uniqueness is required.
 
 ### Slice 4: Recoverable saga coordinator
 - [x] Add an opt-in durable cross-profile transfer saga with stable operation IDs, reservation/credit/settlement phases, compensation, durable status, and explicit unresolved outcomes.

@@ -34,11 +34,32 @@ export type Config = {
 
 export type ReceiptHandler = (receipt_info: unknown) -> EnumItem
 
+export type HistoricalPurchase = {
+	PurchaseId: string,
+	PlayerId: number,
+	ProductId: number,
+}
+
+export type BackfillResult = {
+	code: string,
+	processed_count: number,
+	backfilled_count: number,
+	duplicate_count: number,
+	failed_index: number?,
+	message: string?,
+}
+
 export type Processor = {
 	CreateHandler: (
 		self: Processor,
 		product_grant_reducers: { [number]: GrantReducer }
 	) -> ReceiptHandler,
+	BackfillPermanentLedgerAsync: (
+		self: Processor,
+		record: RecordStore.Record,
+		purchases: { HistoricalPurchase },
+		max_items: number?
+	) -> BackfillResult,
 }
 
 type NormalizedConfig = {
@@ -104,9 +125,9 @@ local function normalize_config(config: unknown): NormalizedConfig
 		or string.sub(ledger_key, 1, #"__recordstore_") == "__recordstore_"
 	then
 		error("permanent_purchase_ledger_key must be a non-reserved application data field of 1 to 96 bytes", 3)
-	elseif ledger_migration_complete ~= true then
-		error("permanent purchase ledger requires permanent_purchase_ledger_migration_complete=true after backfill or confirmation that no earlier purchases need importing", 3)
 	end
+	-- Keep the processor available for a read/reconcile-only ledger backfill.
+	-- The receipt handler itself remains blocked until this gate is true.
 	if ledger_capacity ~= nil and (type(ledger_capacity) ~= "number"
 		or not math.isfinite(ledger_capacity) or math.floor(ledger_capacity) ~= ledger_capacity
 		or ledger_capacity < 1 or ledger_capacity > MAX_PERMANENT_PURCHASE_LEDGER_ENTRIES)
@@ -218,6 +239,14 @@ local function create_handler(
 		local grant_reducer = product_grant_reducers[validated_product_id]
 		if grant_reducer == nil then
 			emit_diagnostic(config, "unsupported_product", nil, "no server-side grant reducer is configured", validated_product_id)
+			return not_processed_yet
+		end
+		if config.permanent_purchase_ledger_key ~= nil
+			and config.permanent_purchase_ledger_migration_complete ~= true
+		then
+			emit_diagnostic(config, "permanent_purchase_ledger_migration_required", "blocked",
+				"receipt grants are disabled until historical PurchaseIds are backfilled or explicitly reconciled",
+				validated_product_id)
 			return not_processed_yet
 		end
 
@@ -398,12 +427,257 @@ local function create_handler(
 	end
 end
 
+
+local BACKFILL_OPERATION_ID_PREFIX = "purchase-backfill:"
+local MAX_BACKFILL_PURCHASE_ID_BYTES = MAX_OPERATION_ID_BYTES - #BACKFILL_OPERATION_ID_PREFIX
+local MAX_BACKFILL_BATCH = 16
+
+local function backfill_permanent_ledger(
+	config: NormalizedConfig,
+	record: RecordStore.Record,
+	purchases: { HistoricalPurchase },
+	max_items: number?
+): BackfillResult
+	local result: BackfillResult = {
+		code = "invalid",
+		processed_count = 0,
+		backfilled_count = 0,
+		duplicate_count = 0,
+		failed_index = nil,
+		message = nil,
+	}
+	local ledger_key = config.permanent_purchase_ledger_key
+	if ledger_key == nil then
+		result.code = "unsupported"
+		result.message = "permanent_purchase_ledger_key is not configured"
+		return result
+	end
+
+	local limit = if max_items == nil then MAX_BACKFILL_BATCH else max_items
+	if type(limit) ~= "number" or not math.isfinite(limit) or math.floor(limit) ~= limit
+		or limit < 1 or limit > MAX_BACKFILL_BATCH
+	then
+		result.message = "max_items must be an integer from 1 to 16"
+		return result
+	end
+	if type(purchases) ~= "table" then
+		result.message = "purchases must be a dense array"
+		return result
+	end
+	local count = #purchases
+	if count < 1 or count > limit then
+		result.message = "purchases must contain 1 to max_items entries"
+		return result
+	end
+	local dense_count = 0
+	for key in pairs(purchases) do
+		if type(key) ~= "number" or not math.isfinite(key) or math.floor(key) ~= key
+			or key < 1 or key > count
+		then
+			result.message = "purchases must be a dense numeric array"
+			return result
+		end
+		dense_count += 1
+	end
+	if dense_count ~= count then
+		result.message = "purchases must be a dense numeric array"
+		return result
+	end
+
+	local session_ok, session_state, session_open, identity = pcall(function()
+		return record:GetState(), record:IsOpen(), record:GetIdentity()
+	end)
+	if not session_ok or session_state ~= "active" or session_open ~= true or type(identity) ~= "table" then
+		result.code = "fenced"
+		result.message = "historical ledger backfill requires active profile ownership"
+		return result
+	end
+	if type(identity.user_ids) ~= "table" then
+		result.code = "fenced"
+		result.message = "profile identity does not expose UserIds for ownership verification"
+		return result
+	end
+	local allowed_players: { [number]: boolean } = {}
+	for _, user_id in ipairs(identity.user_ids) do
+		if not is_positive_integer(user_id) then
+			result.code = "fenced"
+			result.message = "profile UserId metadata is malformed"
+			return result
+		end
+		allowed_players[user_id] = true
+	end
+
+	-- Validate the complete batch before the first write so malformed input
+	-- cannot leave a partially imported batch.
+	local purchase_id_by_index: { [number]: string } = {}
+	local player_id_by_index: { [number]: number } = {}
+	local product_id_by_index: { [number]: number } = {}
+	for index = 1, count do
+		local item = purchases[index]
+		if type(item) ~= "table" then
+			result.message = "purchase entry must be a table"
+			result.failed_index = index
+			return result
+		end
+		local purchase_id = item.PurchaseId
+		local player_id = item.PlayerId
+		local product_id = item.ProductId
+		if type(purchase_id) ~= "string" or purchase_id == ""
+			or #purchase_id > MAX_BACKFILL_PURCHASE_ID_BYTES
+			or string.find(purchase_id, "%c") ~= nil
+			or not is_positive_integer(player_id)
+			or not is_positive_integer(product_id)
+		then
+			result.message = "historical PurchaseId, PlayerId, or ProductId is malformed"
+			result.failed_index = index
+			return result
+		end
+		if not allowed_players[player_id :: number] then
+			result.code = "fenced"
+			result.message = "historical PlayerId is not associated with this active profile"
+			result.failed_index = index
+			return result
+		end
+		purchase_id_by_index[index] = purchase_id :: string
+		player_id_by_index[index] = player_id :: number
+		product_id_by_index[index] = product_id :: number
+	end
+
+	local function get_marker(value: unknown): string?
+		if type(value) ~= "table" then return nil end
+		local marker = (value :: { [string]: unknown })[PERMANENT_LEDGER_RESULT_KEY]
+		if type(marker) ~= "table" then return nil end
+		local status = (marker :: { [string]: unknown }).status
+		return if type(status) == "string" then status else nil
+	end
+
+	local function apply_one(index: number): (string, string?)
+		local purchase_id = purchase_id_by_index[index]
+		local player_id = player_id_by_index[index]
+		local product_id = product_id_by_index[index]
+		local operation_id = BACKFILL_OPERATION_ID_PREFIX .. purchase_id
+		local request: RecordStore.JsonValue = {
+			receipt_type = "developer_product_backfill",
+			purchase_id = purchase_id,
+			player_id = player_id,
+			product_id = product_id,
+		}
+		local transaction_reducer: RecordStore.TransactionReducer = function(current_data, _unused)
+			local function marker(status: string): RecordStore.JsonValue
+				return { [PERMANENT_LEDGER_RESULT_KEY] = { status = status } }
+			end
+			if type(current_data) ~= "table" then return current_data, marker("corrupt") end
+			local current = current_data :: { [string]: RecordStore.JsonValue }
+			for key in pairs(current) do
+				if type(key) ~= "string" then return current_data, marker("corrupt") end
+			end
+			local raw_ledger = current[ledger_key :: string]
+			if raw_ledger ~= nil and type(raw_ledger) ~= "table" then
+				return current_data, marker("corrupt")
+			end
+			local ledger: { [string]: RecordStore.JsonValue } = {}
+			local prior_count = 0
+			if raw_ledger ~= nil then
+				for prior_id, raw_prior in pairs(raw_ledger :: { [string]: RecordStore.JsonValue }) do
+					if type(prior_id) ~= "string" or prior_id == ""
+						or #prior_id > MAX_PURCHASE_ID_BYTES or type(raw_prior) ~= "table"
+					then
+						return current_data, marker("corrupt")
+					end
+					local prior = raw_prior :: { [string]: RecordStore.JsonValue }
+					if not is_positive_integer(prior.player_id) or not is_positive_integer(prior.product_id) then
+						return current_data, marker("corrupt")
+					end
+					ledger[prior_id] = {
+						player_id = prior.player_id,
+						product_id = prior.product_id,
+					}
+					prior_count += 1
+				end
+			end
+			local prior = ledger[purchase_id]
+			if prior ~= nil then
+				local prior_fields = prior :: { [string]: RecordStore.JsonValue }
+				if prior_fields.player_id == player_id and prior_fields.product_id == product_id then
+					return current_data, marker("duplicate")
+				end
+				return current_data, marker("conflict")
+			end
+			if prior_count >= (config.permanent_purchase_ledger_capacity :: number) then
+				return current_data, marker("capacity")
+			end
+			ledger[purchase_id] = {
+				player_id = player_id,
+				product_id = product_id,
+			}
+			local next_data = table.clone(current)
+			next_data[ledger_key :: string] = ledger
+			return next_data, marker("backfilled")
+		end
+
+		local call_ok, transaction_value, transaction_status, transaction_message = pcall(function()
+			return record:TransactAsync(operation_id, transaction_reducer, {
+				request = request,
+				receipt_retention_seconds = config.receipt_retention_seconds,
+			})
+		end)
+		if call_ok and (transaction_status == "committed" or transaction_status == "duplicate") then
+			local status = get_marker(transaction_value)
+			if status == "backfilled" then
+				return if transaction_status == "duplicate" then "duplicate" else "backfilled", nil
+			elseif status == "duplicate" then
+				return "duplicate", nil
+			elseif status ~= nil then
+				return status, "permanent ledger rejected the historical purchase"
+			end
+		end
+
+		if not call_ok or transaction_status == "unknown" then
+			local status_ok, durable_status = pcall(function()
+				return record:GetTransactionStatusAsync(operation_id, request)
+			end)
+			if status_ok and type(durable_status) == "table" and durable_status.code == "committed" then
+				local status = get_marker(durable_status.result)
+				if status == "backfilled" or status == "duplicate" then
+					return "duplicate", nil
+				elseif status ~= nil then
+					return status, "durable ledger rejected the historical purchase"
+				end
+			end
+			if status_ok and type(durable_status) == "table" and durable_status.code == "conflict" then
+				return "conflict", durable_status.message or "backfill operation ID conflicts with another request"
+			end
+			return "unknown", "historical PurchaseId backfill outcome is unresolved; retry the same PurchaseIds"
+		end
+		return if type(transaction_status) == "string" then transaction_status else "unknown",
+			transaction_message or "historical PurchaseId backfill did not commit"
+	end
+
+	for index = 1, count do
+		local status, message = apply_one(index)
+		if status == "backfilled" or status == "duplicate" then
+			result.processed_count += 1
+			if status == "backfilled" then result.backfilled_count += 1 else result.duplicate_count += 1 end
+		else
+			result.code = if result.processed_count > 0 then "partial" else status
+			result.failed_index = index
+			result.message = message or ("backfill stopped with status " .. status)
+			return result
+		end
+	end
+	result.code = if result.backfilled_count == 0 then "duplicate" else "complete"
+	return result
+end
+
 function PurchaseReceiptProcessor.new(config: Config): Processor
 	local normalized = normalize_config(config)
 	local processor: Processor = {
 		CreateHandler = function(_self, product_grant_reducers)
 			local reducers = copy_product_reducers(product_grant_reducers)
 			return create_handler(normalized, reducers)
+		end,
+		BackfillPermanentLedgerAsync = function(_self, record, purchases, max_items)
+			return backfill_permanent_ledger(normalized, record, purchases, max_items)
 		end,
 	}
 	return processor
