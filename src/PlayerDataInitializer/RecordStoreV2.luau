@@ -1527,6 +1527,16 @@ local function saga_coordinator(store, options)
 		if value.last_error ~= nil and (type(value.last_error) ~= "string" or #value.last_error > 256) then
 			return false
 		end
+		local status_matches_phase =
+			(value.phase == "requested" and (value.status == "pending" or value.status == "reconciliation_required"))
+			or (value.phase == "reserved" and value.status == "pending")
+			or ((value.phase == "credit_pending" or value.phase == "credited")
+				and (value.status == "pending" or value.status == "reconciliation_required"))
+			or (value.phase == "compensation_pending" and value.status == "reconciliation_required")
+			or (value.phase == "settled" and value.status == "settled")
+			or (value.phase == "rejected" and value.status == "rejected")
+			or (value.phase == "manual_resolution_required" and value.status == "manual_resolution_required")
+		if not status_matches_phase then return false end
 		if value.manual_resolution ~= nil and type(value.manual_resolution) ~= "table" then return false end
 		if value.phase == "manual_resolution_required" and type(value.manual_resolution) ~= "table" then return false end
 		return true
@@ -1633,6 +1643,7 @@ local function saga_coordinator(store, options)
 			reason = sanitized_reason,
 		})
 		if not manual_request_material then return { code = "invalid", message = manual_request_error } end
+		local requested_at = os.time()
 		local value, code, message = update_saga(id, request, function(current)
 			if current.phase == "settled" or current.phase == "rejected" then return nil, "conflict" end
 			if current.phase == "manual_resolution_required" then
@@ -1648,7 +1659,7 @@ local function saga_coordinator(store, options)
 				request_material = manual_request_material,
 				requested_by = operator_id,
 				reason = sanitized_reason,
-				requested_at = os.time(),
+				requested_at = requested_at,
 				prior_phase = current.phase,
 				prior_status = current.status,
 			}
@@ -1734,6 +1745,7 @@ local function saga_coordinator(store, options)
 			evidence_id = durable_evidence_id
 		end
 		local snapshot_attempts, snapshot_updated_at = observed.attempts, observed.updated_at
+		local resolved_at = os.time()
 		local value, code, message = update_saga(id, request, function(current)
 			local current_manual = current.manual_resolution
 			if current.phase ~= "manual_resolution_required" or type(current_manual) ~= "table"
@@ -1749,7 +1761,6 @@ local function saga_coordinator(store, options)
 				return nil, "conflict"
 			end
 			if current.attempts ~= snapshot_attempts or current.updated_at ~= snapshot_updated_at then return nil, "conflict" end
-			local resolved_at = os.time()
 			current_manual.resolution = {
 				resolution_id = resolution_id,
 				request_material = resolution_request_material,
