@@ -11,7 +11,13 @@ for _, path in {
 	"src/PlayerDataInitializer/PurchaseReceiptProcessor.luau",
 	"src/PlayerDataInitializer/RecordStoreOutboxMailboxAdapter.luau",
 	"src/PlayerDataInitializer/RecordStoreV2.luau",
+	"src/PlayerDataInitializer/RecordStoreV2Acceleration.luau",
+	"src/PlayerDataInitializer/PlayerDataErasure.luau",
 	"src/PlayerDataInitializer/RecordStoreMaintenanceRunner.luau",
+	"bench/DeterministicCrashSimulator.luau",
+	"bench/run_erasure_regression.luau",
+	"bench/run_crash_simulator_regression.luau",
+	"bench/run_acceleration_regression.luau",
 	"bench/run_offline_maintenance_runner_regression.luau",
 	"tests/RecordStoreV2NonSaveServicesRegression.server.luau",
 	"tests/RecordStore_OutboxMailboxAdapterRegression.server.luau",
@@ -89,4 +95,7 @@ Shim.run_script("tests/RecordStore_OutboxMailboxAdapterRegression.server.luau")
 Shim.run_script("tests/RecordStoreV2NonSaveServicesRegression.server.luau")
 Shim.run_script("bench/run_scheduler_bugfix_regression.luau")
 Shim.run_script("tests/RecordStore_NonSaveRoadmapRegression.server.luau")
+Shim.run_script("bench/run_erasure_regression.luau")
+Shim.run_script("bench/run_crash_simulator_regression.luau")
+Shim.run_script("bench/run_acceleration_regression.luau")
 Shim.close()
