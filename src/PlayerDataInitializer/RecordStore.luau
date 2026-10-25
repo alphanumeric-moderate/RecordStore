@@ -4699,6 +4699,18 @@ do
 		end
 		if not valid_text(message_type, 100) then return nil, nil, "legacy message type must be 1 to 100 bytes" end
 
+		local locked_until = legacy.locked_until
+		if locked_until ~= nil and (not is_finite(locked_until) or (locked_until :: number) < 0
+			or (locked_until :: number) > 9_007_199_254_740)
+		then
+			return nil, nil, "legacy locked_until must be a finite Unix timestamp in seconds"
+		end
+		if target == "active" and is_finite(locked_until)
+			and (locked_until :: number) > self:_now() / 1000
+		then
+			return nil, nil, "legacy message still has an unexpired processing lease; wait for expiry and reconcile the old handler before migration"
+		end
+
 		local attempts = if is_finite(legacy.attempts) then legacy.attempts else 0
 		local total_attempts = if is_finite(legacy.total_attempts) then legacy.total_attempts else attempts
 		local replay_count = if is_finite(legacy.replay_count) then legacy.replay_count else 0

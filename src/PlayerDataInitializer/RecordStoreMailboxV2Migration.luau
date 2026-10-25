@@ -287,9 +287,12 @@ function Runner.new(config: Config)
 		if not ok or type(snapshot) ~= "table" or type(result) ~= "table" or result.code ~= "success" then
 			return false, "imported message could not be read back by its original public ID"
 		end
+		local raw_sender = if type(item.sender_job_id) == "string" then item.sender_job_id
+			else if type(item.SenderJobId) == "string" then item.SenderJobId else ""
 		if snapshot.Id ~= id or snapshot.Type ~= message_type or snapshot.State ~= expected_state
 			or snapshot.Attempts ~= attempts or snapshot.TotalAttempts ~= total
 			or snapshot.ReplayCount ~= replay or snapshot.CreatedAt ~= created_ms
+			or snapshot.SenderJobId ~= raw_sender
 			or not deep_equal(snapshot.Data, payload)
 		then
 			return false, "imported message does not match the frozen legacy record"
@@ -297,19 +300,21 @@ function Runner.new(config: Config)
 		if expected_state == "dead_lettered" then
 			local deadlettered = if finite(item.dead_lettered_at) then item.dead_lettered_at else item.DeadLetteredAt
 			local expected_deadlettered = if finite(deadlettered) then math.floor(deadlettered * 1000) else created_ms
-			if snapshot.DeadLetteredAt ~= expected_deadlettered then
-				return false, "imported dead-letter timestamp does not match the frozen source"
+			local raw_error = if type(item.last_error) == "string" then item.last_error
+				else if type(item.LastError) == "string" then item.LastError else "Imported from legacy V3 dead-letter queue"
+			if snapshot.DeadLetteredAt ~= expected_deadlettered or snapshot.LastError ~= raw_error then
+				return false, "imported dead-letter timestamp or error does not match the frozen source"
 			end
 		end
 		return true, nil
 	end
 
-	local function step_page(checkpoint: Checkpoint): (Checkpoint?, string?)
+	local function step_page(checkpoint: Checkpoint, page_limit: number): (Checkpoint?, string?)
 		local page_reader = if checkpoint.phase == "active" then self.read_active_page else self.read_dead_letter_page
-		local read_ok, items, next_cursor, complete, read_message = adapter_call(page_reader, self.migration_id, checkpoint.cursor, self.page_size)
-		if not read_ok then return nil, "legacy page reader failed" end
-		if read_message ~= nil then return nil, tostring(read_message) end
-		local valid, count = dense_page(items, self.page_size)
+		local read_ok, items, next_cursor, complete, read_message = adapter_call(page_reader, self.migration_id, checkpoint.cursor, page_limit)
+		if not read_ok then return nil, "unknown: legacy page reader failed" end
+		if read_message ~= nil then return nil, "unknown: " .. tostring(read_message) end
+		local valid, count = dense_page(items, page_limit)
 		if not valid then return nil, "legacy page is not a dense bounded array" end
 		if type(complete) ~= "boolean" then return nil, "legacy page reader did not return a completion flag" end
 		if complete then
@@ -322,7 +327,9 @@ function Runner.new(config: Config)
 
 		for index = 1, count do
 			local item = items[index]
+			if type(item) ~= "table" then return nil, "legacy page contains a non-table message" end
 			local id = if type(item.id) == "string" then item.id else item.Id
+			if not valid_text(id, 50) then return nil, "legacy page contains an invalid public message ID" end
 			local imported_ok, imported_result = adapter_call(
 				if checkpoint.phase == "active" then self.mailbox.ImportLegacyAsync else self.mailbox.ImportLegacyDeadLetterAsync,
 				self.mailbox, item, self.migration_id
@@ -332,7 +339,9 @@ function Runner.new(config: Config)
 				then imported_result.code == "accepted" or imported_result.code == "duplicate"
 				else imported_result.code == "dead_lettered" or imported_result.code == "duplicate"
 			if not allowed then
-				return nil, "legacy import paused with status " .. tostring(imported_result.code)
+				local code = tostring(imported_result.code)
+				local prefix = if code == "unknown" then "unknown: " else "blocked: "
+				return nil, prefix .. "legacy import paused with status " .. code
 			end
 			local verified, verify_error = verify_import(item, if checkpoint.phase == "active" then "ready" else "dead_lettered")
 			if not verified then return nil, verify_error end
@@ -367,7 +376,7 @@ function Runner.new(config: Config)
 			return { code = "invalid", message = "max_items must be an integer from 1 to 100" }
 		end
 		self.busy = true
-		local ok_call, result = pcall(function()
+		local ok_call, output = pcall(function()
 			local checkpoint, checkpoint_error = ensure_checkpoint()
 			if checkpoint_error ~= nil or checkpoint == nil then
 				return { code = "unknown", message = checkpoint_error or "migration checkpoint is unavailable" }
@@ -376,21 +385,14 @@ function Runner.new(config: Config)
 			if checkpoint.phase == "ready_to_activate" then return { code = "ready_to_activate", checkpoint = checkpoint } end
 			local frozen, frozen_error = verify_frozen()
 			if not frozen then return { code = "fenced", message = frozen_error } end
-			return nil
-		end)
-		self.busy = false
-		if not ok_call then return { code = "unknown", message = "migration coordinator raised an unexpected error" } end
-		if result ~= nil then return result end
-
-		self.busy = true
-		local succeeded, output = pcall(function()
-			local checkpoint, checkpoint_error = load()
-			if checkpoint_error ~= nil or checkpoint == nil then
-				return { code = "unknown", message = checkpoint_error or "migration checkpoint disappeared" }
-			end
-			local next_checkpoint, step_error = step_page(checkpoint)
+			local next_checkpoint, step_error = step_page(checkpoint, limit)
 			if next_checkpoint == nil then
-				return { code = if string.sub(step_error or "", 1, 7) == "unknown" then "unknown" else "blocked", message = step_error }
+				local detail = step_error or "migration step could not be verified"
+				return {
+					code = if string.sub(detail, 1, 9) == "unknown: " then "unknown" else "blocked",
+					message = detail,
+					checkpoint = checkpoint,
+				}
 			end
 			return {
 				code = if next_checkpoint.phase == "ready_to_activate" then "ready_to_activate" else "progress",
@@ -398,7 +400,7 @@ function Runner.new(config: Config)
 			}
 		end)
 		self.busy = false
-		if not succeeded then return { code = "unknown", message = "migration step raised an unexpected error" } end
+		if not ok_call then return { code = "unknown", message = "migration step raised an unexpected error" } end
 		return output
 	end
 
