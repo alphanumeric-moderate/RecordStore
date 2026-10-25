@@ -1,8 +1,8 @@
-# PR #56 Non-Save PR #39 Implementation Plan
+# PR #56 Durable and Non-Save PR #39 Implementation Plan
 
 > Execution: implement in bounded, testable slices on `feat/pr39-non-save-operations-2026-10-24`; keep PR #56 a draft until all merge gates for the delivered scope pass.
 
-**Goal:** Implement the remaining non-save features defined by PR #39, including missing non-save functionality around the merged PR #37 scheduler, while leaving PR #55's durable-save recovery and PlayerData durability/backpressure work separate.
+**Goal:** Make PR #56 the superset implementation for PR #39: finish the remaining non-save work and incorporate the durable-save recovery, freshness-budget, and PlayerData mutation-admission scope previously tracked in PR #55. PR #56 must surpass the standalone #55 proposal without introducing a parallel or weaker save protocol.
 
 **Architecture:** Keep profile-key DataStore envelopes authoritative and all local scheduler, MemoryStore, MessagingService, cache, index, maintenance and tracing state advisory unless a feature has its own explicit durable protocol. Extend the existing embedded Mailbox V2 and RecordStore abstractions rather than adding a parallel persistence protocol. Each write transform remains pure, deterministic, non-yielding and side-effect free. New durable features stay disabled until their correctness and rollout gates pass.
 
@@ -21,7 +21,7 @@
 
 ## Global Constraints
 
-- PR #55 owns P0 save/renewal/release uncertainty recovery, durability SLO/backpressure, and PlayerData mutation admission; do not duplicate or weaken those changes.
+- PR #56 subsumes the relevant P0 durable-save scope previously proposed in PR #55: bounded save/renewal/release uncertainty recovery, freshness budgets, mutation backpressure and opt-in lease recovery. Keep one authoritative implementation in this branch; do not treat PR #55 as a separate scope boundary.
 - Cross-key workflows are not atomic, arbitrary callbacks are not exactly-once, and unknown outcomes are never treated as confirmed non-commit.
 - All accepted durable work must remain discoverable through bounded recovery; no whole-keyspace scans on request paths.
 - Do not physically delete records without a durable tombstone/fence, verified references, and reconciled ambiguous writes.
@@ -53,6 +53,16 @@
 - [x] Add focused tests for reserved work-class aliases, dependency terminal history while queued/in-flight dependents hold references, and bounded reclamation after all dependents terminate.
 - [x] Fix only reproduced defects; preserve queue bounds and critical-lane isolation. This slice fixed the proven V2 transaction API signature mismatch, removed the unsafe read-before-reserve balance rejection that could strand an all-balance reservation after response loss, and persists `compensation_pending` before invoking refund.
 - [x] Record intentional omissions: no cross-server server/master ranking; no durable due-time index without measured need; no automatic Roblox request-rate manipulation; no reprioritization operation in the initial schema; and priority never bypasses ordering, claim fencing, or the reserved critical persistence lane. Local wakeups remain disposable hints backed by bounded polling/reconciliation.
+
+### Slice 1.5: Durable-save recovery, freshness budgets and mutation admission (PR #39 §26.13; subsumes PR #55)
+
+- [x] Port bounded unknown-outcome reconciliation for save, lease renewal and release. Retain immutable operation identity/snapshot, verify the authoritative durable envelope, and retry only through a conditional UpdateAsync while owner token, generation, revision and lease margin remain valid.
+- [x] Add same-process expired-lease recovery behind `lease_recovery_enabled = false` by default. Reacquisition requires an unchanged base write ID/revision/generation/session/job/place identity, an expired lease, a new stable recovery operation/token, and a generation advance; it never replays the uncertain save snapshot.
+- [x] Add validated `max_dirty_age_seconds` and `durability_mode` policies (`balanced`, `durability_first`, `read_only_on_risk`), edge-triggered durability-risk/recovered events, dirty/durable watermarks, oldest-dirty-age evidence, and age-aware autosave selection while preserving due lease renewal and the critical persistence reserve.
+- [x] Wire PlayerDataCore overrides for freshness policy and mutation admission. `read_only_on_risk` rejects new Set calls on verified persistence risk and restores tracked Value-object edits rejected by the pending buffer; accepted pending values remain eligible for flush.
+- [x] Port a deterministic pre-UpdateAsync mock fault hook, production-adapter fake DataStore harness, ambiguous-write recovery regressions, PlayerData backpressure regressions, a focused CodSpeed benchmark entry and CI regression step.
+- [ ] Execute the new/updated durable-save regression suite, Luau typechecks and production-adapter fault matrix on the current final head; wiring coverage is not evidence that the recovery state machine passes.
+- [ ] Independently review the full durable-save diff against the PR #39 §26.13 contract, including every uncertain-result branch and lease-reacquisition invariant.
 
 ### Slice 2: Mailbox V2 protocol and operations
 - [x] Add an opt-in outbox destination adapter that validates destination identity/UserId, requires an explicit activation guard, binds the embedded Mailbox V2 to an active destination Record, and acknowledges only accepted/duplicate enqueue results whose canonical destination record has been read back uncached and matched against the exact event ID/type/payload.
@@ -141,7 +151,7 @@
 
 ## Current status
 
-Implementation status; regression suites are wired but not executed on the current final head:
+Implementation status; PR #56 includes the durable-save scope as well as the non-save scope. Regression suites are wired but not executed on the current final head:
 - Read-only session lease diagnostics and bounded Mailbox V2 maintenance orchestration.
 - Profile Doctor point-in-time inspection and bounded historical version diffs with path/type-only output.
 - Process-local migration registration with stable IDs/implementation revisions, compatibility validation, forward-only edges, ambiguity rejection, and read-only migration previews.
@@ -151,6 +161,6 @@ Implementation status; regression suites are wired but not executed on the curre
 - Regression coverage for inbox/transaction receipt saturation and expiry recovery: full collections reject new operation IDs without profile mutation; live receipts still deduplicate; expired receipts are reclaimed before a new commit.
 - Opt-in developer-product receipt processing through `PurchaseReceiptProcessor:CreateHandler`: malformed receipt and unsupported product checks, active-profile requirements, durable same-profile grant/idempotency, duplicate acknowledgement, conflict deferral, and explicit finite receipt retention.
 
-Remaining scope (grouped by work type): code-level primitives exist for the external PurchaseId authority/import runner, four-leg recoverable sagas and manual-resolution states, runtime policy/governor, bounded offline maintenance/checkpointing, migration manifests/guarded execution, projections/tracing, permanent erasure fences and retention checks, and atomic same-key quarantine with restart recovery. Do not infer end-to-end acceptance from implementation coverage. Still open: (1) live Mailbox V2/V3 mixed-version rollout and rollback; (2) exhaustive and independently reconciled historical PurchaseId import, real multi-server fulfillment, and application-specific receipt adapters/entitlement ledger if required; (3) real storage acceptance for retention compaction and maintenance adapters; (4) exhaustive user-key-family inventory, all-writer/recreation fencing and live RTBF acceptance; (5) fault-injection/regression/type checks and focused CodSpeed evidence on the exact final head; (6) independent review of every changed file; and (7) real Roblox Studio/DataStore acceptance for throttling/cache, crashes/shutdown, multi-server behavior, purchase fulfillment, mixed-version rollback, and erasure. The included purchase ledger is bounded per profile (maximum 8,192 entries); the separate global PurchaseId authority is durable per purchase key, but neither proves that the application's historical source was exhaustively imported. Direct writers that bypass RecordStore and user-associated stores outside the included PlayerDataCore family remain application-owned release blockers.
+Remaining scope (grouped by work type): code-level primitives exist for durable save/renewal/release reconciliation, freshness budgets and mutation admission; the external PurchaseId authority/import runner; four-leg recoverable sagas and manual-resolution states; runtime policy/governor; bounded offline maintenance/checkpointing; migration manifests/guarded execution; projections/tracing; permanent erasure fences and retention checks; and atomic same-key quarantine with restart recovery. Do not infer end-to-end acceptance from implementation coverage. Still open: (1) execute and review the complete durable-save failure matrix, including the new production-adapter harness and opt-in lease-recovery races; (2) live Mailbox V2/V3 mixed-version rollout and rollback; (3) exhaustive and independently reconciled historical PurchaseId import, real multi-server fulfillment, and an application-specific lifetime entitlement ledger or extra receipt adapters if required; (4) connect and validate real maintenance enumeration/inspection/dependency/delete adapters; (5) exhaustive user-key-family inventory, all-writer/recreation fencing and live RTBF acceptance; (6) full regression/type checks and focused CodSpeed evidence on the exact final head; (7) independent review of every changed file; and (8) real Roblox Studio/DataStore acceptance for throttling/cache, crashes/shutdown, multi-server behavior, purchase fulfillment, mixed-version rollback, retention compaction, and erasure. The included purchase ledger is bounded per profile (maximum 8,192 entries); the separate global PurchaseId authority is durable per purchase key, but neither proves that the application's historical source was exhaustively imported. Direct writers that bypass RecordStore and user-associated stores outside the included PlayerDataCore family remain application-owned release blockers.
 
 The outbox-to-Mailbox V2 adapter receipt proves durable mailbox acceptance only. It does not prove that a destination handler executed, or that an external effect completed. Keep handler-side processing idempotent and retain live multi-server acceptance as a separate release gate.
