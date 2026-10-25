@@ -13,6 +13,7 @@ for _, path in {
 	"src/PlayerDataInitializer/PurchaseAuthorityMigrationRunner.luau",
 	"tests/PurchaseDataStoreAuthorityRegression.server.luau",
 	"tests/PurchaseAuthorityMigrationRunnerRegression.server.luau",
+	"tests/RecordStore_QuarantineFenceRegression.server.luau",
 	"src/PlayerDataInitializer/RecordStoreOutboxMailboxAdapter.luau",
 	"src/PlayerDataInitializer/RecordStoreOutboxConsumerAdapter.luau",
 	"tests/RecordStore_OutboxConsumerAdapterRegression.server.luau",
@@ -99,6 +100,7 @@ Shim.run_script("tests/RecordStore_UnknownSaveRecoveryRegression.server.luau")
 Shim.run_script("tests/PurchaseReceiptProcessorRegression.server.luau")
 Shim.run_script("tests/PurchaseDataStoreAuthorityRegression.server.luau")
 Shim.run_script("tests/PurchaseAuthorityMigrationRunnerRegression.server.luau")
+Shim.run_script("tests/RecordStore_QuarantineFenceRegression.server.luau")
 Shim.run_script("tests/RecordStore_OutboxMailboxAdapterRegression.server.luau")
 Shim.run_script("tests/RecordStore_OutboxConsumerAdapterRegression.server.luau")
 Shim.run_script("tests/RecordStoreV2NonSaveServicesRegression.server.luau")
