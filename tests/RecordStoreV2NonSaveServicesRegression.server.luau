@@ -719,6 +719,7 @@ expect(#deleted_items == 2 and deleted_items[1].key == "Player_123456"
 	"erasure failed to invoke each generation-aware deletion adapter")
 expect(erasure:GetStatus(123456).status == "completed", "erasure manifest status was not durable")
 
+local unmatched_deleted = 0
 local unmatched_erasure = V2.Erasure.new(new_store(), {
 	{
 		name = "profile_family",
@@ -728,7 +729,10 @@ local unmatched_erasure = V2.Erasure.new(new_store(), {
 			return { { name = "UnexpectedStore", scope = "global", key = "Orphan_" .. tostring(user_id), generation = 2 } }, true
 		end,
 		fence_user = function() return true end,
-		redact_or_delete_if_generation = function() return "deleted" end,
+		redact_or_delete_if_generation = function()
+			unmatched_deleted += 1
+			return "deleted"
+		end,
 	},
 }, { verify_templates = function() return true end })
 local unmatched_plan = unmatched_erasure:PlanAsync(777, "erase-unmatched")
@@ -736,7 +740,32 @@ expect(unmatched_plan.code == "success" and unmatched_plan.rtbf_coverage_verifie
 	and unmatched_plan.coverage.profile_family.status == "unmatched_inventory"
 	and unmatched_plan.coverage.profile_family.unmatched_count == 1,
 	"erasure did not report an inventory locator that matched no verified template")
+local unmatched_execution = unmatched_erasure:ExecuteAsync(777, "erase-unmatched", 8)
+expect(unmatched_execution.code == "coverage_unverified" and unmatched_deleted == 0,
+	"erasure executed a destructive delete with an inventory locator outside the verified templates")
+expect(unmatched_erasure:GetStatus(777).status == "planned",
+	"unverified erasure advanced its durable manifest")
+local unmatched_is_erased, unmatched_status = unmatched_erasure:IsErased(777)
+expect(unmatched_is_erased == true and unmatched_status.status == "planned",
+	"planned erasure did not continue to fence restoration while coverage is unresolved")
 
+local legacy_completed_store = new_store()
+legacy_completed_store.values["rv2erase-u780"] = {
+	version = 1, user_id = 780, erasure_id = "legacy-incomplete-completion",
+	status = "completed", cursor = 0, completed_count = 0, entries = {}, coverage = {},
+	rtbf_coverage_verified = false,
+}
+local legacy_completed_erasure = V2.Erasure.new(legacy_completed_store, {}, {
+	verify_templates = function() return false end,
+})
+local legacy_erased, legacy_erasure_status = legacy_completed_erasure:IsErased(780)
+expect(legacy_erased == nil and legacy_erasure_status.code == "coverage_unverified",
+	"legacy completed manifest without RTBF coverage proof was reported as erased")
+local legacy_execute = legacy_completed_erasure:ExecuteAsync(780, "legacy-incomplete-completion", 8)
+expect(legacy_execute.code == "coverage_unverified",
+	"legacy completed manifest without RTBF coverage proof was reported as committed")
+
+local incomplete_deleted = 0
 local incomplete_erasure = V2.Erasure.new(new_store(), {
 	{
 		name = "partial_family",
@@ -746,13 +775,48 @@ local incomplete_erasure = V2.Erasure.new(new_store(), {
 			return { { name = "PlayerData", scope = "global", key = "Player_" .. tostring(user_id), generation = 1 } }, false
 		end,
 		fence_user = function() return true end,
-		redact_or_delete_if_generation = function() return "deleted" end,
+		redact_or_delete_if_generation = function()
+			incomplete_deleted += 1
+			return "deleted"
+		end,
 	},
 }, { verify_templates = function() return true end })
 local incomplete_plan = incomplete_erasure:PlanAsync(778, "erase-incomplete")
 expect(incomplete_plan.rtbf_coverage_verified == false
 	and incomplete_plan.coverage.partial_family.status == "inventory_incomplete",
 	"erasure claimed complete coverage without an explicit exhaustive inventory acknowledgement")
+local incomplete_execution = incomplete_erasure:ExecuteAsync(778, "erase-incomplete", 8)
+expect(incomplete_execution.code == "coverage_unverified" and incomplete_deleted == 0,
+	"erasure deleted from a partial inventory without an explicit completeness acknowledgment")
+
+local per_item_fence_store = new_store()
+local per_item_fence_calls = 0
+local per_item_delete_calls = 0
+local per_item_fence_erasure = V2.Erasure.new(per_item_fence_store, {
+	{
+		name = "fenced_family",
+		templates = { { name = "PlayerData", scope = "global", key = "Fence_{user_id}" } },
+		templates_verified = true,
+		inventory = function(user_id)
+			return { { name = "PlayerData", scope = "global", key = "Fence_" .. tostring(user_id), generation = 4 } }, true
+		end,
+		fence_user = function()
+			per_item_fence_calls += 1
+			return per_item_fence_calls == 1
+		end,
+		redact_or_delete_if_generation = function()
+			per_item_delete_calls += 1
+			return "deleted"
+		end,
+	},
+}, { verify_templates = function() return true end })
+expect(per_item_fence_erasure:PlanAsync(781, "erase-fence-expiry").rtbf_coverage_verified == true,
+	"writer-fence regression could not create a verified inventory")
+local per_item_fence_result = per_item_fence_erasure:ExecuteAsync(781, "erase-fence-expiry", 1)
+expect(per_item_fence_result.code == "retryable" and per_item_fence_calls == 2 and per_item_delete_calls == 0,
+	"erasure did not recheck a lost writer fence immediately before deletion")
+expect(per_item_fence_erasure:GetStatus(781).cursor == 0,
+	"erasure advanced progress after losing the per-item writer fence")
 
 local oversize_items = {}
 for index = 1, 513 do
