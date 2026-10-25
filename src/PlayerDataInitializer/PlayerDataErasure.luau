@@ -1,0 +1,230 @@
+--!strict
+--!optimize 2
+-- PlayerDataCore-specific adapter for RecordStoreV2's durable erasure coordinator.
+-- This covers the deterministic PlayerDataCore profile key only. Applications must add
+-- every other user-associated key family before claiming exhaustive RTBF coverage.
+
+local Players = game:GetService("Players")
+local RecordStore = require(script.Parent.RecordStore)
+local RecordStoreV2Factory = require(script.Parent.RecordStoreV2)
+
+type ErasureItem = {
+	name: string,
+	scope: string,
+	key: string,
+	generation: number,
+}
+
+type Family = {
+	name: string,
+	templates: { { name: string, scope: string, key: string } },
+	templates_verified: boolean,
+	inventory: (number, number) -> ({ ErasureItem }?, boolean | string),
+	fence_user: (number, string) -> (boolean, string?),
+	dependencies_clear: (ErasureItem, number) -> (boolean, string?),
+	redact_or_delete_if_generation: (ErasureItem, number, string) -> (string, string?),
+}
+
+type Options = {
+	record_store: any?,
+	record_store_v2: any?,
+	profile_store_name: string?,
+	profile_scope: string?,
+	key_prefix: string?,
+	operation_deadline: number?,
+	profile_family_verified: boolean?,
+	verify_templates: ((number, { any }) -> boolean)?,
+	additional_families: { any }?,
+	dependencies_clear: ((ErasureItem, number) -> (boolean, string?))?,
+	kick_player: ((number, string) -> (boolean, string?))?,
+}
+
+local DEFAULT_PROFILE_STORE = "PlayerData_Test1"
+local DEFAULT_PROFILE_SCOPE = "global"
+local DEFAULT_KEY_PREFIX = "Player_"
+
+local function valid_user_id(value: unknown): boolean
+	return type(value) == "number" and math.isfinite(value)
+		and math.floor(value) == value and value >= 1
+end
+
+local function valid_text(value: unknown, maximum: number): boolean
+	return type(value) == "string" and value ~= "" and #value <= maximum
+end
+
+local function make_profile_key(prefix: string, user_id: number): string
+	return prefix .. tostring(user_id)
+end
+
+local function new(manifest_store: any, options: Options?): any
+	if type(manifest_store) ~= "table"
+		or type(manifest_store.GetAsyncFresh) ~= "function"
+		or type(manifest_store.UpdateAsync) ~= "function"
+	then
+		error("PlayerDataErasure requires a durable manifest adapter with GetAsyncFresh and UpdateAsync", 2)
+	end
+	if options ~= nil and type(options) ~= "table" then
+		error("PlayerDataErasure options must be a table", 2)
+	end
+	local config: Options = if options == nil then {} else table.clone(options)
+	local record_store = config.record_store or RecordStore
+	local record_store_v2 = config.record_store_v2 or RecordStoreV2Factory
+	local profile_store_name = config.profile_store_name or DEFAULT_PROFILE_STORE
+	local profile_scope = if config.profile_scope == nil then DEFAULT_PROFILE_SCOPE else config.profile_scope
+	local key_prefix = config.key_prefix or DEFAULT_KEY_PREFIX
+	local operation_deadline = config.operation_deadline
+	if not valid_text(profile_store_name, 50) then error("profile_store_name must be 1 to 50 bytes", 2) end
+	if type(profile_scope) ~= "string" or #profile_scope > 50 then error("profile_scope must be a string of at most 50 bytes", 2) end
+	if not valid_text(key_prefix, 40) then error("key_prefix must be 1 to 40 bytes", 2) end
+	if operation_deadline ~= nil and (
+		type(operation_deadline) ~= "number" or not math.isfinite(operation_deadline)
+		or operation_deadline <= 0
+	) then error("operation_deadline must be finite and positive", 2) end
+	if config.verify_templates == nil or type(config.verify_templates) ~= "function" then
+		error("PlayerDataErasure requires verify_templates; a hard-coded template is not proof of live coverage", 2)
+	end
+	if config.additional_families ~= nil and type(config.additional_families) ~= "table" then
+		error("additional_families must be an array", 2)
+	end
+	if type(record_store) ~= "table"
+		or type(record_store.get_erasure_status_async) ~= "function"
+		or type(record_store.erase_user_data_async) ~= "function"
+		or type(record_store.purge_erased_versions_async) ~= "function"
+	then
+		error("RecordStore must expose the permanent erasure fence and historical purge APIs", 2)
+	end
+	if type(record_store_v2) ~= "table" or type(record_store_v2.new) ~= "function" then
+		error("RecordStoreV2 factory is unavailable", 2)
+	end
+	local mailbox = record_store.MailboxV2
+	if type(mailbox) ~= "table" or type(mailbox.new) ~= "function" then
+		error("RecordStore must expose its MailboxV2 module", 2)
+	end
+
+	local function resolve_key(user_id: number): string
+		return make_profile_key(key_prefix, user_id)
+	end
+
+	local function kick_active_player(user_id: number, erasure_id: string): (boolean, string?)
+		if type(config.kick_player) == "function" then
+			local ok, accepted, message = pcall(config.kick_player, user_id, erasure_id)
+			if not ok then return false, tostring(accepted) end
+			if accepted ~= true then return false, message or "application did not confirm the active-player fence" end
+			return true, nil
+		end
+		local player = Players:GetPlayerByUserId(user_id)
+		if player ~= nil then
+			local ok, message = pcall(function()
+				player:Kick("Your data is being erased. Rejoin only after the request is resolved.")
+			end)
+			if not ok then return false, tostring(message) end
+		end
+		return true, nil
+	end
+
+	local family: Family = {
+		name = "PlayerDataCore",
+		templates = {
+			{
+				name = profile_store_name,
+				scope = profile_scope,
+				key = key_prefix .. "{user_id}",
+			},
+		},
+		templates_verified = config.profile_family_verified == true,
+		inventory = function(user_id: number, _maximum: number): ({ ErasureItem }?, boolean | string)
+			if not valid_user_id(user_id) then return nil, "invalid UserId" end
+			local key = resolve_key(user_id)
+			local status, code, message = record_store.get_erasure_status_async(
+				profile_store_name, profile_scope, key, user_id, operation_deadline
+			)
+			if code ~= "success" and code ~= "not_found" then
+				return nil, message or ("profile inventory failed: " .. tostring(code))
+			end
+			local generation = 0
+			if status ~= nil then
+				generation = if status.Erased then status.SourceGeneration or 0 else status.Generation
+			end
+			return {
+				{
+					name = profile_store_name,
+					scope = profile_scope,
+					key = key,
+					generation = generation,
+				},
+			}, true
+		end,
+		fence_user = function(user_id: number, erasure_id: string): (boolean, string?)
+			if not valid_user_id(user_id) or not valid_text(erasure_id, 96) then
+				return false, "invalid erasure identity"
+			end
+			local kicked, kick_error = kick_active_player(user_id, erasure_id)
+			if not kicked then return false, kick_error or "active player could not be fenced" end
+			local _, code, message = record_store.erase_user_data_async(
+				profile_store_name, profile_scope, resolve_key(user_id),
+				user_id, erasure_id, nil, operation_deadline
+			)
+			if code ~= "success" then return false, message or ("profile fence failed: " .. tostring(code)) end
+			return true, nil
+		end,
+		dependencies_clear = function(item: ErasureItem, user_id: number): (boolean, string?)
+			if item.name ~= profile_store_name or item.scope ~= profile_scope
+				or item.key ~= resolve_key(user_id)
+			then
+				return false, "inventory locator is outside the declared PlayerDataCore family"
+			end
+			if type(config.dependencies_clear) == "function" then
+				return config.dependencies_clear(item, user_id)
+			end
+			-- PlayerDataCore's configured profile fields are scalar values and contain no
+			-- external object references. Additional key families need their own checks.
+			return true, nil
+		end,
+		redact_or_delete_if_generation = function(
+			item: ErasureItem,
+			user_id: number,
+			erasure_id: string
+		): (string, string?)
+			if not valid_user_id(user_id) or not valid_text(erasure_id, 96)
+				or item.name ~= profile_store_name or item.scope ~= profile_scope
+				or item.key ~= resolve_key(user_id)
+			then
+				return "skipped", "inventory identity did not match the exact PlayerDataCore key"
+			end
+			local _, erase_code, erase_message = record_store.erase_user_data_async(
+				profile_store_name, profile_scope, item.key, user_id, erasure_id,
+				item.generation, operation_deadline
+			)
+			if erase_code ~= "success" then
+				return if erase_code == "unknown" then "unknown" else "retryable",
+					erase_message or ("generation-aware profile erasure returned " .. tostring(erase_code))
+			end
+			local progress, purge_code, purge_message = record_store.purge_erased_versions_async(
+				profile_store_name, profile_scope, item.key, user_id, erasure_id, 16, operation_deadline
+			)
+			if purge_code ~= "success" or progress == nil then
+				return if purge_code == "unknown" then "unknown" else "retryable",
+					purge_message or ("historical profile purge returned " .. tostring(purge_code))
+			end
+			if progress.Complete ~= true then
+				return "retryable", "historical profile purge remains incomplete; resume the same erasure ID"
+			end
+			return "redacted", nil
+		end,
+	}
+
+	local families: { any } = { family }
+	for _, additional in ipairs(config.additional_families or {}) do
+		if type(additional) ~= "table" then error("additional erasure families must be tables", 2) end
+		families[#families + 1] = additional
+	end
+
+	local v2 = record_store_v2.new(record_store, mailbox)
+	return v2.Erasure.new(manifest_store, families, {
+		verify_templates = config.verify_templates,
+	})
+end
+
+return table.freeze({
+	new = new,
+})
