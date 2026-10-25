@@ -76,9 +76,10 @@ local profile_store = service:GetDataStore("Profiles", "scope")
 profile_store.data = {
 	Player_A = { fencing_generation = 2, eligible = true, dependencies_clear = true, maintenance_fence_job_id = "job-adapter-1" },
 	Player_B = { fencing_generation = 9, eligible = false, dependencies_clear = true, maintenance_fence_job_id = "job-adapter-1" },
+	Player_D = { fencing_generation = 3, eligible = false, dependencies_clear = true, maintenance_fence_job_id = "job-adapter-1" },
 	Other_C = { fencing_generation = 4, eligible = true, dependencies_clear = true, maintenance_fence_job_id = "job-adapter-1" },
 }
-profile_store.keys = { "Other_C", "Player_A", "Player_B" }
+profile_store.keys = { "Other_C", "Player_A", "Player_B", "Player_D" }
 
 local atomic_delete_calls = 0
 local adapter = AdapterModule.new({
@@ -133,7 +134,7 @@ expect(#first == 2 and first_cursor ~= nil and first_complete == false,
 expect(first[1].key == "Player_A" and first[2].key == "Player_B",
 	"key enumeration did not filter the declared family prefix or preserve sorted order")
 local second, second_cursor, second_complete = adapter.next_page(first_cursor, 2)
-expect(#second == 1 and second[1].key == "Player_B" and second_cursor == nil and second_complete == true,
+expect(#second == 1 and second[1].key == "Player_D" and second_cursor == nil and second_complete == true,
 	"second page did not terminate correctly")
 
 local inspected = adapter.inspect(first[1])
