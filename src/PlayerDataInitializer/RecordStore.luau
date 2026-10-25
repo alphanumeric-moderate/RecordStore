@@ -11487,7 +11487,7 @@ export type ErasureStatus = {
 	SourceGeneration: number?,
 	SourceRevision: number?,
 	Version: string?,
-	UpdatedAt: number?,
+	UpdatedTime: number?,
 }
 
 export type ErasurePurgeProgress = {
@@ -11512,7 +11512,7 @@ export type QuarantineFenceStatus = {
 	OperatorId: string?,
 	Reason: string?,
 	CreatedAt: number?,
-	UpdatedTime: number?,
+	UpdatedAt: number?,
 	ResolutionId: string?,
 	ResolutionOperatorId: string?,
 	ResolutionReason: string?,
@@ -12466,6 +12466,62 @@ local function purge_erased_versions_internal(
 		CurrentVersion = current_version,
 		RetentionUntil = if complete then nil else retention_until,
 	}, "success", nil
+end
+
+function RecordStore.get_quarantine_fence_status_async(
+	name: string,
+	scope: string,
+	key: string,
+	operation_deadline: number?
+): (QuarantineFenceStatus?, ResultCode, string?)
+	return get_quarantine_fence_status_internal(name, scope, key, operation_deadline, false)
+end
+
+function RecordStore.quarantine_profile_writes_async(
+	name: string,
+	scope: string,
+	key: string,
+	quarantine_id: string,
+	operator_id: string,
+	reason: string,
+	expected_generation: number,
+	expected_revision: number,
+	operation_deadline: number?
+): (QuarantineFenceStatus?, ResultCode, string?)
+	return quarantine_profile_writes_internal(
+		name, scope, key, quarantine_id, operator_id, reason,
+		expected_generation, expected_revision, operation_deadline, false
+	)
+end
+
+function RecordStore.mark_quarantine_release_pending_async(
+	name: string,
+	scope: string,
+	key: string,
+	quarantine_id: string,
+	resolution_id: string,
+	operator_id: string,
+	reason: string,
+	expected_revision: number?,
+	operation_deadline: number?
+): (QuarantineFenceStatus?, ResultCode, string?)
+	return mark_quarantine_release_pending_internal(
+		name, scope, key, quarantine_id, resolution_id, operator_id, reason,
+		expected_revision, operation_deadline, false
+	)
+end
+
+function RecordStore.release_quarantine_fence_async(
+	name: string,
+	scope: string,
+	key: string,
+	quarantine_id: string,
+	resolution_id: string,
+	operation_deadline: number?
+): (QuarantineFenceStatus?, ResultCode, string?)
+	return release_quarantine_fence_internal(
+		name, scope, key, quarantine_id, resolution_id, operation_deadline, false
+	)
 end
 
 function RecordStore.get_erasure_status_async(
