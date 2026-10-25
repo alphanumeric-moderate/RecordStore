@@ -14,6 +14,7 @@ local MAX_PENDING_OWNERS = 512
 local MAX_CALLBACKS_PER_PUMP = 32
 local MAX_SEEN_EVENTS = 2048
 local MAX_MEMORY_HINT_SLOTS = 256
+local MAX_MEMORY_HINT_BATCH = 20
 local SEEN_EVENT_TTL_MS = 120000
 
 local REASONS = {
@@ -401,7 +402,7 @@ function Acceleration.new(options)
 			local first_hash = tonumber(string.sub(digest, 1, 8), 16) or 0
 			local slot = "h" .. tostring((first_hash + self.sequence) % self.max_memory_hint_slots)
 			local ok = pcall(function()
-				self.memory_map:SetAsync(slot, message, now, self.memory_hint_ttl_seconds)
+				self.memory_map:SetAsync(slot, message, self.memory_hint_ttl_seconds, now)
 			end)
 			memory_ok = ok
 			if not ok then self.metrics.memory_write_errors += 1 end
@@ -419,11 +420,11 @@ function Acceleration.new(options)
 		if not self.enabled or not self.running or self.memory_map == nil then
 			return { code = "disabled", processed = 0 }
 		end
-		if max_items == nil then max_items = math.min(32, self.max_memory_hint_slots) end
+		if max_items == nil then max_items = math.min(MAX_MEMORY_HINT_BATCH, self.max_memory_hint_slots) end
 		if not finite(max_items) or math.floor(max_items) ~= max_items or max_items < 1
-			or max_items > self.max_memory_hint_slots
+			or max_items > math.min(MAX_MEMORY_HINT_BATCH, self.max_memory_hint_slots)
 		then
-			return { code = "invalid", processed = 0, message = "max_items must be an integer within configured MemoryStore hint slots" }
+			return { code = "invalid", processed = 0, message = "max_items must be an integer from 1 to the smaller of 20 and configured MemoryStore hint slots" }
 		end
 		local ok, rows = pcall(function()
 			return self.memory_map:GetRangeAsync(self.sort_ascending, max_items)

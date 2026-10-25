@@ -811,13 +811,13 @@ function Simulator.new(options)
 		end
 		function service:GetSortedMap(name)
 			local map = service:GetHashMap(name)
-			function map:SetAsync(key, value, sort_key, expiration_seconds)
-				if not finite(sort_key) then error("sorted map sort key must be finite", 2) end
+			function map:SetAsync(key, value, expiration_seconds, sort_key)
+				if sort_key ~= nil and not finite(sort_key) then error("sorted map sort key must be finite when supplied", 2) end
 				return memory_set(name, key, value, expiration_seconds, sort_key)
 			end
 			function map:GetRangeAsync(direction, count, exclusive_lower_bound, exclusive_upper_bound)
 				if direction ~= "Ascending" and direction ~= "Descending" then error("invalid sorted-map direction", 2) end
-				count = math.clamp(math.floor(count or 100), 1, 100)
+				count = math.clamp(math.floor(count or 20), 1, 20)
 				local entries = {}
 				for key, entry in pairs(memory_namespace(name)) do
 					if entry.expires_at_ms == math.huge or entry.expires_at_ms > simulator.now_ms then
