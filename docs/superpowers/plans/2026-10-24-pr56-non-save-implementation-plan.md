@@ -33,6 +33,12 @@
 
 ## Work slices
 
+### Slice 0: Deterministic protocol simulation infrastructure
+
+- [x] Add a bounded, replayable bench-only simulator with independent server clocks, per-key atomic UpdateAsync semantics, transform replay, fail-before-commit and commit-then-error faults, virtual scheduling, process-crash local-state loss, MemoryStore TTL behavior, best-effort MessagingService hint faults, stable seed handling, and redacted trace/invariant reporting.
+- [ ] Add simulator-specific regression coverage to the final verification phase only, after the remaining feature work is complete; do not treat simulator implementation or mock behavior as Roblox service acceptance.
+
+
 ### Slice 1: Audit and complete PR #37 non-save scheduling correctness
 
 - [x] Compare the merged scheduler and public API against PR #39 sections 28-29 and PR #37 follow-up behavior. The audit confirms bounded local scheduling, per-owner/resource admission, critical reserves, deadline-aware lease renewal, retry/circuit backpressure, kill-switch/pause behavior, and dependency retention have existing implementation/tests; no new global scheduler tier is warranted.
