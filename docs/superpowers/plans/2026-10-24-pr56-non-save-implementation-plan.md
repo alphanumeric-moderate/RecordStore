@@ -61,7 +61,7 @@
 - [x] Add validated `max_dirty_age_seconds` and `durability_mode` policies (`balanced`, `durability_first`, `read_only_on_risk`), edge-triggered durability-risk/recovered events, dirty/durable watermarks, oldest-dirty-age evidence, and age-aware autosave selection while preserving due lease renewal and the critical persistence reserve.
 - [x] Wire PlayerDataCore overrides for freshness policy and mutation admission. `read_only_on_risk` rejects new Set calls on verified persistence risk and restores tracked Value-object edits rejected by the pending buffer; accepted pending values remain eligible for flush.
 - [x] Port a deterministic pre-UpdateAsync mock fault hook, production-adapter fake DataStore harness, ambiguous-write recovery regressions, PlayerData backpressure regressions, a focused CodSpeed benchmark entry and CI regression step.
-- [ ] Execute the new/updated durable-save regression suite, Luau typechecks and production-adapter fault matrix on the current final head; wiring coverage is not evidence that the recovery state machine passes.
+- [x] Execute the new/updated durable-save regression suite, Luau typechecks and production-adapter fault matrix on the current source head. All Lune regression stages and the production-adapter fault matrix passed on code commit `18bf95be`; Luau Type Check passed on the same commit. This is fake-store/Lune evidence, not live Roblox acceptance.
 - [ ] Independently review the full durable-save diff against the PR #39 §26.13 contract, including every uncertain-result branch and lease-reacquisition invariant.
 
 ### Slice 2: Mailbox V2 protocol and operations
@@ -145,14 +145,15 @@
 
 ### Slice 8: Verification and merge gates
 
-- [ ] After the remaining implementation/scope updates are complete, run all Luau checks and Lune regression stages on the exact final head. This includes the new durable-save fault matrix, purchase manifest digest tests, real-maintenance-adapter contract regression, RTBF attestation-gate regression, quarantine recovery, Inbox pruning and erasure retention. None have been run during this implementation pass.
-- [ ] Run the final-head fault-injection and focused CodSpeed suites after implementation closes. Focused regression coverage is wired for mailbox producer/ack/future-schema interleavings, compaction checkpoint/counter replay, maintenance checkpoint recovery, purchase-ledger expiry/conflict/capacity/legacy markers, saga reserve/credit/refund/settle pre-commit and response-loss paths, purchase-import checkpoint recovery, quarantine fence/release crash windows, Inbox pruning, and erasure retention. Code being wired is not proof it passes; collect fresh benchmark evidence and keep live-platform acceptance separate.
+- [x] Run all Luau checks and Lune regression stages on the current code head. The Luau Type Check and all Lune regression steps passed on `18bf95be`, including durable-save fault injection, purchase manifest digest coverage, the real-maintenance-adapter contract, the new multi-family maintenance-catalog regression, and the non-save/erasure regression stages.
+- [x] Run the current-head fault-injection and regression stages. CI on code commit `18bf95be` passed all listed Lune test stages, including mailbox ordering/security, production-adapter fault injection, maintenance checkpoint recovery, quarantine, purchase migration, and erasure-related regressions.
+- [ ] Establish comparable focused CodSpeed performance evidence. The previous completed comparison reports a 28.04% aggregate degradation but explicitly flags differing CPU/runner environments, unreliable wall-time measurements, and syscall-dominated benchmarks. Treat that comparison as inconclusive until a comparable measurement is available; keep live-platform acceptance separate.
 - [ ] Complete independent code review and inspect every changed file.
 - [ ] Keep live Roblox Studio/DataStore multi-server, throttling/cache, crash/shutdown, mixed-version/V3 rollout and rollback, purchase fulfillment, retention compaction, and RTBF-template/fence acceptance blocked until executed and recorded in a real test experience.
 
 ## Current status
 
-Implementation status; PR #56 includes the durable-save scope as well as the non-save scope. Regression suites are wired but not executed on the current final head:
+Implementation status; PR #56 includes the durable-save scope as well as the non-save scope. The Lune regression stages and Luau Type Check passed on code commit `18bf95be`, including the newly added maintenance catalog test. The latest completed CodSpeed comparison remains inconclusive because CodSpeed detected non-matching runner hardware and warned about wall-time/system-call measurement quality:
 - Read-only session lease diagnostics and bounded Mailbox V2 maintenance orchestration.
 - Profile Doctor point-in-time inspection and bounded historical version diffs with path/type-only output.
 - Process-local migration registration with stable IDs/implementation revisions, compatibility validation, forward-only edges, ambiguity rejection, and read-only migration previews.
