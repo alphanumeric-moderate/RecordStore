@@ -2940,48 +2940,117 @@ end
 
 local function new_read_coalescer(fetch, options)
 	options = options or {}
+	if type(options) ~= "table" then error("read coalescer options must be a table", 2) end
+	if type(fetch) ~= "function" then error("read coalescer requires a fetch callback", 2) end
+	local ttl = if options.ttl_seconds == nil then 1 else options.ttl_seconds
+	local maximum = if options.max_entries == nil then 128 else options.max_entries
+	if not finite(ttl) or ttl < 0 then error("ttl_seconds must be finite and non-negative", 2) end
+	if not finite(maximum) or math.floor(maximum) ~= maximum or maximum < 1 or maximum > 2048 then
+		error("max_entries must be an integer from 1 to 2048", 2)
+	end
+
 	local values, inflight = {}, {}
 	local service = { hits = 0, misses = 0, coalesced = 0, evictions = 0 }
-	local ttl, maximum = options.ttl_seconds or 1, math.clamp(math.floor(options.max_entries or 128), 1, 2048)
+
+	local function make_cache_key(key, fence_key)
+		return tostring(fence_key or "") .. "\0" .. key
+	end
+
 	function service:GetAsync(key, fence_key)
 		if not valid_text(key, 256) then return nil, "invalid key" end
-		local cache_key = tostring(fence_key or "") .. "\0" .. key
+		local cache_key = make_cache_key(key, fence_key)
 		local now = os.clock()
 		local cached = values[cache_key]
-		if cached and cached.expires > now then self.hits += 1; return copy(cached.value), nil, "cache" end
+		if cached ~= nil then
+			if cached.expires > now then
+				self.hits += 1
+				return copy(cached.value), nil, "cache"
+			end
+			-- Never retain expired values: waiters must not see an old entry
+			-- after the refresh fetch fails.
+			values[cache_key] = nil
+		end
+
 		local active = inflight[cache_key]
-		if active then
+		if active ~= nil and active.invalidated == true then
+			if inflight[cache_key] == active then inflight[cache_key] = nil end
+			active = nil
+		end
+		if active ~= nil then
 			self.coalesced += 1
-			if active.event then active.event.Event:Wait(); local result = values[cache_key]; return result and copy(result.value) or nil, active.message end
+			if active.event ~= nil then
+				active.event.Event:Wait()
+				if active.invalidated == true then return nil, "in-flight read was invalidated" end
+				if active.result ~= nil then return copy(active.result), nil, "coalesced" end
+				return nil, active.message or "coalesced fetch returned no value"
+			end
 			return nil, "in-flight waiter signal unavailable"
 		end
+
 		self.misses += 1
 		local event
 		if Instance and type(Instance.new) == "function" then
 			local ok, object = pcall(Instance.new, "BindableEvent")
 			if ok and object and object.Event and type(object.Fire) == "function" then event = object end
 		end
-		local flight = { event = event }
+		local flight = { event = event, invalidated = false, result = nil, message = nil }
 		inflight[cache_key] = flight
 		local result, message = io_call(fetch, key)
 		if result ~= nil then
-			values[cache_key] = { value = copy(result), expires = now + ttl }
-			local size = 0; for _ in pairs(values) do size += 1 end
-			while size > maximum do
-				local oldest, expires
-				for candidate, row in pairs(values) do if expires == nil or row.expires < expires then oldest, expires = candidate, row.expires end end
-				if not oldest then break end
-				values[oldest] = nil; self.evictions += 1; size -= 1
+			flight.result = copy(result)
+			if flight.invalidated ~= true and inflight[cache_key] == flight then
+				values[cache_key] = { value = copy(result), expires = os.clock() + ttl }
+				local size = 0
+				for _ in pairs(values) do size += 1 end
+				while size > maximum do
+					local oldest, expires
+					for candidate, row in pairs(values) do
+						if expires == nil or row.expires < expires then oldest, expires = candidate, row.expires end
+					end
+					if oldest == nil then break end
+					values[oldest] = nil
+					self.evictions += 1
+					size -= 1
+				end
 			end
-		else flight.message = message or "fetch returned nil" end
-		inflight[cache_key] = nil
-		if event then event:Fire(); event:Destroy() end
+		else
+			flight.message = message or "fetch returned nil"
+		end
+		if inflight[cache_key] == flight then inflight[cache_key] = nil end
+		if event ~= nil then event:Fire(); event:Destroy() end
 		if result == nil then return nil, message end
 		return copy(result), nil, "fetch"
 	end
-	function service:Invalidate(key, fence_key) values[tostring(fence_key or "") .. "\0" .. key] = nil; return true end
-	function service:Clear() table.clear(values); return true end
-	function service:Stats() return { entries = key_count(values), hits = self.hits, misses = self.misses, coalesced = self.coalesced, evictions = self.evictions } end
+
+	function service:Invalidate(key, fence_key)
+		if not valid_text(key, 256) then return false, "invalid key" end
+		local cache_key = make_cache_key(key, fence_key)
+		values[cache_key] = nil
+		local active = inflight[cache_key]
+		if active ~= nil then
+			active.invalidated = true
+			inflight[cache_key] = nil
+		end
+		return true, nil
+	end
+
+	function service:Clear()
+		for _, active in pairs(inflight) do active.invalidated = true end
+		table.clear(inflight)
+		table.clear(values)
+		return true
+	end
+
+	function service:Stats()
+		return {
+			entries = key_count(values),
+			in_flight = key_count(inflight),
+			hits = self.hits,
+			misses = self.misses,
+			coalesced = self.coalesced,
+			evictions = self.evictions,
+		}
+	end
 	return service
 end
 
