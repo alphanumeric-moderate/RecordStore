@@ -2338,7 +2338,13 @@ local function new_erasure(store, families, options)
 			-- the mutation; a separate fence check followed by an unconditional delete
 			-- still has a check/delete race.
 			local status, action_error = io_call(family.redact_or_delete_if_generation, entry.item, user_id, erasure_id)
-			if status ~= "deleted" and status ~= "redacted" then
+			-- A prior delete/redaction may have committed before its response or the
+			-- subsequent cursor checkpoint was lost. Accept exact-generation absence
+			-- as an idempotent replay outcome; adapters must return "skipped" or
+			-- "retryable" when a newer generation exists or identity is uncertain.
+			if status ~= "deleted" and status ~= "redacted"
+				and status ~= "already_absent" and status ~= "already_redacted"
+			then
 				adapter_call(store, "UpdateAsync", key, function(old)
 					if type(old) ~= "table" or old.user_id ~= user_id or old.erasure_id ~= erasure_id
 						or old.status == "completed" or old.status == "resolved"
