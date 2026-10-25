@@ -175,8 +175,27 @@ function Runner.new(maintenance, config)
 		local step_limit = math.clamp(math.floor(max_steps or 8), 1, 64)
 		local size = math.clamp(math.floor(batch_size or 1), 1, 256)
 		local per_step_budget = math.clamp(math.floor(budget_ms or 25), 1, 1000)
+		local started_at = os.clock() * 1000
 		local result = { code = "yielded", job_id = config.job_id, mode = mode }
-		for _ = 1, step_limit do
+		for step = 1, step_limit do
+			-- Budget checks happen only between fully checkpointed steps. A DataStore
+			-- read/delete can take longer than this target; never pause an unresolved
+			-- page before its cursor and counters have been persisted.
+			if step > 1 and os.clock() * 1000 - started_at >= per_step_budget then
+				local stats = compactor:Stats()
+				return {
+					code = "yielded",
+					job_id = config.job_id,
+					mode = mode,
+					cursor = stats.cursor,
+					processed = stats.processed,
+					removed = stats.removed,
+					max_steps = step - 1,
+					budget_exhausted = true,
+					checkpoint_revision = revision,
+					would_delete = would_delete,
+				}
+			end
 			result = self:Step(size, per_step_budget)
 			if result.code ~= "incomplete" then return result end
 		end
