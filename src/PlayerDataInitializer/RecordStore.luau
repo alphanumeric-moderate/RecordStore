@@ -3251,7 +3251,7 @@ do
 				if row == nil then
 					return false
 				end
-				local record_value, record_error = self:_get(tostring(row.route))
+				local record_value, record_error = self:_get_fresh(tostring(row.route))
 				local record = as_dict(record_value)
 				if record_error ~= nil or record == nil or not same_owner(record.owner, self.owner) then
 					return false

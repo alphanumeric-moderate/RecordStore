@@ -934,6 +934,53 @@ local function test_reclaim_fences_a_concurrent_append()
 		"stale writer changed the retired segment state")
 end
 
+local function test_reclaim_uses_fresh_canonical_state()
+	local backing = MailboxV2.MockStore()
+	local stale_route = nil
+	local stale_terminal = nil
+	local store = {
+		GetAsync = function(_, key)
+			if stale_route ~= nil and key == stale_route and stale_terminal ~= nil then
+				return clone(stale_terminal)
+			end
+			return backing:GetAsync(key)
+		end,
+		GetAsyncFresh = function(_, key) return backing:GetAsyncFresh(key) end,
+		UpdateAsync = function(_, key, transform) return backing:UpdateAsync(key, transform) end,
+		RemoveAsync = function(_, key) return backing:RemoveAsync(key) end,
+	}
+	local mailbox = new_mailbox({ segment_max_messages = 1 }, store)
+	local queued = enqueue(mailbox, "reclaim-fresh-state", "reclaim-fresh-state-id", nil, "normal")
+	local processed = process_one(mailbox, function() return true end)
+	assert(processed.code == "processed", "fresh-state fixture did not finish the original delivery")
+	local terminal = backing.values[queued.message_id]
+	assert(type(terminal) == "table" and terminal.state == "acknowledged",
+		"fresh-state fixture did not create a terminal cached snapshot")
+	stale_route = queued.message_id
+	stale_terminal = clone(terminal)
+	local authoritative_live = clone(terminal)
+	authoritative_live.state = "ready"
+	backing.values[queued.message_id] = authoritative_live
+	assert(store:GetAsync(stale_route).state == "acknowledged"
+		and store:GetAsyncFresh(stale_route).state == "ready",
+		"fresh-state fixture did not create the intended stale-cache disagreement")
+
+	local manifest = backing.values[mailbox:_manifest_key("active")]
+	local segment_key = nil
+	for slot_number, slot in ipairs(manifest.slots) do
+		if type(slot) == "table" and slot.state == "sealed" then
+			segment_key = mailbox:_segment_key("active", slot_number, slot.generation)
+			break
+		end
+	end
+	assert(type(segment_key) == "string", "fresh-state fixture omitted its sealed segment")
+	assert(mailbox:_reclaim_slot("active") == false,
+		"reclaimer trusted a cached terminal record over an authoritative active record")
+	assert(type(backing.values[segment_key]) == "table"
+		and backing.values[segment_key].state == "sealed",
+		"reclaimer removed an index segment containing an authoritatively active message")
+end
+
 local function test_high_priority_burst_does_not_starve_background_messages()
 	local mailbox = new_mailbox({ strict_ordering_enabled = true })
 	for index = 1, 7 do
@@ -1438,6 +1485,7 @@ test_future_message_version_cannot_confirm_duplicate_producer_receipt()
 test_future_index_schema_versions_fail_closed()
 test_future_schema_writers_cancel_updates()
 test_reclaim_fences_a_concurrent_append()
+test_reclaim_uses_fresh_canonical_state()
 test_high_priority_burst_does_not_starve_background_messages()
 test_clock_skew_cannot_break_ordering_under_adversarial_sort_keys()
 test_priority_burst_policy_is_bounded_and_configurable()
