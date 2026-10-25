@@ -184,8 +184,8 @@ local function validate_envelope(
 	payload: unknown,
 	message: { [string]: unknown },
 	record_identity: { [string]: unknown }
-): (DestinationEnvelope?, HandlerDefinition?, string?)
-	if type(payload) ~= "table" then return nil, nil, "outbox event envelope must be a table" end
+): (DestinationEnvelope?, string?)
+	if type(payload) ~= "table" then return nil, "outbox event envelope must be a table" end
 	local fields = payload :: { [string]: unknown }
 	local event_id = fields.source_event_id
 	local event_version = fields.payload_version
@@ -202,39 +202,41 @@ local function validate_envelope(
 		or not valid_text(destination_profile_key, 50)
 		or (destination_user_id ~= nil and not positive_integer(destination_user_id))
 	then
-		return nil, nil, "outbox event identity, payload version, timestamp or destination is malformed"
+		return nil, "outbox event identity, payload version, timestamp or destination is malformed"
+	end
+	if fields.correlation_id ~= nil and not valid_text(fields.correlation_id, 256) then
+		return nil, "correlation_id must be a non-empty string of at most 256 bytes"
+	end
+	if fields.causation_id ~= nil and not valid_text(fields.causation_id, 256) then
+		return nil, "causation_id must be a non-empty string of at most 256 bytes"
 	end
 	local event_type = message.Type
-	if not valid_text(event_type, 100) then return nil, nil, "Mailbox V2 event type is malformed" end
-	local definition = nil
-	local _unused = event_version
+	if not valid_text(event_type, 100) then return nil, "Mailbox V2 event type is malformed" end
 	if destination_store_name ~= record_identity.store_name
 		or destination_scope ~= record_identity.scope
 		or destination_profile_key ~= record_identity.profile_key
 	then
-		return nil, nil, "event destination locator does not match this active profile"
+		return nil, "event destination locator does not match this active profile"
 	end
 	if destination_user_id ~= nil then
 		local found = false
 		for _, user_id in ipairs(record_identity.user_ids :: { unknown }) do
 			if user_id == destination_user_id then found = true; break end
 		end
-		if not found then return nil, nil, "event destination UserId does not belong to this profile" end
+		if not found then return nil, "event destination UserId does not belong to this profile" end
 	end
-	local context_placeholder = event_type
-	if context_placeholder == "" then return nil, nil, "event type is empty" end
 	return {
 		source_event_id = event_id :: string,
 		payload_version = event_version :: number,
 		payload = fields.payload :: RecordStore.JsonValue,
-		correlation_id = if valid_text(fields.correlation_id, 256) then fields.correlation_id :: string else nil,
-		causation_id = if valid_text(fields.causation_id, 256) then fields.causation_id :: string else nil,
+		correlation_id = if fields.correlation_id ~= nil then fields.correlation_id :: string else nil,
+		causation_id = if fields.causation_id ~= nil then fields.causation_id :: string else nil,
 		source_created_at = source_created_at :: number,
 		destination_store_name = destination_store_name :: string,
 		destination_scope = destination_scope :: string,
 		destination_profile_key = destination_profile_key :: string,
 		destination_user_id = destination_user_id :: number?,
-	}, nil, nil
+	}, nil
 end
 
 function OutboxConsumerAdapter.new(config: Config): Processor
@@ -288,7 +290,7 @@ function OutboxConsumerAdapter.new(config: Config): Processor
 		snapshot: { [string]: unknown },
 		handler_context: unknown
 	): (boolean, string?)
-		local event, _, event_error = validate_envelope(payload, snapshot, identity)
+		local event, event_error = validate_envelope(payload, snapshot, identity)
 		if event == nil then return false, event_error or "event envelope validation failed" end
 		local handler = normalized.handlers[snapshot.Type :: string]
 		if handler == nil then return false, "no destination handler is registered for this event type" end
