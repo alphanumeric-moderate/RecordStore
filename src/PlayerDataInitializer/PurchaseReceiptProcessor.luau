@@ -237,12 +237,9 @@ local function create_handler(
 				return grant_reducer(current_data, receipt_context)
 			end
 			local function ledger_result(ledger_status: string, grant_result: RecordStore.JsonValue?): RecordStore.JsonValue
-				return {
-					[PERMANENT_LEDGER_RESULT_KEY] = {
-						status = ledger_status,
-						grant_result = grant_result,
-					},
-				}
+				local marker: { [string]: RecordStore.JsonValue } = { status = ledger_status }
+				if grant_result ~= nil then marker.grant_result = grant_result end
+				return { [PERMANENT_LEDGER_RESULT_KEY] = marker }
 			end
 			if type(current_data) ~= "table" then
 				return current_data, ledger_result("corrupt")
