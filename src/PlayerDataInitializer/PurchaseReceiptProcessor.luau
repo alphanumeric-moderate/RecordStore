@@ -60,7 +60,7 @@ export type PurchaseAuthorityRecord = {
 export type PurchaseAuthority = {
 	ClaimAsync: (self: any, purchase_id: string, player_id: number, product_id: number) -> (PurchaseAuthorityRecord?, string?),
 	CommitAsync: (self: any, purchase_id: string, player_id: number, product_id: number, outcome: string) -> (PurchaseAuthorityRecord?, string?),
-	GetStatusAsync: (self: any, purchase_id: string) -> (PurchaseAuthorityRecord?, string?),
+	GetStatusAsync: (self: any, purchase_id: string, player_id: number, product_id: number) -> (PurchaseAuthorityRecord?, string?),
 	BackfillAsync: (self: any, purchase_id: string, player_id: number, product_id: number) -> (PurchaseAuthorityRecord?, string?),
 }
 
@@ -278,7 +278,7 @@ local function invoke_purchase_authority(
 		elseif operation == "CommitAsync" then
 			return untyped.CommitAsync(untyped, purchase_id, player_id, product_id, outcome)
 		elseif operation == "GetStatusAsync" then
-			return untyped.GetStatusAsync(untyped, purchase_id)
+			return untyped.GetStatusAsync(untyped, purchase_id, player_id, product_id)
 		elseif operation == "BackfillAsync" then
 			return untyped.BackfillAsync(untyped, purchase_id, player_id, product_id)
 		end
