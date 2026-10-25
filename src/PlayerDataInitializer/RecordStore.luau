@@ -3541,10 +3541,10 @@ do
 		local updated, update_error = self:_update(route, function(raw)
 			local current = as_dict(raw)
 			if current ~= nil and not same_owner(current.owner, self.owner) then
-				return raw
+				return nil
 			end
 			if current ~= nil and current.version ~= VERSION then
-				return raw
+				return nil
 			end
 			return transform(current)
 		end)
@@ -3552,6 +3552,29 @@ do
 			return nil, update_error
 		end
 		local record = as_dict(updated)
+		if updated == nil then
+			-- UpdateAsync returning nil means the write was cancelled. Read back
+			-- authoritatively to distinguish a missing record from an incompatible
+			-- version that must never be re-persisted by an older writer.
+			local latest_value, latest_error = self:_get_fresh(route)
+			if latest_error ~= nil then
+				return nil, "canonical update was cancelled but read-back is unresolved: " .. latest_error
+			end
+			if latest_value == nil then
+				return nil, nil
+			end
+			local latest = as_dict(latest_value)
+			if latest == nil then
+				return nil, "canonical record is malformed after a cancelled update"
+			end
+			if not same_owner(latest.owner, self.owner) then
+				return nil, "canonical route collision: owner identity mismatch"
+			end
+			if latest.version ~= VERSION then
+				return nil, "unsupported schema version: canonical message version is not supported"
+			end
+			return latest, nil
+		end
 		if record ~= nil and not same_owner(record.owner, self.owner) then
 			return nil, "canonical route collision: owner identity mismatch"
 		end
@@ -5613,6 +5636,7 @@ do
 	type MockStoreState = {
 		values: { [string]: unknown },
 		update_calls: number,
+		committed_update_calls: number,
 		get_calls: number,
 		remove_calls: number,
 		fail_next_mode: string?,
@@ -5631,6 +5655,7 @@ do
 		local state: MockStoreState = {
 			values = {},
 			update_calls = 0,
+			committed_update_calls = 0,
 			get_calls = 0,
 			remove_calls = 0,
 			fail_next_mode = nil,
@@ -5676,6 +5701,7 @@ do
 			proposed = transform(clone_json(old_value), nil)
 		end
 		if proposed ~= nil then
+			self.committed_update_calls += 1
 			self.values[key] = clone_json(proposed)
 		end
 		local result = clone_json(self.values[key])

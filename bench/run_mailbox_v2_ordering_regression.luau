@@ -647,6 +647,14 @@ local function test_future_message_version_fails_closed()
 	assert(#queue == 0 and queue_result.code == "unsupported_schema",
 		"public queue read exposed a future-version message as a v2 entry")
 
+	local commits_before_guard = store.committed_update_calls
+	local guarded_record, guarded_error = mailbox:_update_message(queued.message_id, function(current)
+		return current
+	end)
+	assert(guarded_record == nil and string.find(tostring(guarded_error), "unsupported schema version", 1, true) ~= nil,
+		"message mutation helper did not fail closed on a future-version canonical record")
+	assert(store.committed_update_calls == commits_before_guard,
+		"message mutation helper re-persisted a future-version canonical record")
 	local claimed, claim_result = mailbox:_claim(queued.message_id)
 	assert(claimed == nil and claim_result.code == "unsupported_schema",
 		"claim attempted to process a message from an unsupported schema version")
