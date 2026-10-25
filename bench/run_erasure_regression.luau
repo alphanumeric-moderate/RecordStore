@@ -319,6 +319,25 @@ do
 	local raw = RecordStore.Mock.get_record_raw("PlayerData_Test1", "global", key)
 	expect(type(raw) == "table" and type(raw.data) == "table",
 		"non-destructive erasure planning installed the destructive erasure fence")
+
+	local changed_inventory = ErasureModule.new(manifest_store, {
+		record_store = RecordStore.Mock,
+		record_store_v2 = { new = function() return v2 end },
+		mailbox_module = RecordStore.MailboxV2,
+		profile_store_name = "PlayerData_Test1",
+		profile_scope = "global",
+		key_prefix = "Player_",
+		profile_family_verified = true,
+		application_inventory_manifest_id = "test-inventory-playerdata-v2",
+		writer_inventory_verified = true,
+		verify_templates = function(rendered_user_id, templates)
+			return rendered_user_id == user_id and #templates == 1
+				and templates[1].template.key == key
+		end,
+	})
+	local changed_status = changed_inventory:GetStatus(user_id)
+	expect(changed_status.code == "coverage_unverified",
+		"resuming an erasure plan with a different application inventory manifest was accepted")
 end
 
 -- End-to-end integration through the generic manifest coordinator. The known
