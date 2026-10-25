@@ -394,6 +394,9 @@ function MigrationRunner.new(config: Config)
 			end
 			local next_cursor = page_fields.next_cursor :: string?
 			local done = page_fields.done :: boolean
+			if done and next_cursor ~= nil then
+				return result("conflict", checkpoint, "terminal historical source page must not include a continuation cursor")
+			end
 			if not done and (next_cursor == nil or next_cursor == checkpoint.cursor) then
 				return result("conflict", checkpoint, "historical source cursor did not advance")
 			end
@@ -405,11 +408,19 @@ function MigrationRunner.new(config: Config)
 					return result("unknown", checkpoint, "external PurchaseId import raised or returned no result: " .. tostring(backfill))
 				end
 				local backfill_result = backfill :: BackfillResult
-				if backfill_result.processed_count ~= item_count
+				local processed_count = backfill_result.processed_count
+				local backfilled_count = backfill_result.backfilled_count
+				local duplicate_count = backfill_result.duplicate_count
+				if not nonnegative_integer(processed_count)
+					or not nonnegative_integer(backfilled_count)
+					or not nonnegative_integer(duplicate_count)
+					or processed_count ~= item_count
+					or backfilled_count + duplicate_count ~= processed_count
+					or backfill_result.failed_index ~= nil
 					or (backfill_result.code ~= "complete" and backfill_result.code ~= "duplicate")
 				then
 					return result(backfill_result.code or "unknown", checkpoint,
-						backfill_result.message or "historical PurchaseId batch is not fully reconciled; cursor was not advanced")
+						backfill_result.message or "historical PurchaseId batch result did not reconcile; cursor was not advanced")
 				end
 				local next_checkpoint: Checkpoint = {
 					version = 1,
