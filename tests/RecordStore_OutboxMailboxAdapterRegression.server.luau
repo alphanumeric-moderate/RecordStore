@@ -98,10 +98,26 @@ local malformed_time = table.clone(event)
 malformed_time.CreatedAt = math.huge
 expect(not adapter.Dispatch(malformed_time), "outbox adapter accepted a non-finite event timestamp")
 expect(diagnostics[#diagnostics].category == "invalid_event", "invalid timestamp was not rejected before destination lookup")
+local malformed_time_type = table.clone(event)
+malformed_time_type.CreatedAt = "not-a-timestamp"
+local malformed_time_call_ok, malformed_time_dispatched = pcall(function()
+	return adapter.Dispatch(malformed_time_type)
+end)
+expect(malformed_time_call_ok and malformed_time_dispatched == false,
+	"outbox adapter threw instead of rejecting a string timestamp")
+expect(diagnostics[#diagnostics].category == "invalid_event", "string timestamp was not diagnosed")
 local malformed_trace = table.clone(event)
 malformed_trace.CorrelationId = {}
 expect(not adapter.Dispatch(malformed_trace), "outbox adapter accepted non-string correlation metadata")
 expect(diagnostics[#diagnostics].category == "invalid_event", "invalid trace metadata was not diagnosed")
+local malformed_attempts = table.clone(event)
+malformed_attempts.Attempts = "0"
+local malformed_attempts_call_ok, malformed_attempts_dispatched = pcall(function()
+	return adapter.Dispatch(malformed_attempts)
+end)
+expect(malformed_attempts_call_ok and malformed_attempts_dispatched == false,
+	"outbox adapter threw instead of rejecting a string attempt counter")
+expect(diagnostics[#diagnostics].category == "invalid_event", "string attempt counter was not diagnosed")
 local non_dispatchable = table.clone(event)
 non_dispatchable.State = "delivered"
 expect(not adapter.Dispatch(non_dispatchable), "outbox adapter dispatched an event outside pending/unknown state")
