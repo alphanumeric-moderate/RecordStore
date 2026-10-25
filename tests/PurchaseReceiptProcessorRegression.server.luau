@@ -154,6 +154,7 @@ local ledger_processor = ReceiptProcessor.new({
 	receipt_retention_seconds = 1,
 	permanent_purchase_ledger_key = "purchase_ledger",
 	permanent_purchase_ledger_capacity = 2,
+	permanent_purchase_ledger_migration_complete = true,
 	on_diagnostic = function(diagnostic) table.insert(diagnostics, diagnostic) end,
 })
 local ledger_handler = ledger_processor:CreateHandler({
@@ -248,7 +249,22 @@ expect(not pcall(function()
 	ReceiptProcessor.new({
 		get_record = function() return ledger_record end,
 		receipt_retention_seconds = 60,
+		permanent_purchase_ledger_key = "purchase_ledger",
+	})
+end), "permanent purchase ledger was enabled without explicit history-migration acknowledgement")
+expect(not pcall(function()
+	ReceiptProcessor.new({
+		get_record = function() return ledger_record end,
+		receipt_retention_seconds = 60,
+		permanent_purchase_ledger_migration_complete = true,
+	})
+end), "migration acknowledgement was accepted without a permanent ledger key")
+expect(not pcall(function()
+	ReceiptProcessor.new({
+		get_record = function() return ledger_record end,
+		receipt_retention_seconds = 60,
 		permanent_purchase_ledger_key = "__recordstore_bad",
+		permanent_purchase_ledger_migration_complete = true,
 	})
 end), "reserved internal data namespace was accepted for the purchase ledger")
 expect(ledger_record:Close() == "closed", "permanent purchase ledger profile did not close")
