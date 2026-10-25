@@ -1,6 +1,8 @@
 --!nocheck
 -- Deferred until the remaining PR #56 implementation slices are complete.
 local Shim = require("./RobloxShim")
+local RecordStore = Shim.load()
+local Mock = RecordStore.Mock
 local PurchaseAuthorityModule = require(
 	game:GetService("ServerScriptService"):WaitForChild("PlayerDataInitializer"):WaitForChild("PurchaseDataStoreAuthority")
 )
@@ -128,5 +130,5 @@ local still_claimed = authority:GetStatusAsync("purchase-inflight-history", 123,
 expect(still_claimed ~= nil and still_claimed.Status == "claimed",
 	"in-flight authority record changed during historical import")
 
-Mock = Shim.load().Mock
 Mock.reset()
+Shim.close()
