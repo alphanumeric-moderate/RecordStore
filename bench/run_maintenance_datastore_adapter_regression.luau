@@ -18,7 +18,7 @@ local function make_service(initial_stores)
 		local identity = name .. "\n" .. (scope or "")
 		local store = self.stores[identity]
 		if store == nil then
-			store = { data = {} }
+			store = { data = {}, lose_next_response = false, before_next_update = nil }
 			self.stores[identity] = store
 		end
 		function store:ListKeysAsync(prefix, page_size, cursor, _exclude_deleted)
@@ -48,9 +48,19 @@ local function make_service(initial_stores)
 			return clone(self.data[key]), { Version = "v1" }
 		end
 		function store:UpdateAsync(key, transform)
+			if self.before_next_update ~= nil then
+				local before = self.before_next_update
+				self.before_next_update = nil
+				before(self, key)
+			end
 			local proposed = transform(clone(self.data[key]), { Version = "v1" })
 			if proposed ~= nil then self.data[key] = clone(proposed) end
-			return clone(self.data[key])
+			local observed = clone(self.data[key])
+			if self.lose_next_response then
+				self.lose_next_response = false
+				return nil, "injected response loss after commit"
+			end
+			return observed
 		end
 		return store
 	end
@@ -69,17 +79,22 @@ local function make_family(name, store_name, prefix)
 		inspect = function(_key, value)
 			return {
 				status = "success",
-				eligible = false,
-				dependencies_clear = true,
+				eligible = value.eligible == true,
+				dependencies_clear = value.dependencies_clear == true,
 				generation = value.generation,
 			}, nil
 		end,
-		can_delete = function() return false end,
-		make_tombstone = function(value, _info, generation)
-			return { generation = generation + 1, tombstone = true, previous = value }
+		can_delete = function(value, _info, expected_generation, job_id)
+			return type(value) == "table"
+				and value.generation == expected_generation
+				and value.maintenance_job_id == job_id
 		end,
-		is_tombstone = function(value, generation)
-			return type(value) == "table" and value.tombstone == true and value.generation == generation + 1
+		make_tombstone = function(_value, _info, generation, job_id)
+			return { generation = generation + 1, tombstone = true, maintenance_job_id = job_id }
+		end,
+		is_tombstone = function(value, generation, job_id)
+			return type(value) == "table" and value.tombstone == true
+				and value.generation == generation + 1 and value.maintenance_job_id == job_id
 		end,
 	}
 end
@@ -101,11 +116,11 @@ end
 
 local service = make_service({
 	Profiles = {
-		Player_1 = { generation = 3 },
-		Player_2 = { generation = 4 },
+		Player_1 = { generation = 3, eligible = true, dependencies_clear = true, maintenance_job_id = "maintenance-regression" },
+		Player_2 = { generation = 4, eligible = true, dependencies_clear = true, maintenance_job_id = "maintenance-regression" },
 	},
 	OtherStore = {
-		Other_1 = { generation = 9 },
+		Other_1 = { generation = 9, eligible = true, dependencies_clear = true, maintenance_job_id = "maintenance-regression" },
 	},
 })
 Shim.set_service("DataStoreService", service)
@@ -125,6 +140,77 @@ assert(#page == 2 and page[1].store_name == "Profiles" and page[1].scope == "glo
 	and page[1].key == "Player_1" and page[2].key == "Player_2",
 	"mutating caller-owned family configuration changed the bound catalog after adapter creation")
 assert(cursor == nil and complete == true, "single-family catalog did not terminate after its only page")
+
+local inspected, inspect_error = adapter:Inspect(page[1])
+assert(inspect_error == nil and inspected ~= nil and inspected.status == "success"
+	and inspected.eligible == true and inspected.dependencies_clear == true and inspected.generation == 3,
+	"fresh inspection did not preserve generation and application eligibility")
+local missing_inspection, missing_error = adapter:Inspect({
+	family_name = "profiles", store_name = "Profiles", scope = "global", key = "Player_Missing",
+})
+assert(missing_error == nil and missing_inspection ~= nil
+	and missing_inspection.status == "success" and missing_inspection.eligible == false,
+	"missing key was treated as a destructive candidate")
+
+local deleted, delete_error = adapter:DeleteIfGeneration(page[1], 3)
+assert(deleted == "deleted", delete_error or "generation- and job-fenced deletion did not commit")
+local after_delete = service.stores["Profiles\nglobal"].data.Player_1
+assert(after_delete.tombstone == true and after_delete.generation == 4
+	and after_delete.maintenance_job_id == "maintenance-regression",
+	"atomic delete did not write the expected same-key tombstone")
+local profiles_store = service.stores["Profiles\nglobal"]
+profiles_store.before_next_update = function(store, key)
+	if key == "Player_2" then
+		store.data.Player_2.generation = 99
+		store.data.Player_2.maintenance_job_id = "replacement-job"
+	end
+end
+local stale_delete, stale_delete_error = adapter:DeleteIfGeneration(page[2], 4)
+assert(stale_delete == "skipped", stale_delete_error or "generation change inside UpdateAsync was not fenced")
+assert(profiles_store.data.Player_2.generation == 99 and profiles_store.data.Player_2.tombstone ~= true,
+	"stale delete overwrote a replacement generation during the conditional mutation")
+
+local checkpoint_before, checkpoint_before_error = adapter:LoadCheckpoint()
+assert(checkpoint_before == nil and checkpoint_before_error == nil,
+	"fresh checkpoint store did not load as absent")
+local checkpoint_store = service.stores["MaintenanceCheckpoints\nglobal"]
+assert(checkpoint_store ~= nil, "adapter did not isolate checkpoint storage")
+checkpoint_store.lose_next_response = true
+local checkpoint_written, checkpoint_error = adapter:PersistCheckpoint({
+	version = 1,
+	job_id = "maintenance-regression",
+	revision = 1,
+	cursor = "inventory-r1|1:2",
+	processed = 1,
+	removed = 0,
+	status = "incomplete",
+}, 0)
+assert(checkpoint_written == true, checkpoint_error or "committed checkpoint with a lost response was not reconciled")
+local durable_checkpoint, checkpoint_read_error = adapter:LoadCheckpoint()
+assert(checkpoint_read_error == nil and type(durable_checkpoint) == "table"
+	and durable_checkpoint.revision == 1 and durable_checkpoint.cursor == "inventory-r1|1:2",
+	"checkpoint response-loss recovery did not return the committed checkpoint")
+local checkpoint_advanced, advance_error = adapter:PersistCheckpoint({
+	version = 1,
+	job_id = "maintenance-regression",
+	revision = 2,
+	cursor = nil,
+	processed = 2,
+	removed = 1,
+	status = "completed",
+}, 1)
+assert(checkpoint_advanced == true, advance_error or "checkpoint revision did not advance")
+local conflict_checkpoint, conflict_error = adapter:PersistCheckpoint({
+	version = 1,
+	job_id = "maintenance-regression",
+	revision = 2,
+	cursor = nil,
+	processed = 2,
+	removed = 0,
+	status = "completed",
+}, 1)
+assert(conflict_checkpoint == false and string.find(tostring(conflict_error), "revision changed", 1, true) ~= nil,
+	"checkpoint compare-and-swap accepted a conflicting revision")
 
 local family_one = make_family("one", "Profiles", "Player_")
 local family_two = make_family("two", "OtherStore", "Other_")
