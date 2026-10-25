@@ -392,6 +392,18 @@ they require scheduler ordering. The generic `schedule_work` API does not provid
 `ordering_key` semantics. Global or per-server-instance priority is intentionally not part of
 the protocol; priority may affect message selection and server-local work-class scheduling only.
 
+RecordStore's profile path includes bounded unknown-outcome reconciliation for save, lease-renewal,
+and release operations. It retains the logical operation ID and immutable save snapshot, performs an
+authoritative uncached read, and retries only through a conditional profile-key `UpdateAsync` while
+the exact owner token, fencing generation, expected revision, and lease safety margin still match.
+If ownership or revision has changed, the old writer is fenced. `lease_recovery_enabled` defaults to
+`false`. When explicitly enabled, same-process recovery may reacquire only if an uncached authoritative
+read and the key-level `UpdateAsync` transform both confirm the exact base write ID, revision, fencing
+generation, session token, and job/place identity are unchanged and the lease is expired. Reacquisition
+uses a distinct stable operation ID and new session token, increments the fencing generation, preserves
+the durable payload/revision, and does not replay the ambiguous operation's snapshot. Any uncommitted
+local changes remain dirty for a later save. A competing owner or changed fence always wins.
+
 The separate `RecordStore.MailboxV2` API supports an opt-in strict per-key message order. Pass
 `strict_ordering_enabled = true` when constructing the mailbox before using a non-nil
 `ordering_key`; the default remains disabled and rejects those enqueues. When enabled, every
@@ -407,7 +419,71 @@ sets the maximum consecutive high-priority claims before non-high work gets a se
 (default `4`, maximum `32`). These are local scheduling preferences, not ownership or durability
 guarantees.
 
-Scheduler design is governed by [PR #39](https://github.com/alphanumeric-moderate/RecordStore/pull/39), the latest durable-messaging and durable-save-recovery specification. In particular, its sections 26.13, 27.4, 29 and P0 release blockers 9-10 in section 31 govern dirty-age-aware saves, bounded unknown-outcome reconciliation, mutation backpressure, and the critical persistence reserve. This PR implements only the scheduler side of that contract; the production-path unknown-save/renewal reconciler and its fault-injection acceptance gates remain unimplemented and must not be treated as satisfied. The focused scheduler regression suite runs under Lune. CodSpeed measures FIFO, weighted, deadline and DRR against the same synthetic multi-owner/work-class input in separate benchmark entries. These establish local algorithm behavior and relative cost only; they do not prove Roblox DataStore latency, quota, cross-server behavior or production rollout safety.
+Scheduler design and durable-save recovery are governed by [PR #39](https://github.com/alphanumeric-moderate/RecordStore/pull/39), especially sections 26.13, 27.4, 29 and P0 release blockers 9-10 in section 31. PR #56 now includes bounded save/renewal/release reconciliation, freshness budgets, mutation admission and opt-in same-process expired-lease reacquisition. The implementation is still awaiting the final fault-injection/typecheck pass and real Roblox acceptance; code and mock coverage do not prove the whole durability contract. The focused scheduler regression suite runs under Lune. CodSpeed measures FIFO, weighted, deadline and DRR against the same synthetic multi-owner/work-class input in separate benchmark entries. These establish local algorithm behavior and relative cost only; they do not prove Roblox DataStore latency, quota, cross-server behavior or production rollout safety.
+
+## Durability risk and mutation admission
+
+Each Record accepts a validated durability policy:
+
+```luau
+local record = RecordStore.new("PlayerData", "global", "Player_123", {
+    schema_version = 1,
+    autosave_interval = 60,
+    max_dirty_age_seconds = 120,
+    durability_mode = "balanced",
+    lease_recovery_enabled = false,
+    on_event = function(event, key, result, message)
+        if event == "durability_risk" then
+            warn("Persistence risk", key, result, message or "")
+        elseif event == "durability_recovered" then
+            print("Persistence risk cleared", key)
+        end
+    end,
+})
+
+local status = record:GetDurabilityStatus()
+local server_status = RecordStore.get_health_snapshot()
+```
+
+- `balanced` preserves the normal mutation policy and emits an edge-triggered risk event when a
+  write outcome is unknown or dirty data exceeds the configured age.
+- `durability_first` advances the next eligible autosave deadline once dirty data reaches half of
+  `max_dirty_age_seconds`. Lease renewal still takes precedence when due. These thresholds do not
+  guarantee that Roblox DataStoreService will accept or complete a write by a particular time.
+- **read_only_on_risk** rejects RecordStore mutation APIs once the observed dirty generation reaches
+  the configured age. In PlayerDataCore, the same policy also rejects new PlayerData.Set calls and
+  restores tracked Value-object changes if either the coalesced pending-value buffer or the Record's
+  dirty generation exceeds that age. Pending values are coalesced to at most one latest value per
+  configured field. Earlier accepted pending values remain eligible for flush; read-only admission
+  must not discard them. An in-process policy cannot make uncommitted memory durable.
+
+The game-facing policy can be selected per controller instead of editing the module default:
+
+    local player_data = PlayerDataCore.new({
+        DurabilityMode = "read_only_on_risk",
+        MaxDirtyAgeSeconds = 120,
+        LeaseRecoveryEnabled = false,
+    })
+
+DurabilityMode accepts balanced, durability_first, or read_only_on_risk. MaxDirtyAgeSeconds must be
+finite, positive, and at most 86,400 seconds. These controller overrides are passed to each Record
+and also govern the PlayerDataCore pending buffer.
+
+max_dirty_age_seconds defaults to twice autosave_interval and must be positive and at most
+86,400 seconds. GetDurabilityStatus() observes supported direct mutation of the public Record.Data
+table before returning status, reports ownership certainty separately from durability, and includes
+confirmed revision/generation, dirty and durable watermarks, oldest dirty age and its evidence basis,
+lease margin, pending operation identity, policy, and mutation-admission state. Direct mutable-table
+changes are timestamped when first observed, so that age is explicitly marked as a lower bound. The
+existing on_event option receives edge-triggered durability_risk and durability_recovered events.
+The server-level get_health_snapshot() summarizes only Records known to the current server instance;
+a healthy result is not a global DataStore service health guarantee.
+
+The Lune regression suite exercises direct-data status, risk reporting, unknown-write reconciliation,
+and pending-buffer backpressure. Mock tests do not establish live-service latency, throttling, or
+cross-server guarantees. Full PR #39 acceptance still requires the complete failure-injection matrix,
+Roblox Studio/server validation, and the separately gated Mailbox, transaction, saga, migration,
+operations, and erasure phases.
 
 ## Non-save operational diagnostics
 
