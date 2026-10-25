@@ -819,18 +819,36 @@ local function test_future_schema_writers_cancel_updates()
 	assert(segment_store.committed_update_calls == commits_before_append,
 		"index append re-persisted a future-version segment")
 
-	local ordering_mailbox, ordering_store = new_mailbox()
 	local order_key = "future-ordering-schema"
+	local intercepted_order_route = nil
+	local order_backing = MailboxV2.MockStore()
+	local order_store = {
+		GetAsync = function(_, key) return order_backing:GetAsync(key) end,
+		GetAsyncFresh = function(_, key) return order_backing:GetAsyncFresh(key) end,
+		UpdateAsync = function(_, key, transform)
+			local cancelled = false
+			local result = order_backing:UpdateAsync(key, function(raw, key_info)
+				local proposed = transform(raw, key_info)
+				if key == intercepted_order_route and proposed == nil then cancelled = true end
+				return proposed
+			end)
+			if cancelled then return nil end
+			return result
+		end,
+		RemoveAsync = function(_, key) return order_backing:RemoveAsync(key) end,
+	}
+	local ordering_mailbox = new_mailbox({}, order_store)
 	local order_route = ordering_mailbox:_ordering_route(order_key)
-	ordering_store.values[order_route] = {
+	intercepted_order_route = order_route
+	order_backing.values[order_route] = {
 		version = 3, owner = ordering_mailbox.owner, ordering_key = order_key,
 		next_sequence = 2, routes = { ["future-ordering-route"] = 1 }, replay_operations = {},
 	}
-	local commits_before_order = ordering_store.committed_update_calls
+	local commits_before_order = order_backing.committed_update_calls
 	local sequence, order_error = ordering_mailbox:_ensure_ordering_slot("future-ordering-route-2", order_key)
 	assert(sequence == nil and string.find(tostring(order_error), "unsupported schema version", 1, true) ~= nil,
-		"ordering reservation did not reject a future-version index")
-	assert(ordering_store.committed_update_calls == commits_before_order,
+		"ordering reservation did not reject a future-version index after a cancelled UpdateAsync")
+	assert(order_backing.committed_update_calls == commits_before_order,
 		"ordering reservation re-persisted a future-version index")
 end
 

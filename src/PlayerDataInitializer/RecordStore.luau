@@ -3856,6 +3856,11 @@ do
 		if update_error ~= nil or updated == nil then
 			local latest_value, read_error = self:_get_fresh(ordering_route)
 			local latest = as_dict(latest_value)
+			if read_error == nil and latest ~= nil and same_owner(latest.owner, self.owner)
+				and latest.version ~= VERSION
+			then
+				return nil, "unsupported schema version: ordering index version is unsupported"
+			end
 			local routes = if latest ~= nil then as_dict(latest.routes) else nil
 			local sequence = if routes ~= nil then routes[route] else nil
 			if read_error == nil and latest ~= nil and latest.version == VERSION
