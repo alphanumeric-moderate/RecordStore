@@ -250,25 +250,36 @@ local function create_handler(
 			if raw_ledger ~= nil and type(raw_ledger) ~= "table" then
 				return current_data, ledger_result("corrupt")
 			end
-			local ledger: { [string]: { [string]: unknown } } = if type(raw_ledger) == "table"
-				then table.clone(raw_ledger :: { [string]: { [string]: unknown } })
-				else {}
+			local ledger: { [string]: RecordStore.JsonValue } = {}
 			local prior_count = 0
-			for prior_id, prior in pairs(ledger) do
-				if type(prior_id) ~= "string" or prior_id == "" or type(prior) ~= "table"
-					or not is_positive_integer(prior.player_id) or not is_positive_integer(prior.product_id)
-				then
-					return current_data, ledger_result("corrupt")
+			if raw_ledger ~= nil then
+				local raw_entries = raw_ledger :: { [string]: RecordStore.JsonValue }
+				for prior_id, raw_prior in pairs(raw_entries) do
+					if type(prior_id) ~= "string" or prior_id == "" or type(raw_prior) ~= "table" then
+						return current_data, ledger_result("corrupt")
+					end
+					local prior_fields = raw_prior :: { [string]: RecordStore.JsonValue }
+					if not is_positive_integer(prior_fields.player_id)
+						or not is_positive_integer(prior_fields.product_id)
+					then
+						return current_data, ledger_result("corrupt")
+					end
+					ledger[prior_id] = {
+						player_id = prior_fields.player_id,
+						product_id = prior_fields.product_id,
+					}
+					prior_count += 1
 				end
-				prior_count += 1
 			end
-			local prior = ledger[validated_purchase_id]
-			if prior ~= nil then
-				if prior.player_id == validated_player_id and prior.product_id == validated_product_id then
-					return current_data, ledger_result("duplicate")
-				end
-				return current_data, ledger_result("conflict")
+		local prior = ledger[validated_purchase_id]
+		if prior ~= nil then
+			if type(prior) ~= "table" then return current_data, ledger_result("corrupt") end
+			local prior_fields = prior :: { [string]: RecordStore.JsonValue }
+			if prior_fields.player_id == validated_player_id and prior_fields.product_id == validated_product_id then
+				return current_data, ledger_result("duplicate")
 			end
+			return current_data, ledger_result("conflict")
+		end
 			if prior_count >= (config.permanent_purchase_ledger_capacity :: number) then
 				return current_data, ledger_result("capacity")
 			end
