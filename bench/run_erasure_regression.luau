@@ -259,6 +259,38 @@ do
 		"late first-time join recreated a key already fenced by erasure")
 end
 
+-- Default production configuration must block before fencing a profile when
+-- historical versions exist and the only available purge API is deprecated.
+do
+	local user_id = 205
+	local _, key = create_profile(user_id, 20)
+	local manifest_store = new_manifest_store()
+	local v2 = V2Module.new(RecordStore, RecordStore.MailboxV2)
+	local erasure = ErasureModule.new(manifest_store, {
+		record_store = RecordStore.Mock,
+		record_store_v2 = { new = function() return v2 end },
+		mailbox_module = RecordStore.MailboxV2,
+		profile_store_name = "PlayerData_Test1",
+		profile_scope = "global",
+		key_prefix = "Player_",
+		profile_family_verified = true,
+		allow_deprecated_remove_version = true, -- mock-only fixture; Roblox live acceptance is still blocked
+		verify_templates = function(rendered_user_id, templates)
+			return rendered_user_id == user_id and #templates == 1
+				and templates[1].template.key == key
+		end,
+		kick_player = function(kicked_user_id, _erasure_id)
+			return kicked_user_id == user_id
+		end,
+	})
+	local plan = erasure:PlanAsync(user_id, "erase-default-block-205")
+	expect(plan.rtbf_coverage_verified ~= true,
+		"default erasure configuration certified a profile with historical versions")
+	local raw = RecordStore.Mock.get_record_raw("PlayerData_Test1", "global", key)
+	expect(type(raw) == "table" and type(raw.data) == "table",
+		"blocked historical purge still installed the destructive erasure fence")
+end
+
 -- End-to-end integration through the generic manifest coordinator. The known
 -- PlayerDataCore family is explicitly audited for this fixture only; this does
 -- not certify any other application-owned key family or live Roblox behavior.
