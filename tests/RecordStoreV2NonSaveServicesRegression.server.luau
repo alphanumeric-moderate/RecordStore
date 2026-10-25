@@ -562,6 +562,7 @@ do
 	expect(source:Close() == "closed" and target:Close() == "closed", "refund response-loss records did not close")
 end
 
+do
 local function inject_precommit_unknown(record, suffix)
 	local original = record.TransactAsync
 	local armed = true
@@ -713,6 +714,8 @@ do
 	expect(source:Close() == "closed" and target:Close() == "closed",
 		"pre-commit refund records did not close")
 end
+
+end -- scope saga precommit matrix
 
 local projection_store = new_store()
 local projections = V2.Projections.new(projection_store)
@@ -877,6 +880,7 @@ expect(#deleted_items == 2 and deleted_items[1].key == "Player_123456"
 	"erasure failed to invoke each generation-aware deletion adapter")
 expect(erasure:GetStatus(123456).status == "completed", "erasure manifest status was not durable")
 
+do -- scope RTBF coverage and write-gate regression locals
 expect(not pcall(function()
 	V2.Erasure.new(new_store(), {
 		{
@@ -992,6 +996,8 @@ expect(per_item_fence_result.code == "retryable" and per_item_fence_calls == 2 a
 	"erasure did not recheck a lost writer fence immediately before deletion")
 expect(per_item_fence_erasure:GetStatus(781).cursor == 0,
 	"erasure advanced progress after losing the per-item writer fence")
+
+end -- scope RTBF coverage and write-gate regression locals
 
 local oversize_items = {}
 for index = 1, 513 do
