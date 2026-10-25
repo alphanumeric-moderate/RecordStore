@@ -2582,7 +2582,12 @@ local function new_erasure(store, families, options)
 			}
 		end
 		if status.code == "unknown" or status.code == "conflict" or status.code == "corrupt" then
-			return nil, status
+			return true, {
+				code = "erasure_state_unresolved",
+				write_blocked = true,
+				message = "write/recreation must remain blocked because durable erasure status could not be proven safe",
+				observed = status,
+			}
 		end
 		if status.status == "resolved" then
 			-- A generic terminal label is not proof that user data was erased or
