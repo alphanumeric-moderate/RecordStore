@@ -2786,7 +2786,15 @@ local function new_maintenance()
 			end
 			self.status = "running"
 			for _, item in ipairs(items) do
-				if os.clock() * 1000 - start >= budget_ms then self.status = "paused"; break end
+				-- The durable cursor describes page boundaries. Checking time after
+				-- some items in a multi-item page would checkpoint counters while keeping
+				-- the old cursor, so resuming can replay rows and inflate progress.
+				-- Enforce the cooperative deadline only for a single-item page; otherwise
+				-- finish the bounded page before advancing its cursor.
+				if #items == 1 and os.clock() * 1000 - start >= budget_ms then
+					self.status = "paused"
+					break
+				end
 				local inspected, inspect_error = io_call(config.inspect, item)
 				if type(inspected) ~= "table" or inspected.status == "unknown" then
 					self.status = "unknown"
