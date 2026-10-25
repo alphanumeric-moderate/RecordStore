@@ -151,7 +151,7 @@ local ledger_records = { [123] = ledger_record }
 local ledger_grants = 0
 local ledger_processor = ReceiptProcessor.new({
 	get_record = function(user_id) return ledger_records[user_id] end,
-	receipt_retention_seconds = 60,
+	receipt_retention_seconds = 1,
 	permanent_purchase_ledger_key = "purchase_ledger",
 	permanent_purchase_ledger_capacity = 2,
 	on_diagnostic = function(diagnostic) table.insert(diagnostics, diagnostic) end,
@@ -213,12 +213,12 @@ expect(diagnostics[#diagnostics].category == "purchase_grant_rejected",
 expect(type(ledger_record:Get().purchase_ledger) == "table"
 	and ledger_record:Get().purchase_ledger["permanent-001"].product_id == 1001,
 	"permanent ledger did not record purchase identity atomically with the grant")
-ledger_clock = 2000
+ledger_clock = 1002
 expect(ledger_handler(permanent_purchase) == Enum.ProductPurchaseDecision.PurchaseGranted,
 	"same purchase was not acknowledged after bounded transaction-receipt expiry")
 expect(ledger_record:Get().coins == 10 and ledger_grants == 1,
 	"permanent ledger failed to suppress a grant after transaction-receipt expiry")
-ledger_clock = 3000
+ledger_clock = 1003
 local permanent_conflict = table.clone(permanent_purchase)
 permanent_conflict.ProductId = 1002
 expect(ledger_handler(permanent_conflict) == Enum.ProductPurchaseDecision.NotProcessedYet,
