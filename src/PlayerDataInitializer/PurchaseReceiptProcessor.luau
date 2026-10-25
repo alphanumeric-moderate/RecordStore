@@ -29,6 +29,10 @@ export type Config = {
 	-- Acknowledges that pre-existing PurchaseIds were backfilled or do not exist.
 	-- This is an operator assertion, not automatic proof of the migration.
 	permanent_purchase_ledger_migration_complete: boolean?,
+	external_purchase_authority: PurchaseAuthority?,
+	-- This operator assertion means exhaustive historical PurchaseIds were imported
+	-- into the external authority or separately reconciled.
+	external_purchase_authority_migration_complete: boolean?,
 	on_diagnostic: ((diagnostic: Diagnostic) -> ())?,
 }
 
@@ -38,6 +42,26 @@ export type HistoricalPurchase = {
 	PurchaseId: string,
 	PlayerId: number,
 	ProductId: number,
+}
+
+export type PurchaseAuthorityRecord = {
+	PurchaseId: string,
+	PlayerId: number,
+	ProductId: number,
+	Status: string,
+	Outcome: string?,
+}
+
+-- Implement this contract with a globally shared, strongly consistent durable store.
+-- ClaimAsync atomically reserves PurchaseId to the exact PlayerId/ProductId tuple.
+-- Claims are sticky until committed; a retry of the same tuple returns "claimed".
+-- CommitAsync is idempotent and only finalizes a matching claim. GetStatusAsync must
+-- bypass caches. BackfillAsync imports historical completed purchases without granting.
+export type PurchaseAuthority = {
+	ClaimAsync: (self: any, purchase_id: string, player_id: number, product_id: number) -> (PurchaseAuthorityRecord?, string?),
+	CommitAsync: (self: any, purchase_id: string, player_id: number, product_id: number, outcome: string) -> (PurchaseAuthorityRecord?, string?),
+	GetStatusAsync: (self: any, purchase_id: string) -> (PurchaseAuthorityRecord?, string?),
+	BackfillAsync: (self: any, purchase_id: string, player_id: number, product_id: number) -> (PurchaseAuthorityRecord?, string?),
 }
 
 export type BackfillResult = {
@@ -60,6 +84,11 @@ export type Processor = {
 		purchases: { HistoricalPurchase },
 		max_items: number?
 	) -> BackfillResult,
+	BackfillExternalAuthorityAsync: (
+		self: Processor,
+		purchases: { HistoricalPurchase },
+		max_items: number?
+	) -> BackfillResult,
 }
 
 type NormalizedConfig = {
@@ -68,6 +97,8 @@ type NormalizedConfig = {
 	permanent_purchase_ledger_key: string?,
 	permanent_purchase_ledger_capacity: number?,
 	permanent_purchase_ledger_migration_complete: boolean,
+	external_purchase_authority: PurchaseAuthority?,
+	external_purchase_authority_migration_complete: boolean,
 	on_diagnostic: ((diagnostic: Diagnostic) -> ())?,
 }
 
@@ -90,6 +121,8 @@ local function normalize_config(config: unknown): NormalizedConfig
 			and option_name ~= "permanent_purchase_ledger_key"
 			and option_name ~= "permanent_purchase_ledger_capacity"
 			and option_name ~= "permanent_purchase_ledger_migration_complete"
+			and option_name ~= "external_purchase_authority"
+			and option_name ~= "external_purchase_authority_migration_complete"
 			and option_name ~= "on_diagnostic"
 		then
 			error("unsupported purchase receipt option: " .. tostring(option_name), 3)
@@ -113,6 +146,26 @@ local function normalize_config(config: unknown): NormalizedConfig
 	local ledger_migration_complete = values.permanent_purchase_ledger_migration_complete
 	if ledger_migration_complete ~= nil and type(ledger_migration_complete) ~= "boolean" then
 		error("permanent_purchase_ledger_migration_complete must be a boolean", 3)
+	end
+	local external_authority = values.external_purchase_authority
+	local external_authority_migration_complete = values.external_purchase_authority_migration_complete
+	if external_authority_migration_complete ~= nil and type(external_authority_migration_complete) ~= "boolean" then
+		error("external_purchase_authority_migration_complete must be a boolean", 3)
+	end
+	if external_authority == nil then
+		if external_authority_migration_complete == true then
+			error("external_purchase_authority_migration_complete requires external_purchase_authority", 3)
+		end
+	elseif type(external_authority) ~= "table"
+		or type((external_authority :: { [string]: unknown }).ClaimAsync) ~= "function"
+		or type((external_authority :: { [string]: unknown }).CommitAsync) ~= "function"
+		or type((external_authority :: { [string]: unknown }).GetStatusAsync) ~= "function"
+		or type((external_authority :: { [string]: unknown }).BackfillAsync) ~= "function"
+	then
+		error("external_purchase_authority must implement ClaimAsync, CommitAsync, GetStatusAsync, and BackfillAsync", 3)
+	end
+	if external_authority ~= nil and (ledger_key == nil or ledger_migration_complete ~= true) then
+		error("external_purchase_authority requires the migrated permanent per-profile ledger so grant outcomes are recoverable", 3)
 	end
 	if ledger_key == nil then
 		if ledger_capacity ~= nil then
@@ -146,6 +199,8 @@ local function normalize_config(config: unknown): NormalizedConfig
 		permanent_purchase_ledger_key = ledger_key :: string?,
 		permanent_purchase_ledger_capacity = (ledger_capacity or (if ledger_key ~= nil then MAX_PERMANENT_PURCHASE_LEDGER_ENTRIES else nil)) :: number?,
 		permanent_purchase_ledger_migration_complete = ledger_migration_complete == true,
+		external_purchase_authority = external_authority :: PurchaseAuthority?,
+		external_purchase_authority_migration_complete = external_authority_migration_complete == true,
 		on_diagnostic = on_diagnostic :: ((diagnostic: Diagnostic) -> ())?,
 	}
 	return table.freeze(normalized)
@@ -206,6 +261,58 @@ local function copy_product_reducers(
 	return table.freeze(copied)
 end
 
+local function invoke_purchase_authority(
+	config: NormalizedConfig,
+	operation: string,
+	purchase_id: string,
+	player_id: number,
+	product_id: number,
+	outcome: string?
+): (unknown?, string?)
+	local authority = config.external_purchase_authority
+	if authority == nil then return nil, "external purchase authority is not configured" end
+	local untyped = authority :: any
+	local ok, result, message = pcall(function()
+		if operation == "ClaimAsync" then
+			return untyped.ClaimAsync(untyped, purchase_id, player_id, product_id)
+		elseif operation == "CommitAsync" then
+			return untyped.CommitAsync(untyped, purchase_id, player_id, product_id, outcome)
+		elseif operation == "GetStatusAsync" then
+			return untyped.GetStatusAsync(untyped, purchase_id)
+		elseif operation == "BackfillAsync" then
+			return untyped.BackfillAsync(untyped, purchase_id, player_id, product_id)
+		end
+		error("unsupported purchase-authority operation")
+	end)
+	if not ok then return nil, tostring(result) end
+	return result, if type(message) == "string" then message else nil
+end
+
+local function validate_authority_record(
+	value: unknown,
+	purchase_id: string,
+	player_id: number,
+	product_id: number
+): (PurchaseAuthorityRecord?, string?)
+	if type(value) ~= "table" then return nil, "purchase authority returned no structured record" end
+	local fields = value :: { [string]: unknown }
+	if fields.PurchaseId ~= purchase_id or fields.PlayerId ~= player_id or fields.ProductId ~= product_id then
+		return nil, "purchase authority record identity does not match the receipt tuple"
+	end
+	if type(fields.Status) ~= "string" then return nil, "purchase authority record status is malformed" end
+	if fields.Outcome ~= nil and type(fields.Outcome) ~= "string" then
+		return nil, "purchase authority record outcome is malformed"
+	end
+	return value :: PurchaseAuthorityRecord, nil
+end
+
+local function authority_commit_is_confirmed(
+	record: PurchaseAuthorityRecord?
+): boolean
+	if record == nil or record.Status ~= "committed" then return false end
+	return record.Outcome == "granted" or record.Outcome == "duplicate" or record.Outcome == "historical"
+end
+
 local function create_handler(
 	config: NormalizedConfig,
 	product_grant_reducers: { [number]: GrantReducer }
@@ -248,6 +355,50 @@ local function create_handler(
 				"receipt grants are disabled until historical PurchaseIds are backfilled or explicitly reconciled",
 				validated_product_id)
 			return not_processed_yet
+		end
+		if config.external_purchase_authority ~= nil
+			and config.external_purchase_authority_migration_complete ~= true
+		then
+			emit_diagnostic(config, "external_purchase_authority_migration_required", "blocked",
+				"receipt grants are disabled until historical PurchaseIds are imported into the external authority",
+				validated_product_id)
+			return not_processed_yet
+		end
+		if config.external_purchase_authority ~= nil then
+			local raw_claim, claim_message = invoke_purchase_authority(
+				config, "ClaimAsync", validated_purchase_id, validated_player_id, validated_product_id, nil
+			)
+			local claim, claim_error = validate_authority_record(
+				raw_claim, validated_purchase_id, validated_player_id, validated_product_id
+			)
+			if claim ~= nil and claim.Status == "committed" and authority_commit_is_confirmed(claim) then
+				return purchase_granted
+			end
+			if claim ~= nil and claim.Status == "conflict" then
+				emit_diagnostic(config, "external_purchase_conflict", "conflict",
+					"PurchaseId is already bound to a different player or product", validated_product_id)
+				return not_processed_yet
+			end
+			if claim == nil or claim.Status == "unknown" then
+				local raw_status, status_message = invoke_purchase_authority(
+					config, "GetStatusAsync", validated_purchase_id, validated_player_id, validated_product_id, nil
+				)
+				local observed, observed_error = validate_authority_record(
+					raw_status, validated_purchase_id, validated_player_id, validated_product_id
+				)
+				if observed ~= nil and observed.Status == "committed" and authority_commit_is_confirmed(observed) then
+					return purchase_granted
+				elseif observed == nil or observed.Status ~= "claimed" then
+					emit_diagnostic(config, "external_purchase_authority_unresolved", "unknown",
+						observed_error or status_message or claim_error or claim_message
+							or "claim status is not durably confirmed", validated_product_id)
+					return not_processed_yet
+				end
+			elseif claim.Status ~= "claimed" then
+				emit_diagnostic(config, "external_purchase_authority_unresolved", claim.Status,
+					claim_error or claim_message or "authority did not confirm a usable claim", validated_product_id)
+				return not_processed_yet
+			end
 		end
 
 		local lookup_ok, record = pcall(config.get_record, validated_player_id)
@@ -387,9 +538,44 @@ local function create_handler(
 				"unrecognized permanent-ledger marker; operator reconciliation is required", validated_product_id)
 			return true
 		end
+		local function acknowledge_committed_receipt(result_value: unknown): EnumItem
+			if defer_for_permanent_ledger(result_value) then return not_processed_yet end
+			local authority = config.external_purchase_authority
+			if authority == nil then return purchase_granted end
+			local marker = if type(result_value) == "table"
+				then (result_value :: { [string]: unknown })[PERMANENT_LEDGER_RESULT_KEY]
+				else nil
+			local ledger_status = if type(marker) == "table"
+				then (marker :: { [string]: unknown }).status
+				else nil
+			if ledger_status ~= "granted" and ledger_status ~= "duplicate" then
+				emit_diagnostic(config, "external_purchase_outcome_unresolved", "unknown",
+					"profile transaction did not expose a validated grant/duplicate outcome", validated_product_id)
+				return not_processed_yet
+			end
+			local raw_commit, commit_message = invoke_purchase_authority(
+				config, "CommitAsync", validated_purchase_id, validated_player_id, validated_product_id,
+				ledger_status :: string
+			)
+			local committed, commit_error = validate_authority_record(
+				raw_commit, validated_purchase_id, validated_player_id, validated_product_id
+			)
+			if authority_commit_is_confirmed(committed) then return purchase_granted end
+			local raw_status, status_message = invoke_purchase_authority(
+				config, "GetStatusAsync", validated_purchase_id, validated_player_id, validated_product_id, nil
+			)
+			local observed, observed_error = validate_authority_record(
+				raw_status, validated_purchase_id, validated_player_id, validated_product_id
+			)
+			if authority_commit_is_confirmed(observed) then return purchase_granted end
+			emit_diagnostic(config, "external_purchase_commit_unresolved", "unknown",
+				observed_error or status_message or commit_error or commit_message
+					or "external purchase commit is not durably confirmed", validated_product_id)
+			return not_processed_yet
+		end
+
 		if transaction_ok and (status == "committed" or status == "duplicate") then
-			if defer_for_permanent_ledger(_result) then return not_processed_yet end
-			return purchase_granted
+			return acknowledge_committed_receipt(_result)
 		end
 
 		if not transaction_ok or status == "unknown" then
@@ -400,8 +586,7 @@ local function create_handler(
 				)
 			end)
 			if status_lookup_ok and durable_status ~= nil and durable_status.code == "committed" then
-				if defer_for_permanent_ledger(durable_status.result) then return not_processed_yet end
-				return purchase_granted
+				return acknowledge_committed_receipt(durable_status.result)
 			end
 			if status_lookup_ok and durable_status ~= nil and durable_status.code == "conflict" then
 				emit_diagnostic(config, "transaction_conflict", "conflict",
@@ -684,6 +869,129 @@ local function backfill_permanent_ledger(
 	return result
 end
 
+local function backfill_external_authority(
+	config: NormalizedConfig,
+	purchases: { HistoricalPurchase },
+	max_items: number?
+): BackfillResult
+	local result: BackfillResult = {
+		code = "invalid",
+		processed_count = 0,
+		backfilled_count = 0,
+		duplicate_count = 0,
+		failed_index = nil,
+		message = nil,
+	}
+	if config.external_purchase_authority == nil then
+		result.code = "unsupported"
+		result.message = "external_purchase_authority is not configured"
+		return result
+	end
+	local limit = if max_items == nil then MAX_BACKFILL_BATCH else max_items
+	if type(limit) ~= "number" or not math.isfinite(limit) or math.floor(limit) ~= limit
+		or limit < 1 or limit > MAX_BACKFILL_BATCH
+	then
+		result.message = "max_items must be an integer from 1 to 16"
+		return result
+	end
+	if type(purchases) ~= "table" then
+		result.message = "purchases must be a dense array"
+		return result
+	end
+	local count = #purchases
+	if count < 1 or count > limit then
+		result.message = "purchases must contain 1 to max_items entries"
+		return result
+	end
+	local dense_count = 0
+	for key in pairs(purchases) do
+		if type(key) ~= "number" or not math.isfinite(key) or math.floor(key) ~= key
+			or key < 1 or key > count
+		then
+			result.message = "purchases must be a dense numeric array"
+			return result
+		end
+		dense_count += 1
+	end
+	if dense_count ~= count then
+		result.message = "purchases must be a dense numeric array"
+		return result
+	end
+	local seen: { [string]: { player_id: number, product_id: number } } = {}
+	for index = 1, count do
+		local item = purchases[index]
+		if type(item) ~= "table" then
+			result.message = "purchase entry must be a table"
+			result.failed_index = index
+			return result
+		end
+		local id, player_id, product_id = item.PurchaseId, item.PlayerId, item.ProductId
+		if type(id) ~= "string" or id == "" or #id > MAX_PURCHASE_ID_BYTES
+			or string.find(id, "%c") ~= nil
+			or not is_positive_integer(player_id) or not is_positive_integer(product_id)
+		then
+			result.message = "historical PurchaseId, PlayerId, or ProductId is malformed"
+			result.failed_index = index
+			return result
+		end
+		local previous = seen[id :: string]
+		if previous ~= nil and (
+			previous.player_id ~= player_id or previous.product_id ~= product_id
+		) then
+			result.code = "conflict"
+			result.message = "the same PurchaseId appears in this batch with conflicting identity"
+			result.failed_index = index
+			return result
+		end
+		seen[id :: string] = { player_id = player_id :: number, product_id = product_id :: number }
+	end
+	local function apply_one(index: number): (string, string?)
+		local item = purchases[index]
+		local id = item.PurchaseId :: string
+		local player_id = item.PlayerId :: number
+		local product_id = item.ProductId :: number
+		local raw, message = invoke_purchase_authority(config, "BackfillAsync", id, player_id, product_id, nil)
+		local response, response_error = validate_authority_record(raw, id, player_id, product_id)
+		if response ~= nil and (response.Status == "imported" or response.Status == "committed")
+			and (response.Outcome == "historical" or response.Outcome == "granted"
+				or response.Outcome == "duplicate")
+		then
+			return if response.Status == "imported" then "backfilled" else "duplicate", nil
+		end
+		if response ~= nil and response.Status == "conflict" then
+			return "conflict", "historical PurchaseId is already bound to a different identity"
+		end
+		local raw_status, status_message = invoke_purchase_authority(
+			config, "GetStatusAsync", id, player_id, product_id, nil
+		)
+		local observed, observed_error = validate_authority_record(raw_status, id, player_id, product_id)
+		if observed ~= nil and observed.Status == "committed"
+			and (observed.Outcome == "historical" or observed.Outcome == "granted" or observed.Outcome == "duplicate")
+		then
+			return "duplicate", nil
+		end
+		if observed ~= nil and observed.Status == "conflict" then
+			return "conflict", "external authority reports a conflicting historical identity"
+		end
+		return "unknown", response_error or status_message or observed_error or message
+			or "external historical import outcome remains unresolved"
+	end
+	for index = 1, count do
+		local status, message = apply_one(index)
+		if status == "backfilled" or status == "duplicate" then
+			result.processed_count += 1
+			if status == "backfilled" then result.backfilled_count += 1 else result.duplicate_count += 1 end
+		else
+			result.code = if result.processed_count > 0 then "partial" else status
+			result.failed_index = index
+			result.message = message or ("external authority backfill stopped with status " .. status)
+			return result
+		end
+	end
+	result.code = if result.backfilled_count == 0 then "duplicate" else "complete"
+	return result
+end
+
 function PurchaseReceiptProcessor.new(config: Config): Processor
 	local normalized = normalize_config(config)
 	local processor: Processor = {
@@ -693,6 +1001,9 @@ function PurchaseReceiptProcessor.new(config: Config): Processor
 		end,
 		BackfillPermanentLedgerAsync = function(_self, record, purchases, max_items)
 			return backfill_permanent_ledger(normalized, record, purchases, max_items)
+		end,
+		BackfillExternalAuthorityAsync = function(_self, purchases, max_items)
+			return backfill_external_authority(normalized, purchases, max_items)
 		end,
 	}
 	return processor
