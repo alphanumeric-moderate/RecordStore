@@ -2476,7 +2476,15 @@ local function new_erasure(store, families, options)
 		end
 		if status.code == "invalid" then return nil, status end
 		if status.code == "not_found" then return false, status end
-		if status.code == "unknown" or status.code == "conflict" or status.code == "corrupt" or status.code == "coverage_unverified" then
+		if status.code == "coverage_unverified" then
+			return true, {
+				code = "coverage_unverified",
+				write_blocked = true,
+				message = "write/recreation must remain blocked until RTBF coverage is reconciled",
+				observed = status.observed,
+			}
+		end
+		if status.code == "unknown" or status.code == "conflict" or status.code == "corrupt" then
 			return nil, status
 		end
 		if status.status == "resolved" then
