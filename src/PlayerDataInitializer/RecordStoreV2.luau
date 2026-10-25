@@ -2670,7 +2670,12 @@ local function new_maintenance()
 	end
 	function service.NewCompactor(config)
 		config = config or {}
-		local compactor = { status = "idle", cursor = config.initial_cursor, processed = 0, removed = 0, last_error = nil }
+		local initial_processed = config.initial_processed or 0
+		local initial_removed = config.initial_removed or 0
+		if not finite(initial_processed) or math.floor(initial_processed) ~= initial_processed or initial_processed < 0
+			or not finite(initial_removed) or math.floor(initial_removed) ~= initial_removed or initial_removed < 0
+		then error("initial maintenance counters must be non-negative integers", 2) end
+		local compactor = { status = "idle", cursor = config.initial_cursor, processed = initial_processed, removed = initial_removed, last_error = nil }
 		function compactor:RunStep(max_items, budget_ms)
 			max_items = math.clamp(math.floor(max_items or 32), 1, 256)
 			budget_ms = math.clamp(math.floor(budget_ms or 25), 1, 1000)
