@@ -1483,6 +1483,12 @@ local function new_doctor(record_store)
 			if existing.quarantine_id == quarantine_id and existing.status == "resolved" then
 				return { code = "duplicate", status = "resolved", manifest = existing }
 			end
+			if existing.quarantine_id == quarantine_id
+				and (existing.operator_id ~= operator_id or existing.reason ~= reason)
+			then
+				return { code = "conflict", status = existing.status,
+					message = "quarantine ID was already bound to a different operator decision" }
+			end
 			if existing.quarantine_id ~= quarantine_id and existing.status ~= "resolved" then
 				return { code = "conflict", message = "another quarantine is active or awaiting resolution" }
 			end
@@ -1522,6 +1528,7 @@ local function new_doctor(record_store)
 			scope = identity.scope,
 			profile_key = identity.profile_key,
 			quarantine_id = quarantine_id,
+			fence_protocol = 1,
 			status = "quarantined",
 			observed_revision = source_revision,
 			observed_generation = source_generation,
@@ -1631,14 +1638,12 @@ local function new_doctor(record_store)
 			return { code = "not_found", status = "not_quarantined", allowed = true }
 		end
 		if manifest.status == "resolved" then
-			local exact_release = fence_code == "success" and fence ~= nil
-				and fence.Quarantined == false
-				and type(fence.CurrentWriteId) == "string"
-				and fence.CurrentWriteId == ("qrel:" .. tostring(manifest.resolution_id))
+			local exact_release = manifest.fence_protocol == 1
+				and fence_code == "success" and fence ~= nil and fence.Quarantined == false
 			if exact_release then
 				return { code = "success", status = "resolved", allowed = true, manifest = manifest, fence = fence }
 			end
-			if fence_code == "not_found" then
+			if fence_code == "not_found" and manifest.fence_protocol == 1 then
 				return { code = "success", status = "resolved", allowed = true, manifest = manifest }
 			end
 			return {
@@ -1805,6 +1810,7 @@ local function new_doctor(record_store)
 					or "same-key fence is release-pending but durable audit resolution was not confirmed" }
 		end
 		if observed_pending.status == "release_pending" then
+			local manifest_resolved_at = os.time()
 			local _, resolve_manifest_error = adapter_call(quarantine_store, "UpdateAsync", key, function(old)
 				if type(old) ~= "table" or old.version ~= 1 or old.identity_text ~= identity_text
 					or old.quarantine_id ~= quarantine_id or old.resolution_id ~= resolution_id
@@ -1813,7 +1819,8 @@ local function new_doctor(record_store)
 				if old.status ~= "release_pending" then return old end
 				local next_manifest = copy(old)
 				next_manifest.status = "resolved"
-				next_manifest.updated_at = os.time()
+				next_manifest.fence_protocol = 1
+				next_manifest.updated_at = manifest_resolved_at
 				return next_manifest
 			end)
 			observed_pending, observed_pending_code, observed_pending_error = read_quarantine_manifest(
