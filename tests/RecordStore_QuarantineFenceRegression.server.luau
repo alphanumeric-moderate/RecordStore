@@ -220,6 +220,61 @@ local recovered_writer = V2.ProfileDoctor.CheckWritableAsync(recovery_identity, 
 expect(recovered_writer.code == "success" and recovered_writer.allowed == true,
 	"identity-only release remained blocked after confirmed audit and fence completion")
 
+local pending_recovery_record = open_profile("QuarantineFenceRegression", "pending-recovery")
+local pending_recovery_identity = {
+	store_name = "QuarantineFenceRegression",
+	scope = "global",
+	profile_key = "pending-recovery",
+}
+local pending_initial, pending_initial_code = RecordStore.Mock.get_quarantine_fence_status_async(
+	pending_recovery_identity.store_name, pending_recovery_identity.scope, pending_recovery_identity.profile_key
+)
+expect(pending_initial_code == "success" and pending_initial ~= nil
+	and pending_initial.Quarantined == false,
+	"pending-recovery fixture has no verified initial fence status")
+local orphan_pending_id = "quarantine-orphan-release-pending"
+local orphan_pending_operator = "operator-4"
+local orphan_pending_reason = "recover release-pending fence after process restart"
+local resolution_fingerprint = V2.Fingerprint({
+	quarantine_id = orphan_pending_id,
+	operator_id = orphan_pending_operator,
+	reason = orphan_pending_reason,
+	source_revision = pending_initial.CurrentRevision,
+})
+expect(type(resolution_fingerprint) == "string" and #resolution_fingerprint >= 48,
+	"could not derive the stable quarantine resolution identity")
+local orphan_pending_resolution_id = "qr-" .. string.sub(resolution_fingerprint, 1, 48)
+local orphan_pending_fence, orphan_pending_code = RecordStore.Mock.quarantine_profile_writes_async(
+	pending_recovery_identity.store_name, pending_recovery_identity.scope, pending_recovery_identity.profile_key,
+	orphan_pending_id, orphan_pending_operator, orphan_pending_reason,
+	pending_initial.CurrentGeneration, pending_initial.CurrentRevision
+)
+expect(orphan_pending_code == "success" and orphan_pending_fence ~= nil,
+	"could not install the pre-resolution quarantine fence")
+local orphan_pending_updated, orphan_pending_update_code = RecordStore.Mock.mark_quarantine_release_pending_async(
+	pending_recovery_identity.store_name, pending_recovery_identity.scope, pending_recovery_identity.profile_key,
+	orphan_pending_id, orphan_pending_resolution_id, orphan_pending_operator, orphan_pending_reason,
+	pending_initial.CurrentRevision
+)
+expect(orphan_pending_update_code == "success" and orphan_pending_updated ~= nil
+	and orphan_pending_updated.Phase == "release_pending",
+	"could not simulate a process crash after the release-pending fence but before the audit update")
+local orphan_pending_manifest_store = new_store()
+local recovered_pending_resolution = V2.ProfileDoctor.ResolveQuarantineAsync(
+	pending_recovery_identity, orphan_pending_manifest_store, orphan_pending_id,
+	orphan_pending_operator, orphan_pending_reason, pending_initial.CurrentRevision
+)
+expect(recovered_pending_resolution.code == "committed"
+	and recovered_pending_resolution.status == "resolved",
+	"identity-only resolution failed to recover an orphan release-pending fence: "
+		.. tostring(recovered_pending_resolution.code))
+local orphan_pending_writer = V2.ProfileDoctor.CheckWritableAsync(
+	pending_recovery_identity, orphan_pending_manifest_store
+)
+expect(orphan_pending_writer.code == "success" and orphan_pending_writer.allowed == true
+	and orphan_pending_writer.status == "resolved",
+	"recovered release-pending fence did not become writable after durable resolution")
+
 local erase_record = open_profile("QuarantineFenceRegression", "erase-over-quarantine")
 local erase_manifest = new_store()
 local erase_quarantine = quarantine(
