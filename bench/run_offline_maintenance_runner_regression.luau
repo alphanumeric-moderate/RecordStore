@@ -3,7 +3,9 @@ local fs = require("@lune/fs")
 local luau = require("@lune/luau")
 local Shim = require("./RobloxShim")
 local RecordStore = Shim.load()
-local V2Module = require(game:GetService("ServerScriptService"):WaitForChild("PlayerDataInitializer"):WaitForChild("RecordStoreV2"))
+local V2Module = luau.load(fs.readFile("src/PlayerDataInitializer/RecordStoreV2.luau"), {
+	debugName = "RecordStoreV2",
+})()
 local V2 = V2Module.new(RecordStore, RecordStore.MailboxV2)
 local Runner = luau.load(fs.readFile("src/PlayerDataInitializer/RecordStoreMaintenanceRunner.luau"), {
 	debugName = "RecordStoreMaintenanceRunner",
