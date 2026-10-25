@@ -11814,22 +11814,22 @@ local function purge_erased_versions_internal(
 		return nil, list_code or "unknown", list_message or "historical version inventory could not be read"
 	end
 	local current_found = false
-	local removable_history_found = false
+	local historical_version_found = false
 	for _, entry in ipairs(entries) do
 		if entry.Version == current_version then current_found = true
-		elseif not entry.IsDeleted then removable_history_found = true end
+		else historical_version_found = true end
 	end
 	if not current_found then
 		return nil, "conflict", "the durable erasure fence version is missing from version history"
 	end
-	if not mock and removable_history_found and allow_deprecated_remove_version ~= true then
+	if not mock and historical_version_found and allow_deprecated_remove_version ~= true then
 		return nil, "unsupported",
 			"historical purge requires deprecated DataStore:RemoveVersionAsync; pass allow_deprecated_remove_version=true only after reviewing the platform limitation"
 	end
 	local removed = 0
 	for _, entry in ipairs(entries) do
 		if removed >= limit then break end
-		if entry.Version ~= current_version and not entry.IsDeleted then
+		if entry.Version ~= current_version then
 			if mock then
 				local mock_entry = get_mock_store(name, scope)[key]
 				if mock_entry == nil then return nil, "unknown", "mock profile disappeared during historical purge" end
@@ -11864,7 +11864,7 @@ local function purge_erased_versions_internal(
 					end
 					local still_present = false
 					for _, current_entry in ipairs(after_failure) do
-						if current_entry.Version == entry.Version and not current_entry.IsDeleted then
+						if current_entry.Version == entry.Version then
 							still_present = true
 							break
 						end
@@ -11910,7 +11910,7 @@ local function purge_erased_versions_internal(
 	local complete = #remaining_entries < MAX_ERASURE_HISTORY_SCAN
 	if complete then
 		for _, entry in ipairs(remaining_entries) do
-			if entry.Version ~= current_version and not entry.IsDeleted then
+			if entry.Version ~= current_version then
 				complete = false
 				break
 			end
