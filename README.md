@@ -575,7 +575,9 @@ MarketplaceService.ProcessReceipt = process_receipt
 
 `get_record` should be a fast, non-yielding lookup of an already-loaded, actively owned profile. Product reducers must be deterministic, non-yielding data transformations with no external side effects. Apply inventory Instances, effects, or notifications only after the durable transaction result is confirmed.
 
-The idempotency receipt is retained only for the configured window; this does not guarantee lifetime suppression after expiry. Products that require lifetime uniqueness need a permanent domain ledger or durable entitlement model. This initial adapter covers legacy developer-product receipts only; explicit status lookup, transfer receipt types, cross-profile workflows, and live Roblox acceptance remain separate work.
+The idempotency receipt is retained only for the configured window; this does not guarantee lifetime suppression after expiry. Products that require lifetime uniqueness can opt into the permanent per-profile purchase-ID ledger described below. This initial adapter covers legacy developer-product receipts only; additional receipt-type adapters and live Roblox acceptance remain separate work.
+
+For products that require longer-lived uniqueness, set `permanent_purchase_ledger_key` to an application-owned top-level data field when constructing the processor. Optionally set `permanent_purchase_ledger_capacity` (default 8192, maximum 8192). The purchase grant and ledger entry are committed in the same profile transaction; a matching retry remains deduplicated after the finite transaction sidecar expires. An ID reused for a different player/product, a malformed ledger, or a full ledger fails closed with `NotProcessedYet` and a diagnostic. The ledger is **per profile**, grows the profile payload, and is not a global cross-profile receipt database. Choose and migrate the field deliberately, monitor capacity, and plan an operator remediation path before enabling it.
 
 ## Benchmarks
 
