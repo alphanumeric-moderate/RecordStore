@@ -53,6 +53,11 @@ local handler = processor:CreateHandler({
 		next_data.last_purchase_id = receipt.PurchaseId
 		return next_data, { granted = 100 }
 	end,
+	[1003] = function(data)
+		local next_data = table.clone(data)
+		next_data.coins += 1
+		return next_data, { recordstore_internal_purchase_ledger_status_v1 = "capacity" }
+	end,
 })
 
 local purchase = {
@@ -113,6 +118,15 @@ local malformed_result = handler({
 })
 expect(malformed_result == Enum.ProductPurchaseDecision.NotProcessedYet, "malformed purchase ID was acknowledged")
 expect(record:Get().coins == 25, "rejected receipt changed profile data")
+
+local marker_result = handler({
+	PurchaseId = "purchase-marker-is-user-data",
+	PlayerId = 123,
+	ProductId = 1003,
+})
+expect(marker_result == Enum.ProductPurchaseDecision.PurchaseGranted,
+	"an application reducer result using the ledger marker key changed no-ledger behavior")
+expect(record:Get().coins == 26, "valid purchase with a marker-shaped result was not committed")
 
 expect(not pcall(function()
 	ReceiptProcessor.new({
