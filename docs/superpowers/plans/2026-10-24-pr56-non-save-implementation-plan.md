@@ -77,7 +77,7 @@
 - [x] Add versioned bounded runtime policies and read-only health/runtime snapshots on top of the current scheduler/governor; this duplicates the checked runtime-policy/snapshot item above and has been reconciled with its existing regression coverage.
 - [x] Preserve the internal critical persistence reserve and keep adaptive changes opt-in. Existing scheduler tests confirm generic work cannot consume reserved critical capacity; runtime policy changes are versioned and explicitly applied.
 - [x] Add an independently invokable bounded maintenance runner with dry-run default, authorization and durable writer-fence requirements for execution, revision-checked checkpoints, exact response-loss reconciliation and resumable job IDs. Application-owned page, inspection, dependency and generation-aware delete adapters remain mandatory; the runner does not infer the live keyspace.
-- [ ] Complete real retention-compaction acceptance. The compactor has checkpoint-failure replay coverage; live storage behavior and acceptance with the real application adapters remain open.
+- [ ] Complete real retention-compaction acceptance. The compactor now validates dense bounded pages and advancing cursors, rolls counters back to the durable page boundary after inspection/delete uncertainty, and counts idempotent `already_absent` replays as confirmed absence. Live storage behavior and acceptance with the real application adapters remain open.
 - [x] Add fairness, low-budget, throttle, lease-margin, pause/resume and bounded-progress regressions to the common Lune runner. The advanced scheduler suite covers request-budget recovery, pause/resume and kill-switch behavior; the focused scheduler slice checks high-lane flood fairness, low-budget critical preference, circuit cooldown recovery, and lease-margin renewal selection.
 
 ### Slice 6: Migration and Profile Doctor
@@ -103,7 +103,7 @@
 
 ### Slice 8: Verification and merge gates
 
-- [ ] Run all Luau checks and Lune regression stages for every delivered slice, including the new standalone maintenance-runner regression on the final head.
+- [ ] Run all Luau checks and Lune regression stages for every delivered slice on the final head. Latest completed typecheck and regression evidence predates the current erasure-constructor hardening; fresh current-head CI is required.
 - [ ] Complete fault-injection and focused CodSpeed evidence for every durable protocol/maintenance path. Mailbox V2 producer/acknowledgement/future-schema interleavings, compaction checkpoint replay (including counters), independent maintenance-runner checkpoint recovery, purchase-ledger expiry/conflict/capacity/legacy-marker behavior, and saga reserve/credit/refund/settle failures both before commit and after response loss have focused regression coverage. Complete final-head benchmark/evidence and real-platform acceptance remain outstanding.
 - [ ] Complete independent code review and inspect every changed file.
 - [ ] Keep live Roblox Studio/DataStore multi-server, throttling/cache, crash/shutdown, mixed-version rollout/rollback and RTBF template acceptance explicitly blocked until executed in a real test experience.
