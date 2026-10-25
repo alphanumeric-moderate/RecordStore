@@ -3326,7 +3326,7 @@ do
 				end
 
 				if segment.state == "sealed" then
-					local expected_entries = canonical_request(segment.entries)
+					local expected_entries = canonical(segment.entries)
 					local retired, retire_error = self:_update(locator.key, function(raw)
 						local current = as_dict(raw)
 						if current == nil then return nil end
@@ -3338,7 +3338,7 @@ do
 							return nil
 						end
 						-- A new append after the safety scan invalidates this retirement.
-						if canonical_request(current.entries) ~= expected_entries then return nil end
+						if canonical(current.entries) ~= expected_entries then return nil end
 						local next_segment = clone_dict(current)
 						next_segment.state = "retired"
 						return next_segment
