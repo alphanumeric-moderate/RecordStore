@@ -1384,6 +1384,36 @@ local function new_doctor(record_store)
 		return "rv2q-" .. digest(identity_text)
 	end
 
+	local function resolve_quarantine_identity(subject)
+		if type(subject) ~= "table" then return nil, "Record or durable profile identity is required" end
+		local identity
+		if type(subject.GetIdentity) == "function" then
+			local ok, value = pcall(function() return subject:GetIdentity() end)
+			if not ok or type(value) ~= "table" then return nil, "Record identity could not be read" end
+			identity = value
+		else
+			identity = subject
+		end
+		if not valid_text(identity.store_name, 50)
+			or type(identity.scope) ~= "string" or #identity.scope > 50
+			or not valid_text(identity.profile_key, 50)
+		then
+			return nil, "durable profile identity must contain a valid store_name, scope and profile_key"
+		end
+		return {
+			store_name = identity.store_name,
+			scope = identity.scope,
+			profile_key = identity.profile_key,
+		}, nil
+	end
+
+	local function is_record_subject(subject)
+		return type(subject) == "table"
+			and type(subject.GetState) == "function"
+			and type(subject.IsOpen) == "function"
+			and type(subject.GetIdentity) == "function"
+	end
+
 	local function read_quarantine_manifest(store, key, identity_text)
 		local value, message = adapter_call(store, "GetAsync", key)
 		if message then return nil, "unknown", message end
@@ -1447,28 +1477,49 @@ local function new_doctor(record_store)
 		then
 			return { code = "invalid", message = "durable audit/fence stores, quarantine ID, operator ID and reason are required" }
 		end
-		local active_ok, state, is_open, identity = pcall(function()
-			return record:GetState(), record:IsOpen(), record:GetIdentity()
-		end)
-		if not active_ok or state ~= "active" or is_open ~= true or type(identity) ~= "table" then
-			return { code = "fenced", message = "quarantine requires active Record ownership" }
+		local identity, identity_error = resolve_quarantine_identity(record)
+		if identity == nil then return { code = "invalid", message = identity_error } end
+		local source_revision
+		local source_generation
+		if is_record_subject(record) then
+			local active_ok, state, is_open = pcall(function()
+				return record:GetState(), record:IsOpen()
+			end)
+			if not active_ok or state ~= "active" or is_open ~= true then
+				return { code = "fenced", message = "quarantine requires active Record ownership or an identity-only recovery call" }
+			end
+			local stats = record_stats(record)
+			if not finite(stats.revision) or not finite(stats.generation)
+				or not finite(stats.last_saved_revision)
+			then
+				return { code = "unknown", message = "record revision/generation could not be verified for durable quarantine" }
+			end
+			if expected_revision ~= nil and stats.revision ~= expected_revision then
+				return { code = "conflict", message = "record revision changed after diagnosis" }
+			end
+			source_revision = stats.last_saved_revision
+			source_generation = stats.generation
+		else
+			local current_fence, current_code, current_error = durable_quarantine_fence(identity, nil)
+			if current_code ~= "success" or type(current_fence) ~= "table" then
+				return { code = current_code or "unknown", message = current_error or "profile identity could not be read for quarantine" }
+			end
+			if current_fence.Quarantined == true then
+				source_revision = current_fence.SourceRevision
+				source_generation = current_fence.SourceGeneration
+			elseif current_fence.Quarantined == false then
+				source_revision = current_fence.CurrentRevision
+				source_generation = current_fence.CurrentGeneration
+			else
+				return { code = "unknown", message = "profile identity has no confirmed generation/revision" }
+			end
+			if not finite(source_revision) or not finite(source_generation) then
+				return { code = "unknown", message = "durable generation/revision could not be verified for quarantine" }
+			end
+			if expected_revision ~= nil and expected_revision ~= source_revision then
+				return { code = "conflict", message = "durable profile revision changed after diagnosis" }
+			end
 		end
-		if not valid_text(identity.store_name, 50) or type(identity.scope) ~= "string"
-			or #identity.scope > 50 or not valid_text(identity.profile_key, 50)
-		then
-			return { code = "invalid", message = "active Record returned an invalid durable identity" }
-		end
-		local stats = record_stats(record)
-		if not finite(stats.revision) or not finite(stats.generation)
-			or not finite(stats.last_saved_revision)
-		then
-			return { code = "unknown", message = "record revision/generation could not be verified for durable quarantine" }
-		end
-		if expected_revision ~= nil and stats.revision ~= expected_revision then
-			return { code = "conflict", message = "record revision changed after diagnosis" }
-		end
-		local source_revision = stats.last_saved_revision
-		local source_generation = stats.generation
 		local identity_text = canonical({
 			store_name = identity.store_name, scope = identity.scope, profile_key = identity.profile_key,
 		})
@@ -1592,8 +1643,8 @@ local function new_doctor(record_store)
 		if type(quarantine_store) ~= "table"
 			or type(record_store.get_quarantine_fence_status_async) ~= "function"
 		then return { code = "unsupported", status = "unknown" } end
-		local identity_ok, identity = pcall(function() return record:GetIdentity() end)
-		if not identity_ok or type(identity) ~= "table" then return { code = "unknown", status = "unknown" } end
+		local identity, identity_error = resolve_quarantine_identity(record)
+		if identity == nil then return { code = "invalid", status = "unknown", message = identity_error } end
 		local identity_text = canonical({
 			store_name = identity.store_name, scope = identity.scope, profile_key = identity.profile_key,
 		})
@@ -1688,11 +1739,15 @@ local function new_doctor(record_store)
 		then
 			return { code = "invalid", message = "durable audit/fence stores, quarantine identity and bounded operator audit fields are required" }
 		end
-		local active_ok, state, is_open, identity = pcall(function()
-			return record:GetState(), record:IsOpen(), record:GetIdentity()
-		end)
-		if not active_ok or state ~= "active" or is_open ~= true or type(identity) ~= "table" then
-			return { code = "fenced", message = "quarantine resolution requires an active Record" }
+		local identity, identity_error = resolve_quarantine_identity(record)
+		if identity == nil then return { code = "invalid", message = identity_error } end
+		if is_record_subject(record) then
+			local active_ok, state, is_open = pcall(function()
+				return record:GetState(), record:IsOpen()
+			end)
+			if not active_ok or state ~= "active" or is_open ~= true then
+				return { code = "fenced", message = "quarantine resolution requires active Record ownership or an identity-only recovery call" }
+			end
 		end
 		local identity_text = canonical({
 			store_name = identity.store_name, scope = identity.scope, profile_key = identity.profile_key,
