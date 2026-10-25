@@ -274,7 +274,7 @@ do
 		profile_scope = "global",
 		key_prefix = "Player_",
 		profile_family_verified = true,
-				verify_templates = function(rendered_user_id, templates)
+		verify_templates = function(rendered_user_id, templates)
 			return rendered_user_id == user_id and #templates == 1
 				and templates[1].template.key == key
 		end,
