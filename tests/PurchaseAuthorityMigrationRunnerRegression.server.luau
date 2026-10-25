@@ -49,7 +49,22 @@ local function make_source(pages, revision, calls)
 	local source = {}
 	local inventory_count = 0
 	for _, source_page in pairs(pages) do inventory_count += #source_page.items end
+	local ordered_purchases = {}
+	local first_cursor = if pages["<initial>"] ~= nil then "<initial>" else next(pages)
+	local cursor_key = first_cursor
+	local visited_pages = {}
+	while cursor_key ~= nil and not visited_pages[cursor_key] do
+		local source_page = pages[cursor_key]
+		if source_page == nil then break end
+		visited_pages[cursor_key] = true
+		for _, item in ipairs(source_page.items) do ordered_purchases[#ordered_purchases + 1] = clone(item) end
+		if source_page.done then break end
+		cursor_key = source_page.next_cursor
+	end
 	source.inventory_count = inventory_count
+	local inventory_digest, digest_error = RunnerModule.ComputeInventoryDigest(ordered_purchases)
+	assert(inventory_digest ~= nil, digest_error or "could not compute fixture inventory digest")
+	source.inventory_digest = inventory_digest
 	source.source_revision = revision
 	function source:read_page(cursor, maximum)
 		calls.count += 1
@@ -98,7 +113,7 @@ local function page(items, next_cursor, done)
 	return { items = items, next_cursor = next_cursor, done = done }
 end
 
-local function new_runner(job_id, source, processor, checkpoint_store, revision, initial_cursor, expected_count_override, verifier_override)
+local function new_runner(job_id, source, processor, checkpoint_store, revision, initial_cursor, expected_count_override, verifier_override, expected_digest_override)
 	return RunnerModule.new({
 		job_id = job_id,
 		source_revision = revision or source.source_revision or "snapshot-v1",
@@ -110,11 +125,14 @@ local function new_runner(job_id, source, processor, checkpoint_store, revision,
 		page_size = 16,
 		inventory_manifest_id = "manifest:" .. (revision or source.source_revision or "snapshot-v1"),
 		expected_purchase_count = if expected_count_override == nil then source.inventory_count else expected_count_override,
-		verify_complete_inventory = verifier_override or function(manifest_id, source_revision, expected_count, observed_count)
+		expected_inventory_digest = expected_digest_override or source.inventory_digest,
+		verify_complete_inventory = verifier_override or function(manifest_id, source_revision, expected_count, observed_count, expected_digest, observed_digest)
 			return manifest_id == "manifest:" .. source.source_revision
 				and source_revision == source.source_revision
 				and expected_count == source.inventory_count
-				and observed_count == source.inventory_count,
+				and observed_count == source.inventory_count
+				and expected_digest == source.inventory_digest
+				and observed_digest == source.inventory_digest,
 				"fixture inventory manifest mismatch"
 		end,
 	})
@@ -175,6 +193,33 @@ do
 	local checkpoint, read_error = backing:GetAsyncFresh("purchase-migration:historical-import-short-manifest")
 	expect(checkpoint == nil and read_error == nil,
 		"incomplete inventory manifest created a terminal checkpoint")
+end
+
+-- A same-count but wrong content digest must block before importing the terminal page.
+do
+	local calls = { count = 0 }
+	local backing = make_checkpoint_store()
+	local source = make_source({
+		["<initial>"] = page({ purchase("manifest-digest-001") }, nil, true),
+	}, "snapshot-digest", calls)
+	local processor = make_processor()
+	local runner = new_runner(
+		"historical-import-digest-mismatch",
+		source,
+		processor,
+		backing,
+		"snapshot-digest",
+		nil,
+		nil,
+		nil,
+		"00000000000000000000000000000000"
+	)
+	local result = runner:RunBatchAsync(1)
+	expect(result.code == "incomplete_inventory"
+		and string.find(result.message or "", "inventory digest") ~= nil,
+		"terminal page with a same-count digest mismatch was accepted")
+	expect(processor.calls == 0 and calls.count == 1,
+		"PurchaseIds were imported before terminal digest verification")
 end
 
 -- An external manifest verifier can block a terminal page even when row counts match.
