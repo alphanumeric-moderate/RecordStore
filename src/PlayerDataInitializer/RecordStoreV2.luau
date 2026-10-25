@@ -2029,9 +2029,18 @@ local function new_erasure(store, families, options)
 		if #templates == 0 then error("each erasure family must declare at least one RTBF template", 2) end
 		for _, template in ipairs(templates) do
 			if type(template) ~= "table" then error("RTBF template must be table", 2) end
+			-- A partial locator would act as a wildcard for omitted DataStore names or
+			-- scopes. Require the complete exact name/scope/key identity in every
+			-- template; an empty scope is allowed for the platform default scope.
+			if type(template.name) ~= "string" or template.name == ""
+				or type(template.scope) ~= "string"
+				or type(template.key) ~= "string" or template.key == ""
+			then
+				error("RTBF template must declare exact name, scope, and key fields", 2)
+			end
 			local matchable = false
 			for _, field in ipairs({ "name", "scope", "key" }) do
-				if type(template[field]) == "string" and string.find(template[field], "{user_id}", 1, true) then matchable = true end
+				if string.find(template[field], "{user_id}", 1, true) then matchable = true end
 			end
 			if not matchable then error("RTBF template must place {user_id} in name, scope, or key", 2) end
 			table.insert(all_templates, { family = family.name, template = copy(template) })
