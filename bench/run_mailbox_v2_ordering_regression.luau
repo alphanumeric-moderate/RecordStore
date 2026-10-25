@@ -852,6 +852,88 @@ local function test_future_schema_writers_cancel_updates()
 		"ordering reservation re-persisted a future-version index")
 end
 
+local function test_reclaim_fences_a_concurrent_append()
+	local backing = MailboxV2.MockStore()
+	local target_segment_key = nil
+	local intercept_armed = false
+	local injected = false
+	local store = {
+		GetAsync = function(_, key) return backing:GetAsync(key) end,
+		GetAsyncFresh = function(_, key) return backing:GetAsyncFresh(key) end,
+		UpdateAsync = function(_, key, transform)
+			if intercept_armed and not injected and key == target_segment_key then
+				local current = backing.values[key]
+				if type(current) == "table" and current.state == "sealed" then
+					local raced = clone(current)
+					table.insert(raced.entries, {
+						route = "concurrent-active-route",
+						placement_generation = 999,
+					})
+					backing.values[key] = raced
+					injected = true
+				end
+			end
+			return backing:UpdateAsync(key, transform)
+		end,
+		RemoveAsync = function(_, key) return backing:RemoveAsync(key) end,
+	}
+	local mailbox = new_mailbox({ segment_max_messages = 1 }, store)
+	local queued = enqueue(mailbox, "reclaim-race-owner", "reclaim-race-producer", nil, "normal")
+	local processed = process_one(mailbox, function() return true end)
+	assert(processed.code == "processed", "reclaim-race fixture did not acknowledge the canonical message")
+	local manifest = backing.values[mailbox:_manifest_key("active")]
+	assert(type(manifest) == "table" and type(manifest.slots) == "table",
+		"reclaim-race fixture omitted the active manifest")
+	for slot_number, slot in ipairs(manifest.slots) do
+		if type(slot) == "table" and slot.state == "sealed" then
+			target_segment_key = mailbox:_segment_key("active", slot_number, slot.generation)
+			break
+		end
+	end
+	assert(type(target_segment_key) == "string", "reclaim-race fixture did not create a sealed segment")
+	intercept_armed = true
+	local reclaimed = mailbox:_reclaim_slot("active")
+	assert(injected, "concurrent segment append was not injected before retirement")
+	assert(reclaimed == false, "reclaimer removed a segment changed after the safety scan")
+	local remaining = backing.values[target_segment_key]
+	assert(type(remaining) == "table" and remaining.state == "sealed",
+		"reclaimer removed or retired a concurrently changed segment")
+	local found_raced_row = false
+	for _, row in ipairs(remaining.entries) do
+		if type(row) == "table" and row.route == "concurrent-active-route" then found_raced_row = true end
+	end
+	assert(found_raced_row, "reclaimer discarded the concurrent index row")
+
+	local stale_mailbox, stale_store = new_mailbox()
+	local original = enqueue(stale_mailbox, "retired-segment-stale-writer", "retired-segment-stale-writer-id", nil, "normal")
+	local stale_manifest = stale_store.values[stale_mailbox:_manifest_key("active")]
+	local stale_locator = nil
+	for slot_number, slot in ipairs(stale_manifest.slots) do
+		if type(slot) == "table" and slot.state == "open" then
+			local key = stale_mailbox:_segment_key("active", slot_number, slot.generation)
+			local segment = stale_store.values[key]
+			if type(segment) == "table" and segment.generation == slot.generation then
+				segment.state = "retired"
+				stale_store.values[key] = segment
+				stale_locator = { slot = slot_number, generation = slot.generation, key = key }
+				break
+			end
+		end
+	end
+	assert(stale_locator ~= nil and type(original.message_id) == "string",
+		"retired-segment fixture could not locate its segment")
+	local commits_before = stale_store.committed_update_calls
+	local stale_status = stale_mailbox:_append_at_locator("active", stale_locator, {
+		route = "stale-writer-extra-route", placement_generation = 1,
+		reservation_token = "stale-writer",
+	})
+	assert(stale_status == "full", "stale writer revived a retired segment instead of retrying elsewhere")
+	assert(stale_store.committed_update_calls == commits_before,
+		"stale writer committed a mutation to a retired segment")
+	assert(stale_store.values[stale_locator.key].state == "retired",
+		"stale writer changed the retired segment state")
+end
+
 local function test_high_priority_burst_does_not_starve_background_messages()
 	local mailbox = new_mailbox({ strict_ordering_enabled = true })
 	for index = 1, 7 do
@@ -1355,6 +1437,7 @@ test_future_message_version_fails_closed()
 test_future_message_version_cannot_confirm_duplicate_producer_receipt()
 test_future_index_schema_versions_fail_closed()
 test_future_schema_writers_cancel_updates()
+test_reclaim_fences_a_concurrent_append()
 test_high_priority_burst_does_not_starve_background_messages()
 test_clock_skew_cannot_break_ordering_under_adversarial_sort_keys()
 test_priority_burst_policy_is_bounded_and_configurable()

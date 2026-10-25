@@ -3258,16 +3258,17 @@ do
 				end
 				if kind == "active" then
 					local active_locator = as_dict(record.locator)
-					local row_is_stale = record.placement_generation ~= row.placement_generation
-						or active_locator == nil
-						or active_locator.slot ~= locator.slot
-						or active_locator.generation ~= locator.generation
-					if not row_is_stale
-						and record.state ~= "acknowledged"
-						and record.state ~= "dead_lettered"
-						and record.state ~= "discarded"
-						and record.state ~= "expired"
-					then
+					local same_generation = record.placement_generation == row.placement_generation
+					local same_location = active_locator == nil
+						or (active_locator.slot == locator.slot and active_locator.generation == locator.generation)
+					local terminal = record.state == "acknowledged" or record.state == "dead_lettered"
+						or record.state == "discarded" or record.state == "expired"
+					if same_generation and same_location and not terminal then
+						-- A matching generation without a published locator can be a
+						-- partially prepared placement. Do not reclaim it as stale.
+						return false
+					end
+					if record.state == "replaying" and same_generation then
 						return false
 					end
 				elseif record.state == "replaying"
@@ -3314,7 +3315,7 @@ do
 					continue
 				end
 
-				local safe = segment.state == "retired" or rows_are_safe(segment, locator)
+				local safe = rows_are_safe(segment, locator)
 				if not safe then
 					continue
 				end
@@ -3325,15 +3326,19 @@ do
 				end
 
 				if segment.state == "sealed" then
+					local expected_entries = canonical_request(segment.entries)
 					local retired, retire_error = self:_update(locator.key, function(raw)
 						local current = as_dict(raw)
 						if current == nil then return nil end
 						if current.version ~= VERSION then return nil end
-						if current.generation ~= generation or current.state ~= "sealed"
+						if current.kind ~= kind or current.slot ~= slot_number
+							or current.generation ~= generation or current.state ~= "sealed"
 							or not same_owner(current.owner, self.owner)
 						then
-							return raw
+							return nil
 						end
+						-- A new append after the safety scan invalidates this retirement.
+						if canonical_request(current.entries) ~= expected_entries then return nil end
 						local next_segment = clone_dict(current)
 						next_segment.state = "retired"
 						return next_segment
@@ -4176,6 +4181,7 @@ do
 			then
 				return raw
 			end
+			if segment.state == "retired" then return nil end
 			if has_row(segment, tostring(row.route), row.placement_generation :: number) then
 				return raw
 			end
@@ -4211,6 +4217,7 @@ do
 		if segment == nil or segment.generation ~= locator.generation or not same_owner(segment.owner, self.owner) then
 			return "unknown", "segment update could not be verified"
 		end
+		if segment.state == "retired" then return "full", nil end
 		if has_row(segment, tostring(row.route), row.placement_generation :: number) then
 			if segment.state == "sealed" then
 				self:_set_slot_state(kind, locator, "open", "sealed")
