@@ -69,6 +69,14 @@ local MAX_PAGE_SIZE = 100
 local MAX_CURSOR_BYTES = 512
 local MAX_NAME_BYTES = 50
 
+local CHECKPOINT_STATUSES = {
+	idle = true,
+	incomplete = true,
+	completed = true,
+	unknown = true,
+	paused = true,
+}
+
 local function valid_text(value: unknown, maximum: number): boolean
 	return type(value) == "string" and value ~= "" and #value <= maximum
 end
@@ -115,6 +123,9 @@ local function valid_checkpoint(value: unknown, job_id: string): Checkpoint?
 		or not nonnegative_integer(checkpoint.removed)
 		or (checkpoint.removed :: number) > (checkpoint.processed :: number)
 		or type(checkpoint.status) ~= "string"
+		or CHECKPOINT_STATUSES[checkpoint.status :: string] ~= true
+		or (checkpoint.status == "completed" and checkpoint.cursor ~= nil)
+		or (checkpoint.status == "incomplete" and checkpoint.cursor == nil)
 	then
 		return nil
 	end
