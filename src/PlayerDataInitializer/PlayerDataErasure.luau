@@ -97,6 +97,7 @@ local function new(manifest_store: any, options: Options?): any
 		or type(record_store.get_erasure_status_async) ~= "function"
 		or type(record_store.erase_user_data_async) ~= "function"
 		or type(record_store.purge_erased_versions_async) ~= "function"
+		or type(record_store.list_versions_async) ~= "function"
 	then
 		error("RecordStore must expose the permanent erasure fence and historical purge APIs", 2)
 	end
@@ -151,6 +152,24 @@ local function new(manifest_store: any, options: Options?): any
 			local generation = 0
 			if status ~= nil then
 				generation = if status.Erased then status.SourceGeneration or 0 else status.Generation
+				if config.allow_deprecated_remove_version ~= true then
+					local history, history_code, history_message = record_store.list_versions_async(
+						profile_store_name, profile_scope, key, Enum.SortDirection.Descending,
+						nil, nil, 1024, operation_deadline
+					)
+					if history_code ~= "success" or history == nil then
+						return nil, history_message or ("historical inventory failed: " .. tostring(history_code))
+					end
+					if #history >= 1024 then
+						return nil, "historical inventory reached the 1,024-version bound; erasure is blocked until an explicit retention path is configured"
+					end
+					local current_version = status.Version
+					for _, entry in ipairs(history) do
+						if entry.Version ~= current_version and not entry.IsDeleted then
+							return nil, "profile has historical versions; erasure is blocked until allow_deprecated_remove_version is explicitly enabled or an approved retention path is supplied"
+						end
+					end
+				end
 			end
 			return {
 				{
