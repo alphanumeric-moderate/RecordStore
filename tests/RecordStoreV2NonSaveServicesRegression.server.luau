@@ -1105,6 +1105,48 @@ expect(#removed == 1 and removed[1].generation == 4, "compactor deleted an ineli
 expect(compaction_store.values.checkpoint.status == "completed",
 	"compactor checkpoint did not persist its final completion status")
 
+do -- Verify a time budget cannot interrupt a multi-item durable page.
+	local budget_store = new_store()
+	local budget_removed = {}
+	local budget_items = {
+		{ key = "budget-active", generation = 1, eligible = false },
+		{ key = "budget-expired", generation = 2, eligible = true },
+	}
+	local budget_checkpoint = nil
+	local delay_until = 0
+	local budget_compactor = V2.Maintenance.NewCompactor({
+		next_page = function(cursor, maximum)
+			expect(cursor == "before-page" and maximum == 2,
+				"page-level budget regression received an unexpected cursor or bound")
+			return budget_items, "after-page", true
+		end,
+		inspect = function(item)
+			if item.key == "budget-active" then
+				delay_until = os.clock() + 0.02
+				while os.clock() < delay_until do end
+			end
+			return { status = "success", eligible = item.eligible, dependencies_clear = true, generation = item.generation }
+		end,
+		delete_if_generation = function(item, generation)
+			budget_removed[#budget_removed + 1] = { key = item.key, generation = generation }
+			return "deleted"
+		end,
+		persist_progress = function(cursor, processed, removed_count, status)
+			budget_checkpoint = { cursor = cursor, processed = processed, removed = removed_count, status = status }
+			return true
+		end,
+	})
+	budget_compactor.cursor = "before-page"
+	local budget_result = budget_compactor:RunStep(2, 1)
+	expect(budget_result.code == "completed" and budget_result.cursor == "after-page",
+		"compactor paused in the middle of a multi-item page after the soft budget elapsed")
+	expect(budget_result.processed == 2 and budget_result.removed == 1 and #budget_removed == 1,
+		"compactor counters did not account for the complete page exactly once")
+	expect(budget_checkpoint ~= nil and budget_checkpoint.cursor == "after-page"
+		and budget_checkpoint.processed == 2 and budget_checkpoint.removed == 1,
+		"compactor did not persist page-level cursor and counters together")
+end
+
 local checkpoint_loss_store = new_store()
 local checkpoint_calls = 0
 local delete_applied = false
