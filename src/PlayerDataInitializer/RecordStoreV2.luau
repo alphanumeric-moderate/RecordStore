@@ -2824,7 +2824,7 @@ local function new_maintenance()
 				end
 				if inspected.eligible == true and inspected.dependencies_clear == true then
 					local action, action_error = io_call(config.delete_if_generation, item, inspected.generation)
-					if action ~= "deleted" and action ~= "already_absent" and action ~= "skipped" and action ~= "unknown" then
+					if action ~= "deleted" and action ~= "already_absent" and action ~= "skipped" and action ~= "unknown" and action ~= "dry_run" then
 						self.cursor = before_cursor
 						self.processed = before_processed
 						self.removed = before_removed
