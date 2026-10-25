@@ -61,7 +61,7 @@
 - [x] Add validated `max_dirty_age_seconds` and `durability_mode` policies (`balanced`, `durability_first`, `read_only_on_risk`), edge-triggered durability-risk/recovered events, dirty/durable watermarks, oldest-dirty-age evidence, and age-aware autosave selection while preserving due lease renewal and the critical persistence reserve.
 - [x] Wire PlayerDataCore overrides for freshness policy and mutation admission. `read_only_on_risk` rejects new Set calls on verified persistence risk and restores tracked Value-object edits rejected by the pending buffer; accepted pending values remain eligible for flush.
 - [x] Port a deterministic pre-UpdateAsync mock fault hook, production-adapter fake DataStore harness, ambiguous-write recovery regressions, PlayerData backpressure regressions, a focused CodSpeed benchmark entry and CI regression step.
-- [x] Execute the new/updated durable-save regression suite, Luau typechecks and production-adapter fault matrix on the current source head. All Lune regression stages and the production-adapter fault matrix passed on code commit `18bf95be`; Luau Type Check passed on the same commit. This is fake-store/Lune evidence, not live Roblox acceptance.
+- [x] Execute the durable-save regression suite, strict Luau typecheck and production-adapter fault matrix on the current code head. All 18 CodSpeed regression/test stages and Luau Type Check passed on `9ac39e6`; the coverage includes uncertain save/renewal/release outcomes, PlayerData mutation admission, purchase manifest/digest and malformed-checkpoint rejection, maintenance catalog immutability, multi-family paging, same-key generation fencing, checkpoint response-loss reconciliation, and the integrated maintenance `NewRunner()` dry-run. Bencher Continuous Benchmarks and RecordStore Update Latency also passed on `9ac39e6`. This is fake-store/Lune/CI evidence, not live Roblox acceptance.
 - [ ] Independently review the full durable-save diff against the PR #39 §26.13 contract, including every uncertain-result branch and lease-reacquisition invariant.
 
 ### Slice 2: Mailbox V2 protocol and operations
@@ -145,7 +145,7 @@
 
 ### Slice 8: Verification and merge gates
 
-- [x] Run all Luau checks and Lune regression stages on the current code head. The Luau Type Check and all Lune regression steps passed on `18bf95be`, including durable-save fault injection, purchase manifest digest coverage, the real-maintenance-adapter contract, the new multi-family maintenance-catalog regression, and the non-save/erasure regression stages.
+- [x] Run all Luau checks and regression stages on the current code head. Luau Type Check and the Lune regression stages passed on `9ac39e6`, including durable-save fault injection, purchase source revision/digest verification and malformed terminal/revision-zero checkpoint rejection, real maintenance adapter inspection/deletion/checkpoint tests, multi-family catalog and runner integration, and non-save/erasure regressions.
 - [x] Run the current-head fault-injection and regression stages. CI on code commit `18bf95be` passed all listed Lune test stages, including mailbox ordering/security, production-adapter fault injection, maintenance checkpoint recovery, quarantine, purchase migration, and erasure-related regressions.
 - [ ] Establish comparable focused CodSpeed performance evidence. The previous completed comparison reports a 28.04% aggregate degradation but explicitly flags differing CPU/runner environments, unreliable wall-time measurements, and syscall-dominated benchmarks. Treat that comparison as inconclusive until a comparable measurement is available; keep live-platform acceptance separate.
 - [ ] Complete independent code review and inspect every changed file.
@@ -153,7 +153,7 @@
 
 ## Current status
 
-Implementation status; PR #56 includes the durable-save scope as well as the non-save scope. The Lune regression stages and Luau Type Check passed on code commit `18bf95be`, including the newly added maintenance catalog test. The latest completed CodSpeed comparison remains inconclusive because CodSpeed detected non-matching runner hardware and warned about wall-time/system-call measurement quality:
+Implementation status; PR #56 includes the durable-save scope as well as the non-save scope. Lune regression stages and Luau Type Check passed on code commit `9ac39e6`; Bencher and update-latency workflows also passed. The latest CodSpeed run collected only the two update-batch wall-time measurements (3.1 s optimized and 9.3 s pre-optimization) and explicitly warned that wall-time results are unreliable outside Macro Runners. The branch comparison also skipped 62 benchmarks and carried forward baseline results, and reports have warned about runner-type mismatches and syscall-dominated benchmarks. These numbers are not a defensible aggregate performance verdict; keep the performance gate open:
 - Read-only session lease diagnostics and bounded Mailbox V2 maintenance orchestration.
 - Profile Doctor point-in-time inspection and bounded historical version diffs with path/type-only output.
 - Process-local migration registration with stable IDs/implementation revisions, compatibility validation, forward-only edges, ambiguity rejection, and read-only migration previews.
