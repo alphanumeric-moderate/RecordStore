@@ -282,12 +282,14 @@ do
 			return kicked_user_id == user_id
 		end,
 	})
-	local plan = erasure:PlanAsync(user_id, "erase-default-block-205")
-	expect(plan.rtbf_coverage_verified ~= true,
-		"default erasure configuration certified a profile with historical versions")
+	local plan = erasure:PlanAsync(user_id, "erase-retention-plan-205")
+	expect(plan.code == "success" and plan.rtbf_coverage_verified == true,
+		"verified historical inventory was rejected by the retention-based erase plan: " .. tostring(plan.message))
+	expect(#plan.entries == 1 and plan.entries[1].item.key == key,
+		"retention-based erasure plan omitted the exact profile key")
 	local raw = RecordStore.Mock.get_record_raw("PlayerData_Test1", "global", key)
 	expect(type(raw) == "table" and type(raw.data) == "table",
-		"blocked historical purge still installed the destructive erasure fence")
+		"non-destructive erasure planning installed the destructive erasure fence")
 end
 
 -- End-to-end integration through the generic manifest coordinator. The known
@@ -306,7 +308,6 @@ do
 		profile_scope = "global",
 		key_prefix = "Player_",
 		profile_family_verified = true,
-		allow_deprecated_remove_version = true, -- mock-only fixture; Roblox live acceptance is still blocked
 		verify_templates = function(rendered_user_id, templates)
 			return rendered_user_id == user_id and #templates == 1
 				and templates[1].family == "PlayerDataCore"
