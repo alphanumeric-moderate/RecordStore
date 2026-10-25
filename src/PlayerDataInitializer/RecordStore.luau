@@ -8,6 +8,7 @@ local RecordStore = {}
 -- Erasure fences must be unreadable to older writers so a stale server cannot recreate erased data.
 local ERASURE_FENCE_IMPLEMENTATION_VERSION = 2147483647
 local ERASURE_FENCE_FIELD = "__recordstore_erasure_fence"
+local MAX_ERASURE_HISTORY_SCAN = 1024
 
 
 -- BEGIN EMBEDDED SCHEDULER MODULE
@@ -11806,7 +11807,7 @@ local function purge_erased_versions_internal(
 		return nil, "unknown", "erasure marker version was not returned by the storage adapter"
 	end
 	local entries, list_code, list_message = list_versions_internal(
-		name, scope, key, Enum.SortDirection.Descending, nil, nil, 100, deadline - now_local(), mock
+		name, scope, key, Enum.SortDirection.Descending, nil, nil, MAX_ERASURE_HISTORY_SCAN, deadline - now_local(), mock
 	)
 	if list_code ~= "success" or entries == nil then
 		return nil, list_code or "unknown", list_message or "historical version inventory could not be read"
@@ -11849,7 +11850,7 @@ local function purge_erased_versions_internal(
 				release_slot()
 				if not remove_ok then
 					local after_failure, after_code = list_versions_internal(
-						name, scope, key, Enum.SortDirection.Descending, nil, nil, 100, deadline - now_local(), false
+						name, scope, key, Enum.SortDirection.Descending, nil, nil, MAX_ERASURE_HISTORY_SCAN, deadline - now_local(), false
 					)
 					if after_code ~= "success" or after_failure == nil then
 						return nil, "unknown", tostring(remove_error)
@@ -11878,7 +11879,7 @@ local function purge_erased_versions_internal(
 		end
 	end
 	local remaining_entries, remaining_code, remaining_message = list_versions_internal(
-		name, scope, key, Enum.SortDirection.Descending, nil, nil, 100, deadline - now_local(), mock
+		name, scope, key, Enum.SortDirection.Descending, nil, nil, MAX_ERASURE_HISTORY_SCAN, deadline - now_local(), mock
 	)
 	if remaining_code ~= "success" or remaining_entries == nil then
 		return nil, remaining_code or "unknown", remaining_message or "could not verify historical version removal"
@@ -11892,7 +11893,14 @@ local function purge_erased_versions_internal(
 		return nil, "conflict", latest_message or "erasure fence changed before purge completion was confirmed"
 	end
 	current_version = latest_status.Version or current_version
-	local complete = #remaining_entries < 100
+	local latest_version_present = false
+	for _, entry in ipairs(remaining_entries) do
+		if entry.Version == current_version then latest_version_present = true; break end
+	end
+	if not latest_version_present then
+		return nil, "conflict", "durable erasure fence version is absent from the bounded post-purge history scan"
+	end
+	local complete = #remaining_entries < MAX_ERASURE_HISTORY_SCAN
 	if complete then
 		for _, entry in ipairs(remaining_entries) do
 			if entry.Version ~= current_version and not entry.IsDeleted then
