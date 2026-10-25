@@ -719,6 +719,15 @@ expect(#deleted_items == 2 and deleted_items[1].key == "Player_123456"
 	"erasure failed to invoke each generation-aware deletion adapter")
 expect(erasure:GetStatus(123456).status == "completed", "erasure manifest status was not durable")
 
+expect(not pcall(function()
+	V2.Erasure.new(new_store(), {
+		{
+			name = "underspecified_family",
+			templates = { { key = "Player_{user_id}" } },
+		},
+	})
+end), "erasure accepted a key-only template that wildcarded DataStore name and scope")
+
 local unmatched_deleted = 0
 local unmatched_erasure = V2.Erasure.new(new_store(), {
 	{
