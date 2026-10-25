@@ -594,6 +594,34 @@ The idempotency receipt is retained only for the configured window; this does no
 
 After the bounded historical backfill and reconciliation completes, live receipt processing can enable longer-lived uniqueness by setting `permanent_purchase_ledger_key` to an application-owned top-level data field and `permanent_purchase_ledger_migration_complete = true` when constructing the processor. Optionally set `permanent_purchase_ledger_capacity` (default 8192, maximum 8192). The boolean is an operator declaration that all historical PurchaseIds were backfilled into the ledger or that no earlier purchases need importing; it is not automatic verification. A ledger only suppresses IDs already stored in it. If a finite transaction receipt has already expired before its PurchaseId was backfilled, the processor cannot know it was previously granted and could grant it again. Do not enable this feature until historical purchase/entitlement data has been reconciled and imported. Still-retained pre-ledger transaction receipts lack the ledger proof marker and deliberately return `NotProcessedYet` with a `permanent_purchase_ledger_marker_missing` diagnostic instead of being acknowledged without lifetime-ledger proof. The grant and ledger entry commit in the same profile transaction; an ID rebound to another player/product, a malformed ledger, or a full ledger fails closed with `NotProcessedYet` and a diagnostic. The ledger is **per profile**, grows the profile payload, and is not a global cross-profile receipt database. Monitor capacity and plan an audited remediation path. Products requiring global user/product lifetime uniqueness need a dedicated durable global entitlement/receipt authority, not this per-profile ledger alone.
 
+
+### External durable PurchaseId authority
+
+An optional **external_purchase_authority** contract is available for experiences that need PurchaseId uniqueness across different player profiles. It is an adapter interface, not a built-in DataStore/Open Cloud service. The application must provide a globally shared, strongly consistent durable implementation with atomic operations and uncached status reads.
+
+The adapter implements **ClaimAsync(purchase_id, player_id, product_id)**, **CommitAsync(purchase_id, player_id, product_id, outcome)**, **GetStatusAsync(purchase_id, player_id, product_id)**, and **BackfillAsync(purchase_id, player_id, product_id)**. Every returned record contains the requested PurchaseId, PlayerId, ProductId, Status, and optional Outcome. For conflicting tuples, return a Status of **conflict** record echoing the requested tuple; do not disguise a conflict as a timeout or return an unvalidated record shape.
+
+**ClaimAsync** must atomically reserve an ID to one tuple. Repeating the same tuple returns **claimed**, while an already completed matching ID returns **committed**; a different tuple returns **conflict**. Claims remain durable until completion or explicit audited recovery, so a process crash cannot free an ID for another player. **CommitAsync** idempotently transitions a matching claim to **committed** with Outcome **granted** or **duplicate**. **GetStatusAsync** bypasses caches and reconciles uncertain responses. **BackfillAsync** imports already-completed historical purchases as Status **imported** on first insertion and Status **committed**, Outcome **historical** on later reads, without running a grant reducer. It must not convert an in-flight **claimed** entry into historical completion.
+
+Configure both the existing per-profile ledger and the external authority:
+
+~~~lua
+local processor = PurchaseReceiptProcessor.new({
+    get_record = get_active_record,
+    receipt_retention_seconds = 30 * 24 * 60 * 60,
+    permanent_purchase_ledger_key = "purchase_ledger",
+    permanent_purchase_ledger_capacity = 8192,
+    permanent_purchase_ledger_migration_complete = true,
+    external_purchase_authority = purchase_authority_adapter,
+    external_purchase_authority_migration_complete = true,
+})
+~~~
+
+The two migration flags are operator assertions, not proof. Before enabling live grants, enumerate and reconcile the relevant historical PurchaseIds, use BackfillPermanentLedgerAsync against each owning active profile, and use BackfillExternalAuthorityAsync to import global history in bounded batches of at most 16. Persist source cursors externally and retry ambiguous batches using the same IDs. Set both flags only after both histories have been exhaustively reconciled. The local transaction records the profile grant and its per-profile receipt; the external authority is committed afterward. If the external commit is uncertain, the handler returns NotProcessedYet unless an uncached status read confirms completion, and the next delivery reconciles without running the reducer again.
+
+No production external-authority adapter or live service acceptance is included here. Until the application supplies and independently reviews that adapter and validates its multi-server behavior, the contract must not be described as production global uniqueness.
+
+
 ## Optional cross-server mailbox wake-ups
 
 `src/PlayerDataInitializer/RecordStoreV2Acceleration.luau` implements the opt-in adapter required by `RecordStoreV2.BindMailboxWakeups`. It uses a bounded set of MessagingService topic shards, opaque owner fingerprints, bounded local registrations and coalesced wake-ups. An optional MemoryStore sorted-map hint cache is enabled explicitly and is also bounded; each range poll requests at most Roblox's 20-entry API limit and observed entries are evicted after each poll attempt so stale hints cannot permanently occupy the first page. Entries are advisory and may be overwritten, duplicated, delayed, dropped or expire. The adapter is disabled unless configured with `enabled = true` and started with `Start()`. Wake-ups are never proof that a durable message exists, was claimed or completed. Periodic durable polling and reconciliation must remain active.
