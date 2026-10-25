@@ -82,6 +82,10 @@ jobs:
         timeout-minutes: 2
         run: timeout --signal=TERM --kill-after=5s 60s lune run bench/run_offline_maintenance_runner_regression.luau
 
+      - name: Regression - production DataStore adapter safety
+        timeout-minutes: 4
+        run: timeout --signal=TERM --kill-after=5s 240s lune run bench/run_production_adapter_safety_regression.luau
+
       - name: Run the benchmarks
         timeout-minutes: 16
         uses: CodSpeedHQ/action@v5
