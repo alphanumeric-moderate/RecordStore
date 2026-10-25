@@ -669,6 +669,39 @@ Planning is non-destructive. Execution returns `coverage_unverified` and perform
 These checks do **not** establish complete RTBF for an application until its real user-associated store/key inventory and all writer/recreation paths have been wired to the family adapters and accepted against live Roblox DataStore behavior. Keep the RTBF-completeness claim blocked until that application-specific acceptance has passed.
 
 
+### PlayerDataCore integration
+
+\`src/PlayerDataInitializer/PlayerDataErasure.luau\` is an opt-in family adapter for the current \`PlayerDataCore\` layout (\`PlayerData_Test1\`, scope \`global\`, key \`Player_{user_id}\`). It supplies a bounded exact-key inventory, an active-player kick hook, a same-key generation-aware erasure fence, and bounded historical-version cleanup. The fence replaces the profile envelope with an intentionally unsupported future implementation marker, so older RecordStore versions fail closed rather than recreating the profile. The same marker remains authoritative for new RecordStore code. Erasure status is read through \`RecordStore.get_erasure_status_async\`; \`RecordStore.erase_user_data_async\` installs/reconciles the fence; \`RecordStore.purge_erased_versions_async\` removes historical non-deleted versions in bounded batches.
+
+The manifest store is injected rather than silently constructed by this adapter. It must provide \`GetAsyncFresh\` that bypasses Roblox's cached read view and an atomic \`UpdateAsync\` adapter suitable for the coordinator's compare-and-update manifests. Do not substitute cached reads or a non-atomic read/write pair.
+
+\`\`\`luau
+local PlayerDataErasure = require(script.Parent.PlayerDataErasure)
+
+local coordinator = PlayerDataErasure.new(manifest_store_adapter, {
+    -- Set true only after auditing every user-key layout owned by PlayerDataCore.
+    profile_family_verified = false,
+
+    -- Verify the rendered templates against independent, deployment-specific evidence.
+    verify_templates = function(user_id, rendered_templates)
+        return false -- keep the destructive gate closed until verified
+    end,
+
+    -- Add every other user-associated store/key family in the application here.
+    additional_families = {},
+})
+
+local plan = coordinator:PlanAsync(user_id, erasure_id)
+if plan.code == "success" and plan.rtbf_coverage_verified == true then
+    local progress = coordinator:ExecuteAsync(user_id, erasure_id, 1)
+end
+\`\`\`
+
+The default configuration deliberately does not certify RTBF coverage. Replace the example verification callback only after the full application's key families and templates have been independently audited. Every \`additional_families\` entry must provide complete inventory, exact templates, a durable writer fence, dependency checks, and a generation-aware action that validates the same erasure fence atomically with its mutation. Keep \`ShouldBlockWrites(user_id)\` fail-closed when manifest state is missing, corrupt, or uncertain.
+
+This adapter covers one known profile family; it cannot discover arbitrary DataStores or verify application-owned secondary keys. It does not make the overall application RTBF-complete. Historical-version removal, cross-server kick timing, stale-server behavior, and the full erasure flow still require acceptance in a real Roblox test experience before any completeness claim.
+
+
 ## Independent maintenance runner
 
 `RecordStoreMaintenanceRunner` is an opt-in runner around `RecordStoreV2.Maintenance.NewCompactor`. It defaults to `dry_run`; `execute` mode refuses construction without both application authorization and a durable writer-fence callback. The runner rechecks authorization/fencing before a step and immediately before each generation-aware delete. Its checkpoint adapter must atomically compare the expected revision, persist the next revision, cursor, processed/removed counts and status, and return whether that write was confirmed.
