@@ -2448,8 +2448,8 @@ local function new_erasure(store, families, options)
 	end
 
 	-- IsErased reports completion evidence; this separate predicate answers whether
-	-- application writers must stay blocked while erasure is planned/in progress or
-	-- an old completed manifest lacks coverage proof.
+	-- application writers must stay blocked during planned/in-progress erasure or
+	-- whenever a terminal manifest lacks explicit audited evidence that recreation is safe.
 	function coordinator:ShouldBlockWrites(user_id)
 		local status = self:GetStatus(user_id)
 		if type(status) ~= "table" then
