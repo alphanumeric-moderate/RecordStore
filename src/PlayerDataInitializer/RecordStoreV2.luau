@@ -2019,8 +2019,8 @@ local function render_template(template, user_id)
 end
 
 local function new_erasure(store, families, options)
-	if type(store) ~= "table" or type(store.GetAsync) ~= "function" or type(store.UpdateAsync) ~= "function" then
-		error("erasure coordinator requires GetAsync and UpdateAsync storage adapters", 2)
+	if type(store) ~= "table" or type(store.GetAsyncFresh) ~= "function" or type(store.UpdateAsync) ~= "function" then
+		error("erasure coordinator requires GetAsyncFresh and UpdateAsync; cached reads cannot authorize erasure state changes", 2)
 	end
 	if options == nil then options = {} elseif type(options) ~= "table" then error("erasure options must be a table", 2) end
 	if families == nil then families = {} elseif type(families) ~= "table" then error("erasure families must be an array", 2) end
@@ -2248,7 +2248,7 @@ local function new_erasure(store, families, options)
 			return manifest
 		end)
 		if message then
-			local old = adapter_call(store, "GetAsync", manifest_key(user_id))
+			local old = adapter_call(store, "GetAsyncFresh", manifest_key(user_id))
 			if type(old) == "table" and old.user_id == user_id and old.erasure_id == erasure_id then
 				local result = copy(old)
 				result.code = "unknown_reconciled"
@@ -2275,7 +2275,7 @@ local function new_erasure(store, families, options)
 		if not finite(user_id) or user_id < 1 or math.floor(user_id) ~= user_id or not valid_text(erasure_id, 96) then return { code = "invalid" } end
 		max_items = math.clamp(math.floor(max_items or 16), 1, 64)
 		local key = manifest_key(user_id)
-		local manifest, message = adapter_call(store, "GetAsync", key)
+		local manifest, message = adapter_call(store, "GetAsyncFresh", key)
 		if message then return { code = "unknown", message = message } end
 		if type(manifest) ~= "table" or manifest.user_id ~= user_id or manifest.erasure_id ~= erasure_id then return { code = "not_found" } end
 		if manifest.version ~= 1 or type(manifest.entries) ~= "table" or type(manifest.coverage) ~= "table"
@@ -2408,7 +2408,7 @@ local function new_erasure(store, families, options)
 		}
 	end
 	function coordinator:GetStatus(user_id)
-		local result, message = adapter_call(store, "GetAsync", manifest_key(user_id))
+		local result, message = adapter_call(store, "GetAsyncFresh", manifest_key(user_id))
 		if message then return { code = "unknown", message = message } end
 		if not result then return { code = "not_found" } end
 		return copy(result)
