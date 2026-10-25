@@ -2920,8 +2920,14 @@ local function new_maintenance()
 			if item_count > max_items then
 				return { code = "capacity", cursor = before_cursor, message = "page adapter exceeded the requested item bound" }
 			end
+			if type(complete) ~= "boolean" then
+				return { code = "invalid", cursor = before_cursor, message = "page adapter must return a boolean completion flag" }
+			end
 			if next_cursor ~= nil and (type(next_cursor) ~= "string" or next_cursor == "" or #next_cursor > 512) then
 				return { code = "invalid", cursor = before_cursor, message = "page cursor must be a non-empty string of at most 512 bytes" }
+			end
+			if complete == true and next_cursor ~= nil then
+				return { code = "invalid", cursor = before_cursor, message = "complete page must not return a next cursor" }
 			end
 			if complete == false and (next_cursor == nil or next_cursor == before_cursor) then
 				return { code = "invalid", cursor = before_cursor, message = "incomplete page must provide an advancing cursor" }
