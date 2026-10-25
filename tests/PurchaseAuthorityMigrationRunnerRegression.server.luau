@@ -98,7 +98,7 @@ local function page(items, next_cursor, done)
 	return { items = items, next_cursor = next_cursor, done = done }
 end
 
-local function new_runner(job_id, source, processor, checkpoint_store, revision, initial_cursor)
+local function new_runner(job_id, source, processor, checkpoint_store, revision, initial_cursor, expected_count_override, verifier_override)
 	return RunnerModule.new({
 		job_id = job_id,
 		source_revision = revision or source.source_revision or "snapshot-v1",
@@ -109,8 +109,8 @@ local function new_runner(job_id, source, processor, checkpoint_store, revision,
 		initial_cursor = initial_cursor,
 		page_size = 16,
 		inventory_manifest_id = "manifest:" .. (revision or source.source_revision or "snapshot-v1"),
-		expected_purchase_count = source.inventory_count,
-		verify_complete_inventory = function(manifest_id, source_revision, expected_count, observed_count)
+		expected_purchase_count = if expected_count_override == nil then source.inventory_count else expected_count_override,
+		verify_complete_inventory = verifier_override or function(manifest_id, source_revision, expected_count, observed_count)
 			return manifest_id == "manifest:" .. source.source_revision
 				and source_revision == source.source_revision
 				and expected_count == source.inventory_count
@@ -156,6 +156,42 @@ do
 	local already_complete = runner:RunBatchAsync(1)
 	expect(already_complete.code == "completed" and calls.count == 3,
 		"completed migration reread source pages unexpectedly")
+end
+
+-- A terminal page cannot commit unless its full row count matches the declared manifest.
+do
+	local calls = { count = 0 }
+	local backing = make_checkpoint_store()
+	local source = make_source({
+		["<initial>"] = page({ purchase("manifest-short-001") }, nil, true),
+	}, "snapshot-short", calls)
+	local processor = make_processor()
+	local runner = new_runner("historical-import-short-manifest", source, processor, backing, nil, nil, 2)
+	local result = runner:RunBatchAsync(1)
+	expect(result.code == "incomplete_inventory" and result.done == false and result.cursor == nil,
+		"terminal page with fewer rows than the manifest was accepted")
+	expect(processor.calls == 0 and calls.count == 1,
+		"runner imported a terminal page before inventory-count reconciliation")
+	local checkpoint, read_error = backing:GetAsyncFresh("purchase-migration:historical-import-short-manifest")
+	expect(checkpoint == nil and read_error == nil,
+		"incomplete inventory manifest created a terminal checkpoint")
+end
+
+-- An external manifest verifier can block a terminal page even when row counts match.
+do
+	local calls = { count = 0 }
+	local backing = make_checkpoint_store()
+	local source = make_source({
+		["<initial>"] = page({ purchase("manifest-rejected-001") }, nil, true),
+	}, "snapshot-rejected", calls)
+	local processor = make_processor()
+	local runner = new_runner("historical-import-rejected-manifest", source, processor, backing, nil, nil, nil,
+		function() return false, "external manifest digest mismatch" end)
+	local result = runner:RunBatchAsync(1)
+	expect(result.code == "incomplete_inventory" and string.find(result.message or "", "digest mismatch") ~= nil,
+		"external inventory verifier rejection was ignored")
+	expect(processor.calls == 0 and calls.count == 1,
+		"PurchaseIds were imported before independent manifest verification")
 end
 
 -- A partial/unknown batch must leave the durable cursor and counters unchanged,
