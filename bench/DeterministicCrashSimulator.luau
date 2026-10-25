@@ -123,6 +123,7 @@ function Simulator.new(options)
 		memory = {},
 		subscriptions = {},
 		scheduled = {},
+		_running_event = false,
 		faults = {},
 		trace = {},
 		invariants = {},
@@ -561,7 +562,8 @@ function Simulator.new(options)
 		then
 			return nil, "schedule requires a server, valid delay, and callback"
 		end
-		if #self.scheduled >= self.max_events then return nil, "simulated event queue is full" end
+		local active = if self._running_event then 1 else 0
+		if #self.scheduled + active >= self.max_events then return nil, "simulated event queue is full" end
 		self.next_sequence += 1
 		local event = {
 			server = server,
@@ -595,10 +597,46 @@ function Simulator.new(options)
 			self:_trace(event.server, event.operation_id, "scheduler", "event", "dropped_after_crash", "scheduled callback belonged to an earlier process epoch")
 			return { code = "dropped", sequence = event.sequence }
 		end
-		local ok, result = pcall(event.callback, self, event)
+		local thread = event.thread
+		if thread == nil then
+			thread = coroutine.create(function()
+				return event.callback(self, event)
+			end)
+		end
+		self._running_event = true
+		local ok, result = coroutine.resume(thread, event.resume_value)
+		self._running_event = false
+		if not ok then
+			self.counters.events_executed += 1
+			self:_trace(event.server, event.operation_id, "scheduler", event.callback_id or "callback", "failed", "callback failed; exception details redacted")
+			return { code = "failed", sequence = event.sequence, result = "callback failed; exception details redacted" }
+		end
+		if coroutine.status(thread) ~= "dead" then
+			if #self.scheduled >= self.max_events then
+				self:_trace(event.server, event.operation_id, "scheduler", event.callback_id or "callback", "yield_blocked", "event capacity prevented deterministic rescheduling")
+				return { code = "capacity", sequence = event.sequence, result = "yielding callback could not be rescheduled because the event queue is full" }
+			end
+			local yielded = result
+			local delay_ms = 0
+			if type(yielded) == "table" and yielded.delay_ms ~= nil then
+				if not finite(yielded.delay_ms) or yielded.delay_ms < 0 or yielded.delay_ms > 31_536_000_000 then
+					self:_trace(event.server, event.operation_id, "scheduler", event.callback_id or "callback", "invalid_yield", "yield delay was outside the supported finite range")
+					return { code = "invalid", sequence = event.sequence, result = "yield delay must be finite and non-negative" }
+				end
+				delay_ms = yielded.delay_ms
+			end
+			self.next_sequence += 1
+			event.sequence = self.next_sequence
+			event.due_global_ms = self.now_ms + delay_ms
+			event.thread = thread
+			event.resume_value = nil
+			table.insert(self.scheduled, event)
+			self:_trace(event.server, event.operation_id, "scheduler", event.callback_id or "callback", "yielded", "callback suspended and was rescheduled deterministically")
+			return { code = "yielded", sequence = event.sequence, due_ms = event.due_global_ms }
+		end
 		self.counters.events_executed += 1
-		self:_trace(event.server, event.operation_id, "scheduler", event.callback_id or "callback", if ok then "completed" else "failed", if ok then "deterministic callback completed" else tostring(result):sub(1, 240))
-		return { code = if ok then "completed" else "failed", sequence = event.sequence, result = result }
+		self:_trace(event.server, event.operation_id, "scheduler", event.callback_id or "callback", "completed", "deterministic callback completed")
+		return { code = "completed", sequence = event.sequence, result = result }
 	end
 
 	function self:RunUntil(global_time_ms, maximum_events)
@@ -638,7 +676,7 @@ function Simulator.new(options)
 		local violation = {
 			at_ms = self.now_ms,
 			invariant = name,
-			detail = if ok and valid_text(detail, 256) then detail else if not ok then tostring(passed):sub(1, 256) else "predicate returned false",
+			detail = if ok and passed == true then "invariant failed" else if ok then "predicate returned false" else "predicate raised an error; exception details redacted",
 			context_id = if type(context) == "table" and valid_text(context.operation_id, 128) then context.operation_id else nil,
 		}
 		if self.first_violation == nil then self.first_violation = violation end
@@ -674,6 +712,7 @@ function Simulator.new(options)
 
 	function self:DataStore(name, scope, server)
 		server = server or "server-a"
+		local simulator = self
 		if not valid_text(name, 50) or type(scope) ~= "string" or #scope > 50 then
 			error("DataStore adapter needs a name and bounded scope", 2)
 		end
@@ -684,22 +723,22 @@ function Simulator.new(options)
 			return prefix .. key
 		end
 		function adapter:GetAsync(key)
-			return self:GetAsync(server, actual_key(key), { key_family = name .. "/" .. scope })
+			return simulator:GetAsync(server, actual_key(key), { key_family = name .. "/" .. scope })
 		end
 		function adapter:GetAsyncFresh(key)
-			return self:GetAsyncFresh(server, actual_key(key), { key_family = name .. "/" .. scope })
+			return simulator:GetAsyncFresh(server, actual_key(key), { key_family = name .. "/" .. scope })
 		end
 		function adapter:UpdateAsync(key, transform)
-			return self:UpdateAsync(server, actual_key(key), transform, { key_family = name .. "/" .. scope })
+			return simulator:UpdateAsync(server, actual_key(key), transform, { key_family = name .. "/" .. scope })
 		end
 		function adapter:SetAsync(key, value, user_ids, metadata)
-			return self:SetAsync(server, actual_key(key), value, user_ids, metadata, { key_family = name .. "/" .. scope })
+			return simulator:SetAsync(server, actual_key(key), value, user_ids, metadata, { key_family = name .. "/" .. scope })
 		end
 		function adapter:RemoveAsync(key)
-			return self:RemoveAsync(server, actual_key(key), { key_family = name .. "/" .. scope })
+			return simulator:RemoveAsync(server, actual_key(key), { key_family = name .. "/" .. scope })
 		end
 		function adapter:GetRequestBudgetForRequestType(request_type)
-			return self:GetRequestBudgetForRequestType(server, request_type)
+			return simulator:GetRequestBudgetForRequestType(server, request_type)
 		end
 		return adapter
 	end
@@ -736,6 +775,7 @@ function Simulator.new(options)
 	end
 
 	function self:MemoryStoreService()
+		local simulator = self
 		local service = {}
 		function service:GetHashMap(name)
 			local map = {}
@@ -769,7 +809,7 @@ function Simulator.new(options)
 				count = math.clamp(math.floor(count or 100), 1, 100)
 				local entries = {}
 				for key, entry in pairs(memory_namespace(name)) do
-					if entry.expires_at_ms == math.huge or entry.expires_at_ms > self.now_ms then
+					if entry.expires_at_ms == math.huge or entry.expires_at_ms > simulator.now_ms then
 						local sort_key = entry.sort_key
 						if type(sort_key) == "number"
 							and (exclusive_lower_bound == nil or sort_key > exclusive_lower_bound)
