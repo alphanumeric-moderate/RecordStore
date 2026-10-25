@@ -999,6 +999,65 @@ expect(per_item_fence_erasure:GetStatus(781).cursor == 0,
 
 end -- scope RTBF coverage and write-gate regression locals
 
+do -- Corrupt manifests and forged coverage flags must not trigger erasure writes.
+	local malformed_store = new_store()
+	local malformed_deletes = 0
+	local malformed_family = {
+		name = "malformed_family",
+		templates = { { name = "PlayerData", scope = "global", key = "Malformed_{user_id}" } },
+		templates_verified = true,
+		inventory = function(user_id) return { { name = "PlayerData", scope = "global", key = "Malformed_" .. tostring(user_id), generation = 1 } }, true end,
+		fence_user = function() return true end,
+		dependencies_clear = function() return true end,
+		redact_or_delete_if_generation = function() malformed_deletes += 1; return "deleted" end,
+	}
+	malformed_store.values["rv2erase-u782"] = {
+		version = 1, user_id = 782, erasure_id = "malformed-entry",
+		status = "in_progress", cursor = 0, completed_count = 0,
+		entries = { "not-an-entry" },
+		coverage = { malformed_family = { status = "template_verified_by_integrator", count = 1, inventory_complete = true, unmatched_count = 0 } },
+		rtbf_coverage_verified = true, template_fingerprint = "invalid",
+	}
+	local malformed_erasure = V2.Erasure.new(malformed_store, { malformed_family }, {
+		verify_templates = function() return true end,
+	})
+	local call_ok, malformed_result = pcall(function()
+		return malformed_erasure:ExecuteAsync(782, "malformed-entry", 8)
+	end)
+	expect(call_ok and malformed_result.code == "corrupt" and malformed_deletes == 0,
+		"malformed erasure entry was indexed or processed destructively instead of rejected")
+
+	local forged_store = new_store()
+	local forged_deletes = 0
+	local forged_family = {
+		name = "forged_family",
+		templates = { { name = "PlayerData", scope = "global", key = "Forged_{user_id}" } },
+		templates_verified = true,
+		inventory = function(user_id) return {}, true end,
+		fence_user = function() return true end,
+		dependencies_clear = function() return true end,
+		redact_or_delete_if_generation = function() forged_deletes += 1; return "deleted" end,
+	}
+	local forged_erasure = V2.Erasure.new(forged_store, { forged_family }, {
+		verify_templates = function() return true end,
+	})
+	local verified_plan = forged_erasure:PlanAsync(783, "forged-coverage")
+	expect(verified_plan.rtbf_coverage_verified == true,
+		"forged-coverage regression failed to create an initially verified plan")
+	local stored_plan = forged_store.values["rv2erase-u783"]
+	stored_plan.coverage.forged_family.status = "inventory_incomplete"
+	stored_plan.coverage.forged_family.inventory_complete = false
+	local forged_result = forged_erasure:ExecuteAsync(783, "forged-coverage", 8)
+	expect(forged_result.code == "coverage_unverified" and forged_deletes == 0,
+		"execution trusted a true coverage flag despite inconsistent coverage rows")
+	local forged_is_erased, forged_status = forged_erasure:IsErased(783)
+	expect(forged_is_erased == nil and forged_status.code == "coverage_unverified",
+		"completion status trusted a true coverage flag despite inconsistent coverage rows")
+	local forged_gate, forged_gate_status = forged_erasure:ShouldBlockWrites(783)
+	expect(forged_gate == true and forged_gate_status.code == "coverage_unverified",
+		"write/recreation gate did not remain blocked for inconsistent completed-coverage evidence")
+end
+
 local oversize_items = {}
 for index = 1, 513 do
 	table.insert(oversize_items, {
