@@ -2068,6 +2068,9 @@ local function new_erasure(store, families, options)
 		end
 	end
 	local coordinator = { store = store, families = families }
+	local function valid_user_id(user_id)
+		return finite(user_id) and user_id >= 1 and math.floor(user_id) == user_id
+	end
 	local function manifest_key(user_id) return "rv2erase-u" .. tostring(user_id) end
 	function coordinator:RenderTemplates(user_id)
 		if not finite(user_id) or user_id < 1 or math.floor(user_id) ~= user_id then return nil, "invalid UserId" end
@@ -2272,8 +2275,11 @@ local function new_erasure(store, families, options)
 		return result
 	end
 	function coordinator:ExecuteAsync(user_id, erasure_id, max_items)
-		if not finite(user_id) or user_id < 1 or math.floor(user_id) ~= user_id or not valid_text(erasure_id, 96) then return { code = "invalid" } end
-		max_items = math.clamp(math.floor(max_items or 16), 1, 64)
+		if not valid_user_id(user_id) or not valid_text(erasure_id, 96) then return { code = "invalid", message = "a positive integer UserId and migration ID are required" } end
+		if max_items == nil then max_items = 16 end
+		if not finite(max_items) or math.floor(max_items) ~= max_items or max_items < 1 or max_items > 64 then
+			return { code = "invalid", message = "max_items must be an integer from 1 to 64" }
+		end
 		local key = manifest_key(user_id)
 		local manifest, message = adapter_call(store, "GetAsyncFresh", key)
 		if message then return { code = "unknown", message = message } end
@@ -2418,16 +2424,29 @@ local function new_erasure(store, families, options)
 		}
 	end
 	function coordinator:GetStatus(user_id)
+		if not valid_user_id(user_id) then return { code = "invalid", message = "UserId must be a positive integer" } end
 		local result, message = adapter_call(store, "GetAsyncFresh", manifest_key(user_id))
 		if message then return { code = "unknown", message = message } end
-		if not result then return { code = "not_found" } end
+		if result == nil then return { code = "not_found" } end
+		if type(result) ~= "table" or result.user_id ~= user_id
+			or not valid_text(result.erasure_id, 96) or result.version ~= 1
+		then
+			return { code = "corrupt", message = "erasure status manifest identity or version is malformed" }
+		end
+		if result.rtbf_coverage_verified == true then
+			local valid, code, validation_error = validate_plan_manifest(result, user_id)
+			if not valid then
+				return { code = code or "coverage_unverified", message = validation_error, observed = copy(result) }
+			end
+		end
 		return copy(result)
 	end
 	function coordinator:IsErased(user_id)
 		local status = self:GetStatus(user_id)
 		if type(status) ~= "table" then return nil, { code = "unknown", message = "erasure status returned no record" } end
+		if status.code == "invalid" then return nil, status end
 		if status.code == "not_found" then return false, status end
-		if status.code == "unknown" or status.code == "conflict" or status.code == "corrupt" then
+		if status.code == "unknown" or status.code == "conflict" or status.code == "corrupt" or status.code == "coverage_unverified" then
 			return nil, status
 		end
 		if status.status == "resolved" or status.status == "planned" or status.status == "in_progress" then
@@ -2455,8 +2474,9 @@ local function new_erasure(store, families, options)
 		if type(status) ~= "table" then
 			return nil, { code = "unknown", message = "erasure status returned no record" }
 		end
+		if status.code == "invalid" then return nil, status end
 		if status.code == "not_found" then return false, status end
-		if status.code == "unknown" or status.code == "conflict" or status.code == "corrupt" then
+		if status.code == "unknown" or status.code == "conflict" or status.code == "corrupt" or status.code == "coverage_unverified" then
 			return nil, status
 		end
 		if status.status == "resolved" then
