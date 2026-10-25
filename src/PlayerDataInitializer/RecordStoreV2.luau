@@ -1592,6 +1592,10 @@ local function new_doctor(record_store)
 			if current_fence.Phase ~= "quarantined" then
 				return { code = "conflict", message = "durable quarantine phase is not recognized" }
 			end
+			if current_fence.OperatorId ~= operator_id or current_fence.Reason ~= reason then
+				return { code = "conflict", status = "quarantined",
+					message = "quarantine ID is already bound to a different durable operator decision" }
+			end
 			source_revision = current_fence.SourceRevision
 			source_generation = current_fence.SourceGeneration
 			if existing ~= nil and existing.quarantine_id == quarantine_id and existing.status == "resolved" then
