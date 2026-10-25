@@ -2730,9 +2730,16 @@ local function new_maintenance()
 			if type(config.next_page) ~= "function" or type(config.inspect) ~= "function" or type(config.delete_if_generation) ~= "function" or type(config.persist_progress) ~= "function" then return { code = "invalid", message = "compactor requires page, inspect, generation-aware delete, and checkpoint adapters" } end
 			local start = os.clock() * 1000
 			local before_cursor = self.cursor
+			local before_processed = self.processed
+			local before_removed = self.removed
 			local function checkpoint(status, cursor)
 				local persisted, persist_error = io_call(config.persist_progress, cursor, self.processed, self.removed, status)
 				if persisted ~= true then
+					-- Keep every in-memory progress field aligned with the last
+					-- confirmed checkpoint, not just the cursor.
+					self.cursor = before_cursor
+					self.processed = before_processed
+					self.removed = before_removed
 					self.status = "unknown"
 					self.last_error = persist_error
 					return false, persist_error
