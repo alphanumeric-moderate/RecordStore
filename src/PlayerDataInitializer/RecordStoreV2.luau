@@ -1755,16 +1755,21 @@ local function new_doctor(record_store)
 		local key = quarantine_manifest_key(identity_text)
 		local fence, fence_code, fence_error = durable_quarantine_fence(identity, nil)
 		if fence_code ~= "success" or type(fence) ~= "table" or fence.Quarantined ~= true then
-			if fence_code == "success" and type(fence) == "table" and fence.Quarantined == false then
+			if (fence_code == "success" and type(fence) == "table" and fence.Quarantined == false)
+				or fence_code == "not_found"
+			then
 				local manifest, manifest_code, manifest_error = read_quarantine_manifest(
 					quarantine_store, key, identity_text
 				)
-				if manifest_code == "success" and manifest ~= nil and manifest.quarantine_id == quarantine_id
+				if manifest_code == "success" and manifest ~= nil
+					and manifest.quarantine_id == quarantine_id
 					and manifest.status == "resolved" and manifest.resolution_id ~= nil
+					and manifest.fence_protocol == 1
 				then
 					return { code = "duplicate", status = "resolved", manifest = manifest, fence = fence }
 				end
-				return { code = "conflict", message = "quarantine is no longer active and no matching completed resolution exists" }
+				return { code = "conflict", message = manifest_error
+					or "quarantine is no longer active and no matching completed resolution exists" }
 			end
 			return { code = fence_code or "unknown", message = fence_error or "durable quarantine fence could not be confirmed" }
 		end
