@@ -2727,6 +2727,13 @@ do
 		return { code = code, message_id = message_id, message = message, error = error_message }
 	end
 
+	local function storage_error_code(error_message: string): string
+		if string.find(error_message, "unsupported schema version", 1, true) ~= nil then
+			return "unsupported_schema"
+		end
+		return "unknown"
+	end
+
 	local function clone_owner(owner: EmbeddedMailboxOwner): EmbeddedMailboxOwner
 		return {
 			store_name = owner.store_name,
@@ -3057,8 +3064,17 @@ do
 		local current, read_error = self:_get(key)
 		if read_error == nil and current ~= nil then
 			local manifest = as_dict(current)
-			if manifest == nil or manifest.version ~= VERSION or manifest.kind ~= kind or not same_owner(manifest.owner, self.owner) or type(manifest.slots) ~= "table" then
-				return nil, "manifest is corrupt, future-versioned or belongs to another owner"
+			if manifest == nil then
+				return nil, "manifest is malformed"
+			end
+			if not same_owner(manifest.owner, self.owner) then
+				return nil, "manifest belongs to another owner"
+			end
+			if manifest.version ~= VERSION then
+				return nil, "unsupported schema version: manifest version is unsupported"
+			end
+			if manifest.kind ~= kind or type(manifest.slots) ~= "table" then
+				return nil, "manifest is malformed"
 			end
 			return manifest, nil
 		end
@@ -4517,9 +4533,13 @@ do
 				if read_error ~= nil then
 					return result, read_error
 				end
-				if segment ~= nil and segment.generation == locator.generation and same_owner(segment.owner, self.owner)
-					and type(segment.entries) == "table"
-				then
+				if segment ~= nil and segment.generation == locator.generation and same_owner(segment.owner, self.owner) then
+					if segment.version ~= VERSION then
+						return result, "unsupported schema version: index segment version is unsupported"
+					end
+					if segment.kind ~= kind or segment.slot ~= locator.slot or type(segment.entries) ~= "table" then
+						return result, "index segment metadata or entries are malformed"
+					end
 					for _, raw_row in segment.entries :: { unknown } do
 						local row = as_dict(raw_row)
 						if row ~= nil then
@@ -4537,7 +4557,7 @@ do
 	function MailboxV2.GetQueueAsync(self: EmbeddedMailbox): ({ EmbeddedMailboxDict }, EmbeddedMailboxResult)
 		local rows, rows_error = self:_rows("active")
 		if rows_error ~= nil then
-			return {}, ok("unknown", nil, nil, rows_error)
+			return {}, ok(storage_error_code(rows_error), nil, nil, rows_error)
 		end
 		local result: { EmbeddedMailboxDict } = {}
 		local seen: { [string]: boolean } = {}
@@ -5188,7 +5208,7 @@ do
 		end
 		local rows, rows_error = self:_rows("active")
 		if rows_error ~= nil then
-			return ok("unknown", nil, nil, rows_error)
+			return ok(storage_error_code(rows_error), nil, nil, rows_error)
 		end
 		for _, row in rows do
 			local route = tostring(row.route)
@@ -5308,7 +5328,7 @@ do
 	function MailboxV2.GetDeadLettersAsync(self: EmbeddedMailbox, cursor: string?, page_size: number?): ({ EmbeddedMailboxDict }, string?, EmbeddedMailboxResult)
 		local rows, rows_error = self:_rows("dlq")
 		if rows_error ~= nil then
-			return {}, nil, ok("unknown", nil, nil, rows_error)
+			return {}, nil, ok(storage_error_code(rows_error), nil, nil, rows_error)
 		end
 		local messages: { EmbeddedMailboxDict } = {}
 		local seen: { [string]: boolean } = {}

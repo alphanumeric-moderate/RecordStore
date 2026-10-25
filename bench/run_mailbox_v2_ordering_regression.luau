@@ -697,6 +697,72 @@ local function test_future_message_version_cannot_confirm_duplicate_producer_rec
 		"future-version producer record was modified by V2 compatibility handling")
 end
 
+local function test_future_index_schema_versions_fail_closed()
+	local function poison_index_segment(mailbox, store, kind)
+		local manifest = store.values[mailbox:_manifest_key(kind)]
+		assert(type(manifest) == "table" and type(manifest.slots) == "table",
+			"index-schema fixture omitted its manifest")
+		for slot_number, slot in ipairs(manifest.slots) do
+			if type(slot) == "table"
+				and (slot.state == "open" or slot.state == "sealed" or slot.state == "draining")
+			then
+				local key = mailbox:_segment_key(kind, slot_number, slot.generation)
+				local segment = store.values[key]
+				if type(segment) == "table" and segment.generation == slot.generation then
+					local future_segment = clone(segment)
+					future_segment.version = 3
+					store.values[key] = future_segment
+					return key
+				end
+			end
+		end
+		error("index-schema fixture could not find a live segment for " .. kind)
+	end
+
+	local active_mailbox, active_store = new_mailbox()
+	local active = enqueue(active_mailbox, "future-active-index", "future-active-index-id", nil, "normal")
+	assert(type(active.message_id) == "string", "active-index fixture did not create a canonical message")
+	poison_index_segment(active_mailbox, active_store, "active")
+	local active_writes = active_store.update_calls
+	local queue, queue_result = active_mailbox:GetQueueAsync()
+	assert(#queue == 0 and queue_result.code == "unsupported_schema",
+		"queue reader interpreted a future-version index segment as V2")
+	assert(active_store.update_calls == active_writes,
+		"queue read wrote while rejecting a future-version index segment")
+	local recovery = active_mailbox:RecoverAsync()
+	assert(recovery.code == "unsupported_schema",
+		"mailbox recovery did not surface an unsupported active-index schema")
+	assert(active_store.update_calls == active_writes,
+		"mailbox recovery wrote after encountering a future-version index segment")
+
+	local manifest_mailbox, manifest_store = new_mailbox()
+	enqueue(manifest_mailbox, "future-manifest", "future-manifest-id", nil, "normal")
+	local manifest_key = manifest_mailbox:_manifest_key("active")
+	local future_manifest = clone(manifest_store.values[manifest_key])
+	future_manifest.version = 3
+	manifest_store.values[manifest_key] = future_manifest
+	local manifest_writes = manifest_store.update_calls
+	local manifest_queue, manifest_result = manifest_mailbox:GetQueueAsync()
+	assert(#manifest_queue == 0 and manifest_result.code == "unsupported_schema",
+		"queue reader did not surface a future-version manifest")
+	assert(manifest_store.update_calls == manifest_writes,
+		"queue read wrote after encountering a future-version manifest")
+
+	local dlq_mailbox, dlq_store = new_mailbox({ max_attempts = 1 })
+	local dlq_message = enqueue(dlq_mailbox, "future-dlq-index", "future-dlq-index-id", nil, "normal")
+	local dlq_transition = process_one(dlq_mailbox, function() return false end)
+	assert(dlq_transition.code == "dead_lettered",
+		"DLQ index fixture did not reach the dead-letter state")
+	assert(type(dlq_message.message_id) == "string", "DLQ fixture omitted its canonical message ID")
+	poison_index_segment(dlq_mailbox, dlq_store, "dlq")
+	local dlq_writes = dlq_store.update_calls
+	local dead_letters, _, dlq_result = dlq_mailbox:GetDeadLettersAsync(nil, 100)
+	assert(#dead_letters == 0 and dlq_result.code == "unsupported_schema",
+		"dead-letter reader interpreted a future-version DLQ segment as V2")
+	assert(dlq_store.update_calls == dlq_writes,
+		"dead-letter read wrote while rejecting a future-version DLQ segment")
+end
+
 local function test_high_priority_burst_does_not_starve_background_messages()
 	local mailbox = new_mailbox({ strict_ordering_enabled = true })
 	for index = 1, 7 do
@@ -1198,6 +1264,7 @@ test_stale_cache_cannot_bypass_claim_metadata_validation()
 test_corrupt_ready_message_metadata_fails_closed()
 test_future_message_version_fails_closed()
 test_future_message_version_cannot_confirm_duplicate_producer_receipt()
+test_future_index_schema_versions_fail_closed()
 test_high_priority_burst_does_not_starve_background_messages()
 test_clock_skew_cannot_break_ordering_under_adversarial_sort_keys()
 test_priority_burst_policy_is_bounded_and_configurable()
