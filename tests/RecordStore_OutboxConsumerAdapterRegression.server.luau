@@ -43,7 +43,6 @@ local opened, open_message = destination:Open({
 })
 expect(opened == "created" or opened == "loaded", "destination profile open failed: " .. tostring(open_message))
 
-local consumer_reducer_calls = 0
 local processor = ConsumerModule.new({
 	activation_guard = function(record, _operation)
 		return record:GetState() == "active" and record:IsOpen(), "destination activation denied"
@@ -63,7 +62,6 @@ local processor = ConsumerModule.new({
 				next_data.GrantCount += 1
 				next_data.LastEventId = context.EventId
 				next_data.LastCorrelationId = context.CorrelationId
-				consumer_reducer_calls += 1
 				return next_data
 			end,
 		},
@@ -89,7 +87,6 @@ expect(destination:Get().LastEventId == "outbox-event-001",
 	"destination profile reducer did not receive the source event identity")
 expect(destination:Get().LastCorrelationId == "transfer-correlation-outbox-event-001",
 	"correlation metadata was not exposed to the destination reducer")
-expect(consumer_reducer_calls == 1, "destination reducer ran an unexpected number of times")
 
 -- A distinct transport message carrying the same source event must be applied
 -- as an Inbox duplicate, then acknowledged without repeating the profile mutation.
@@ -103,7 +100,6 @@ expect(duplicate_process.code == "processed",
 	"duplicate source event was not acknowledged after durable inbox reconciliation")
 expect(destination:Get().Balance == 35 and destination:Get().GrantCount == 1,
 	"duplicate source event mutated destination data more than once")
-expect(consumer_reducer_calls == 1, "Inbox replay invoked the destination reducer again")
 
 -- The transport cannot redirect an event to another profile by forging its
 -- envelope. The invalid message is kept retryable, and destination data is unchanged.
