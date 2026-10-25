@@ -128,7 +128,28 @@ assert(cursor == nil and complete == true, "single-family catalog did not termin
 
 local family_one = make_family("one", "Profiles", "Player_")
 local family_two = make_family("two", "OtherStore", "Other_")
-local sparse_families = { [1] = family_one, [3] = family_two }
+local multi_family_adapter = AdapterModule.new(make_config(service, { family_one, family_two }))
+local first_family_page, first_family_cursor, first_family_complete = multi_family_adapter:NextPage(nil, 1)
+assert(#first_family_page == 1 and first_family_page[1].store_name == "Profiles"
+	and first_family_page[1].key == "Player_1" and first_family_cursor ~= nil
+	and first_family_complete == false,
+	"first family page did not return a bounded continuation")
+local final_first_family_page, second_family_cursor, second_family_complete = multi_family_adapter:NextPage(first_family_cursor, 1)
+assert(#final_first_family_page == 1 and final_first_family_page[1].key == "Player_2"
+	and second_family_cursor == "inventory-r1|2:" and second_family_complete == false,
+	"finished first-family page did not advance to the next catalog family")
+local second_family_page, terminal_cursor, terminal_complete = multi_family_adapter:NextPage(second_family_cursor, 1)
+assert(#second_family_page == 1 and second_family_page[1].store_name == "OtherStore"
+	and second_family_page[1].key == "Other_1" and terminal_cursor == nil
+	and terminal_complete == true,
+	"multi-family pagination did not finish the final family")
+local stale_cursor_ok, stale_cursor_error = pcall(function()
+	multi_family_adapter:NextPage("inventory-r2|1:1", 1)
+end)
+assert(not stale_cursor_ok and string.find(tostring(stale_cursor_error), "catalog revision", 1, true) ~= nil,
+	"adapter accepted a cursor from a different catalog revision")
+
+local sparse_families = { [1] = make_family("sparse-one", "Profiles", "Player_"), [3] = make_family("sparse-two", "OtherStore", "Other_") }
 local sparse_ok, sparse_error = pcall(function()
 	AdapterModule.new(make_config(service, sparse_families))
 end)
