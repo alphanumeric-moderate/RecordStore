@@ -5,10 +5,18 @@ local Adapter = {}
 
 export type Inspection = {
 	status: string,
+	eligible?: boolean,
+	dependencies_clear?: boolean,
+	generation?: number,
+	message?: string,
+}
+
+type FamilyInspection = {
+	status: string,
 	eligible: boolean,
 	dependencies_clear: boolean,
-	generation: number?,
-	message: string?,
+	generation?: number,
+	message?: string,
 }
 
 export type Family = {
@@ -17,7 +25,7 @@ export type Family = {
 	scope: string?,
 	prefix: string?,
 	get_generation: (value: unknown, key_info: any) -> number?,
-	inspect: (key: string, value: unknown, key_info: any) -> (Inspection?, string?),
+	inspect: (key: string, value: unknown, key_info: any) -> (FamilyInspection?, string?),
 	can_delete: (value: unknown, key_info: any, expected_generation: number, job_id: string) -> boolean,
 	make_tombstone: (value: unknown, key_info: any, expected_generation: number, job_id: string) -> unknown?,
 	is_tombstone: (value: unknown, expected_generation: number, job_id: string) -> boolean,
@@ -48,6 +56,13 @@ type Checkpoint = {
 	processed: number,
 	removed: number,
 	status: string,
+}
+
+type CatalogItem = {
+	family_name: string,
+	store_name: string,
+	scope: string,
+	key: string,
 }
 
 local MAX_FAMILIES = 128
@@ -89,7 +104,7 @@ local function valid_checkpoint(value: unknown, job_id: string): Checkpoint?
 		or (checkpoint.cursor ~= nil and not valid_text(checkpoint.cursor, MAX_CURSOR_BYTES))
 		or not nonnegative_integer(checkpoint.processed)
 		or not nonnegative_integer(checkpoint.removed)
-		or checkpoint.removed > checkpoint.processed
+		or (checkpoint.removed :: number) > (checkpoint.processed :: number)
 		or type(checkpoint.status) ~= "string"
 	then
 		return nil
@@ -156,8 +171,13 @@ function Adapter.new(config: Config)
 	end
 
 	local service = config.data_store_service or DataStoreService
-	local instance_factory = config.instance_factory or function(class_name: string): Instance
-		return Instance.new(class_name)
+	local instance_factory: (string) -> Instance
+	if config.instance_factory ~= nil then
+		instance_factory = config.instance_factory
+	else
+		instance_factory = function(class_name: string): Instance
+			return Instance.new(class_name)
+		end
 	end
 	local families = table.clone(config.families)
 	local family_by_name: { [string]: Family } = {}
@@ -262,7 +282,7 @@ function Adapter.new(config: Config)
 
 	local adapter = {}
 
-	function adapter:NextPage(cursor: string?, maximum: number)
+	function adapter:NextPage(cursor: string?, maximum: number): ({ CatalogItem }?, string?, boolean, string?)
 		if not nonnegative_integer(maximum) or maximum < 1 then
 			return nil, nil, false, "maximum must be a positive integer"
 		end
@@ -288,7 +308,7 @@ function Adapter.new(config: Config)
 		if not current_ok or type(keys_or_error) ~= "table" then
 			return nil, nil, false, "ListKeysAsync page read failed: " .. tostring(keys_or_error)
 		end
-		local items = {}
+		local items: { CatalogItem } = {}
 		for _, key_info in ipairs(keys_or_error) do
 			local key_name = key_info.KeyName
 			if not valid_text(key_name, MAX_NAME_BYTES) then
@@ -317,7 +337,7 @@ function Adapter.new(config: Config)
 		return items, nil, true, nil
 	end
 
-	function adapter:Inspect(item: unknown)
+	function adapter:Inspect(item: unknown): (Inspection?, string?)
 		if type(item) ~= "table" then
 			return { status = "invalid", message = "inventory item must be a table" }, "invalid inventory item"
 		end
@@ -344,7 +364,7 @@ function Adapter.new(config: Config)
 			return { status = "unknown", message = read_error }, read_error
 		end
 		if value == nil then
-			return { status = "success", eligible = false, dependencies_clear = true, generation = 0 }, nil
+			return { status = "success", eligible = false, dependencies_clear = true, generation = 0, message = nil }, nil
 		end
 		local called, inspected, inspect_error = pcall(family.inspect, key, value, key_info)
 		if not called or type(inspected) ~= "table" or inspected.status ~= "success" then
@@ -360,10 +380,10 @@ function Adapter.new(config: Config)
 				return { status = "invalid", message = "eligible item must expose a non-negative generation" }, "invalid generation"
 			end
 		end
-		return inspected, nil
+		return inspected :: FamilyInspection, nil
 	end
 
-	function adapter:DeleteIfGeneration(item: unknown, expected_generation: number)
+	function adapter:DeleteIfGeneration(item: unknown, expected_generation: number): (string, string?)
 		if type(item) ~= "table" or not nonnegative_integer(expected_generation) then
 			return "skipped", "invalid inventory item or generation"
 		end
@@ -393,7 +413,7 @@ function Adapter.new(config: Config)
 			return "skipped", "generation changed after inspection"
 		end
 		local update_ok, updated_or_error = pcall(function()
-			return store_or_error:UpdateAsync(key, function(current, current_info)
+			return store_or_error:UpdateAsync(key, function(current: unknown, current_info: any): any
 				if current == nil then return nil end
 				if family.get_generation(current, current_info) ~= expected_generation then return nil end
 				local allowed = family.can_delete(current, current_info, expected_generation, config.job_id)
@@ -420,7 +440,7 @@ function Adapter.new(config: Config)
 		return "unknown", "UpdateAsync did not confirm the expected same-key tombstone"
 	end
 
-	function adapter:LoadCheckpoint()
+	function adapter:LoadCheckpoint(): (unknown, string?)
 		local ok, store_or_error = pcall(function()
 			return get_store(config.checkpoint_store_name, config.checkpoint_scope)
 		end)
@@ -430,7 +450,7 @@ function Adapter.new(config: Config)
 		return value, nil
 	end
 
-	function adapter:PersistCheckpoint(proposed_value: unknown, expected_revision: number)
+	function adapter:PersistCheckpoint(proposed_value: unknown, expected_revision: number): (boolean, string?)
 		local proposed = valid_checkpoint(proposed_value, config.job_id)
 		if proposed == nil or not nonnegative_integer(expected_revision) or proposed.revision ~= expected_revision + 1 then
 			return false, "proposed maintenance checkpoint is invalid"
@@ -440,7 +460,7 @@ function Adapter.new(config: Config)
 		end)
 		if not store_ok then return false, "could not open checkpoint store: " .. tostring(store_or_error) end
 		local update_ok, updated_or_error = pcall(function()
-			return store_or_error:UpdateAsync(config.checkpoint_key, function(raw)
+			return store_or_error:UpdateAsync(config.checkpoint_key, function(raw: unknown): any
 				if raw == nil then
 					if expected_revision ~= 0 then return nil end
 					return copy_checkpoint(proposed)

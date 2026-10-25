@@ -6288,6 +6288,7 @@ export type ResultCode =
 | "duplicate"
 | "capacity"
 | "disabled"
+| "unsupported"
 
 local RESULT_CODE_SET: { [string]: boolean } = {
 	success = true, created = true, loaded = true, saved = true, closed = true,
@@ -6296,7 +6297,7 @@ local RESULT_CODE_SET: { [string]: boolean } = {
 	conflict = true, validation = true, migration = true, future_schema = true,
 	corrupt = true, tombstoned = true, legacy = true, budget = true,
 	retry_exhausted = true, invalid = true, not_found = true, duplicate = true,
-	capacity = true, disabled = true,
+	capacity = true, disabled = true, unsupported = true,
 }
 
 local function normalize_result_code(value: unknown): ResultCode?
@@ -11642,6 +11643,14 @@ local function valid_erasure_user_id(value: unknown): boolean
 		and math.floor(value :: number) == (value :: number) and (value :: number) >= 1
 end
 
+local function valid_quarantine_text(value: unknown, maximum: number): boolean
+	return type(value) == "string" and value ~= "" and #value <= maximum
+end
+
+local function result_code_or_unknown(value: unknown): ResultCode
+	return normalize_result_code(value) or "unknown"
+end
+
 local function user_ids_include(user_ids: { number }?, user_id: number): boolean
 	if user_ids == nil or #user_ids == 0 then return true end
 	for _, existing_user_id in ipairs(user_ids) do
@@ -11682,7 +11691,7 @@ local function parse_erasure_fence(raw: unknown): (ErasureFenceMarker?, boolean,
 		return nil, true, "erasure fence fields failed validation"
 	end
 	return {
-		version = version,
+		version = version :: number,
 		user_id = user_id :: number,
 		erasure_id = erasure_id :: string,
 		erased_at = erased_at :: number,
@@ -11744,10 +11753,10 @@ local function parse_quarantine_fence(raw: unknown): (QuarantineFenceMarker?, bo
 	local resolution_reason = fields.resolution_reason
 	local resolution_at = fields.resolution_at
 	if version ~= 1
-		or not valid_text(store_name, 50)
+		or not valid_quarantine_text(store_name, 50)
 		or type(scope) ~= "string" or #scope > 50
-		or not valid_text(profile_key, 50)
-		or not valid_text(quarantine_id, 96)
+		or not valid_quarantine_text(profile_key, 50)
+		or not valid_quarantine_text(quarantine_id, 96)
 		or not finite_erasure_number(source_implementation_version)
 		or (source_implementation_version :: number) < 1
 		or math.floor(source_implementation_version :: number) ~= (source_implementation_version :: number)
@@ -11761,8 +11770,8 @@ local function parse_quarantine_fence(raw: unknown): (QuarantineFenceMarker?, bo
 		or not finite_erasure_number(fence_generation)
 		or math.floor(fence_generation :: number) ~= (fence_generation :: number)
 		or (fence_generation :: number) ~= math.max(1, (source_generation :: number) + 1)
-		or not valid_text(operator_id, 96)
-		or not valid_text(reason, 512)
+		or not valid_quarantine_text(operator_id, 96)
+		or not valid_quarantine_text(reason, 512)
 		or not finite_erasure_number(created_at)
 		or not finite_erasure_number(updated_at)
 		or (updated_at :: number) < (created_at :: number)
@@ -11771,9 +11780,9 @@ local function parse_quarantine_fence(raw: unknown): (QuarantineFenceMarker?, bo
 		return nil, true, "quarantine fence fields failed validation"
 	end
 	if phase == "release_pending" then
-		if not valid_text(resolution_id, 96)
-			or not valid_text(resolution_operator_id, 96)
-			or not valid_text(resolution_reason, 512)
+		if not valid_quarantine_text(resolution_id, 96)
+			or not valid_quarantine_text(resolution_operator_id, 96)
+			or not valid_quarantine_text(resolution_reason, 512)
 			or not finite_erasure_number(resolution_at)
 		then
 			return nil, true, "quarantine release-pending fields failed validation"
@@ -11815,7 +11824,7 @@ local function quarantine_status_from_marker(
 	info: BackendInfo?,
 	raw: unknown
 ): QuarantineFenceStatus
-	local fields = if type(raw) == "table" then raw :: { [string]: unknown } else {}
+	local fields: { [string]: unknown } = if type(raw) == "table" then raw :: any else {}
 	return {
 		Exists = true,
 		Quarantined = true,
@@ -11929,8 +11938,8 @@ local function quarantine_profile_writes_internal(
 ): (QuarantineFenceStatus?, ResultCode, string?)
 	local valid_identity, identity_message = validate_store_identity(name, scope, key)
 	if not valid_identity then return nil, "invalid", identity_message end
-	if not valid_text(quarantine_id, 96) or not valid_text(operator_id, 96)
-		or not valid_text(reason, 512)
+	if not valid_quarantine_text(quarantine_id, 96) or not valid_quarantine_text(operator_id, 96)
+		or not valid_quarantine_text(reason, 512)
 	then
 		return nil, "invalid", "quarantine ID, operator ID and reason must be bounded non-empty strings"
 	end
@@ -11946,11 +11955,11 @@ local function quarantine_profile_writes_internal(
 	local backend = make_backend(name, scope, key, mock)
 	local now = session_now_unix(mock)
 	local fence_write_id = HttpService:GenerateGUID(false)
-	local update_result, _, update_code, update_message = backend_update(backend, function(raw, info)
+	local _, _, update_code, update_message = backend_update(backend, function(raw, info)
 		if raw == nil then return nil, nil, nil end
 		local erasure, erasure_present = parse_erasure_fence(raw)
 		if erasure_present or erasure ~= nil then return nil, nil, nil end
-		local existing, present = parse_quarantine_fence(raw)
+		local _, present = parse_quarantine_fence(raw)
 		if present then return nil, nil, nil end
 		local envelope, _, current_format = parse_envelope(raw)
 		if not current_format or envelope == nil
@@ -11961,7 +11970,7 @@ local function quarantine_profile_writes_internal(
 		end
 		local next_raw = copy_value(raw)
 		if type(next_raw) ~= "table" then return nil, nil, nil end
-		local mutable = next_raw :: { [string]: unknown }
+		local mutable: any = next_raw
 		local next_generation = math.max(1, envelope.fencing_generation + 1)
 		local marker: { [string]: unknown } = {
 			version = 1,
@@ -12018,7 +12027,7 @@ local function quarantine_profile_writes_internal(
 	if status_code == "corrupt" or status_code == "future_schema" or status_code == "legacy" then
 		return nil, status_code, status_message
 	end
-	return nil, normalize_result_code(update_code) or status_code or "unknown",
+	return nil, result_code_or_unknown(if update_code ~= nil then update_code else status_code),
 		status_message or update_message or "quarantine fence outcome could not be reconciled"
 end
 
@@ -12036,8 +12045,8 @@ local function mark_quarantine_release_pending_internal(
 ): (QuarantineFenceStatus?, ResultCode, string?)
 	local valid_identity, identity_message = validate_store_identity(name, scope, key)
 	if not valid_identity then return nil, "invalid", identity_message end
-	if not valid_text(quarantine_id, 96) or not valid_text(resolution_id, 96)
-		or not valid_text(operator_id, 96) or not valid_text(reason, 512)
+	if not valid_quarantine_text(quarantine_id, 96) or not valid_quarantine_text(resolution_id, 96)
+		or not valid_quarantine_text(operator_id, 96) or not valid_quarantine_text(reason, 512)
 	then return nil, "invalid", "quarantine resolution identity and audit fields are invalid" end
 	if expected_revision ~= nil and (
 		not finite_erasure_number(expected_revision) or expected_revision < 0
@@ -12058,8 +12067,8 @@ local function mark_quarantine_release_pending_internal(
 		end
 		local next_raw = copy_value(raw)
 		if type(next_raw) ~= "table" then return nil, nil, nil end
-		local mutable = next_raw :: { [string]: unknown }
-		local next_marker = table.clone(marker) :: { [string]: unknown }
+		local mutable: any = next_raw
+		local next_marker: any = table.clone(marker)
 		next_marker.phase = "release_pending"
 		next_marker.resolution_id = resolution_id
 		next_marker.resolution_operator_id = operator_id
@@ -12086,7 +12095,7 @@ local function mark_quarantine_release_pending_internal(
 	if status_code == "success" and observed ~= nil and observed.Quarantined
 		and (observed.QuarantineId ~= quarantine_id or observed.ResolutionId ~= resolution_id)
 	then return nil, "conflict", "quarantine release request conflicts with the durable fence" end
-	return nil, normalize_result_code(update_code) or status_code or "unknown",
+	return nil, result_code_or_unknown(if update_code ~= nil then update_code else status_code),
 		status_message or update_message or "release-pending fence transition could not be confirmed"
 end
 
@@ -12101,7 +12110,7 @@ local function release_quarantine_fence_internal(
 ): (QuarantineFenceStatus?, ResultCode, string?)
 	local valid_identity, identity_message = validate_store_identity(name, scope, key)
 	if not valid_identity then return nil, "invalid", identity_message end
-	if not valid_text(quarantine_id, 96) or not valid_text(resolution_id, 96) then
+	if not valid_quarantine_text(quarantine_id, 96) or not valid_quarantine_text(resolution_id, 96) then
 		return nil, "invalid", "quarantine ID and resolution ID are invalid"
 	end
 	local deadline, deadline_error = resolve_operation_deadline(operation_deadline)
@@ -12116,7 +12125,7 @@ local function release_quarantine_fence_internal(
 		then return nil, nil, nil end
 		local next_raw = copy_value(raw)
 		if type(next_raw) ~= "table" then return nil, nil, nil end
-		local mutable = next_raw :: { [string]: unknown }
+		local mutable: any = next_raw
 		mutable.implementation_version = marker.source_implementation_version
 		mutable.revision = (get_string_field(raw, "revision") :: number) + 1
 		mutable.fencing_generation = marker.fence_generation + 1
@@ -12124,7 +12133,7 @@ local function release_quarantine_fence_internal(
 		mutable.write_id = release_write_id
 		mutable.session = nil
 		mutable[QUARANTINE_FENCE_FIELD] = nil
-		local restored_envelope, restore_error, is_current = parse_envelope(mutable)
+		local restored_envelope, _, is_current = parse_envelope(mutable)
 		if not is_current or restored_envelope == nil then return nil, nil, nil end
 		local size_ok = validate_serialized_size(mutable)
 		if not size_ok then return nil, nil, nil end
@@ -12145,7 +12154,7 @@ local function release_quarantine_fence_internal(
 		return nil, normalize_result_code(update_code) or "unknown",
 			update_message or "quarantine fence remains durable after the release attempt"
 	end
-	return nil, normalize_result_code(update_code) or status_code or "unknown",
+	return nil, result_code_or_unknown(if update_code ~= nil then update_code else status_code),
 		status_message or update_message or "quarantine release outcome could not be reconciled"
 end
 
@@ -12399,7 +12408,7 @@ local function erase_user_data_internal(
 		name, scope, key, user_id, deadline - now_local(), mock
 	)
 	if status_code ~= "success" or status == nil or not status.Erased or status.ErasureId ~= erasure_id then
-		return nil, status_code == "not_found" and "unknown" or status_code,
+		return nil, result_code_or_unknown(if status_code == "not_found" then "unknown" else status_code),
 			status_message or "erasure fence was not confirmed by an uncached read"
 	end
 	if expected_generation ~= nil and status.SourceGeneration ~= expected_generation then
@@ -12434,12 +12443,11 @@ local function purge_erased_versions_internal(
 		name, scope, key, user_id, deadline - now_local(), mock
 	)
 	if status_code ~= "success" or status == nil then
-		return nil, status_code, status_message or "could not confirm the durable erasure fence"
+		return nil, result_code_or_unknown(status_code), status_message or "could not confirm the durable erasure fence"
 	end
 	if not status.Erased or status.ErasureId ~= erasure_id then
 		return nil, "fenced", "historical version purge requires the exact durable erasure fence"
 	end
-	local backend = make_backend(name, scope, key, mock)
 	local current_version = status.Version
 	if type(current_version) ~= "string" or current_version == "" then
 		return nil, "unknown", "erasure marker version was not returned by the storage adapter"
@@ -12448,7 +12456,7 @@ local function purge_erased_versions_internal(
 		name, scope, key, Enum.SortDirection.Descending, nil, nil, MAX_ERASURE_HISTORY_SCAN, deadline - now_local(), mock
 	)
 	if list_code ~= "success" or entries == nil then
-		return nil, list_code or "unknown", list_message or "historical version inventory could not be read"
+		return nil, result_code_or_unknown(list_code), list_message or "historical version inventory could not be read"
 	end
 	local current_found = false
 	local historical_version_found = false
@@ -12527,7 +12535,7 @@ local function purge_erased_versions_internal(
 		name, scope, key, Enum.SortDirection.Descending, nil, nil, MAX_ERASURE_HISTORY_SCAN, deadline - now_local(), mock
 	)
 	if remaining_code ~= "success" or remaining_entries == nil then
-		return nil, remaining_code or "unknown", remaining_message or "could not verify historical version removal"
+		return nil, result_code_or_unknown(remaining_code), remaining_message or "could not verify historical version removal"
 	end
 	local latest_status, latest_code, latest_message = get_erasure_status_internal(
 		name, scope, key, user_id, deadline - now_local(), mock
@@ -12661,6 +12669,10 @@ end
 erasure_internal.get_status = get_erasure_status_internal
 erasure_internal.erase_user_data = erase_user_data_internal
 erasure_internal.purge_erased_versions = purge_erased_versions_internal
+erasure_internal.get_quarantine_fence_status = get_quarantine_fence_status_internal
+erasure_internal.quarantine_profile_writes = quarantine_profile_writes_internal
+erasure_internal.mark_quarantine_release_pending = mark_quarantine_release_pending_internal
+erasure_internal.release_quarantine_fence = release_quarantine_fence_internal
 end
 
 local function data_values_equal(left: JsonValue?, right: JsonValue?, depth: number?): boolean
@@ -19837,12 +19849,13 @@ RecordStore.enqueue_async = (function()
 	return function(name: string, scope: string, key: string, message_type: string, data: JsonValue?, queue_store_name: string?, operation_deadline: number?): (ResultCode, string?)
 		return enqueue_production(name, scope, key, message_type, data, queue_store_name, operation_deadline)
 	end
-end)()
+end)();
 
-local mailbox_v2_migration_production = mailbox_v2_migration_api(false)
-RecordStore.begin_mailbox_v2_migration_async = mailbox_v2_migration_production.begin_mailbox_v2_migration_async
-RecordStore.get_mailbox_v2_migration_status_async = mailbox_v2_migration_production.get_mailbox_v2_migration_status_async
-RecordStore.get_mailbox_v2_migration_source_page_async = mailbox_v2_migration_production.get_mailbox_v2_migration_source_page_async
+(function(mailbox_v2_migration_production)
+	RecordStore.begin_mailbox_v2_migration_async = mailbox_v2_migration_production.begin_mailbox_v2_migration_async
+	RecordStore.get_mailbox_v2_migration_status_async = mailbox_v2_migration_production.get_mailbox_v2_migration_status_async
+	RecordStore.get_mailbox_v2_migration_source_page_async = mailbox_v2_migration_production.get_mailbox_v2_migration_source_page_async
+end)(mailbox_v2_migration_api(false))
 
 RecordStore.new = (function()
 	local normalize_options = RecordStore._internals.normalize_options
@@ -20057,7 +20070,7 @@ RecordStore.Mock = (function()
 	local function mock_get_quarantine_fence_status_async(
 		name: string, scope: string, key: string, operation_deadline: number?
 	): (QuarantineFenceStatus?, ResultCode, string?)
-		return get_quarantine_fence_status_internal(name, scope, key, operation_deadline, true)
+		return erasure_internal.get_quarantine_fence_status(name, scope, key, operation_deadline, true)
 	end
 
 	local function mock_quarantine_profile_writes_async(
@@ -20065,7 +20078,7 @@ RecordStore.Mock = (function()
 		reason: string, expected_generation: number, expected_revision: number,
 		operation_deadline: number?
 	): (QuarantineFenceStatus?, ResultCode, string?)
-		return quarantine_profile_writes_internal(
+		return erasure_internal.quarantine_profile_writes(
 			name, scope, key, quarantine_id, operator_id, reason,
 			expected_generation, expected_revision, operation_deadline, true
 		)
@@ -20075,7 +20088,7 @@ RecordStore.Mock = (function()
 		name: string, scope: string, key: string, quarantine_id: string, resolution_id: string,
 		operator_id: string, reason: string, expected_revision: number?, operation_deadline: number?
 	): (QuarantineFenceStatus?, ResultCode, string?)
-		return mark_quarantine_release_pending_internal(
+		return erasure_internal.mark_quarantine_release_pending(
 			name, scope, key, quarantine_id, resolution_id, operator_id, reason,
 			expected_revision, operation_deadline, true
 		)
@@ -20085,7 +20098,7 @@ RecordStore.Mock = (function()
 		name: string, scope: string, key: string, quarantine_id: string,
 		resolution_id: string, operation_deadline: number?
 	): (QuarantineFenceStatus?, ResultCode, string?)
-		return release_quarantine_fence_internal(
+		return erasure_internal.release_quarantine_fence(
 			name, scope, key, quarantine_id, resolution_id, operation_deadline, true
 		)
 	end

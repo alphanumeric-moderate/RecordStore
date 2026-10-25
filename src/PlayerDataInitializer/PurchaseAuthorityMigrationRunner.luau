@@ -132,12 +132,14 @@ end
 local function compute_inventory_digest(purchases: { HistoricalPurchase }, initial_digest: string?): (string?, string?)
 	local seed = if initial_digest == nil then EMPTY_INVENTORY_DIGEST else initial_digest
 	if not valid_digest(seed) then return nil, "starting inventory digest is malformed" end
-	local state = {
-		h1 = tonumber(string.sub(seed, 1, 8), 16),
-		h2 = tonumber(string.sub(seed, 9, 16), 16),
-		h3 = tonumber(string.sub(seed, 17, 24), 16),
-		h4 = tonumber(string.sub(seed, 25, 32), 16),
-	}
+	local h1 = tonumber(string.sub(seed, 1, 8), 16)
+	local h2 = tonumber(string.sub(seed, 9, 16), 16)
+	local h3 = tonumber(string.sub(seed, 17, 24), 16)
+	local h4 = tonumber(string.sub(seed, 25, 32), 16)
+	if h1 == nil or h2 == nil or h3 == nil or h4 == nil then
+		return nil, "starting inventory digest is malformed"
+	end
+	local state = { h1 = h1, h2 = h2, h3 = h3, h4 = h4 }
 	local count = #purchases
 	local seen = 0
 	for index in pairs(purchases) do
@@ -500,7 +502,7 @@ function MigrationRunner.new(config: Config)
 			if type(raw_page) ~= "table" then
 				return result("invalid", checkpoint, "historical source returned no page table")
 			end
-			local page_fields = raw_page :: { [string]: unknown }
+			local page_fields: { [string]: unknown } = raw_page :: any
 			for key in pairs(page_fields) do
 				if key ~= "items" and key ~= "next_cursor" and key ~= "done" and key ~= "source_revision" then
 					return result("invalid", checkpoint, "historical source page contains an unsupported field")

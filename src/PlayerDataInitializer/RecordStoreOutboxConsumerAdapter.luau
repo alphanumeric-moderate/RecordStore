@@ -296,7 +296,7 @@ function OutboxConsumerAdapter.new(config: Config): Processor
 		payload: unknown,
 		snapshot: { [string]: unknown },
 		handler_context: unknown
-	): (boolean, string?)
+	): (boolean, string)
 		local event, event_error = validate_envelope(payload, snapshot, identity)
 		if event == nil then
 			emit(normalized, "destination_event_rejected", nil, "invalid", event_error)
@@ -322,7 +322,7 @@ function OutboxConsumerAdapter.new(config: Config): Processor
 		if type(handler_context) == "table" then
 			local context_methods = handler_context :: { [string]: unknown }
 			if type(context_methods.is_cancelled) == "function" then
-				local ok, cancelled = pcall(context_methods.is_cancelled)
+				local ok, cancelled = pcall(context_methods.is_cancelled :: (() -> boolean))
 				if not ok or cancelled == true then
 					return false, "destination message claim was cancelled before application"
 				end
@@ -342,11 +342,11 @@ function OutboxConsumerAdapter.new(config: Config): Processor
 			MailboxMessageId = snapshot.Id,
 			Attempt = snapshot.Attempts,
 		})
-		local function reducer(current_data: RecordStore.JsonValue?, stored_envelope: RecordStore.JsonValue, _inbox_message: any)
+		local function reducer(current_data: RecordStore.JsonValue?, stored_envelope: RecordStore.JsonValue, _inbox_message: any): (RecordStore.JsonValue?, string?)
 			if type(current_data) ~= "table" or type(stored_envelope) ~= "table" then
 				return nil, "destination Inbox requires table profile data and a table event envelope"
 			end
-			local stored_fields = stored_envelope :: { [string]: unknown }
+			local stored_fields: any = stored_envelope
 			if stored_fields.source_event_id ~= event.source_event_id
 				or stored_fields.payload_version ~= event.payload_version
 				or stored_fields.destination_store_name ~= event.destination_store_name
@@ -380,7 +380,7 @@ function OutboxConsumerAdapter.new(config: Config): Processor
 		if type(handler_context) == "table" then
 			local context_methods = handler_context :: { [string]: unknown }
 			if type(context_methods.is_cancelled) == "function" then
-				local ok, cancelled = pcall(context_methods.is_cancelled)
+				local ok, cancelled = pcall(context_methods.is_cancelled :: (() -> boolean))
 				if not ok or cancelled == true then
 					emit(normalized, "destination_claim_cancelled_after_commit", event.source_event_id, "unknown",
 						"destination mutation committed but the mailbox claim was cancelled; retry will deduplicate via Inbox")
@@ -388,7 +388,7 @@ function OutboxConsumerAdapter.new(config: Config): Processor
 				end
 			end
 		end
-		return true, nil
+		return true, ""
 	end
 
 	local processor: Processor = {

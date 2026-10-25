@@ -574,7 +574,12 @@ local function new_governor(options)
 		local now, eligible = now_ms(), {}
 		for index, item in ipairs(self.queue) do
 			local ready = (item.due_at_ms or 0) <= now
-			for _, dependency in ipairs(item.dependencies or {}) do if not self.completed[dependency] then ready = false break end end
+			for _, dependency in ipairs(item.dependencies or {}) do
+				if not self.completed[dependency] then
+					ready = false
+					break
+				end
+			end
 			if ready and (not item.expires_at_ms or item.expires_at_ms > now) then table.insert(eligible, { index = index, item = item }) end
 		end
 		for _, row in ipairs(eligible) do
@@ -591,7 +596,12 @@ local function new_governor(options)
 		if #high > 0 and self.high_streak < self.policy.high_burst then candidates = high
 		elseif #regular > 0 then
 			candidates = regular
-			for _, row in ipairs(background) do if now - row.item.enqueued_at_ms >= (self.aging_threshold_ms or 10000) then candidates = background break end end
+			for _, row in ipairs(background) do
+				if now - row.item.enqueued_at_ms >= (self.aging_threshold_ms or 10000) then
+					candidates = background
+					break
+				end
+			end
 		elseif #background > 0 then candidates = background else candidates = high end
 		local best, best_score
 		for _, row in ipairs(candidates or {}) do
@@ -806,7 +816,8 @@ local function path_diff(left, right, options)
 		for key in pairs(keys) do table.insert(sorted, key) end
 		table.sort(sorted)
 		for _, key_text in ipairs(sorted) do
-			local key, av, bv = keys[key_text], a[keys[key_text]], b[keys[key_text]]
+			local key = keys[key_text]
+			local av, bv = a[key], b[key]
 			if av == nil or bv == nil then if av ~= bv then add(path .. "/" .. key_text, av, bv) end
 			else walk(av, bv, path .. "/" .. key_text, depth + 1) end
 			if truncated then return end

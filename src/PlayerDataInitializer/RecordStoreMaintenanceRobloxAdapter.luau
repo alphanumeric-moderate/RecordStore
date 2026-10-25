@@ -268,7 +268,7 @@ function Adapter.new(config: Options)
 			config.atomic_delete_if_generation, store, item, generation, config.job_id
 		)
 		if not ok then return "unknown", tostring(action) end
-		if action ~= "deleted" and action ~= "already_absent" and action ~= "skipped" and action ~= "unknown" then
+		if type(action) ~= "string" or (action ~= "deleted" and action ~= "already_absent" and action ~= "skipped" and action ~= "unknown") then
 			return "unknown", message or "atomic delete adapter returned an unsupported result"
 		end
 		return action, message
