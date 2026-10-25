@@ -25,7 +25,7 @@ local function clone(value, depth)
 	return result
 end
 
-local function create_profile(user_id, initial_kills)
+local function create_profile(user_id, initial_kills, leave_open)
 	local key = "Player_" .. tostring(user_id)
 	local record = RecordStore.Mock.new("PlayerData_Test1", "global", key, {
 		schema_version = 1,
@@ -53,8 +53,10 @@ local function create_profile(user_id, initial_kills)
 		local save_result, save_message = record:Save()
 		expect(save_result == "saved", "mock profile save failed: " .. tostring(save_message))
 	end
-	local close_result, close_message = record:Close()
-	expect(close_result == "closed", "mock profile close failed: " .. tostring(close_message))
+	if leave_open ~= true then
+		local close_result, close_message = record:Close()
+		expect(close_result == "closed", "mock profile close failed: " .. tostring(close_message))
+	end
 	return record, key
 end
 
@@ -165,7 +167,7 @@ end
 -- the newest page while older historical payloads remain.
 do
 	local user_id = 103
-	local record, key = create_profile(user_id, 5)
+	local record, key = create_profile(user_id, 5, true)
 	for index = 1, 1030 do
 		local update_result, update_message = record:Update(function(current)
 			local next_data = clone(current)
@@ -176,6 +178,8 @@ do
 		local save_result, save_message = record:Save()
 		expect(save_result == "saved", "large-history save failed at " .. tostring(index) .. ": " .. tostring(save_message))
 	end
+	local close_result, close_message = record:Close()
+	expect(close_result == "closed", "large-history profile close failed: " .. tostring(close_message))
 	local source, source_code = RecordStore.Mock.get_erasure_status_async(
 		"PlayerData_Test1", "global", key, user_id, 30
 	)
