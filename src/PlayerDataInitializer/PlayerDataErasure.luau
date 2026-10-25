@@ -29,6 +29,7 @@ type Options = {
 	record_store: any?,
 	record_store_v2: any?,
 	profile_store_name: string?,
+	mailbox_module: any?,
 	profile_scope: string?,
 	key_prefix: string?,
 	operation_deadline: number?,
@@ -96,7 +97,7 @@ local function new(manifest_store: any, options: Options?): any
 	if type(record_store_v2) ~= "table" or type(record_store_v2.new) ~= "function" then
 		error("RecordStoreV2 factory is unavailable", 2)
 	end
-	local mailbox = record_store.MailboxV2
+	local mailbox = config.mailbox_module or record_store.MailboxV2 or RecordStore.MailboxV2
 	if type(mailbox) ~= "table" or type(mailbox.new) ~= "function" then
 		error("RecordStore must expose its MailboxV2 module", 2)
 	end
@@ -213,8 +214,23 @@ local function new(manifest_store: any, options: Options?): any
 		end,
 	}
 
+	local additional_families = config.additional_families or {}
+	local additional_count = #additional_families
+	local additional_keys = 0
+	for index in pairs(additional_families) do
+		additional_keys += 1
+		if type(index) ~= "number" or not math.isfinite(index)
+			or math.floor(index) ~= index or index < 1 or index > additional_count
+		then
+			error("additional_families must be a dense numeric array", 2)
+		end
+	end
+	if additional_keys ~= additional_count then
+		error("additional_families must be a dense numeric array", 2)
+	end
 	local families: { any } = { family }
-	for _, additional in ipairs(config.additional_families or {}) do
+	for index = 1, additional_count do
+		local additional = additional_families[index]
 		if type(additional) ~= "table" then error("additional erasure families must be tables", 2) end
 		families[#families + 1] = additional
 	end
