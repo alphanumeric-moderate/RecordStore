@@ -284,6 +284,87 @@ local function test_producer_idempotency_conflict_and_preparation_response_loss(
 	assert(route_count == 1, "response-loss recovery or duplicate enqueue created multiple active placements")
 end
 
+local function test_every_enqueue_write_boundary_recovers_durably()
+	local function create_mailbox(failure_index, failure_mode)
+		local backing = MailboxV2.MockStore()
+		local write_trace = {}
+		local store = {
+			GetAsync = function(_, key) return backing:GetAsync(key) end,
+			GetAsyncFresh = function(_, key) return backing:GetAsyncFresh(key) end,
+			UpdateAsync = function(_, key, transform)
+				table.insert(write_trace, key)
+				if failure_index == #write_trace then
+					backing:FailNextUpdate(failure_mode)
+				end
+				return backing:UpdateAsync(key, transform)
+			end,
+		}
+		local mailbox = new_mailbox({}, store)
+		return mailbox, backing, write_trace
+	end
+
+	local baseline, _, baseline_trace = create_mailbox(nil, nil)
+	local baseline_result = baseline:EnqueueAsync("preparation-matrix", { value = "stable" }, {
+		idempotency_key = "preparation-matrix-baseline",
+		priority = "normal",
+		available_at = now_ms,
+	})
+	assert(baseline_result.code == "accepted", "producer write-matrix baseline failed")
+	local write_count = #baseline_trace
+	assert(write_count >= 5, "producer write-matrix observed too few durable preparation writes")
+
+	for failure_index = 1, write_count do
+		for _, failure_mode in ipairs({ "before", "after" }) do
+			local mailbox, backing, write_trace = create_mailbox(failure_index, failure_mode)
+			local producer_key = ("preparation-matrix-%d-%s"):format(failure_index, failure_mode)
+			local options = {
+				idempotency_key = producer_key,
+				priority = "normal",
+				available_at = now_ms,
+			}
+			local first = mailbox:EnqueueAsync("preparation-matrix", { value = "stable" }, options)
+			assert(#write_trace >= failure_index,
+				("fault injection %d/%s was not reached"):format(failure_index, failure_mode))
+			assert(type(first.message_id) == "string" and first.message_id ~= "",
+				("producer receipt identity was not returned for fault %d/%s"):format(failure_index, failure_mode))
+
+			local route = first.message_id
+			local recovered = false
+			local last_status = tostring(first.code) .. ": " .. tostring(first.error)
+			for attempt = 1, 4 do
+				local recovery = mailbox:RecoverAsync()
+				last_status = "recovery=" .. tostring(recovery.code) .. ": " .. tostring(recovery.error)
+				local delivery, delivery_result = mailbox:GetDeliveryAsync(route)
+				if delivery ~= nil and delivery_result.code == "success" and delivery.State == "ready" then
+					recovered = true
+					break
+				end
+				last_status ..= "; delivery=" .. tostring(delivery_result.code) .. ": " .. tostring(delivery_result.error)
+				local retry = mailbox:EnqueueAsync("preparation-matrix", { value = "stable" }, options)
+				last_status ..= "; retry=" .. tostring(retry.code) .. ": " .. tostring(retry.error)
+			end
+			assert(recovered,
+				("producer recovery did not converge for write %d/%s: %s"):format(
+					failure_index, failure_mode, last_status
+				))
+			local duplicate = mailbox:EnqueueAsync("preparation-matrix", { value = "stable" }, options)
+			assert(duplicate.code == "duplicate" and duplicate.message_id == route,
+				("producer receipt was not discoverable after recovery at write %d/%s"):format(failure_index, failure_mode))
+			local queue, queue_result = mailbox:GetQueueAsync()
+			assert(queue_result.code == "success",
+				("queue read failed after write %d/%s recovery"):format(failure_index, failure_mode))
+			local active_placements = 0
+			for _, item in ipairs(queue) do
+				if item.Id == route then active_placements += 1 end
+			end
+			assert(active_placements == 1,
+				("recovery left %d active placements for write %d/%s"):format(
+					active_placements, failure_index, failure_mode
+				))
+		end
+	end
+end
+
 local function test_priority_never_overtakes_an_earlier_ordered_message()
 	local mailbox = new_mailbox({ strict_ordering_enabled = true })
 	local earlier = enqueue(mailbox, "earlier", "priority-earlier", "account-alpha", "background")
@@ -810,6 +891,70 @@ local function test_acknowledgement_response_loss_recovers_without_redelivery()
 		"recovered acknowledgement redelivered a successfully handled message")
 end
 
+local function test_acknowledgement_terminal_write_fault_matrix()
+	for _, failure_mode in ipairs({ "before", "after" }) do
+		local backing = MailboxV2.MockStore()
+		local route = nil
+		local injected = false
+		local store = {
+			GetAsync = function(_, key) return backing:GetAsync(key) end,
+			GetAsyncFresh = function(_, key) return backing:GetAsyncFresh(key) end,
+			UpdateAsync = function(_, key, transform)
+				if not injected and key == route then
+					local current = backing.values[key]
+					if type(current) == "table" and current.state == "acknowledging" then
+						injected = true
+						backing:FailNextUpdate(failure_mode)
+					end
+				end
+				return backing:UpdateAsync(key, transform)
+			end,
+		}
+		local mailbox = new_mailbox({ strict_ordering_enabled = true }, store)
+		local queued = enqueue(
+			mailbox,
+			"ack-terminal-" .. failure_mode,
+			"ack-terminal-" .. failure_mode,
+			"ack-terminal-account-" .. failure_mode,
+			"high"
+		)
+		route = queued.message_id
+		local handler_calls = 0
+		local first = process_one(mailbox, function()
+			handler_calls += 1
+			return true
+		end)
+		assert(injected, "acknowledgement terminal-state failure was not injected: " .. failure_mode)
+		assert(first.code == "unknown",
+			"ambiguous terminal acknowledgement was not reported as unknown: " .. tostring(first.code))
+
+		local interrupted = backing:GetAsyncFresh(route)
+		if failure_mode == "before" then
+			assert(interrupted.state == "acknowledging",
+				"pre-commit acknowledgement failure did not preserve its recoverable intermediate state")
+		else
+			assert(interrupted.state == "acknowledged",
+				"post-commit acknowledgement response loss did not preserve the committed state")
+		end
+
+		local recovery = mailbox:RecoverAsync()
+		assert(recovery.code == "success",
+			"terminal acknowledgement recovery failed: " .. tostring(recovery.error))
+		local durable = backing:GetAsyncFresh(route)
+		assert(durable.state == "acknowledged" and durable.effect_outcome == "handler_succeeded",
+			"terminal acknowledgement did not recover to its durable success state")
+		local delivery, delivery_result = mailbox:GetDeliveryAsync(route)
+		assert(delivery_result.code == "success" and delivery ~= nil and delivery.State == "acknowledged",
+			"terminal acknowledgement result was not discoverable")
+		local retry = process_one(mailbox, function()
+			handler_calls += 1
+			return true
+		end)
+		assert(retry.code == "empty" and handler_calls == 1,
+			"terminal acknowledgement recovery redelivered a successfully handled message")
+	end
+end
+
 local function test_dead_letter_transition_response_loss_recovers_once()
 	local backing = MailboxV2.MockStore()
 	local route = nil
@@ -1040,6 +1185,7 @@ test_clock_is_never_called_inside_update_async_transform()
 test_ordering_is_opt_in_and_input_validation_is_side_effect_free()
 test_recordstore_installs_shared_scheduler_for_v2_claim_renewal()
 test_producer_idempotency_conflict_and_preparation_response_loss()
+test_every_enqueue_write_boundary_recovers_durably()
 test_priority_never_overtakes_an_earlier_ordered_message()
 test_delayed_predecessor_blocks_later_high_priority_work()
 test_retrying_predecessor_blocks_same_key_successor()
@@ -1056,6 +1202,7 @@ test_high_priority_burst_does_not_starve_background_messages()
 test_clock_skew_cannot_break_ordering_under_adversarial_sort_keys()
 test_priority_burst_policy_is_bounded_and_configurable()
 test_acknowledgement_response_loss_recovers_without_redelivery()
+test_acknowledgement_terminal_write_fault_matrix()
 test_dead_letter_transition_response_loss_recovers_once()
 test_expired_claim_is_recovered_and_retried_at_least_once()
 test_competing_mailbox_instances_cannot_claim_the_same_message()
