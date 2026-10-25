@@ -2301,16 +2301,44 @@ local function new_erasure(store, families, options)
 		if status.code == "unknown" or status.code == "conflict" or status.code == "corrupt" then
 			return nil, status
 		end
+		if status.status == "resolved" or status.status == "planned" or status.status == "in_progress" then
+			return false, status
+		end
+		if status.status == "completed" then
+			if status.rtbf_coverage_verified ~= true then
+				return nil, {
+					code = "coverage_unverified",
+					message = "manifest says completed but does not prove exhaustive RTBF coverage",
+					observed = status,
+				}
+			end
+			return true, status
+		end
+		return nil, { code = "unknown", message = "erasure manifest status is unrecognized", observed = status }
+	end
+
+	-- IsErased reports completion evidence; this separate predicate answers whether
+	-- application writers must stay blocked while erasure is planned/in progress or
+	-- an old completed manifest lacks coverage proof.
+	function coordinator:ShouldBlockWrites(user_id)
+		local status = self:GetStatus(user_id)
+		if type(status) ~= "table" then
+			return nil, { code = "unknown", message = "erasure status returned no record" }
+		end
+		if status.code == "not_found" then return false, status end
+		if status.code == "unknown" or status.code == "conflict" or status.code == "corrupt" then
+			return nil, status
+		end
 		if status.status == "resolved" then return false, status end
-		if status.status == "completed" and status.rtbf_coverage_verified ~= true then
-			return nil, {
+		if status.status == "planned" or status.status == "in_progress" then return true, status end
+		if status.status == "completed" then
+			if status.rtbf_coverage_verified == true then return true, status end
+			return true, {
 				code = "coverage_unverified",
-				message = "manifest says completed but does not prove exhaustive RTBF coverage",
+				write_blocked = true,
+				message = "write/recreation must remain blocked until RTBF coverage is reconciled",
 				observed = status,
 			}
-		end
-		if status.status == "planned" or status.status == "in_progress" or status.status == "completed" then
-			return true, status
 		end
 		return nil, { code = "unknown", message = "erasure manifest status is unrecognized", observed = status }
 	end
