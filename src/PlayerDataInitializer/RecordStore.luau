@@ -3083,14 +3083,35 @@ do
 			if raw == nil then
 				return initial
 			end
-			return raw
+			-- A racing writer already created this key. Cancel rather than
+			-- re-persisting an envelope that might belong to a newer schema.
+			return nil
 		end)
 		if write_error ~= nil then
 			return nil, "manifest initialization outcome is unknown: " .. write_error
 		end
 		local manifest = as_dict(written)
-		if manifest == nil or manifest.version ~= VERSION or manifest.kind ~= kind or not same_owner(manifest.owner, self.owner) then
-			return nil, "manifest initialization could not be verified"
+		if manifest == nil then
+			local latest_value, latest_error = self:_get_fresh(key)
+			if latest_error ~= nil then
+				return nil, "manifest initialization outcome is unknown: " .. latest_error
+			end
+			if latest_value ~= nil and as_dict(latest_value) == nil then
+				return nil, "manifest is malformed"
+			end
+			manifest = as_dict(latest_value)
+		end
+		if manifest == nil then
+			return nil, "manifest initialization was cancelled and no manifest is visible"
+		end
+		if not same_owner(manifest.owner, self.owner) then
+			return nil, "manifest belongs to another owner"
+		end
+		if manifest.version ~= VERSION then
+			return nil, "unsupported schema version: manifest version is unsupported"
+		end
+		if manifest.kind ~= kind or type(manifest.slots) ~= "table" then
+			return nil, "manifest is malformed"
 		end
 		return manifest, nil
 	end
@@ -3100,6 +3121,7 @@ do
 		local updated, update_error = self:_update(key, function(raw)
 			local manifest = as_dict(raw)
 			if manifest == nil or manifest.version ~= VERSION or not same_owner(manifest.owner, self.owner) then
+				if manifest ~= nil and manifest.version ~= VERSION then return nil end
 				return raw
 			end
 			local next_manifest = clone_dict(manifest)
@@ -3138,15 +3160,36 @@ do
 			if raw == nil then
 				return segment_template
 			end
+			local existing = as_dict(raw)
+			if existing == nil or existing.version ~= VERSION then
+				return nil
+			end
+			if existing.kind ~= kind or existing.slot ~= locator.slot
+				or existing.generation ~= locator.generation or not same_owner(existing.owner, self.owner)
+			then
+				return nil
+			end
 			return raw
 		end)
 		if segment_error ~= nil then
 			return nil, "segment allocation outcome is unknown: " .. segment_error
 		end
 		local segment_dict = as_dict(segment)
-		if segment_dict == nil or segment_dict.version ~= VERSION or segment_dict.kind ~= kind
-			or segment_dict.slot ~= locator.slot or segment_dict.generation ~= locator.generation
-			or not same_owner(segment_dict.owner, self.owner)
+		if segment_dict == nil then
+			local latest_value, latest_error = self:_get_fresh(locator.key)
+			if latest_error ~= nil then
+				return nil, "segment allocation outcome is unknown: " .. latest_error
+			end
+			if latest_value ~= nil and as_dict(latest_value) == nil then
+				return nil, "segment allocation collided with malformed data"
+			end
+			segment_dict = as_dict(latest_value)
+		end
+		if segment_dict ~= nil and segment_dict.version ~= VERSION then
+			return nil, "unsupported schema version: segment version is unsupported"
+		end
+		if segment_dict == nil or segment_dict.kind ~= kind or segment_dict.slot ~= locator.slot
+			or segment_dict.generation ~= locator.generation or not same_owner(segment_dict.owner, self.owner)
 		then
 			return nil, "segment allocation collided with a different owner or generation"
 		end
@@ -3171,9 +3214,9 @@ do
 		local function release_draining_slot(slot_number: number, generation: number): boolean
 			local updated, update_error = self:_update(self:_manifest_key(kind), function(raw)
 				local current = as_dict(raw)
-				if current == nil or current.version ~= VERSION or not same_owner(current.owner, self.owner) then
-					return raw
-				end
+				if current == nil then return raw end
+				if current.version ~= VERSION then return nil end
+				if not same_owner(current.owner, self.owner) then return nil end
 				local next_manifest = clone_dict(current)
 				local slot = locate_slot(next_manifest, slot_number)
 				if slot == nil or slot.generation ~= generation or slot.state ~= "draining" then
@@ -3194,6 +3237,11 @@ do
 		end
 
 		local function rows_are_safe(segment: EmbeddedMailboxDict, locator: EmbeddedMailboxLocator): boolean
+			if segment.version ~= VERSION or segment.kind ~= kind or segment.slot ~= locator.slot
+				or segment.generation ~= locator.generation or not same_owner(segment.owner, self.owner)
+			then
+				return false
+			end
 			local entries = segment.entries
 			if type(entries) ~= "table" then
 				return false
@@ -3252,9 +3300,15 @@ do
 					end
 					return false
 				end
-				if segment == nil
-					or segment.generation ~= generation
+				if segment ~= nil and segment.generation == generation and same_owner(segment.owner, self.owner)
+					and segment.version ~= VERSION
+				then
+					return false
+				end
+				if segment == nil or segment.generation ~= generation
 					or not same_owner(segment.owner, self.owner)
+					or segment.version ~= VERSION or segment.kind ~= kind
+					or segment.slot ~= slot_number
 					or (segment.state ~= "sealed" and segment.state ~= "retired")
 				then
 					continue
@@ -3273,7 +3327,9 @@ do
 				if segment.state == "sealed" then
 					local retired, retire_error = self:_update(locator.key, function(raw)
 						local current = as_dict(raw)
-						if current == nil or current.generation ~= generation or current.state ~= "sealed"
+						if current == nil then return nil end
+						if current.version ~= VERSION then return nil end
+						if current.generation ~= generation or current.state ~= "sealed"
 							or not same_owner(current.owner, self.owner)
 						then
 							return raw
@@ -3329,7 +3385,14 @@ do
 					}
 					local segment_value, segment_error = self:_get(locator.key)
 					local segment = as_dict(segment_value)
-					if segment_error == nil and segment ~= nil and segment.state == "open"
+					if segment ~= nil and segment.generation == locator.generation and same_owner(segment.owner, self.owner)
+						and segment.version ~= VERSION
+					then
+						return nil, "unsupported schema version: index segment version is unsupported"
+					end
+					if segment_error == nil and segment ~= nil and segment.version == VERSION
+						and segment.kind == kind and segment.slot == locator.slot
+						and type(segment.entries) == "table" and segment.state == "open"
 						and segment.generation == locator.generation and same_owner(segment.owner, self.owner)
 					then
 						return locator, nil
@@ -3356,10 +3419,11 @@ do
 			local allocated, allocate_error = self:_update(self:_manifest_key(kind), function(raw)
 				local current = as_dict(raw)
 				if current == nil then
-					return self:_fresh_manifest(kind)
+					if raw == nil then return self:_fresh_manifest(kind) end
+					return nil
 				end
 				if current.version ~= VERSION or not same_owner(current.owner, self.owner) then
-					return raw
+					return nil
 				end
 				local next_manifest = clone_dict(current)
 				local next_slots = next_manifest.slots :: { unknown }
@@ -3380,6 +3444,22 @@ do
 				return nil, "slot allocation outcome is unknown: " .. allocate_error
 			end
 			local next_manifest = as_dict(allocated)
+			if next_manifest == nil then
+				local latest_value, latest_error = self:_get_fresh(self:_manifest_key(kind))
+				if latest_error ~= nil then
+					return nil, "slot allocation outcome is unresolved: " .. latest_error
+				end
+				if latest_value ~= nil and as_dict(latest_value) == nil then
+					return nil, "manifest is malformed"
+				end
+				next_manifest = as_dict(latest_value)
+			end
+			if next_manifest ~= nil and next_manifest.version ~= VERSION then
+				return nil, "unsupported schema version: manifest version is unsupported"
+			end
+			if next_manifest ~= nil and not same_owner(next_manifest.owner, self.owner) then
+				return nil, "manifest belongs to another owner"
+			end
 			local selected_slot: number? = nil
 			local selected_generation: number? = nil
 			if next_manifest ~= nil and type(next_manifest.slots) == "table" then
@@ -3414,9 +3494,8 @@ do
 			if current == nil then
 				return raw
 			end
-			if current.version ~= VERSION or not same_owner(current.owner, self.owner) then
-				return raw
-			end
+			if current.version ~= VERSION then return nil end
+			if not same_owner(current.owner, self.owner) then return nil end
 			local entries = as_dict(current.entries)
 			if entries == nil then
 				return raw
@@ -3443,6 +3522,19 @@ do
 			return nil, "preparation update outcome is unknown: " .. update_error
 		end
 		local registry = as_dict(updated)
+		if registry == nil then
+			local latest_value, latest_error = self:_get_fresh(key)
+			if latest_error ~= nil then
+				return nil, "preparation update outcome is unknown: " .. latest_error
+			end
+			registry = as_dict(latest_value)
+		end
+		if registry ~= nil and registry.version ~= VERSION then
+			return nil, "unsupported schema version: preparation registry version is unsupported"
+		end
+		if registry ~= nil and not same_owner(registry.owner, self.owner) then
+			return nil, "preparation registry belongs to another owner"
+		end
 		local entry = if registry ~= nil then as_dict(as_dict(registry.entries) and (as_dict(registry.entries) :: EmbeddedMailboxDict)[route]) else nil
 		return entry, nil
 	end
@@ -3456,8 +3548,11 @@ do
 		if registry == nil then
 			return nil, nil
 		end
-		if registry.version ~= VERSION or not same_owner(registry.owner, self.owner) then
-			return nil, "preparation registry is corrupt or belongs to another owner"
+		if registry.version ~= VERSION then
+			return nil, "unsupported schema version: preparation registry version is unsupported"
+		end
+		if not same_owner(registry.owner, self.owner) then
+			return nil, "preparation registry belongs to another owner"
 		end
 		local entries = as_dict(registry.entries)
 		return if entries ~= nil then as_dict(entries[route]) else nil, nil
@@ -3484,6 +3579,7 @@ do
 		local updated, update_error = self:_update(key, function(raw)
 			local current = as_dict(raw)
 			if current == nil then
+				if raw ~= nil then return nil end
 				current = ({
 					version = VERSION,
 					owner = clone_owner(self.owner),
@@ -3493,7 +3589,7 @@ do
 			end
 			assert(current ~= nil)
 			if current.version ~= VERSION or current.shard ~= shard or not same_owner(current.owner, self.owner) then
-				return raw
+				return nil
 			end
 			local entries = as_dict(current.entries)
 			if entries == nil then
@@ -3526,6 +3622,22 @@ do
 			return nil, "unknown: preparation reservation write may have committed"
 		end
 		local registry = as_dict(updated)
+		if registry == nil then
+			local latest_value, latest_error = self:_get_fresh(key)
+			if latest_error ~= nil then
+				return nil, "unknown: preparation reservation state is unresolved: " .. latest_error
+			end
+			if latest_value ~= nil and as_dict(latest_value) == nil then
+				return nil, "corrupt: preparation registry is malformed"
+			end
+			registry = as_dict(latest_value)
+		end
+		if registry ~= nil and registry.version ~= VERSION then
+			return nil, "unsupported schema version: preparation registry version is unsupported"
+		end
+		if registry ~= nil and (registry.shard ~= shard or not same_owner(registry.owner, self.owner)) then
+			return nil, "conflict: preparation registry owner or shard identity mismatch"
+		end
 		local entries = if registry ~= nil then as_dict(registry.entries) else nil
 		local existing = if entries ~= nil then as_dict(entries[route]) else nil
 		if existing ~= nil then
@@ -3708,6 +3820,7 @@ do
 		local updated, update_error = self:_update(ordering_route, function(raw)
 			local current = as_dict(raw)
 			if current == nil then
+				if raw ~= nil then return nil end
 				current = ({
 					version = VERSION,
 					owner = clone_owner(self.owner),
@@ -3720,7 +3833,7 @@ do
 			if current.version ~= VERSION or not same_owner(current.owner, self.owner)
 				or current.ordering_key ~= ordering_key
 			then
-				return raw
+				return nil
 			end
 			local routes = as_dict(current.routes)
 			if routes == nil or not valid_ordering_routes(routes, current.next_sequence) then return raw end
@@ -3755,9 +3868,12 @@ do
 			return nil, "ordering sequence reservation is unresolved: " .. tostring(update_error or read_error or "no durable sequence")
 		end
 		local record = as_dict(updated)
+		if record ~= nil and record.version ~= VERSION then
+			return nil, "unsupported schema version: ordering index version is unsupported"
+		end
 		local routes = if record ~= nil then as_dict(record.routes) else nil
 		local sequence = if routes ~= nil then routes[route] else nil
-		if record == nil or record.version ~= VERSION or not same_owner(record.owner, self.owner)
+		if record == nil or not same_owner(record.owner, self.owner)
 			or record.ordering_key ~= ordering_key or routes == nil
 			or not valid_ordering_routes(routes, record.next_sequence) or not is_finite(sequence)
 		then
@@ -3777,10 +3893,10 @@ do
 		local released_at = self:_now()
 		local updated, update_error = self:_update(ordering_route, function(raw)
 			local current = as_dict(raw)
-			if current == nil or not same_owner(current.owner, self.owner)
-				or current.ordering_key ~= ordering_key
-			then
-				return raw
+			if current == nil then return raw end
+			if current.version ~= VERSION then return nil end
+			if not same_owner(current.owner, self.owner) or current.ordering_key ~= ordering_key then
+				return nil
 			end
 			local routes = as_dict(current.routes)
 			local route_sequence = if routes ~= nil then routes[route] else nil
@@ -3818,7 +3934,8 @@ do
 		local record = as_dict(updated)
 		local routes = if record ~= nil then as_dict(record.routes) else nil
 		local latest_sequence = if routes ~= nil then routes[route] else nil
-		return record ~= nil and same_owner(record.owner, self.owner)
+		return record ~= nil and record.version == VERSION and same_owner(record.owner, self.owner)
+			and record.ordering_key == ordering_key and routes ~= nil
 			and (latest_sequence == nil or (expected_sequence ~= nil and latest_sequence ~= expected_sequence))
 	end
 
@@ -3833,6 +3950,7 @@ do
 		local updated, update_error = self:_update(ordering_route, function(raw)
 			local current = as_dict(raw)
 			if current == nil then
+				if raw ~= nil then return nil end
 				current = ({
 					version = VERSION,
 					owner = clone_owner(self.owner),
@@ -3846,7 +3964,7 @@ do
 			if current.version ~= VERSION or not same_owner(current.owner, self.owner)
 				or current.ordering_key ~= ordering_key
 			then
-				return raw
+				return nil
 			end
 			local routes = as_dict(current.routes)
 			local replay_operations = if current.replay_operations == nil then {} else as_dict(current.replay_operations)
@@ -3880,10 +3998,20 @@ do
 			next_record.updated_at = reserved_at
 			return next_record
 		end)
-		if update_error ~= nil or updated == nil then
-			return nil, "replay ordering reservation is unresolved: " .. tostring(update_error or "no durable ordering state")
+		if update_error ~= nil then
+			return nil, "replay ordering reservation is unresolved: " .. update_error
 		end
 		local record = as_dict(updated)
+		if record == nil then
+			local latest_value, latest_error = self:_get_fresh(ordering_route)
+			if latest_error ~= nil then
+				return nil, "replay ordering reservation is unresolved: " .. latest_error
+			end
+			record = as_dict(latest_value)
+		end
+		if record ~= nil and record.version ~= VERSION then
+			return nil, "unsupported schema version: ordering index version is unsupported"
+		end
 		local routes = if record ~= nil then as_dict(record.routes) else nil
 		local replay_operations = if record ~= nil then as_dict(record.replay_operations) else nil
 		local replay_entry = if replay_operations ~= nil then as_dict(replay_operations[route]) else nil
@@ -4036,9 +4164,10 @@ do
 		local maximum = if kind == "active" then self.options.segment_max_messages :: number else self.options.dlq_segment_max_messages :: number
 		local updated, update_error = self:_update(locator.key, function(raw)
 			local segment = as_dict(raw)
-			if segment == nil or segment.version ~= VERSION or segment.kind ~= kind
-				or segment.slot ~= locator.slot or segment.generation ~= locator.generation
-				or not same_owner(segment.owner, self.owner)
+			if segment == nil then return nil end
+			if segment.version ~= VERSION then return nil end
+			if segment.kind ~= kind or segment.slot ~= locator.slot
+				or segment.generation ~= locator.generation or not same_owner(segment.owner, self.owner)
 			then
 				return raw
 			end
@@ -4063,7 +4192,18 @@ do
 			return "unknown", update_error
 		end
 		local segment = as_dict(updated)
-		if segment == nil or segment.version ~= VERSION or segment.generation ~= locator.generation or not same_owner(segment.owner, self.owner) then
+		if segment ~= nil and segment.version ~= VERSION then
+			return "unknown", "unsupported schema version: index segment version is unsupported"
+		end
+		if segment == nil then
+			local latest_value, latest_error = self:_get_fresh(locator.key)
+			if latest_error ~= nil then return "unknown", "segment update could not be verified: " .. latest_error end
+			segment = as_dict(latest_value)
+		end
+		if segment ~= nil and segment.version ~= VERSION then
+			return "unknown", "unsupported schema version: index segment version is unsupported"
+		end
+		if segment == nil or segment.generation ~= locator.generation or not same_owner(segment.owner, self.owner) then
 			return "unknown", "segment update could not be verified"
 		end
 		if has_row(segment, tostring(row.route), row.placement_generation :: number) then

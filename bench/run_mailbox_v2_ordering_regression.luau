@@ -771,6 +771,69 @@ local function test_future_index_schema_versions_fail_closed()
 		"dead-letter read wrote while rejecting a future-version DLQ segment")
 end
 
+local function test_future_schema_writers_cancel_updates()
+	local manifest_mailbox, manifest_store = new_mailbox()
+	enqueue(manifest_mailbox, "future-manifest-write", "future-manifest-write-id", nil, "normal")
+	local manifest_key = manifest_mailbox:_manifest_key("active")
+	local future_manifest = clone(manifest_store.values[manifest_key])
+	future_manifest.version = 3
+	manifest_store.values[manifest_key] = future_manifest
+	local commits_before_slot = manifest_store.committed_update_calls
+	local slot = nil
+	for index, candidate in ipairs(future_manifest.slots) do
+		if type(candidate) == "table" and candidate.state == "open" then
+			slot = { slot = index, generation = candidate.generation, key = manifest_mailbox:_segment_key("active", index, candidate.generation) }
+			break
+		end
+	end
+	assert(slot ~= nil, "future-manifest fixture has no open slot")
+	assert(manifest_mailbox:_set_slot_state("active", slot, "open", "sealed") == false,
+		"slot mutation accepted a future-version manifest")
+	assert(manifest_store.committed_update_calls == commits_before_slot,
+		"slot mutation re-persisted a future-version manifest")
+
+	local segment_mailbox, segment_store = new_mailbox()
+	local queued = enqueue(segment_mailbox, "future-segment-write", "future-segment-write-id", nil, "normal")
+	local segment_key = segment_store.values[segment_mailbox:_manifest_key("active")]
+	local segment_locator = nil
+	for index, candidate in ipairs(segment_key.slots) do
+		if type(candidate) == "table" and candidate.state == "open" then
+			local key = segment_mailbox:_segment_key("active", index, candidate.generation)
+			local segment = segment_store.values[key]
+			if type(segment) == "table" and segment.generation == candidate.generation then
+				segment.version = 3
+				segment_store.values[key] = segment
+				segment_locator = { slot = index, generation = candidate.generation, key = key }
+				break
+			end
+		end
+	end
+	assert(segment_locator ~= nil and type(queued.message_id) == "string",
+		"future-segment fixture could not find an open segment")
+	local commits_before_append = segment_store.committed_update_calls
+	local append_status, append_error = segment_mailbox:_append_at_locator("active", segment_locator, {
+		route = "future-segment-write-extra", placement_generation = 1, reservation_token = "regression",
+	})
+	assert(append_status == "unknown" and string.find(tostring(append_error), "unsupported schema version", 1, true) ~= nil,
+		"index append did not fail closed on a future-version segment")
+	assert(segment_store.committed_update_calls == commits_before_append,
+		"index append re-persisted a future-version segment")
+
+	local ordering_mailbox, ordering_store = new_mailbox()
+	local order_key = "future-ordering-schema"
+	local order_route = ordering_mailbox:_ordering_route(order_key)
+	ordering_store.values[order_route] = {
+		version = 3, owner = ordering_mailbox.owner, ordering_key = order_key,
+		next_sequence = 2, routes = { ["future-ordering-route"] = 1 }, replay_operations = {},
+	}
+	local commits_before_order = ordering_store.committed_update_calls
+	local sequence, order_error = ordering_mailbox:_ensure_ordering_slot("future-ordering-route-2", order_key)
+	assert(sequence == nil and string.find(tostring(order_error), "unsupported schema version", 1, true) ~= nil,
+		"ordering reservation did not reject a future-version index")
+	assert(ordering_store.committed_update_calls == commits_before_order,
+		"ordering reservation re-persisted a future-version index")
+end
+
 local function test_high_priority_burst_does_not_starve_background_messages()
 	local mailbox = new_mailbox({ strict_ordering_enabled = true })
 	for index = 1, 7 do
@@ -1273,6 +1336,7 @@ test_corrupt_ready_message_metadata_fails_closed()
 test_future_message_version_fails_closed()
 test_future_message_version_cannot_confirm_duplicate_producer_receipt()
 test_future_index_schema_versions_fail_closed()
+test_future_schema_writers_cancel_updates()
 test_high_priority_burst_does_not_starve_background_messages()
 test_clock_skew_cannot_break_ordering_under_adversarial_sort_keys()
 test_priority_burst_policy_is_bounded_and_configurable()
