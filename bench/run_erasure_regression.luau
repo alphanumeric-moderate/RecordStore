@@ -259,6 +259,33 @@ do
 		"late first-time join recreated a key already fenced by erasure")
 end
 
+-- A profile-family flag and valid template callback alone cannot certify RTBF.
+do
+	local user_id = 206
+	local _, key = create_profile(user_id, 21)
+	local manifest_store = new_manifest_store()
+	local v2 = V2Module.new(RecordStore, RecordStore.MailboxV2)
+	local erasure = ErasureModule.new(manifest_store, {
+		record_store = RecordStore.Mock,
+		record_store_v2 = { new = function() return v2 end },
+		mailbox_module = RecordStore.MailboxV2,
+		profile_store_name = "PlayerData_Test1",
+		profile_scope = "global",
+		key_prefix = "Player_",
+		profile_family_verified = true,
+		verify_templates = function(rendered_user_id, templates)
+			return rendered_user_id == user_id and #templates == 1
+				and templates[1].template.key == key
+		end,
+	})
+	local plan = erasure:PlanAsync(user_id, "erase-attestation-required-206")
+	expect(plan.code == "coverage_unverified" and plan.rtbf_coverage_verified == false,
+		"PlayerData family flag without an application inventory/direct-writer attestation certified RTBF")
+	local progress = erasure:ExecuteAsync(user_id, "erase-attestation-required-206", 1)
+	expect(progress.code == "coverage_unverified" and progress.rtbf_coverage_verified == false,
+		"destructive erasure was allowed without an application inventory/direct-writer attestation")
+end
+
 -- Planning may verify a bounded historical inventory without deleting data.
 -- Execute remains fenced by the durable marker and waits for documented version retention.
 do
@@ -274,6 +301,8 @@ do
 		profile_scope = "global",
 		key_prefix = "Player_",
 		profile_family_verified = true,
+		application_inventory_manifest_id = "test-inventory-playerdata-v1",
+		writer_inventory_verified = true,
 		verify_templates = function(rendered_user_id, templates)
 			return rendered_user_id == user_id and #templates == 1
 				and templates[1].template.key == key
@@ -308,6 +337,8 @@ do
 		profile_scope = "global",
 		key_prefix = "Player_",
 		profile_family_verified = true,
+		application_inventory_manifest_id = "test-inventory-playerdata-v1",
+		writer_inventory_verified = true,
 		verify_templates = function(rendered_user_id, templates)
 			return rendered_user_id == user_id and #templates == 1
 				and templates[1].family == "PlayerDataCore"
