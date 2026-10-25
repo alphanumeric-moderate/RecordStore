@@ -34,6 +34,8 @@ type Options = {
 	key_prefix: string?,
 	operation_deadline: number?,
 	profile_family_verified: boolean?,
+	application_inventory_manifest_id: string?,
+	writer_inventory_verified: boolean?,
 	verify_templates: ((number, { any }) -> boolean)?,
 	additional_families: { any }?,
 	dependencies_clear: ((ErasureItem, number) -> (boolean, string?))?,
@@ -81,6 +83,17 @@ local function new(manifest_store: any, options: Options?): any
 		type(operation_deadline) ~= "number" or not math.isfinite(operation_deadline)
 		or operation_deadline <= 0
 	) then error("operation_deadline must be finite and positive", 2) end
+	if config.application_inventory_manifest_id ~= nil
+		and not valid_text(config.application_inventory_manifest_id, 128)
+	then
+		error("application_inventory_manifest_id must be 1 to 128 bytes", 2)
+	end
+	if config.writer_inventory_verified ~= nil and type(config.writer_inventory_verified) ~= "boolean" then
+		error("writer_inventory_verified must be a boolean", 2)
+	end
+	if config.writer_inventory_verified == true and config.application_inventory_manifest_id == nil then
+		error("writer_inventory_verified requires an application inventory manifest ID", 2)
+	end
 	if config.verify_templates == nil or type(config.verify_templates) ~= "function" then
 		error("PlayerDataErasure requires verify_templates; a hard-coded template is not proof of live coverage", 2)
 	end
@@ -133,7 +146,11 @@ local function new(manifest_store: any, options: Options?): any
 				key = key_prefix .. "{user_id}",
 			},
 		},
-		templates_verified = config.profile_family_verified == true,
+		-- A family flag alone cannot certify RTBF: an independently reconciled application
+		-- inventory must also attest that direct writers and recreation paths are fenced.
+		templates_verified = config.profile_family_verified == true
+			and config.writer_inventory_verified == true
+			and valid_text(config.application_inventory_manifest_id, 128),
 		inventory = function(user_id: number, _maximum: number): ({ ErasureItem }?, boolean | string)
 			if not valid_user_id(user_id) then return nil, "invalid UserId" end
 			local key = resolve_key(user_id)
