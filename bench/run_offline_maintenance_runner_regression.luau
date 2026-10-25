@@ -126,6 +126,62 @@ expect(blocked.code == "unknown",
 expect(#delete_calls == 0,
 	"runner deleted data after its writer fence was lost before the destructive operation")
 
+do -- Slow storage reads must not starve single-key maintenance progress.
+	local late_rows = {
+		{ key = "late-a", generation = 1, eligible = true },
+		{ key = "late-b", generation = 2, eligible = true },
+	}
+	local late_checkpoint = nil
+	local late_page_calls = 0
+	local late_config = {
+		job_id = "slow-page-read",
+		mode = "dry_run",
+		next_page = function(cursor, maximum)
+			late_page_calls += 1
+			local deadline = os.clock() + 0.015
+			while os.clock() < deadline do end
+			local page = {}
+			for _, row in ipairs(late_rows) do
+				if cursor == nil or row.key > cursor then
+					table.insert(page, copy(row))
+					if #page >= maximum then break end
+				end
+			end
+			local last_key = if #page > 0 then page[#page].key else cursor
+			local more = false
+			if last_key ~= nil then
+				for _, row in ipairs(late_rows) do
+					if row.key > last_key then more = true; break end
+				end
+			else
+				more = #late_rows > 0
+			end
+			return page, if more then last_key else nil, not more
+		end,
+		inspect = function(item)
+			return { status = "success", eligible = item.eligible, dependencies_clear = true, generation = item.generation }
+		end,
+		delete_if_generation = function() error("dry-run must never delete") end,
+		load_checkpoint = function() return copy(late_checkpoint) end,
+		persist_checkpoint = function(checkpoint, expected_revision)
+			local revision = if late_checkpoint == nil then 0 else late_checkpoint.revision
+			if revision ~= expected_revision then return false, "checkpoint revision conflict" end
+			late_checkpoint = copy(checkpoint)
+			return true
+		end,
+	}
+	local slow_runner = Runner.new(V2.Maintenance, late_config)
+	local first_yield = slow_runner:Run(8, 1, 1)
+	expect(first_yield.code == "yielded" and late_checkpoint ~= nil
+		and late_checkpoint.cursor == "late-a" and late_checkpoint.processed == 1,
+		"slow single-key page read starved progress instead of checkpointing and yielding")
+	local resumed_runner = Runner.new(V2.Maintenance, late_config)
+	local resumed_result = resumed_runner:Run(8, 1, 500)
+	expect(resumed_result.code == "completed" and late_checkpoint.status == "completed"
+		and late_checkpoint.processed == 2 and late_page_calls == 2,
+		"maintenance did not resume after a slow page read without replaying completed work")
+end
+
 do -- Validate generation-aware deletes in execute mode across resumable per-key checkpoints.
 	local execute_rows = {
 		{ key = "a-expired", generation = 1, eligible = true },
