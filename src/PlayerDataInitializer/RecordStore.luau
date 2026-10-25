@@ -9,6 +9,7 @@ local RecordStore = {}
 local ERASURE_FENCE_IMPLEMENTATION_VERSION = 2147483647
 local ERASURE_FENCE_FIELD = "__recordstore_erasure_fence"
 local MAX_ERASURE_HISTORY_SCAN = 1024
+local erasure_internal: { [string]: any } = {}
 
 
 -- BEGIN EMBEDDED SCHEDULER MODULE
@@ -11498,6 +11499,7 @@ type ErasureFenceMarker = {
 	fence_generation: number,
 }
 
+do
 local function finite_erasure_number(value: unknown): boolean
 	return type(value) == "number" and math.isfinite(value)
 end
@@ -11963,6 +11965,11 @@ function RecordStore.purge_erased_versions_async(
 		name, scope, key, user_id, erasure_id, max_versions, operation_deadline, false,
 		allow_deprecated_remove_version
 	)
+end
+
+erasure_internal.get_status = get_erasure_status_internal
+erasure_internal.erase_user_data = erase_user_data_internal
+erasure_internal.purge_erased_versions = purge_erased_versions_internal
 end
 
 local function data_values_equal(left: JsonValue?, right: JsonValue?, depth: number?): boolean
@@ -18830,14 +18837,14 @@ RecordStore.Mock = (function()
 	local function mock_get_erasure_status_async(
 		name: string, scope: string, key: string, user_id: number, operation_deadline: number?
 	): (ErasureStatus?, ResultCode, string?)
-		return get_erasure_status_internal(name, scope, key, user_id, operation_deadline, true)
+		return erasure_internal.get_status(name, scope, key, user_id, operation_deadline, true)
 	end
 
 	local function mock_erase_user_data_async(
 		name: string, scope: string, key: string, user_id: number, erasure_id: string,
 		expected_generation: number?, operation_deadline: number?
 	): (ErasureStatus?, ResultCode, string?)
-		return erase_user_data_internal(
+		return erasure_internal.erase_user_data(
 			name, scope, key, user_id, erasure_id, expected_generation, operation_deadline, true
 		)
 	end
@@ -18846,7 +18853,7 @@ RecordStore.Mock = (function()
 		name: string, scope: string, key: string, user_id: number, erasure_id: string,
 		max_versions: number?, operation_deadline: number?
 	): (ErasurePurgeProgress?, ResultCode, string?)
-		return purge_erased_versions_internal(
+		return erasure_internal.purge_erased_versions(
 			name, scope, key, user_id, erasure_id, max_versions, operation_deadline, true
 		)
 	end
