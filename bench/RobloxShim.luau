@@ -102,16 +102,19 @@ local loaded_mailbox_module: any = nil
 local loaded_receipt_processor: any = nil
 local loaded_outbox_mailbox_adapter: any = nil
 local loaded_recordstore_v2: any = nil
+local loaded_player_data_erasure: any = nil
 
 local RecordStoreInstance = table.freeze({ Name = "RecordStore", ClassName = "ModuleScript" })
 local PurchaseReceiptProcessorInstance = table.freeze({ Name = "PurchaseReceiptProcessor", ClassName = "ModuleScript" })
 local RecordStoreV2Instance = table.freeze({ Name = "RecordStoreV2", ClassName = "ModuleScript" })
 local OutboxMailboxAdapterInstance = table.freeze({ Name = "RecordStoreOutboxMailboxAdapter", ClassName = "ModuleScript" })
+local PlayerDataErasureInstance = table.freeze({ Name = "PlayerDataErasure", ClassName = "ModuleScript" })
 local PlayerDataInitializer = {
 	RecordStore = RecordStoreInstance,
 	PurchaseReceiptProcessor = PurchaseReceiptProcessorInstance,
 	RecordStoreOutboxMailboxAdapter = OutboxMailboxAdapterInstance,
 	RecordStoreV2 = RecordStoreV2Instance,
+	PlayerDataErasure = PlayerDataErasureInstance,
 }
 function PlayerDataInitializer:WaitForChild(name: string): any
 	local child = self[name]
@@ -122,9 +125,7 @@ function PlayerDataInitializer:FindFirstChild(name: string): any
 	return self[name]
 end
 local script = {
-	Parent = {
-		RecordStore = RecordStoreInstance,
-	},
+	Parent = PlayerDataInitializer,
 }
 
 local function load_scheduler(): any
@@ -196,6 +197,18 @@ local function load_receipt_processor(): any
 	return loaded_receipt_processor
 end
 
+local function load_player_data_erasure(): any
+	if loaded_player_data_erasure ~= nil then return loaded_player_data_erasure end
+	local module_environment = table.clone(Shim.environment)
+	module_environment.script = { Parent = PlayerDataInitializer }
+	local chunk = luau.load(fs.readFile("src/PlayerDataInitializer/PlayerDataErasure.luau"), {
+		debugName = "PlayerDataErasure",
+		environment = module_environment,
+	})
+	loaded_player_data_erasure = chunk()
+	return loaded_player_data_erasure
+end
+
 local ServerScriptService = {
 	RecordStore = RecordStoreInstance,
 	PlayerDataInitializer = PlayerDataInitializer,
@@ -209,7 +222,14 @@ local ServerScriptService = {
 	end,
 }
 
+local Players = {
+	GetPlayerByUserId = function(_self, _user_id: number)
+		return nil
+	end,
+}
+
 local services = {
+	Players = Players,
 	DataStoreService = DataStoreService,
 	HttpService = HttpService,
 	MessagingService = MessagingService,
@@ -240,6 +260,7 @@ local function shim_require(target: any)
 	end
 	if target == OutboxMailboxAdapterInstance then return load_outbox_mailbox_adapter() end
 	if target == RecordStoreV2Instance then return load_recordstore_v2() end
+	if target == PlayerDataErasureInstance then return load_player_data_erasure() end
 	return require(target)
 end
 
