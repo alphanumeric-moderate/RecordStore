@@ -5,6 +5,7 @@ local V2Module = require(
 	game:GetService("ServerScriptService"):WaitForChild("PlayerDataInitializer"):WaitForChild("RecordStoreV2")
 )
 local V2 = V2Module.new(RecordStore, RecordStore.MailboxV2)
+local V2Mock = V2Module.new(RecordStore.Mock, RecordStore.MailboxV2)
 
 local function expect(value, message)
 	assert(value, message)
@@ -1682,33 +1683,49 @@ expect(restored_data.cash == 99, "historical restore did not replace the intende
 
 local profile_quarantine_store = new_store()
 local diagnosed_revision = migration_record:GetRevision()
-local quarantined_profile = V2.ProfileDoctor.QuarantineAsync(
+local quarantined_profile = V2Mock.ProfileDoctor.QuarantineAsync(
 	migration_record, profile_quarantine_store, "profile-quarantine-001",
 	"operator-1", "manual diagnosis requires writer fencing", diagnosed_revision
 )
 expect(quarantined_profile.code == "committed",
 	"profile quarantine manifest was not committed: " .. tostring(quarantined_profile.code))
-local profile_quarantine_status = V2.ProfileDoctor.GetQuarantineStatusAsync(migration_record, profile_quarantine_store)
+local durable_profile_fence = RecordStore.Mock.get_record_raw(
+	"V2MigrationProfiles", "global", "profile"
+)
+expect(type(durable_profile_fence) == "table"
+	and durable_profile_fence.implementation_version == 2147483646
+	and type(durable_profile_fence.__recordstore_quarantine_fence_v1) == "table",
+	"profile quarantine did not install the atomic same-key writer fence")
+local profile_quarantine_status = V2Mock.ProfileDoctor.GetQuarantineStatusAsync(migration_record, profile_quarantine_store)
 expect(profile_quarantine_status.code == "success" and profile_quarantine_status.status == "quarantined",
 	"profile quarantine status could not be read durably")
-local blocked_writer = V2.ProfileDoctor.CheckWritableAsync(migration_record, profile_quarantine_store)
+local blocked_writer = V2Mock.ProfileDoctor.CheckWritableAsync(migration_record, profile_quarantine_store)
 expect(blocked_writer.code == "quarantined" and blocked_writer.allowed == false,
 	"quarantine writer gate allowed writes while the profile was quarantined")
-local fail_closed_writer = V2.ProfileDoctor.CheckWritableAsync(migration_record, {
+local fail_closed_writer = V2Mock.ProfileDoctor.CheckWritableAsync(migration_record, {
 	GetAsync = function() error("injected quarantine read failure") end,
 	UpdateAsync = function() error("unexpected write") end,
 })
 expect(fail_closed_writer.allowed == false and fail_closed_writer.code == "unknown",
 	"quarantine writer gate allowed writes when status was unknown")
-local profile_quarantine_resolved = V2.ProfileDoctor.ResolveQuarantineAsync(
+local profile_quarantine_resolved = V2Mock.ProfileDoctor.ResolveQuarantineAsync(
 	migration_record, profile_quarantine_store, "profile-quarantine-001",
 	"operator-1", "write paths inspected", migration_record:GetRevision()
 )
 expect(profile_quarantine_resolved.code == "committed",
 	"profile quarantine resolution failed: " .. tostring(profile_quarantine_resolved.code))
-expect(V2.ProfileDoctor.GetQuarantineStatusAsync(migration_record, profile_quarantine_store).status == "resolved",
+expect(V2Mock.ProfileDoctor.GetQuarantineStatusAsync(migration_record, profile_quarantine_store).status == "resolved",
 	"profile quarantine resolution was not persisted")
-local resumed_writer = V2.ProfileDoctor.CheckWritableAsync(migration_record, profile_quarantine_store)
+local released_profile = RecordStore.Mock.get_record_raw(
+	"V2MigrationProfiles", "global", "profile"
+)
+expect(type(released_profile) == "table"
+	and released_profile.implementation_version ~= 2147483646
+	and released_profile.__recordstore_quarantine_fence_v1 == nil
+	and type(released_profile.fencing_generation) == "number"
+	and released_profile.fencing_generation >= durable_profile_fence.fencing_generation + 1,
+	"resolved quarantine did not durably remove its fence and advance generation")
+local resumed_writer = V2Mock.ProfileDoctor.CheckWritableAsync(migration_record, profile_quarantine_store)
 expect(resumed_writer.code == "success" and resumed_writer.allowed == true,
 	"writer gate remained blocked after an audited quarantine resolution")
 
