@@ -160,6 +160,78 @@ do
 	record:Close()
 end
 
+-- More than one platform-sized version page must be purged over bounded passes.
+-- This verifies the coordinator does not report complete after inspecting only
+-- the newest page while older historical payloads remain.
+do
+	local user_id = 103
+	local record, key = create_profile(user_id, 5)
+	for index = 1, 1030 do
+		local update_result, update_message = record:Update(function(current)
+			local next_data = clone(current)
+			next_data.kills += 1
+			return next_data
+		end)
+		expect(update_result == "success", "large-history update failed at " .. tostring(index) .. ": " .. tostring(update_message))
+		local save_result, save_message = record:Save()
+		expect(save_result == "saved", "large-history save failed at " .. tostring(index) .. ": " .. tostring(save_message))
+	end
+	local source, source_code = RecordStore.Mock.get_erasure_status_async(
+		"PlayerData_Test1", "global", key, user_id, 30
+	)
+	expect(source_code == "success" and source ~= nil and not source.Erased,
+		"large-history profile status could not be read")
+	local erased, erase_code, erase_message = RecordStore.Mock.erase_user_data_async(
+		"PlayerData_Test1", "global", key, user_id, "erase-many-versions-103",
+		source.Generation, 30
+	)
+	expect(erase_code == "success" and erased ~= nil and erased.Erased,
+		"large-history profile fence failed: " .. tostring(erase_message))
+	local progress, purge_code
+	local passes = 0
+	repeat
+		progress, purge_code, erase_message = RecordStore.Mock.purge_erased_versions_async(
+			"PlayerData_Test1", "global", key, user_id, "erase-many-versions-103", 64, 30
+		)
+		expect(purge_code == "success" and progress ~= nil,
+			"large-history purge returned " .. tostring(purge_code) .. ": " .. tostring(erase_message))
+		passes += 1
+		expect(passes <= 40, "large-history purge exceeded bounded resumption count")
+	until progress.Complete
+	local remaining, remaining_code = RecordStore.Mock.list_versions_async(
+		"PlayerData_Test1", "global", key, Enum.SortDirection.Descending, nil, nil, 1024, 30
+	)
+	expect(remaining_code == "success" and remaining ~= nil and #remaining == 1,
+		"large-history purge reported completion while historical versions remained")
+	expect(remaining[1].Version == progress.CurrentVersion,
+		"large-history purge removed the latest erasure fence")
+end
+
+-- A response lost after commit is reconciled by the durable marker instead of
+-- blindly retrying or reporting an unresolved result when the erasure is proven.
+do
+	local user_id = 104
+	local _, key = create_profile(user_id, 2)
+	local source, source_code = RecordStore.Mock.get_erasure_status_async(
+		"PlayerData_Test1", "global", key, user_id, 10
+	)
+	expect(source_code == "success" and source ~= nil and not source.Erased,
+		"ambiguous-write fixture source status failed")
+	RecordStore.Mock.set_update_commit_then_failures(1, "lost erasure response after commit")
+	local erased, erase_code, erase_message = RecordStore.Mock.erase_user_data_async(
+		"PlayerData_Test1", "global", key, user_id, "erase-ambiguous-104",
+		source.Generation, 10
+	)
+	expect(erase_code == "success" and erased ~= nil and erased.Erased,
+		"committed erasure was not reconciled after response loss: " .. tostring(erase_message))
+	local confirmed, confirmed_code = RecordStore.Mock.get_erasure_status_async(
+		"PlayerData_Test1", "global", key, user_id, 10
+	)
+	expect(confirmed_code == "success" and confirmed ~= nil
+		and confirmed.Erased and confirmed.ErasureId == "erase-ambiguous-104",
+		"erasure response-loss reconciliation did not leave a durable marker")
+end
+
 -- A previously absent deterministic profile key is fenced too, preventing a
 -- late first-time join from recreating data after the erasure inventory.
 do
