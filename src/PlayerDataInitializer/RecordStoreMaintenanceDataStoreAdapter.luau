@@ -390,10 +390,10 @@ function Adapter.new(config: Config)
 		end
 		local observed, observed_info, verify_error = read_fresh(store_or_error, key)
 		if verify_error ~= nil then
-			return "unknown", tostring(if update_ok then updated_or_error else update_error_or(updated_or_error)) .. "; verification failed: " .. verify_error
+			return "unknown", tostring(updated_or_error) .. "; verification failed: " .. verify_error
 		end
 		if observed == nil or family.is_tombstone(observed, expected_generation, config.job_id) then
-			return if update_ok then "deleted" else "deleted", nil
+			return "deleted", nil
 		end
 		if family.get_generation(observed, observed_info) ~= expected_generation then
 			return "skipped", "generation changed before the delete fence committed"
@@ -482,8 +482,5 @@ function Adapter.new(config: Config)
 	return table.freeze(adapter)
 end
 
-function update_error_or_update_result(value: unknown): string
-	return tostring(value)
-end
 
 return Adapter
