@@ -200,6 +200,48 @@ local checkpoint_advanced, advance_error = adapter:PersistCheckpoint({
 	status = "completed",
 }, 1)
 assert(checkpoint_advanced == true, advance_error or "checkpoint revision did not advance")
+
+local invalid_status_written, invalid_status_error = adapter:PersistCheckpoint({
+	version = 1,
+	job_id = "maintenance-regression",
+	revision = 3,
+	cursor = nil,
+	processed = 2,
+	removed = 1,
+	status = "future_status",
+}, 2)
+assert(invalid_status_written == false and string.find(tostring(invalid_status_error), "invalid", 1, true) ~= nil,
+	"maintenance adapter accepted a checkpoint status that the runner cannot resume")
+
+local completed_with_cursor, completed_cursor_error = adapter:PersistCheckpoint({
+	version = 1,
+	job_id = "maintenance-regression",
+	revision = 3,
+	cursor = "inventory-r1|1:3",
+	processed = 2,
+	removed = 1,
+	status = "completed",
+}, 2)
+assert(completed_with_cursor == false and string.find(tostring(completed_cursor_error), "invalid", 1, true) ~= nil,
+	"maintenance adapter accepted a completed checkpoint with an unfinished cursor")
+
+local incomplete_without_cursor, incomplete_cursor_error = adapter:PersistCheckpoint({
+	version = 1,
+	job_id = "maintenance-regression",
+	revision = 3,
+	cursor = nil,
+	processed = 2,
+	removed = 1,
+	status = "incomplete",
+}, 2)
+assert(incomplete_without_cursor == false and string.find(tostring(incomplete_cursor_error), "invalid", 1, true) ~= nil,
+	"maintenance adapter accepted an incomplete checkpoint without a continuation cursor")
+
+local after_invalid_checkpoints, after_invalid_error = adapter:LoadCheckpoint()
+assert(after_invalid_error == nil and type(after_invalid_checkpoints) == "table"
+	and after_invalid_checkpoints.revision == 2 and after_invalid_checkpoints.status == "completed",
+	"invalid checkpoint attempts mutated the last valid durable checkpoint")
+
 local conflict_checkpoint, conflict_error = adapter:PersistCheckpoint({
 	version = 1,
 	job_id = "maintenance-regression",
