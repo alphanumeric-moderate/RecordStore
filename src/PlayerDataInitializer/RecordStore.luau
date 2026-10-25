@@ -11533,10 +11533,15 @@ local function parse_erasure_fence(raw: unknown): (ErasureFenceMarker?, boolean,
 		or not valid_erasure_user_id(user_id)
 		or type(erasure_id) ~= "string" or erasure_id == "" or #erasure_id > 96
 		or not finite_erasure_number(erased_at)
-		or not finite_erasure_number(source_generation) or source_generation < 0 or math.floor(source_generation) ~= source_generation
-		or not finite_erasure_number(source_revision) or source_revision < 0 or math.floor(source_revision) ~= source_revision
-		or not finite_erasure_number(fence_generation) or math.floor(fence_generation) ~= fence_generation
-		or fence_generation ~= math.max(1, source_generation + 1)
+		or not finite_erasure_number(source_generation)
+		or (source_generation :: number) < 0
+		or math.floor(source_generation :: number) ~= (source_generation :: number)
+		or not finite_erasure_number(source_revision)
+		or (source_revision :: number) < 0
+		or math.floor(source_revision :: number) ~= (source_revision :: number)
+		or not finite_erasure_number(fence_generation)
+		or math.floor(fence_generation :: number) ~= (fence_generation :: number)
+		or (fence_generation :: number) ~= math.max(1, (source_generation :: number) + 1)
 	then
 		return nil, true, "erasure fence fields failed validation"
 	end
