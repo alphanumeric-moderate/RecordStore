@@ -1080,6 +1080,76 @@ local unverified_plan = unverified_erasure:PlanAsync(123456, "erase-unverified")
 expect(unverified_plan.rtbf_coverage_verified == false,
 	"erasure claimed complete coverage for an unverified key template")
 
+do -- A failed item after an earlier delete must not checkpoint partial-page counters.
+	local retry_store = new_store()
+	local retry_items = {
+		{ key = "retry-first", generation = 1 },
+		{ key = "retry-second", generation = 2 },
+	}
+	local applied_deletes = {}
+	local delete_attempts = 0
+	local fail_second_inspection = true
+	local retry_checkpoint = nil
+	local retry_compactor = V2.Maintenance.NewCompactor({
+		initial_cursor = "cursor-a",
+		next_page = function(cursor, maximum)
+			expect(cursor == "cursor-a" and maximum == 2,
+				"unresolved-page regression received an unexpected cursor or batch size")
+			return retry_items, "cursor-b", false
+		end,
+		inspect = function(item)
+			if item.key == "retry-second" and fail_second_inspection then
+				fail_second_inspection = false
+				return { status = "unknown" }, "injected inspection uncertainty"
+			end
+			return { status = "success", eligible = item.key == "retry-first", dependencies_clear = true, generation = item.generation }
+		end,
+		delete_if_generation = function(item, generation)
+			delete_attempts += 1
+			if applied_deletes[item.key] == generation then return "already_absent" end
+			applied_deletes[item.key] = generation
+			return "deleted"
+		end,
+		persist_progress = function(cursor, processed, removed_count, status)
+			retry_checkpoint = { cursor = cursor, processed = processed, removed = removed_count, status = status }
+			return true
+		end,
+	})
+	local first_try = retry_compactor:RunStep(2, 500)
+	expect(first_try.code == "unknown" and first_try.cursor == "cursor-a",
+		"uncertain inspection did not retain the durable page cursor")
+	expect(retry_compactor:Stats().processed == 0 and retry_compactor:Stats().removed == 0
+		and retry_checkpoint.cursor == "cursor-a" and retry_checkpoint.processed == 0
+		and retry_checkpoint.removed == 0 and retry_checkpoint.status == "unknown",
+		"partial-page counters were persisted despite the cursor remaining at the prior page")
+	local retry_result = retry_compactor:RunStep(2, 500)
+	expect(retry_result.code == "incomplete" and retry_result.cursor == "cursor-b"
+		and retry_result.processed == 2 and retry_result.removed == 1,
+		"resuming the unresolved page did not reconcile idempotent deletion progress exactly once")
+	expect(delete_attempts == 2 and applied_deletes["retry-first"] == 1
+		and retry_checkpoint.cursor == "cursor-b" and retry_checkpoint.processed == 2
+		and retry_checkpoint.removed == 1,
+		"replayed page duplicated a deletion or persisted inconsistent final counters")
+end
+
+do -- A non-advancing nonterminal page cursor must fail closed instead of looping forever.
+	local inspect_calls = 0
+	local persist_calls = 0
+	local stalled = V2.Maintenance.NewCompactor({
+		initial_cursor = "same-cursor",
+		next_page = function() return { { key = "stalled-key", generation = 1 } }, "same-cursor", false end,
+		inspect = function()
+			inspect_calls += 1
+			return { status = "success", eligible = true, dependencies_clear = true, generation = 1 }
+		end,
+		delete_if_generation = function() error("stalled page must not be destructively processed") end,
+		persist_progress = function() persist_calls += 1; return true end,
+	})
+	local stalled_result = stalled:RunStep(1, 500)
+	expect(stalled_result.code == "invalid" and inspect_calls == 0 and persist_calls == 0,
+		"non-advancing page cursor was processed or checkpointed instead of rejected")
+end
+
 local compaction_store = new_store()
 local removed = {}
 local compactor = V2.Maintenance.NewCompactor({
