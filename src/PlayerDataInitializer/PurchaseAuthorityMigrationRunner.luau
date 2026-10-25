@@ -221,6 +221,8 @@ local function valid_checkpoint(raw: unknown, config: NormalizedConfig): (Checkp
 			or value.inventory_digest ~= config.expected_inventory_digest))
 		or not nonnegative_integer(value.revision)
 		or not valid_cursor(value.cursor) or type(value.done) ~= "boolean"
+		or (value.done == true and value.cursor ~= nil)
+		or (value.done == false and value.revision ~= 0 and value.cursor == nil)
 		or not nonnegative_integer(value.pages_processed)
 		or not nonnegative_integer(value.purchases_processed)
 		or not nonnegative_integer(value.backfilled_count)
