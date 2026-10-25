@@ -5,6 +5,10 @@ local HttpService = game:GetService("HttpService")
 local MessagingService = game:GetService("MessagingService")
 local RecordStore = {}
 
+-- Erasure fences must be unreadable to older writers so a stale server cannot recreate erased data.
+local ERASURE_FENCE_IMPLEMENTATION_VERSION = 2147483647
+local ERASURE_FENCE_FIELD = "__recordstore_erasure_fence"
+
 
 -- BEGIN EMBEDDED SCHEDULER MODULE
 type EmbeddedSchedulerDynamicRecord = { [string]: any }
@@ -11461,6 +11465,469 @@ end
 
 
 
+
+export type ErasureStatus = {
+	UserId: number,
+	Exists: boolean,
+	Erased: boolean,
+	Generation: number,
+	Revision: number,
+	ErasureId: string?,
+	ErasedAt: number?,
+	SourceGeneration: number?,
+	SourceRevision: number?,
+	Version: string?,
+}
+
+export type ErasurePurgeProgress = {
+	UserId: number,
+	ErasureId: string,
+	Removed: number,
+	Complete: boolean,
+	CurrentVersion: string?,
+}
+
+type ErasureFenceMarker = {
+	version: number,
+	user_id: number,
+	erasure_id: string,
+	erased_at: number,
+	source_generation: number,
+	source_revision: number,
+	fence_generation: number,
+}
+
+local function valid_erasure_user_id(value: unknown): boolean
+	return type(value) == "number" and math.isfinite(value)
+		and math.floor(value) == value and value >= 1
+end
+
+local function user_ids_include(user_ids: { number }?, user_id: number): boolean
+	if user_ids == nil or #user_ids == 0 then return true end
+	for _, existing_user_id in ipairs(user_ids) do
+		if existing_user_id == user_id then return true end
+	end
+	return false
+end
+
+local function parse_erasure_fence(raw: unknown): (ErasureFenceMarker?, boolean, string?)
+	if type(raw) ~= "table" then return nil, false, nil end
+	local raw_marker = get_string_field(raw, ERASURE_FENCE_FIELD)
+	if raw_marker == nil then return nil, false, nil end
+	if get_string_field(raw, "implementation_version") ~= ERASURE_FENCE_IMPLEMENTATION_VERSION then
+		return nil, true, "erasure fence implementation marker is invalid"
+	end
+	if type(raw_marker) ~= "table" then return nil, true, "erasure fence payload is malformed" end
+	local version = get_string_field(raw_marker, "version")
+	local user_id = get_string_field(raw_marker, "user_id")
+	local erasure_id = get_string_field(raw_marker, "erasure_id")
+	local erased_at = get_string_field(raw_marker, "erased_at")
+	local source_generation = get_string_field(raw_marker, "source_generation")
+	local source_revision = get_string_field(raw_marker, "source_revision")
+	local fence_generation = get_string_field(raw_marker, "fence_generation")
+	if version ~= 1
+		or not valid_erasure_user_id(user_id)
+		or type(erasure_id) ~= "string" or erasure_id == "" or #erasure_id > 96
+		or not finite(erased_at)
+		or not finite(source_generation) or source_generation < 0 or math.floor(source_generation) ~= source_generation
+		or not finite(source_revision) or source_revision < 0 or math.floor(source_revision) ~= source_revision
+		or not finite(fence_generation) or math.floor(fence_generation) ~= fence_generation
+		or fence_generation ~= math.max(1, source_generation + 1)
+	then
+		return nil, true, "erasure fence fields failed validation"
+	end
+	return {
+		version = version,
+		user_id = user_id,
+		erasure_id = erasure_id,
+		erased_at = erased_at,
+		source_generation = source_generation,
+		source_revision = source_revision,
+		fence_generation = fence_generation,
+	}, true, nil
+end
+
+local function get_erasure_status_internal(
+	name: string,
+	scope: string,
+	key: string,
+	user_id: number,
+	operation_deadline: number?,
+	mock: boolean
+): (ErasureStatus?, ResultCode, string?)
+	local valid_identity, identity_message = validate_store_identity(name, scope, key)
+	if not valid_identity then return nil, "invalid", identity_message end
+	if not valid_erasure_user_id(user_id) then return nil, "invalid", "user_id must be a positive integer" end
+	local deadline, deadline_error = resolve_operation_deadline(operation_deadline)
+	if deadline == nil then return nil, "invalid", deadline_error end
+	local backend = make_backend(name, scope, key, mock)
+	local raw, info, read_code, read_message = backend_get(backend, false, deadline, nil)
+	if read_code ~= nil then return nil, normalize_result_code(read_code) or "unknown", read_message end
+	if raw == nil then
+		return {
+			UserId = user_id,
+			Exists = false,
+			Erased = false,
+			Generation = 0,
+			Revision = 0,
+			Version = nil,
+		}, "not_found", nil
+	end
+	local marker, marker_present, marker_error = parse_erasure_fence(raw)
+	if marker_present then
+		if marker == nil then return nil, "corrupt", marker_error or "erasure fence is corrupt" end
+		if marker.user_id ~= user_id then
+			return nil, "conflict", "erasure fence UserId does not match the requested identity"
+		end
+		return {
+			UserId = user_id,
+			Exists = true,
+			Erased = true,
+			Generation = marker.fence_generation,
+			Revision = marker.source_revision,
+			ErasureId = marker.erasure_id,
+			ErasedAt = marker.erased_at,
+			SourceGeneration = marker.source_generation,
+			SourceRevision = marker.source_revision,
+			Version = if info ~= nil then info.Version else nil,
+		}, "success", nil
+	end
+	local envelope, parse_error, current_format = parse_envelope(raw)
+	if not current_format then
+		local result: ResultCode = if parse_error == "legacy payload" then "legacy"
+			elseif parse_error == "future implementation version" then "future_schema" else "corrupt"
+		return nil, result, parse_error or "stored envelope is invalid"
+	end
+	if envelope == nil then return nil, "corrupt", parse_error or "stored envelope is missing" end
+	local user_ids = if info ~= nil then info.UserIds
+		elseif envelope.user_ids ~= nil then envelope.user_ids else {}
+	if not user_ids_include(user_ids, user_id) then
+		return nil, "conflict", "stored profile UserIds do not contain the requested UserId"
+	end
+	return {
+		UserId = user_id,
+		Exists = true,
+		Erased = false,
+		Generation = envelope.fencing_generation,
+		Revision = envelope.revision,
+		Version = if info ~= nil then info.Version else nil,
+	}, "success", nil
+end
+
+local function erase_user_data_internal(
+	name: string,
+	scope: string,
+	key: string,
+	user_id: number,
+	erasure_id: string,
+	expected_generation: number?,
+	operation_deadline: number?,
+	mock: boolean
+): (ErasureStatus?, ResultCode, string?)
+	local valid_identity, identity_message = validate_store_identity(name, scope, key)
+	if not valid_identity then return nil, "invalid", identity_message end
+	if not valid_erasure_user_id(user_id) then return nil, "invalid", "user_id must be a positive integer" end
+	if type(erasure_id) ~= "string" or erasure_id == "" or #erasure_id > 96 then
+		return nil, "invalid", "erasure_id must be 1 to 96 bytes"
+	end
+	if expected_generation ~= nil and (
+		not finite(expected_generation) or expected_generation < 0
+		or math.floor(expected_generation) ~= expected_generation
+	) then
+		return nil, "invalid", "expected_generation must be a non-negative integer"
+	end
+	local deadline, deadline_error = resolve_operation_deadline(operation_deadline)
+	if deadline == nil then return nil, "invalid", deadline_error end
+	local backend = make_backend(name, scope, key, mock)
+	local decision: ResultCode? = nil
+	local decision_message: string? = nil
+	local result, _, update_code, update_message = backend_update(backend, function(raw, info)
+		decision = nil
+		decision_message = nil
+		local existing_marker, marker_present, marker_error = parse_erasure_fence(raw)
+		if marker_present then
+			if existing_marker == nil then
+				decision = "corrupt"
+				decision_message = marker_error or "existing erasure fence is corrupt"
+				return nil, nil, nil
+			end
+			if existing_marker.user_id ~= user_id then
+				decision = "conflict"
+				decision_message = "existing erasure fence belongs to another UserId"
+				return nil, nil, nil
+			end
+			if existing_marker.erasure_id ~= erasure_id then
+				decision = "conflict"
+				decision_message = "profile is already permanently fenced by a different erasure"
+				return nil, nil, nil
+			end
+			decision = "success"
+			return nil, nil, nil
+		end
+		local source_generation = 0
+		local source_revision = 0
+		if raw ~= nil then
+			local envelope, parse_error, current_format = parse_envelope(raw)
+			if not current_format then
+				decision = if parse_error == "legacy payload" then "legacy"
+					elseif parse_error == "future implementation version" then "future_schema" else "corrupt"
+				decision_message = parse_error or "stored envelope is invalid"
+				return nil, nil, nil
+			end
+			if envelope == nil then
+				decision = "corrupt"
+				decision_message = parse_error or "stored envelope is missing"
+				return nil, nil, nil
+			end
+			local stored_user_ids = if info ~= nil then info.UserIds
+				elseif envelope.user_ids ~= nil then envelope.user_ids else {}
+			if not user_ids_include(stored_user_ids, user_id) then
+				decision = "conflict"
+				decision_message = "stored profile UserIds do not contain the requested UserId"
+				return nil, nil, nil
+			end
+			source_generation = envelope.fencing_generation
+			source_revision = envelope.revision
+		end
+		if expected_generation ~= nil and source_generation ~= expected_generation then
+			decision = "conflict"
+			decision_message = "profile generation changed since the erasure inventory was captured"
+			return nil, nil, nil
+		end
+		local erased_at = session_now_unix(mock)
+		local marker_value = {
+			implementation_version = ERASURE_FENCE_IMPLEMENTATION_VERSION,
+			[ERASURE_FENCE_FIELD] = {
+				version = 1,
+				user_id = user_id,
+				erasure_id = erasure_id,
+				erased_at = erased_at,
+				source_generation = source_generation,
+				source_revision = source_revision,
+				fence_generation = math.max(1, source_generation + 1),
+			},
+		}
+		local size_ok, size_error = validate_serialized_size(marker_value)
+		if not size_ok then
+			decision = "validation"
+			decision_message = size_error or "erasure fence exceeds storage limits"
+			return nil, nil, nil
+		end
+		decision = "success"
+		return marker_value, {}, {}
+	end, deadline, nil)
+	if update_code ~= nil and update_code ~= "unknown" then
+		return nil, normalize_result_code(update_code) or "unknown", update_message
+	end
+	if update_code == "unknown" then
+		local observed, status_code, status_message = get_erasure_status_internal(
+			name, scope, key, user_id, deadline - now_local(), mock
+		)
+		if status_code == "success" and observed ~= nil and observed.Erased and observed.ErasureId == erasure_id then
+			return observed, "success", nil
+		end
+		if status_code == "conflict" then return nil, "conflict", status_message end
+		return nil, "unknown", status_message or update_message or "erasure write outcome remains unknown"
+	end
+	local observed_marker, marker_present, marker_error = parse_erasure_fence(result)
+	if marker_present then
+		if observed_marker == nil then return nil, "corrupt", marker_error or "committed erasure fence is corrupt" end
+		if observed_marker.user_id ~= user_id or observed_marker.erasure_id ~= erasure_id then
+			return nil, "conflict", "committed erasure fence identity does not match the request"
+		end
+	end
+	if decision ~= nil and decision ~= "success" then
+		return nil, decision, decision_message or update_message
+	end
+	local status, status_code, status_message = get_erasure_status_internal(
+		name, scope, key, user_id, deadline - now_local(), mock
+	)
+	if status_code ~= "success" or status == nil or not status.Erased or status.ErasureId ~= erasure_id then
+		return nil, status_code == "not_found" and "unknown" or status_code,
+			status_message or "erasure fence was not confirmed by an uncached read"
+	end
+	return status, "success", nil
+end
+
+local function purge_erased_versions_internal(
+	name: string,
+	scope: string,
+	key: string,
+	user_id: number,
+	erasure_id: string,
+	max_versions: number?,
+	operation_deadline: number?,
+	mock: boolean
+): (ErasurePurgeProgress?, ResultCode, string?)
+	local valid_identity, identity_message = validate_store_identity(name, scope, key)
+	if not valid_identity then return nil, "invalid", identity_message end
+	if not valid_erasure_user_id(user_id) then return nil, "invalid", "user_id must be a positive integer" end
+	if type(erasure_id) ~= "string" or erasure_id == "" or #erasure_id > 96 then
+		return nil, "invalid", "erasure_id must be 1 to 96 bytes"
+	end
+	local limit = if max_versions == nil then 16 else max_versions
+	if not finite(limit) or math.floor(limit) ~= limit or limit < 1 or limit > 64 then
+		return nil, "invalid", "max_versions must be an integer from 1 to 64"
+	end
+	local deadline, deadline_error = resolve_operation_deadline(operation_deadline)
+	if deadline == nil then return nil, "invalid", deadline_error end
+	local status, status_code, status_message = get_erasure_status_internal(
+		name, scope, key, user_id, deadline - now_local(), mock
+	)
+	if status_code ~= "success" or status == nil then
+		return nil, status_code, status_message or "could not confirm the durable erasure fence"
+	end
+	if not status.Erased or status.ErasureId ~= erasure_id then
+		return nil, "fenced", "historical version purge requires the exact durable erasure fence"
+	end
+	local backend = make_backend(name, scope, key, mock)
+	local current_version = status.Version
+	if type(current_version) ~= "string" or current_version == "" then
+		return nil, "unknown", "erasure marker version was not returned by the storage adapter"
+	end
+	local entries, list_code, list_message = list_versions_internal(
+		name, scope, key, Enum.SortDirection.Descending, nil, nil, 100, deadline - now_local(), mock
+	)
+	if list_code ~= "success" or entries == nil then
+		return nil, list_code or "unknown", list_message or "historical version inventory could not be read"
+	end
+	local current_found = false
+	for _, entry in ipairs(entries) do
+		if entry.Version == current_version then current_found = true; break end
+	end
+	if not current_found then
+		return nil, "conflict", "the durable erasure fence version is missing from version history"
+	end
+	local removed = 0
+	for _, entry in ipairs(entries) do
+		if removed >= limit then break end
+		if entry.Version ~= current_version and not entry.IsDeleted then
+			if mock then
+				local mock_entry = get_mock_store(name, scope)[key]
+				if mock_entry == nil then return nil, "unknown", "mock profile disappeared during historical purge" end
+				if mock_entry.Version == entry.Version then
+					return nil, "conflict", "historical purge refused to remove the current fence version"
+				end
+				if mock_entry.Versions[entry.Version] ~= nil then
+					mock_entry.Versions[entry.Version] = nil
+					for index = #mock_entry.VersionOrder, 1, -1 do
+						if mock_entry.VersionOrder[index] == entry.Version then
+							table.remove(mock_entry.VersionOrder, index)
+							break
+						end
+					end
+				end
+			else
+				local store = backend.store
+				if store == nil then return nil, "invalid", "backend store is missing" end
+				if not acquire_request(nil, deadline, false, Enum.DataStoreRequestType.StandardRemove) then
+					return nil, "budget", "historical version removal request deadline exceeded"
+				end
+				local remove_ok, remove_error = pcall(function()
+					store:RemoveVersionAsync(key, entry.Version)
+				end)
+				release_slot()
+				if not remove_ok then
+					local after_failure, after_code = list_versions_internal(
+						name, scope, key, Enum.SortDirection.Descending, nil, nil, 100, deadline - now_local(), false
+					)
+					if after_code ~= "success" or after_failure == nil then
+						return nil, "unknown", tostring(remove_error)
+					end
+					local still_present = false
+					for _, current_entry in ipairs(after_failure) do
+						if current_entry.Version == entry.Version and not current_entry.IsDeleted then
+							still_present = true
+							break
+						end
+					end
+					if still_present then return nil, "unknown", tostring(remove_error) end
+				end
+			end
+			removed += 1
+			local refreshed, refreshed_code, refreshed_message = get_erasure_status_internal(
+				name, scope, key, user_id, deadline - now_local(), mock
+			)
+			if refreshed_code ~= "success" or refreshed == nil or not refreshed.Erased or refreshed.ErasureId ~= erasure_id then
+				return nil, "conflict", refreshed_message or "erasure fence changed during historical purge"
+			end
+			current_version = refreshed.Version or current_version
+		end
+		if now_local() >= deadline then
+			return nil, "budget", "historical version purge deadline expired"
+		end
+	end
+	local remaining_entries, remaining_code, remaining_message = list_versions_internal(
+		name, scope, key, Enum.SortDirection.Descending, nil, nil, 100, deadline - now_local(), mock
+	)
+	if remaining_code ~= "success" or remaining_entries == nil then
+		return nil, remaining_code or "unknown", remaining_message or "could not verify historical version removal"
+	end
+	local latest_status, latest_code, latest_message = get_erasure_status_internal(
+		name, scope, key, user_id, deadline - now_local(), mock
+	)
+	if latest_code ~= "success" or latest_status == nil or not latest_status.Erased
+		or latest_status.ErasureId ~= erasure_id
+	then
+		return nil, "conflict", latest_message or "erasure fence changed before purge completion was confirmed"
+	end
+	current_version = latest_status.Version or current_version
+	local complete = #remaining_entries < 100
+	if complete then
+		for _, entry in ipairs(remaining_entries) do
+			if entry.Version ~= current_version and not entry.IsDeleted then
+				complete = false
+				break
+			end
+		end
+	end
+	return {
+		UserId = user_id,
+		ErasureId = erasure_id,
+		Removed = removed,
+		Complete = complete,
+		CurrentVersion = current_version,
+	}, "success", nil
+end
+
+function RecordStore.get_erasure_status_async(
+	name: string,
+	scope: string,
+	key: string,
+	user_id: number,
+	operation_deadline: number?
+): (ErasureStatus?, ResultCode, string?)
+	return get_erasure_status_internal(name, scope, key, user_id, operation_deadline, false)
+end
+
+function RecordStore.erase_user_data_async(
+	name: string,
+	scope: string,
+	key: string,
+	user_id: number,
+	erasure_id: string,
+	expected_generation: number?,
+	operation_deadline: number?
+): (ErasureStatus?, ResultCode, string?)
+	return erase_user_data_internal(
+		name, scope, key, user_id, erasure_id, expected_generation, operation_deadline, false
+	)
+end
+
+function RecordStore.purge_erased_versions_async(
+	name: string,
+	scope: string,
+	key: string,
+	user_id: number,
+	erasure_id: string,
+	max_versions: number?,
+	operation_deadline: number?
+): (ErasurePurgeProgress?, ResultCode, string?)
+	return purge_erased_versions_internal(
+		name, scope, key, user_id, erasure_id, max_versions, operation_deadline, false
+	)
+end
+
 local function data_values_equal(left: JsonValue?, right: JsonValue?, depth: number?): boolean
 	local current_depth = depth or 0
 	if current_depth > 64 then
@@ -18322,6 +18789,31 @@ RecordStore.Mock = (function()
 		return if entry == nil then nil else copy_value(entry.Value)
 	end
 
+
+	local function mock_get_erasure_status_async(
+		name: string, scope: string, key: string, user_id: number, operation_deadline: number?
+	): (ErasureStatus?, ResultCode, string?)
+		return get_erasure_status_internal(name, scope, key, user_id, operation_deadline, true)
+	end
+
+	local function mock_erase_user_data_async(
+		name: string, scope: string, key: string, user_id: number, erasure_id: string,
+		expected_generation: number?, operation_deadline: number?
+	): (ErasureStatus?, ResultCode, string?)
+		return erase_user_data_internal(
+			name, scope, key, user_id, erasure_id, expected_generation, operation_deadline, true
+		)
+	end
+
+	local function mock_purge_erased_versions_async(
+		name: string, scope: string, key: string, user_id: number, erasure_id: string,
+		max_versions: number?, operation_deadline: number?
+	): (ErasurePurgeProgress?, ResultCode, string?)
+		return purge_erased_versions_internal(
+			name, scope, key, user_id, erasure_id, max_versions, operation_deadline, true
+		)
+	end
+
 	local function mock_get_record_version_raw(name: string, scope: string, key: string, version: string): unknown
 		local store = get_mock_store(name, scope)
 		local entry = store[key]
@@ -18501,6 +18993,9 @@ RecordStore.Mock = (function()
 			end
 		end)(),
 		read_async = read_async_mock,
+		get_erasure_status_async = mock_get_erasure_status_async,
+		erase_user_data_async = mock_erase_user_data_async,
+		purge_erased_versions_async = mock_purge_erased_versions_async,
 		claim_queue_message = mock_claim_queue_message,
 		dead_letter_queue_message = mock_dead_letter_queue_message,
 		list_versions_async = list_versions_mock,
