@@ -9564,12 +9564,11 @@ local function legacy_queue_retirement_status(
 	end
 	local retired_at_raw = marker.retired_at
 	local source_version = marker.source_implementation_version
-	if type(retired_at_raw) ~= "number" or not finite(retired_at_raw)
+	if type(retired_at_raw) ~= "number" or not math.isfinite(retired_at_raw)
 		or retired_at_raw < 0 or source_version ~= 1
 	then
 		return false, "corrupt", "legacy queue retirement metadata is malformed"
 	end
-	local retired_at = retired_at_raw
 	return true, nil, nil
 end
 
@@ -9593,7 +9592,7 @@ local function ensure_legacy_queue_clear(
 		mock
 	)
 	local retired_at = queue_now_unix(mock)
-	if not finite(retired_at) or retired_at < 0 then
+	if not math.isfinite(retired_at) or retired_at < 0 then
 		return "invalid", "legacy queue retirement clock returned an invalid timestamp"
 	end
 
@@ -9831,7 +9830,7 @@ local function build_mailbox_v2_freeze_candidate(
 		then
 			local _, _, existing_code, existing_message = inspect_mailbox_v2_freeze_marker(marker, owner, migration_id)
 			if existing_code == nil then return nil, nil, nil end
-			return nil, existing_code :: ResultCode?, existing_message
+			return nil, normalize_result_code(existing_code) or "migration", existing_message
 		end
 	end
 
@@ -9892,7 +9891,7 @@ local function begin_mailbox_v2_migration_internal(
 	local context, context_error, context_message = mailbox_v2_migration_context(
 		name, scope, key, migration_id, queue_store_name, max_queue_bytes, operation_deadline, mock
 	)
-	if context == nil then return context_error or ("invalid" :: ResultCode), context_message end
+	if context == nil then return normalize_result_code(context_error) or "invalid", context_message end
 	local frozen_at = queue_now_unix(mock)
 	if not math.isfinite(frozen_at) or frozen_at < 0 then
 		return "invalid", "queue clock returned an invalid Unix timestamp"
@@ -9918,8 +9917,8 @@ local function begin_mailbox_v2_migration_internal(
 	local _, candidate_code, candidate_message = build_mailbox_v2_freeze_candidate(
 		fresh, context.owner, context.migration_id, frozen_at, context.max_bytes
 	)
-	if candidate_code ~= nil then return candidate_code :: ResultCode, candidate_message end
-	if update_code ~= nil then return normalize_result_code(update_code) or ("unknown" :: ResultCode), update_message or inspect_message end
+	if candidate_code ~= nil then return normalize_result_code(candidate_code) or "migration", candidate_message end
+	if update_code ~= nil then return normalize_result_code(update_code) or "unknown", update_message or inspect_message end
 	return "unknown", "freeze update returned without a durable freeze marker"
 end
 
@@ -9936,12 +9935,12 @@ local function get_mailbox_v2_migration_status_internal(
 	local context, context_error, context_message = mailbox_v2_migration_context(
 		name, scope, key, migration_id, queue_store_name, max_queue_bytes, operation_deadline, mock
 	)
-	if context == nil then return nil, context_error or ("invalid" :: ResultCode), context_message end
+	if context == nil then return nil, normalize_result_code(context_error) or "invalid", context_message end
 	local raw, _, code, message = backend_get(context.backend, false, context.deadline, nil)
 	if code ~= nil then return nil, normalize_result_code(code) or "unknown", message end
 	local _, status, marker_code, marker_message =
 		inspect_mailbox_v2_freeze_marker(raw, context.owner, context.migration_id)
-	if status == nil then return nil, marker_code or ("migration" :: ResultCode), marker_message end
+	if status == nil then return nil, normalize_result_code(marker_code) or "migration", marker_message end
 	return status, "success", nil
 end
 
@@ -9977,12 +9976,12 @@ local function get_mailbox_v2_migration_source_page_internal(
 	local context, context_error, context_message = mailbox_v2_migration_context(
 		name, scope, key, migration_id, queue_store_name, max_queue_bytes, operation_deadline, mock
 	)
-	if context == nil then return nil, nil, false, context_error or ("invalid" :: ResultCode), context_message end
+	if context == nil then return nil, nil, false, normalize_result_code(context_error) or "invalid", context_message end
 	local raw, _, code, message = backend_get(context.backend, false, context.deadline, nil)
 	if code ~= nil then return nil, nil, false, normalize_result_code(code) or "unknown", message end
 	local queue, _, marker_code, marker_message =
 		inspect_mailbox_v2_freeze_marker(raw, context.owner, context.migration_id)
-	if queue == nil then return nil, nil, false, marker_code or ("migration" :: ResultCode), marker_message end
+	if queue == nil then return nil, nil, false, normalize_result_code(marker_code) or "migration", marker_message end
 	local source: { any } = if kind == "active" then queue.messages else queue.dead_letters
 	if offset > #source then return nil, nil, false, "conflict", "migration cursor exceeds the frozen source length" end
 	local amount = math.min(limit, #source - offset)

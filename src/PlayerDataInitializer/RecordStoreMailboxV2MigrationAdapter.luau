@@ -52,7 +52,7 @@ function Adapter.bind(config: Config)
 		return config.store_name, config.scope, config.profile_key, config.migration_id,
 			config.queue_store_name, config.max_queue_bytes, config.operation_deadline
 	end
-	local function source_page(kind: string, migration_id: string, cursor: string?, limit: number): (any?, string?, boolean, string?): (any?, string?, boolean, string?)
+	local function source_page(kind: string, migration_id: string, cursor: string?, limit: number): ({ [number]: { [string]: unknown } }?, string?, boolean, string?)
 		if migration_id ~= config.migration_id then return nil, nil, false, "migration ID mismatch" end
 		local name, scope, key, id, queue_store, max_bytes, deadline = args()
 		local items, next_cursor, complete, status, message =
@@ -62,28 +62,46 @@ function Adapter.bind(config: Config)
 		if status ~= "success" then return nil, nil, false, fail_result(status, message) end
 		return items, next_cursor, complete, nil
 	end
+	local function freeze_legacy(migration_id: string): (boolean, string?)
+		if migration_id ~= config.migration_id then return false, "migration ID mismatch" end
+		local name, scope, key, id, queue_store, max_bytes, deadline = args()
+		local status, message = record_store.begin_mailbox_v2_migration_async(
+			name, scope, key, id, queue_store, max_bytes, deadline
+		)
+		return status == "success", if status == "success" then nil else fail_result(status, message)
+	end
+	local function verify_source_frozen(migration_id: string): (boolean, string?)
+		if migration_id ~= config.migration_id then return false, "migration ID mismatch" end
+		local name, scope, key, id, queue_store, max_bytes, deadline = args()
+		local snapshot, status, message = record_store.get_mailbox_v2_migration_status_async(
+			name, scope, key, id, queue_store, max_bytes, deadline
+		)
+		if status ~= "success" or snapshot == nil then return false, fail_result(status, message) end
+		return snapshot.MigrationId == migration_id,
+			if snapshot.MigrationId == migration_id then nil else "freeze marker identity mismatch"
+	end
+	local function verify_complete(migration_id: string, active_count: number, dead_letter_count: number): (boolean, string?)
+		if migration_id ~= config.migration_id then return false, "migration ID mismatch" end
+		local name, scope, key, id, queue_store, max_bytes, deadline = args()
+		local snapshot, status, message = record_store.get_mailbox_v2_migration_status_async(
+			name, scope, key, id, queue_store, max_bytes, deadline
+		)
+		if status ~= "success" or snapshot == nil then return false, fail_result(status, message) end
+		if snapshot.ActiveCount ~= active_count or snapshot.DeadLetterCount ~= dead_letter_count then
+			return false, "imported counts do not match the frozen source counts"
+		end
+		if type(config.verify_complete) == "function" then
+			return config.verify_complete(migration_id, active_count, dead_letter_count)
+		end
+		return true, nil
+	end
 	return {
 		migration_id = config.migration_id,
 		mailbox = config.mailbox,
 		page_size = config.page_size,
 		now_ms = config.now_ms,
-		freeze_legacy = function(migration_id: string): (boolean, string?): (boolean, string?)
-			if migration_id ~= config.migration_id then return false, "migration ID mismatch" end
-			local name, scope, key, id, queue_store, max_bytes, deadline = args()
-			local status, message = record_store.begin_mailbox_v2_migration_async(
-				name, scope, key, id, queue_store, max_bytes, deadline
-			)
-			return status == "success", if status == "success" then nil else fail_result(status, message)
-		end,
-		verify_source_frozen = function(migration_id: string): (boolean, string?): (boolean, string?)
-			if migration_id ~= config.migration_id then return false, "migration ID mismatch" end
-			local name, scope, key, id, queue_store, max_bytes, deadline = args()
-			local snapshot, status, message = record_store.get_mailbox_v2_migration_status_async(
-				name, scope, key, id, queue_store, max_bytes, deadline
-			)
-			if status ~= "success" or snapshot == nil then return false, fail_result(status, message) end
-			return snapshot.MigrationId == migration_id, if snapshot.MigrationId == migration_id then nil else "freeze marker identity mismatch"
-		end,
+		freeze_legacy = freeze_legacy,
+		verify_source_frozen = verify_source_frozen,
 		legacy_writers_drained = config.legacy_writers_drained,
 		read_active_page = function(migration_id: string, cursor: string?, limit: number)
 			return source_page("active", migration_id, cursor, limit)
@@ -93,21 +111,7 @@ function Adapter.bind(config: Config)
 		end,
 		load_checkpoint = config.load_checkpoint,
 		save_checkpoint = config.save_checkpoint,
-		verify_complete = function(migration_id: string, active_count: number, dead_letter_count: number): (boolean, string?): (boolean, string?)
-			if migration_id ~= config.migration_id then return false, "migration ID mismatch" end
-			local name, scope, key, id, queue_store, max_bytes, deadline = args()
-			local snapshot, status, message = record_store.get_mailbox_v2_migration_status_async(
-				name, scope, key, id, queue_store, max_bytes, deadline
-			)
-			if status ~= "success" or snapshot == nil then return false, fail_result(status, message) end
-			if snapshot.ActiveCount ~= active_count or snapshot.DeadLetterCount ~= dead_letter_count then
-				return false, "imported counts do not match the frozen source counts"
-			end
-			if type(config.verify_complete) == "function" then
-				return config.verify_complete(migration_id, active_count, dead_letter_count)
-			end
-			return true, nil
-		end,
+		verify_complete = verify_complete,
 		activate_v2 = config.activate_v2,
 	}
 end
