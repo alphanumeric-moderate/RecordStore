@@ -671,7 +671,7 @@ These checks do **not** establish complete RTBF for an application until its rea
 
 ### PlayerDataCore integration
 
-`src/PlayerDataInitializer/PlayerDataErasure.luau` is an opt-in family adapter for the current `PlayerDataCore` layout (`PlayerData_Test1`, scope `global`, key `Player_{user_id}`). It supplies a bounded exact-key inventory, an active-player kick hook, a same-key generation-aware erasure fence, and bounded historical-version cleanup. The fence replaces the profile envelope with an intentionally unsupported future implementation marker, so older RecordStore versions fail closed rather than recreating the profile. The same marker remains authoritative for new RecordStore code. Erasure status is read through `RecordStore.get_erasure_status_async`; `RecordStore.erase_user_data_async` installs/reconciles the fence; `RecordStore.purge_erased_versions_async` removes historical non-deleted versions in bounded batches. Roblox currently marks `DataStore:RemoveVersionAsync` deprecated and says not to use it for new work. This implementation is therefore an opt-in, best-effort adapter pending a supported replacement or a verified migration strategy; do not treat the historical-version purge as production-accepted. The default 1,024-version scan is bounded, so callers must resume until `Complete == true`.
+`src/PlayerDataInitializer/PlayerDataErasure.luau` is an opt-in family adapter for the current `PlayerDataCore` layout (`PlayerData_Test1`, scope `global`, key `Player_{user_id}`). It supplies a bounded exact-key inventory, an active-player kick hook, a same-key generation-aware erasure fence, and bounded historical-version cleanup. The fence replaces the profile envelope with an intentionally unsupported future implementation marker, so older RecordStore versions fail closed rather than recreating the profile. The same marker remains authoritative for new RecordStore code. Erasure status is read through `RecordStore.get_erasure_status_async`; `RecordStore.erase_user_data_async` installs/reconciles the fence; `RecordStore.purge_erased_versions_async` removes historical non-deleted versions in bounded batches. Roblox currently marks `DataStore:RemoveVersionAsync` deprecated and says not to use it for new work. The adapter therefore refuses to purge older live versions by default: set `allow_deprecated_remove_version = true` only after explicitly accepting that platform risk. This temporary opt-in remains a release blocker until a supported alternative or a verified migration strategy is available. Mock-backed regression does not validate live Roblox retention behavior. The default 1,024-version scan is bounded, so callers must resume until `Complete == true`.
 
 The manifest store is injected rather than silently constructed by this adapter. It must provide `GetAsyncFresh` that bypasses Roblox's cached read view and an atomic `UpdateAsync` adapter suitable for the coordinator's compare-and-update manifests. Do not substitute cached reads or a non-atomic read/write pair.
 
@@ -681,6 +681,9 @@ local PlayerDataErasure = require(script.Parent.PlayerDataErasure)
 local coordinator = PlayerDataErasure.new(manifest_store_adapter, {
     -- Set true only after auditing every user-key layout owned by PlayerDataCore.
     profile_family_verified = false,
+
+    -- Historical cleanup uses a deprecated Roblox API; default stays fail-closed.
+    allow_deprecated_remove_version = false,
 
     -- Verify the rendered templates against independent, deployment-specific evidence.
     verify_templates = function(user_id, rendered_templates)
