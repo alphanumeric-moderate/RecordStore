@@ -248,6 +248,7 @@ local function new_inbox()
 		end
 		if total_bytes > MAX_REQUEST_BYTES then return { code = "capacity", message = "batch request material exceeds the bounded receipt budget" } end
 		local request = { batch_id = batch_id, items = normalized }
+		local received_at = if finite(options.now_unix) then options.now_unix else os.time()
 		local applied, duplicates = 0, 0
 		local result = transaction_run(record, "rv2:inbox:" .. digest(batch_id), request, function(current)
 			if type(current) ~= "table" then error("inbox batching requires table profile data") end
@@ -272,7 +273,7 @@ local function new_inbox()
 						canonical_request = message.canonical_request,
 						message_type = message.message_type,
 						payload_version = message.payload_version,
-						received_at = if finite(options.now_unix) then options.now_unix else os.time(),
+						received_at = received_at,
 					}
 					data[RESERVED .. "inbox_receipts"] = receipts
 					count += 1
@@ -916,6 +917,7 @@ local function new_tracer(options)
 		end
 		if #batch == 0 then return { code = "empty", flushed = 0 } end
 		local key = "rv2t-" .. digest(operation_id)
+		local flushed_at = os.time()
 		local stored, write_error = adapter_call(self.store, "UpdateAsync", key, function(old)
 			if old ~= nil and old.operation_id ~= operation_id then return old end
 			local next_value = if type(old) == "table" then copy(old) else { version = 1, operation_id = operation_id, events = {}, truncated = false }
@@ -931,7 +933,7 @@ local function new_tracer(options)
 			end
 			table.sort(next_value.events, trace_event_less)
 			while #next_value.events > 128 do table.remove(next_value.events, 1); next_value.truncated = true end
-			next_value.updated_at = os.time()
+			next_value.updated_at = flushed_at
 			return next_value
 		end)
 		if write_error then return { code = "unknown", flushed = 0, message = write_error } end
@@ -1057,6 +1059,7 @@ local function new_migrations(options)
 		return true
 	end
 	local function save_manifest(step, patch)
+		local manifest_now = os.time()
 		if manifest_store == nil then
 			if require_durable_manifest then return false, "durable manifest store is required" end
 			return true, "process_local"
@@ -1074,7 +1077,7 @@ local function new_migrations(options)
 			local created = {
 				version = 1, store_name = step.store_name, from_version = step.from_version,
 				to_version = step.to_version, id = step.id, revision = step.revision,
-				status = "registered", created_at = os.time(), updated_at = os.time(),
+				status = "registered", created_at = manifest_now, updated_at = manifest_now,
 			}
 			if patch ~= nil then apply_manifest_patch(created, patch) end
 			decision = "committed"
@@ -1232,6 +1235,7 @@ local function new_migrations(options)
 		if not valid_text(operator_id, 96) or not valid_text(reason, 512) then return { code = "invalid", message = "resolution requires operator ID and reason" } end
 		local step = self.ids[migration_id]
 		if not step or step.store_name ~= store_name or step.revision ~= revision then return { code = "not_found" } end
+		local resolved_at = os.time()
 		local decision = "unknown"
 		local value, message = adapter_call(manifest_store, "UpdateAsync", manifest_key(step), function(old)
 			decision = "unknown"
@@ -1239,8 +1243,8 @@ local function new_migrations(options)
 			if old.status ~= "quarantined" then decision = if old.status == "registered" then "duplicate" else "conflict"; return old end
 			local next_value = copy(old)
 			next_value.status = "registered"
-			next_value.resolution = { operator_id = operator_id, reason = reason, at_unix = os.time() }
-			next_value.updated_at = os.time()
+			next_value.resolution = { operator_id = operator_id, reason = reason, at_unix = resolved_at }
+			next_value.updated_at = resolved_at
 			decision = "committed"
 			return next_value
 		end)
@@ -1344,6 +1348,7 @@ local function new_doctor(record_store)
 		local current_ok, current_text = pcall(canonical, current_data)
 		if not current_ok then return { code = "corrupt", message = tostring(current_text) } end
 		local expected_data_digest = digest(current_text)
+		local restore_requested_at = os.time()
 		local historical_ok, historical_text = pcall(canonical, historical_data)
 		if not historical_ok then return { code = "invalid", message = tostring(historical_text) } end
 		local request = {
@@ -1367,7 +1372,7 @@ local function new_doctor(record_store)
 			for key, value in pairs(historical_data) do if not is_reserved_data_key(key) then merged[key] = copy(value) end end
 			local audit = merged[RESERVED .. "repair_audit"] or {}
 			if type(audit) ~= "table" then audit = {} end
-			table.insert(audit, { restore_id = restore_id, operator_id = operator_id, reason = reason, before_revision = expected_revision, at_unix = os.time(), result = "requested" })
+			table.insert(audit, { restore_id = restore_id, operator_id = operator_id, reason = reason, before_revision = expected_revision, at_unix = restore_requested_at, result = "requested" })
 			while #audit > 32 do table.remove(audit, 1) end
 			merged[RESERVED .. "repair_audit"] = audit
 			return merged
@@ -1387,6 +1392,7 @@ local function new_doctor(record_store)
 		if expected_revision ~= nil and stats.revision ~= expected_revision then return { code = "conflict", message = "record revision changed after diagnosis" } end
 		local identity_text = canonical({ store_name = identity.store_name, scope = identity.scope, profile_key = identity.profile_key })
 		local key = "rv2q-" .. digest(identity_text)
+		local quarantine_now = os.time()
 		local decision = "unknown"
 		local value, message = adapter_call(quarantine_store, "UpdateAsync", key, function(old)
 			decision = "unknown"
@@ -1400,7 +1406,7 @@ local function new_doctor(record_store)
 				version = 1, identity_text = identity_text, store_name = identity.store_name,
 				scope = identity.scope, profile_key = identity.profile_key, quarantine_id = quarantine_id,
 				status = "quarantined", observed_revision = stats.revision, observed_generation = stats.generation,
-				operator_id = operator_id, reason = reason, created_at = os.time(), updated_at = os.time(),
+				operator_id = operator_id, reason = reason, created_at = quarantine_now, updated_at = quarantine_now,
 			}
 		end)
 		if message then
@@ -1447,6 +1453,7 @@ local function new_doctor(record_store)
 		if expected_revision ~= nil and stats.revision ~= expected_revision then return { code = "conflict", message = "record revision changed after quarantine" } end
 		local identity_text = canonical({ store_name = identity.store_name, scope = identity.scope, profile_key = identity.profile_key })
 		local key = "rv2q-" .. digest(identity_text)
+		local resolution_at = os.time()
 		local decision = "unknown"
 		local value, message = adapter_call(quarantine_store, "UpdateAsync", key, function(old)
 			decision = "unknown"
@@ -1455,8 +1462,8 @@ local function new_doctor(record_store)
 			if old.status ~= "quarantined" then decision = "conflict"; return old end
 			local next_value = copy(old)
 			next_value.status = "resolved"
-			next_value.resolution = { operator_id = operator_id, reason = reason, at_unix = os.time(), revision = stats.revision }
-			next_value.updated_at = os.time()
+			next_value.resolution = { operator_id = operator_id, reason = reason, at_unix = resolution_at, revision = stats.revision }
+			next_value.updated_at = resolution_at
 			decision = "committed"
 			return next_value
 		end)
@@ -1857,6 +1864,7 @@ local function saga_coordinator(store, options)
 			local result = transaction_run(record, operation_id, leg_request, reducer)
 			local leg_state = if result.code == "committed" or result.code == "duplicate"
 				then "committed" elseif result.code == "unknown" then "unknown" else "failed"
+			local leg_updated_at = os.time()
 			local value, code, update_error = update_saga(id, request, function(current)
 				if current.phase == "settled" or current.phase == "rejected" or current.phase == "manual_resolution_required" then
 					return nil, "conflict"
@@ -1874,7 +1882,7 @@ local function saga_coordinator(store, options)
 					attempts = (if type(prior) == "table" then prior.attempts else 0) + 1,
 					state = leg_state,
 					last_code = tostring(result.code or "unknown"),
-					updated_at = os.time(),
+					updated_at = leg_updated_at,
 					last_error = if type(result.message) == "string" and result.message ~= ""
 						then text_error(result.message, 256) else nil,
 				}
@@ -2074,6 +2082,7 @@ local function new_receipt_processor(config)
 			end
 			local revision = product.revision or "1"
 			local request = { receipt_id = id, user_id = user_id, product_id = product_id, product_revision = revision }
+			local granted_at = os.time()
 			local result = transaction_run(record, "rv2:purchase:" .. digest(id), request, function(current)
 				if type(current) ~= "table" then error("purchase profile data must be a table") end
 				local data = copy(current); local field = RESERVED .. "purchase_receipts"
@@ -2088,7 +2097,7 @@ local function new_receipt_processor(config)
 				if type(granted_data) ~= "table" then error("purchase grant rejected: " .. tostring(grant_error)) end
 				receipts = granted_data[field] or receipts
 				if type(receipts) ~= "table" then error("grant reducer corrupted purchase receipt namespace") end
-				receipts[id] = { user_id = user_id, product_id = product_id, revision = revision, granted_at = os.time() }
+				receipts[id] = { user_id = user_id, product_id = product_id, revision = revision, granted_at = granted_at }
 				granted_data[field] = receipts
 				return granted_data
 			end)
@@ -2461,6 +2470,7 @@ local function new_erasure(store, families, options)
 			end
 			completed += 1
 			local progress_decision = "unknown"
+			local progress_at = os.time()
 			local updated, progress_error = adapter_call(store, "UpdateAsync", key, function(old)
 				progress_decision = "unknown"
 				if type(old) ~= "table" or old.user_id ~= user_id or old.erasure_id ~= erasure_id then
@@ -2484,7 +2494,7 @@ local function new_erasure(store, families, options)
 				value.cursor = index
 				value.completed_count = math.max(value.completed_count or 0, completed)
 				value.status = "in_progress"
-				value.updated_at = os.time()
+				value.updated_at = progress_at
 				value.last_error = nil
 				progress_decision = "committed"
 				return value
@@ -2498,6 +2508,7 @@ local function new_erasure(store, families, options)
 			cursor = updated.cursor or cursor
 			completed = updated.completed_count or completed
 		end
+		local finalized_at = os.time()
 		local final, final_error = adapter_call(store, "UpdateAsync", key, function(old)
 			if type(old) ~= "table" or old.user_id ~= user_id or old.erasure_id ~= erasure_id
 				or old.status == "completed" or old.status == "resolved"
@@ -2505,8 +2516,8 @@ local function new_erasure(store, families, options)
 			local value = copy(old)
 			value.completed_count = math.max(value.completed_count or 0, completed)
 			value.status = if value.cursor >= #value.entries then "completed" else "in_progress"
-			value.completed_at = if value.status == "completed" then os.time() else nil
-			value.updated_at = os.time()
+			value.completed_at = if value.status == "completed" then finalized_at else nil
+			value.updated_at = finalized_at
 			return value
 		end)
 		if final_error then return { code = "unknown", message = final_error } end
@@ -2675,6 +2686,7 @@ local function new_projections(store, options)
 			end
 		end
 		local key, decision = key_for(name, event.entity_id), "unknown"
+		local projected_at = os.time()
 		local value, write_error = adapter_call(store, "UpdateAsync", key, function(old)
 			decision = "unknown"
 			if old ~= nil and (type(old) ~= "table" or old.entity_id ~= event.entity_id or old.projection_name ~= name) then
@@ -2698,7 +2710,7 @@ local function new_projections(store, options)
 			local result = copy(current)
 			result.value = next_value
 			result.source_revision = event.source_revision
-			result.updated_at = os.time()
+			result.updated_at = projected_at
 			result.recent_events = copy(current.recent_events)
 			table.insert(result.recent_events, { event_id = event.event_id, fingerprint = event_fingerprint })
 			while #result.recent_events > 64 do table.remove(result.recent_events, 1) end
@@ -2906,6 +2918,7 @@ local function new_projections(store, options)
 	function service:ReserveUnique(namespace, unique_value, entity_id, operation_id)
 		if not valid_text(namespace, 32) or not valid_text(unique_value, 128) or not valid_text(entity_id, 128) or not valid_text(operation_id, 128) then return { code = "invalid" } end
 		local key = "rv2u-" .. digest(namespace .. ":" .. unique_value)
+		local reserved_at = os.time()
 		local decision = "unknown"
 		local value, message = adapter_call(store, "UpdateAsync", key, function(old)
 			if old ~= nil then
@@ -2913,7 +2926,7 @@ local function new_projections(store, options)
 				return old
 			end
 			decision = "committed"
-			return { namespace = namespace, unique_value = unique_value, entity_id = entity_id, operation_id = operation_id, created_at = os.time() }
+			return { namespace = namespace, unique_value = unique_value, entity_id = entity_id, operation_id = operation_id, created_at = reserved_at }
 		end)
 		if message then
 			local observed = adapter_call(store, "GetAsync", key)
