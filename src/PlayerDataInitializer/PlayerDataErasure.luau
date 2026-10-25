@@ -236,8 +236,11 @@ local function new(manifest_store: any, options: Options?): any
 			if progress.Complete ~= true then
 				local retention_until = progress.RetentionUntil
 				if type(retention_until) == "number" and math.isfinite(retention_until) then
-					return "retryable", "historical profile versions are retained by Roblox until approximately Unix time "
-						.. tostring(retention_until) .. "; keep the writer fence and resume the same erasure ID after retention expiry"
+					if os.time() < retention_until then
+						return "retryable", "historical profile versions are retained by Roblox until approximately Unix time "
+							.. tostring(retention_until) .. "; keep the writer fence and resume the same erasure ID after retention expiry"
+					end
+					return "retryable", "the retention deadline passed but historical versions remain visible; keep the writer fence, do not certify erasure completion, and investigate live DataStore retention before resuming"
 				end
 				return "retryable", "historical profile purge remains incomplete; resume the same erasure ID"
 			end
