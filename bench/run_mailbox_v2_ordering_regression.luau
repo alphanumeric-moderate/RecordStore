@@ -592,6 +592,30 @@ local function test_future_message_version_fails_closed()
 		"dead-letter recovery mutated a future-version canonical message")
 end
 
+local function test_future_message_version_cannot_confirm_duplicate_producer_receipt()
+	local mailbox, store = new_mailbox()
+	local producer_key = "future-producer-v3-id"
+	local queued = enqueue(mailbox, "future-producer", producer_key, nil, "normal")
+	local canonical = store.values[queued.message_id]
+	assert(type(canonical) == "table", "producer fixture omitted its canonical record")
+	canonical.version = 3
+	store.values[queued.message_id] = canonical
+	local writes_before_retry = store.update_calls
+
+	local retry = mailbox:EnqueueAsync("future-producer", { id = producer_key }, {
+		idempotency_key = producer_key,
+		priority = "normal",
+		available_at = now_ms,
+	})
+	assert(retry.code == "unsupported_schema",
+		"V2 producer retry acknowledged a future-version canonical record as a duplicate")
+	assert(store.update_calls == writes_before_retry,
+		"future-version producer receipt triggered a canonical or index write")
+	assert(store.values[queued.message_id].version == 3
+		and store.values[queued.message_id].state == "ready",
+		"future-version producer record was modified by V2 compatibility handling")
+end
+
 local function test_high_priority_burst_does_not_starve_background_messages()
 	local mailbox = new_mailbox({ strict_ordering_enabled = true })
 	for index = 1, 7 do
@@ -1027,6 +1051,7 @@ test_corrupt_ordering_index_fails_closed()
 test_stale_cache_cannot_bypass_claim_metadata_validation()
 test_corrupt_ready_message_metadata_fails_closed()
 test_future_message_version_fails_closed()
+test_future_message_version_cannot_confirm_duplicate_producer_receipt()
 test_high_priority_burst_does_not_starve_background_messages()
 test_clock_skew_cannot_break_ordering_under_adversarial_sort_keys()
 test_priority_burst_policy_is_bounded_and_configurable()

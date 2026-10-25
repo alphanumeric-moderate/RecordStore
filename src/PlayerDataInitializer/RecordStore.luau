@@ -4432,8 +4432,14 @@ do
 		end
 		local existing = as_dict(existing_value)
 		if existing ~= nil then
-			if not same_owner(existing.owner, self.owner) or existing.request_text ~= request_text then
-				return ok("conflict", route, nil, "idempotency route is already bound to a different request or owner")
+			if not same_owner(existing.owner, self.owner) then
+				return ok("conflict", route, nil, "idempotency route is already bound to a different owner")
+			end
+			if existing.version ~= VERSION then
+				return ok("unsupported_schema", route, nil, "canonical producer receipt version is unsupported")
+			end
+			if existing.request_text ~= request_text then
+				return ok("conflict", route, nil, "idempotency route is already bound to a different request")
 			end
 			if existing.state == "preparing" then
 				local entry = self:_get_registry_entry(route)
