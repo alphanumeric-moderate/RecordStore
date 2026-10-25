@@ -184,6 +184,13 @@ function Adapter.new(config: Config)
 		family_by_name[family.name] = family
 		all_family_names[family.name] = true
 	end
+	for _, family in ipairs(families) do
+		if family.store_name == config.checkpoint_store_name
+			and (family.scope or "") == (config.checkpoint_scope or "")
+		then
+			error("checkpoint store/scope must be separate from every catalog data family", 2)
+		end
+	end
 	for left_index, left in ipairs(families) do
 		for right_index = left_index + 1, #families do
 			local right = families[right_index]
@@ -324,6 +331,10 @@ function Adapter.new(config: Config)
 		if family == nil or locator.store_name ~= family.store_name or locator.scope ~= (family.scope or "") then
 			return { status = "invalid", message = "inventory locator does not match the explicit family catalog" }, "catalog mismatch"
 		end
+		local prefix = family.prefix or ""
+		if #key > MAX_NAME_BYTES or (prefix ~= "" and string.sub(key, 1, #prefix) ~= prefix) then
+			return { status = "invalid", message = "inventory key is outside the declared family prefix" }, "family prefix mismatch"
+		end
 		local ok, store_or_error = pcall(function()
 			return get_store(family.store_name, family.scope)
 		end)
@@ -359,10 +370,14 @@ function Adapter.new(config: Config)
 		local locator = item :: { [string]: unknown }
 		local family = if type(locator.family_name) == "string" then family_by_name[locator.family_name] else nil
 		local key = locator.key
-		if family == nil or type(key) ~= "string"
+		if family == nil or type(key) ~= "string" or not valid_text(key, MAX_NAME_BYTES)
 			or locator.store_name ~= family.store_name or locator.scope ~= (family.scope or "")
 		then
 			return "skipped", "inventory locator does not match the explicit family catalog"
+		end
+		local prefix = family.prefix or ""
+		if prefix ~= "" and string.sub(key, 1, #prefix) ~= prefix then
+			return "skipped", "inventory key is outside the declared family prefix"
 		end
 		local store_ok, store_or_error = pcall(function()
 			return get_store(family.store_name, family.scope)
@@ -381,7 +396,8 @@ function Adapter.new(config: Config)
 			return store_or_error:UpdateAsync(key, function(current, current_info)
 				if current == nil then return nil end
 				if family.get_generation(current, current_info) ~= expected_generation then return nil end
-				if not family.can_delete(current, current_info, expected_generation, config.job_id) then return nil end
+				local allowed = family.can_delete(current, current_info, expected_generation, config.job_id)
+				if allowed ~= true then return nil end
 				return family.make_tombstone(current, current_info, expected_generation, config.job_id)
 			end)
 		end)
