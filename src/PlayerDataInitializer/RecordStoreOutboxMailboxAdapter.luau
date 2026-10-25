@@ -123,6 +123,23 @@ local function validate_event(event: RecordStore.OutboxEvent): (boolean, string?
 	return true, nil
 end
 
+local function deeply_equal(left: unknown, right: unknown, depth: number?): boolean
+	local level = depth or 0
+	if level > 64 then return false end
+	if left == right then return true end
+	if type(left) ~= type(right) or type(left) ~= "table" then return false end
+	local left_table = left :: { [any]: unknown }
+	local right_table = right :: { [any]: unknown }
+	local left_count = 0
+	for key, value in pairs(left_table) do
+		left_count += 1
+		if not deeply_equal(value, right_table[key], level + 1) then return false end
+	end
+	local right_count = 0
+	for _ in pairs(right_table) do right_count += 1 end
+	return left_count == right_count
+end
+
 function OutboxMailboxAdapter.new(config: Config): Processor
 	local normalized = normalize_config(config)
 	local mailboxes = (setmetatable({}, { __mode = "k" }) :: any)
@@ -214,6 +231,29 @@ function OutboxMailboxAdapter.new(config: Config): Processor
 			if type(message_id) ~= "string" or message_id == "" then
 				emit(normalized, "destination_receipt_missing", event.EventId, "unknown", "accepted enqueue omitted its durable message ID")
 				error("destination mailbox accepted an event without a durable message ID", 0)
+			end
+			-- A message ID is necessary but not sufficient as a destination receipt.
+			-- Re-read the canonical record uncached through Mailbox V2 and verify the
+			-- exact event identity and payload before acknowledging the source outbox.
+			local read_ok, snapshot, read_result = pcall(function()
+				return mailbox:GetDeliveryAsync(message_id)
+			end)
+			if not read_ok or type(snapshot) ~= "table" or type(read_result) ~= "table"
+				or read_result.code ~= "success"
+			then
+				local status = if read_ok and type(read_result) == "table"
+					then tostring(read_result.code) else "unknown"
+				emit(normalized, "destination_receipt_unverified", event.EventId, status,
+					"accepted destination message could not be verified by durable read-back")
+				error("destination enqueue was accepted but its durable receipt is not yet verifiable; retry the same event ID", 0)
+			end
+			local snapshot_data = snapshot.Data
+			if snapshot.Id ~= message_id or snapshot.Type ~= event.EventType
+				or type(snapshot_data) ~= "table" or not deeply_equal(snapshot_data, payload)
+			then
+				emit(normalized, "destination_receipt_conflict", event.EventId, "conflict",
+					"destination receipt identity or canonical payload does not match the source event")
+				error("destination receipt failed identity/payload verification; source event remains unacknowledged", 0)
 			end
 			return true, "mailbox:" .. message_id
 		end

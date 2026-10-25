@@ -428,8 +428,8 @@ local function create_handler(
 end
 
 
-local BACKFILL_OPERATION_ID_PREFIX = "purchase-backfill:"
-local MAX_BACKFILL_PURCHASE_ID_BYTES = MAX_OPERATION_ID_BYTES - #BACKFILL_OPERATION_ID_PREFIX
+local BACKFILL_OPERATION_ID_PREFIX = "pb:"
+local MAX_BACKFILL_PURCHASE_ID_BYTES = MAX_PURCHASE_ID_BYTES
 local MAX_BACKFILL_BATCH = 16
 
 local function backfill_permanent_ledger(

@@ -54,7 +54,7 @@
 - [x] Record intentional omissions: no cross-server server/master ranking; no durable due-time index without measured need; no automatic Roblox request-rate manipulation; no reprioritization operation in the initial schema; and priority never bypasses ordering, claim fencing, or the reserved critical persistence lane. Local wakeups remain disposable hints backed by bounded polling/reconciliation.
 
 ### Slice 2: Mailbox V2 protocol and operations
-- [x] Add an opt-in outbox destination adapter that validates destination identity/UserId, requires an explicit activation guard, binds the embedded Mailbox V2 to an active destination Record, and acknowledges only accepted/duplicate enqueue results carrying a durable message ID.
+- [x] Add an opt-in outbox destination adapter that validates destination identity/UserId, requires an explicit activation guard, binds the embedded Mailbox V2 to an active destination Record, and acknowledges only accepted/duplicate enqueue results whose canonical destination record has been read back and matched against the exact event ID/type/payload.
 
 - [x] Add `ImportLegacyAsync` and `ImportLegacyDeadLetterAsync` with owner-bound stable physical routes, preserved public IDs, attempts/replay counters and Unix-second to millisecond timestamp conversion. Active legacy FIFO order is preserved only when strict ordering is explicitly enabled; old lock tokens are not reused as live claim tokens. Active imports also fail closed while the V3 processing lease is unexpired.
 - [x] Add an atomic q2 queue freeze marker, uncached bounded source page APIs, and a concrete migration adapter; old V2/V3 queue parsers fail closed on the future-version marker. Reserved IDs are rejected before freeze and the source record is retained.
