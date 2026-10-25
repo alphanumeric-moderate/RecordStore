@@ -74,6 +74,7 @@ The repository also includes:
 - `src/PlayerDataInitializer/RecordStoreOutboxMailboxAdapter.luau`: source outbox dispatch to a destination Mailbox V2, with exact durable enqueue receipt verification.
 - `src/PlayerDataInitializer/RecordStoreOutboxConsumerAdapter.luau`: destination message worker that applies registered versioned reducers through a durable Inbox receipt before acknowledging delivery.
 - `src/PlayerDataInitializer/PurchaseReceiptProcessor.luau` and `PurchaseDataStoreAuthority.luau`: opt-in developer-product receipt processing with bounded per-profile idempotency and an optional global PurchaseId authority.
+- `src/PlayerDataInitializer/PurchaseAuthorityMigrationRunner.luau`: resumable, bounded import of an application-enumerated historical PurchaseId snapshot with uncached durable checkpoints; unresolved batches never advance the cursor.
 - `src/PlayerDataInitializer/IntegerInfinityValue.luau`: a `NumberValue` factory that rounds finite values to integers while preserving positive infinity, negative infinity, and NaN. The default `kills` field uses this type so non-finite values are not silently replaced with zero.
 - `InfiniteMath.format(value, options?)`: the shared abbreviation formatter for native and InfiniteMath numbers. Formatting never changes stored values.
 - `src/PlayerDataInitializer/InfiniteMathValue.luau`: an adapter for the vendored InfiniteMath Revised module. It persists the number's normalized `first`/`second` pair inside a versioned JSON envelope and provides `get`/`set` helpers for a replicated StringValue backing instance. With the default schema, this adapter is not required during startup; `PlayerDataCore` loads it only when an `InfiniteMathValue` field is configured or used.
@@ -670,6 +671,33 @@ local processor = PurchaseReceiptProcessor.new({
 The two migration flags are operator assertions, not proof. Before enabling live grants, enumerate and reconcile the relevant historical PurchaseIds, use BackfillPermanentLedgerAsync against each owning active profile, and use BackfillExternalAuthorityAsync to import global history in bounded batches of at most 16. Persist source cursors externally and retry ambiguous batches using the same IDs. Set both flags only after both histories have been exhaustively reconciled. The local transaction records the profile grant and its per-profile receipt; the external authority is committed afterward. If the external commit is uncertain, the handler returns NotProcessedYet unless an uncached status read confirms completion, and the next delivery reconciles without running the reducer again.
 
 The native DataStore adapter checks per-server read/write request budgets and fails fast instead of waiting when exhausted. `request_runner` is an optional hook for integration with the application's shared governor; it receives `read` or `update` plus a callback returning `(value, error)` and must preserve bounded admission and error semantics. An injected `store_adapter` is useful for deterministic regression scenarios but must itself provide atomic updates and truly uncached reads. The adapter does not itself enumerate historical PurchaseIds or set either migration flag. Those flags are operator assertions, and historical import plus cross-server response-loss behavior still require acceptance in a real Roblox experience.
+
+### Resumable historical PurchaseId import
+
+The external authority's single-call backfill and the processor's bounded \`BackfillExternalAuthorityAsync(batch, max_items)\` cover the durable identity transition, but an application still has to enumerate its real source of historical purchases. \`PurchaseAuthorityMigrationRunner\` composes that batch API with an application-supplied paged reader and a durable compare-and-update checkpoint store. The reader must represent a stable source snapshot and return the same declared \`source_revision\` on every page. The checkpoint key must be shared by all workers using the same \`job_id\`.
+
+~~~lua
+local PurchaseAuthorityMigrationRunner = require(
+    game:GetService("ServerScriptService").PlayerDataInitializer.PurchaseAuthorityMigrationRunner
+)
+
+local migration = PurchaseAuthorityMigrationRunner.new({
+    job_id = "purchase-authority-backfill-2026-10",
+    source_revision = "historical-receipts-export-v4",
+    source = historical_purchase_source,
+    processor = processor,
+    checkpoint_store = durable_checkpoint_store,
+    checkpoint_key = "purchase-authority-backfill:2026-10",
+    page_size = 16,
+})
+
+local progress = migration:RunBatchAsync(2)
+-- Repeat RunBatchAsync on later worker turns while progress.code == "incomplete".
+-- Enable the production migration flags only after progress.code == "completed"
+-- and the source inventory has been independently reconciled.
+~~~
+
+The source implements \`read_page(cursor, maximum)\` and returns \`{items, next_cursor, done, source_revision}\`. The checkpoint adapter implements \`GetAsyncFresh(key)\` and atomic \`UpdateAsync(key, transform)\`. Each invocation processes at most 8 pages and each source page at most 16 PurchaseIds. A partially imported or ambiguous batch leaves the cursor unchanged; replay is safe because the authority import is idempotent. The runner rejects a non-advancing cursor, malformed/dense-page violations, a changed source revision, and corrupt or conflicting checkpoints. It cannot prove that an application has found every historical purchase; the source inventory and migration completion declaration still require operator reconciliation and live-platform acceptance.
 
 
 ## Optional cross-server mailbox wake-ups
