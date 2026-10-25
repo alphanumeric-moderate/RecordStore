@@ -11778,7 +11778,8 @@ local function purge_erased_versions_internal(
 	erasure_id: string,
 	max_versions: number?,
 	operation_deadline: number?,
-	mock: boolean
+	mock: boolean,
+	allow_deprecated_remove_version: boolean?
 ): (ErasurePurgeProgress?, ResultCode, string?)
 	local valid_identity, identity_message = validate_store_identity(name, scope, key)
 	if not valid_identity then return nil, "invalid", identity_message end
@@ -11813,11 +11814,17 @@ local function purge_erased_versions_internal(
 		return nil, list_code or "unknown", list_message or "historical version inventory could not be read"
 	end
 	local current_found = false
+	local removable_history_found = false
 	for _, entry in ipairs(entries) do
-		if entry.Version == current_version then current_found = true; break end
+		if entry.Version == current_version then current_found = true
+		elseif not entry.IsDeleted then removable_history_found = true end
 	end
 	if not current_found then
 		return nil, "conflict", "the durable erasure fence version is missing from version history"
+	end
+	if not mock and removable_history_found and allow_deprecated_remove_version ~= true then
+		return nil, "unsupported",
+			"historical purge requires deprecated DataStore:RemoveVersionAsync; pass allow_deprecated_remove_version=true only after reviewing the platform limitation"
 	end
 	local removed = 0
 	for _, entry in ipairs(entries) do
@@ -11949,10 +11956,12 @@ function RecordStore.purge_erased_versions_async(
 	user_id: number,
 	erasure_id: string,
 	max_versions: number?,
-	operation_deadline: number?
+	operation_deadline: number?,
+	allow_deprecated_remove_version: boolean?
 ): (ErasurePurgeProgress?, ResultCode, string?)
 	return purge_erased_versions_internal(
-		name, scope, key, user_id, erasure_id, max_versions, operation_deadline, false
+		name, scope, key, user_id, erasure_id, max_versions, operation_deadline, false,
+		allow_deprecated_remove_version
 	)
 end
 
