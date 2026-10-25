@@ -1059,6 +1059,47 @@ do -- Corrupt manifests and forged coverage flags must not trigger erasure write
 		"write/recreation gate did not remain blocked for inconsistent completed-coverage evidence")
 end
 
+do -- Reject malformed erasure family/template arrays and non-integer generations.
+	local valid_template = { name = "PlayerData", scope = "global", key = "Sparse_{user_id}" }
+	expect(not pcall(function()
+		V2.Erasure.new(new_store(), {
+			[2] = { name = "sparse_family", templates = { valid_template } },
+		})
+	end), "erasure constructor silently accepted a sparse family array")
+	expect(not pcall(function()
+		V2.Erasure.new(new_store(), {
+			{ name = "sparse_templates", templates = { [2] = valid_template } },
+		})
+	end), "erasure constructor silently accepted a sparse template array")
+	expect(not pcall(function()
+		V2.Erasure.new(new_store(), {
+			{ name = "oversized_template", templates = {
+				{ name = string.rep("N", 51), scope = "global", key = "Oversized_{user_id}" },
+			} },
+		})
+	end), "erasure constructor accepted an overlong DataStore name")
+	local invalid_generation_store = new_store()
+	local invalid_generation_erasure = V2.Erasure.new(invalid_generation_store, {
+		{
+			name = "fractional_generation",
+			templates = { { name = "PlayerData", scope = "global", key = "Generation_{user_id}" } },
+			templates_verified = true,
+			inventory = function(user_id)
+				return { {
+					name = "PlayerData",
+					scope = "global",
+					key = "Generation_" .. tostring(user_id),
+					generation = 1.5,
+				} }, true
+			end,
+		},
+	}, { verify_templates = function() return true end })
+	local invalid_generation_plan = invalid_generation_erasure:PlanAsync(784, "fractional-generation")
+	expect(invalid_generation_plan.code == "invalid"
+		and invalid_generation_store.values["rv2erase-u784"] == nil,
+		"erasure accepted or persisted a fractional generation")
+end
+
 local oversize_items = {}
 for index = 1, 513 do
 	table.insert(oversize_items, {
@@ -1208,6 +1249,40 @@ do -- A non-advancing nonterminal page cursor must fail closed instead of loopin
 	local stalled_result = stalled:RunStep(1, 500)
 	expect(stalled_result.code == "invalid" and inspect_calls == 0 and persist_calls == 0,
 		"non-advancing page cursor was processed or checkpointed instead of rejected")
+end
+
+do -- "dry_run" is only a valid compactor delete result when explicitly enabled.
+	local function run_dry_outcome_compactor(allow_dry_run)
+		local persisted = nil
+		local compactor = V2.Maintenance.NewCompactor({
+			initial_cursor = "cursor-a",
+			allow_dry_run = allow_dry_run,
+			next_page = function(cursor, maximum)
+				expect(cursor == "cursor-a" and maximum == 1,
+					"dry-run outcome regression received an unexpected page request")
+				return { { key = "dry-outcome", generation = 1 } }, "cursor-b", true
+			end,
+			inspect = function(item)
+				return { status = "success", eligible = true, dependencies_clear = true, generation = item.generation }
+			end,
+			delete_if_generation = function() return "dry_run" end,
+			persist_progress = function(cursor, processed, removed, status)
+				persisted = { cursor = cursor, processed = processed, removed = removed, status = status }
+				return true
+			end,
+		})
+		local result = compactor:RunStep(1, 500)
+		return result, compactor:Stats(), persisted
+	end
+	local rejected, rejected_stats, rejected_checkpoint = run_dry_outcome_compactor(false)
+	expect(rejected.code == "unknown" and rejected.cursor == "cursor-a"
+		and rejected_stats.processed == 0 and rejected_stats.removed == 0
+		and rejected_checkpoint.status == "unknown",
+		"compactor silently skipped a destructive-run item when its adapter returned dry_run")
+	local allowed, allowed_stats, allowed_checkpoint = run_dry_outcome_compactor(true)
+	expect(allowed.code == "completed" and allowed_stats.processed == 1 and allowed_stats.removed == 0
+		and allowed_checkpoint.cursor == "cursor-b",
+		"explicit dry-run mode did not advance its checkpoint without claiming deletion")
 end
 
 local compaction_store = new_store()
