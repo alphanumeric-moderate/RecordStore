@@ -11829,7 +11829,7 @@ local function purge_erased_versions_internal(
 			else
 				local store = backend.store
 				if store == nil then return nil, "invalid", "backend store is missing" end
-				if not acquire_request(nil, deadline, false, Enum.DataStoreRequestType.StandardRemove) then
+				if not acquire_request(nil, deadline, false, Enum.DataStoreRequestType.RemoveVersionAsync) then
 					return nil, "budget", "historical version removal request deadline exceeded"
 				end
 				local remove_ok, remove_error = pcall(function()
