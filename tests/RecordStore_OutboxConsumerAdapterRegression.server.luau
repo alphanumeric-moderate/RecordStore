@@ -141,6 +141,16 @@ local denied_mailbox, denied_code = denied_processor:GetMailbox(destination)
 expect(denied_mailbox == nil and denied_code == "disabled",
 	"consumer was enabled when the application activation guard denied binding")
 
+-- Pruning is explicit, bounded and uses a stable operation ID so an ambiguous
+-- pruning response can be retried without corrupting destination profile data.
+local pruned = processor:PruneInboxReceiptsAsync(
+	destination, os.time() + 1, "outbox-consumer-prune-inbox-001", 16
+)
+expect(pruned.code == "committed" or pruned.code == "duplicate",
+	"bounded Inbox receipt pruning did not reconcile: " .. tostring(pruned.message))
+expect(destination:Get().Balance == 35 and destination:Get().GrantCount == 1,
+	"Inbox receipt pruning mutated application-owned profile data")
+
 expect(destination:Close() == "closed", "destination profile failed to close")
 Mock.reset()
 Shim.close()
