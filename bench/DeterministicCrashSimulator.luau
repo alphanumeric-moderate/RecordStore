@@ -831,11 +831,15 @@ function Simulator.new(options)
 		return service
 	end
 
-	function self:MessagingService()
-		local service = {}
-		function service:SubscribeAsync(server, topic, callback)
-			if not valid_text(server, 96) or not valid_text(topic, 128) or type(callback) ~= "function" then
-				error("SubscribeAsync requires server, topic, and callback", 2)
+	function self:MessagingService(server_id)
+		server_id = server_id or "server-a"
+		if not valid_text(server_id, 96) then error("MessagingService mock needs a server ID", 2) end
+		local simulator = self
+		local service = { _sim = simulator, _server_id = server_id }
+		function service:SubscribeAsync(topic, callback)
+			local server = self._server_id
+			if not valid_text(topic, 128) or type(callback) ~= "function" then
+				error("SubscribeAsync requires topic and callback", 2)
 			end
 			self._sim.next_subscription += 1
 			local subscription = { id = self._sim.next_subscription, server = server, topic = topic, callback = callback, epoch = self._sim.server_epochs[server] or 0, connected = true }
@@ -849,8 +853,9 @@ function Simulator.new(options)
 			end
 			return connection
 		end
-		function service:PublishAsync(server, topic, message, options)
-			if not valid_text(server, 96) or not valid_text(topic, 128) then error("PublishAsync requires server and topic", 2) end
+		function service:PublishAsync(topic, message, options)
+			local server = self._server_id
+			if not valid_text(topic, 128) then error("PublishAsync requires a topic", 2) end
 			options = options or {}
 			local fault = self._sim:_take_fault("PublishAsync", "before_publish", topic, server)
 			if fault == nil then fault = self._sim:_take_fault("*", "before_publish", topic, server) end
@@ -896,7 +901,6 @@ function Simulator.new(options)
 			self._sim:_trace(server, options.operation_id, "messaging", "publish", "published_hint", "hint is advisory; durable polling remains authoritative")
 			return { code = "published" }
 		end
-		service._sim = self
 		return service
 	end
 

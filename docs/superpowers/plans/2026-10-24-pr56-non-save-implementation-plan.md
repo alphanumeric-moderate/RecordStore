@@ -39,6 +39,12 @@
 - [ ] Add simulator-specific regression coverage to the final verification phase only, after the remaining feature work is complete; do not treat simulator implementation or mock behavior as Roblox service acceptance.
 
 
+### Slice 0.5: Optional server-to-server wake-up acceleration
+
+- [x] Ship the concrete opt-in MessagingService adapter consumed by `RecordStoreV2.BindMailboxWakeups`; use a fixed shard set, bounded local registrations/coalescing, event deduplication, and an explicit start/stop lifecycle.
+- [x] Add an optional fixed-slot MemoryStore hint path, disabled by default. Hint loss or collisions must never affect durable mailbox correctness.
+- [ ] Add accelerator regression coverage in the final verification phase, including dropped, duplicated, delayed, stale and capacity-limited hints; durable polling must remain the recovery path.
+
 ### Slice 1: Audit and complete PR #37 non-save scheduling correctness
 
 - [x] Compare the merged scheduler and public API against PR #39 sections 28-29 and PR #37 follow-up behavior. The audit confirms bounded local scheduling, per-owner/resource admission, critical reserves, deadline-aware lease renewal, retry/circuit backpressure, kill-switch/pause behavior, and dependency retention have existing implementation/tests; no new global scheduler tier is warranted.
