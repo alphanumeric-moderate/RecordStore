@@ -7016,6 +7016,7 @@ local IMPLEMENTATION_VERSION = 2
 local QUEUE_IMPLEMENTATION_VERSION = 3
 local MAILBOX_V2_FREEZE_VERSION = QUEUE_IMPLEMENTATION_VERSION + 1
 local MAILBOX_V2_FREEZE_MARKER = "RecordStore.MailboxV2Freeze.v1"
+local LEGACY_QUEUE_RETIRED_MARKER = "RecordStore.LegacyQueueRetired.v1"
 local DEFAULT_AUTOSAVE_INTERVAL = 300
 local DEFAULT_LEASE_DURATION = 180
 local DEFAULT_LEASE_RENEWAL = 60
@@ -9523,6 +9524,40 @@ local function dead_letter_to_public(item: DeadLetterItem): DeadLetterMessage
 	}
 end
 
+local function legacy_queue_retirement_status(
+	raw: unknown,
+	expected_owner: QueueOwner
+): (boolean, ResultCode?, string?)
+	if type(raw) ~= "table" then return false, nil, nil end
+	local marker = raw :: { [string]: unknown }
+	if get_string_field(marker, "migration_marker") ~= LEGACY_QUEUE_RETIRED_MARKER then
+		return false, nil, nil
+	end
+	local version = get_string_field(marker, "implementation_version")
+	if version ~= MAILBOX_V2_FREEZE_VERSION then
+		return false, "future_schema", "legacy queue retirement marker uses an unsupported future version"
+	end
+	local owner = get_string_field(marker, "owner")
+	if type(owner) ~= "table" then
+		return false, "corrupt", "legacy queue retirement marker lacks an owner"
+	end
+	local owner_name = get_string_field(owner, "name")
+	local owner_scope = get_string_field(owner, "scope")
+	local owner_key = get_string_field(owner, "key")
+	if type(owner_name) ~= "string" or type(owner_scope) ~= "string" or type(owner_key) ~= "string" then
+		return false, "corrupt", "legacy queue retirement owner is malformed"
+	end
+	if owner_name ~= expected_owner.name or owner_scope ~= expected_owner.scope or owner_key ~= expected_owner.key then
+		return false, "conflict", "legacy queue retirement marker belongs to a different record identity"
+	end
+	local retired_at = get_string_field(marker, "retired_at")
+	local source_version = get_string_field(marker, "source_implementation_version")
+	if not is_finite(retired_at) or (retired_at :: number) < 0 or source_version ~= 1 then
+		return false, "corrupt", "legacy queue retirement metadata is malformed"
+	end
+	return true, nil, nil
+end
+
 local function ensure_legacy_queue_clear(
 	name: string,
 	scope: string,
@@ -9535,27 +9570,63 @@ local function ensure_legacy_queue_clear(
 	if state ~= nil and state.queue_legacy_checked then
 		return nil, nil
 	end
+	local owner = make_queue_owner(name, scope, key)
 	local legacy_backend = make_backend(
 		queue_store_name,
 		scope,
 		make_queue_key_legacy(name, scope, key),
 		mock
 	)
-	local raw, _, read_code, read_message = backend_get(legacy_backend, false, deadline, state)
-	if read_code ~= nil then
-		return normalize_result_code(read_code) or "unknown", read_message
+	local retired_at = queue_now_unix(mock)
+	if not is_finite(retired_at) or retired_at < 0 then
+		return "invalid", "legacy queue retirement clock returned an invalid timestamp"
 	end
-	local messages, parse_message = parse_legacy_queue_envelope(raw)
+
+	-- Seal the old q: key only while its current value is absent or a valid,
+	-- empty V1 envelope. Old V1 writers using UpdateAsync will subsequently see
+	-- a future-version marker and must fail closed rather than recreate the queue.
+	local _, _, update_code, update_message = backend_update(legacy_backend, function(current_raw)
+		local already_retired, _, _ = legacy_queue_retirement_status(current_raw, owner)
+		if already_retired then return nil end
+		local messages = parse_legacy_queue_envelope(current_raw)
+		if messages == nil or #messages > 0 then return nil end
+		return {
+			implementation_version = MAILBOX_V2_FREEZE_VERSION,
+			migration_marker = LEGACY_QUEUE_RETIRED_MARKER,
+			owner = owner,
+			source_implementation_version = 1,
+			retired_at = retired_at,
+		}
+	end, deadline, state)
+
+	-- A response can be lost after the marker commits. Verify the durable
+	-- state with an uncached read; the transform never mutates control state.
+	local fresh, _, read_code, read_message = backend_get(legacy_backend, false, deadline, nil)
+	if read_code ~= nil then
+		return "unknown", "could not verify legacy queue retirement marker: " .. (read_message or read_code)
+	end
+	local retired, retired_code, retired_message = legacy_queue_retirement_status(fresh, owner)
+	if retired then
+		if state ~= nil then state.queue_legacy_checked = true end
+		return nil, nil
+	end
+	if retired_code ~= nil then return retired_code, retired_message end
+
+	local messages, parse_message = parse_legacy_queue_envelope(fresh)
 	if messages == nil then
+		local version = if type(fresh) == "table" then get_string_field(fresh, "implementation_version") else nil
+		if type(version) == "number" and version > 1 then
+			return "future_schema", "legacy q: key contains an unsupported future-version value; it was left untouched"
+		end
 		return "corrupt", parse_message or "legacy durable queue is corrupt; it was left untouched"
 	end
 	if #messages > 0 then
 		return "migration", "nonempty legacy durable queue has no verifiable owner; it was left untouched and requires manual recovery"
 	end
-	if state ~= nil then
-		state.queue_legacy_checked = true
+	if update_code ~= nil then
+		return normalize_result_code(update_code) or "unknown", update_message or "legacy queue retirement write was not confirmed"
 	end
-	return nil, nil
+	return "unknown", "empty legacy queue could not be durably retired; queue writes remain blocked"
 end
 
 local function queue_backend_for_state(state: InternalState): Backend?
