@@ -199,7 +199,7 @@ local function normalize_config(value: unknown): NormalizedConfig
 	then
 		error("checkpoint_store must implement uncached GetAsyncFresh and atomic UpdateAsync", 3)
 	end
-	if not valid_text(fields.checkpoint_key, 100) then error("checkpoint_key must be 1 to 100 bytes", 3) end
+	if not valid_text(fields.checkpoint_key, 50) then error("checkpoint_key must be 1 to 50 bytes", 3) end
 	if not valid_cursor(fields.initial_cursor) then error("initial_cursor exceeds the 512-byte cursor limit", 3) end
 	local page_size = if fields.page_size == nil then 16 else fields.page_size
 	if type(page_size) ~= "number" or not math.isfinite(page_size)
