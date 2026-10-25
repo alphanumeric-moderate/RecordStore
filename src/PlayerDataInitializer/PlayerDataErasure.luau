@@ -33,6 +33,7 @@ type Options = {
 	profile_scope: string?,
 	key_prefix: string?,
 	operation_deadline: number?,
+	allow_deprecated_remove_version: boolean?,
 	profile_family_verified: boolean?,
 	verify_templates: ((number, { any }) -> boolean)?,
 	additional_families: { any }?,
@@ -81,6 +82,11 @@ local function new(manifest_store: any, options: Options?): any
 		type(operation_deadline) ~= "number" or not math.isfinite(operation_deadline)
 		or operation_deadline <= 0
 	) then error("operation_deadline must be finite and positive", 2) end
+	if config.allow_deprecated_remove_version ~= nil
+		and type(config.allow_deprecated_remove_version) ~= "boolean"
+	then
+		error("allow_deprecated_remove_version must be a boolean", 2)
+	end
 	if config.verify_templates == nil or type(config.verify_templates) ~= "function" then
 		error("PlayerDataErasure requires verify_templates; a hard-coded template is not proof of live coverage", 2)
 	end
@@ -216,7 +222,8 @@ local function new(manifest_store: any, options: Options?): any
 					erase_message or ("generation-aware profile erasure returned " .. tostring(erase_code))
 			end
 			local progress, purge_code, purge_message = record_store.purge_erased_versions_async(
-				profile_store_name, profile_scope, item.key, user_id, erasure_id, 16, operation_deadline
+				profile_store_name, profile_scope, item.key, user_id, erasure_id, 16, operation_deadline,
+				config.allow_deprecated_remove_version == true
 			)
 			if purge_code ~= "success" or progress == nil then
 				return if purge_code == "unknown" then "unknown" else "retryable",
