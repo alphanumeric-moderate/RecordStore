@@ -21,7 +21,7 @@ type Config = {
 	load_checkpoint: (string) -> (any?, string?),
 	save_checkpoint: (string, number?, any) -> (boolean, string?),
 	activate_v2: (string) -> (boolean, string?),
-	verify_complete: ((string, number, number) -> (boolean, string?))?,
+	verify_complete: (string, number, number) -> (boolean, string?),
 }
 
 local function fail_result(code: string, message: string?): string
@@ -45,7 +45,7 @@ function Adapter.bind(config: Config)
 	then
 		error("store_name, scope, profile_key and migration_id are required", 2)
 	end
-	for _, field in ipairs({ "legacy_writers_drained", "load_checkpoint", "save_checkpoint", "activate_v2" }) do
+	for _, field in ipairs({ "legacy_writers_drained", "load_checkpoint", "save_checkpoint", "activate_v2", "verify_complete" }) do
 		if type(config[field]) ~= "function" then error(field .. " callback is required", 2) end
 	end
 	local function args()
@@ -90,10 +90,7 @@ function Adapter.bind(config: Config)
 		if snapshot.ActiveCount ~= active_count or snapshot.DeadLetterCount ~= dead_letter_count then
 			return false, "imported counts do not match the frozen source counts"
 		end
-		if type(config.verify_complete) == "function" then
-			return config.verify_complete(migration_id, active_count, dead_letter_count)
-		end
-		return true, nil
+		return config.verify_complete(migration_id, active_count, dead_letter_count)
 	end
 	return {
 		migration_id = config.migration_id,
