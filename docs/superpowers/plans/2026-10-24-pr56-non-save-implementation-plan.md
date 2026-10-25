@@ -36,7 +36,7 @@
 ### Slice 0: Deterministic protocol simulation infrastructure
 
 - [x] Add a bounded, replayable bench-only simulator with independent server clocks, per-key atomic UpdateAsync semantics, transform replay, fail-before-commit and commit-then-error faults, virtual scheduling, process-crash local-state loss, MemoryStore TTL behavior, best-effort MessagingService hint faults, stable seed handling, and redacted trace/invariant reporting.
-- [ ] Add simulator-specific regression coverage to the final verification phase only, after the remaining feature work is complete; do not treat simulator implementation or mock behavior as Roblox service acceptance.
+- [x] Add deferred simulator regressions for stale/fresh reads, commit-then-error, transform replay, process crash, and dropped/duplicated/delayed/expired messaging hints; wire them to the final Lune runner without executing them yet. Simulator/mock results remain distinct from live Roblox acceptance.
 
 
 ### Slice 0.5: Optional server-to-server wake-up acceleration
@@ -45,7 +45,7 @@
 - [x] Add an optional fixed-slot MemoryStore hint path, disabled by default. Hint loss or collisions must never affect durable mailbox correctness.
 - [x] Evict every observed sorted-map hint after a poll attempt and expose removal errors; fixed-slot overwrite races remain acceptable because durable polling/reconciliation is authoritative. Use Roblox's real SortedMap.SetAsync(key, value, expirationSeconds, sortKey) argument order and cap GetRangeAsync batches to 20.
 - [x] Align the simulator's MessagingService mock to Roblox's `SubscribeAsync(topic, callback)` and `PublishAsync(topic, message)` call shape; model cache staleness across servers instead of globally invalidating every reader's cache.
-- [ ] Add accelerator regression coverage in the final verification phase, including dropped, duplicated, delayed, stale and capacity-limited hints; durable polling must remain the recovery path.
+- [x] Add deferred wake-up accelerator regressions for dropped, duplicate, delayed, expired, stopped and capacity-limited hints, including durable-poll fallback; wire them to the final runner without executing them yet.
 
 ### Slice 1: Audit and complete PR #37 non-save scheduling correctness
 
@@ -120,9 +120,11 @@
 - [x] Add bounded redacted trace buffering and optional durable trace flush/read reconciliation.
 
 - [x] Add opt-in durable projection rebuild manifests with stable rebuild/snapshot identity, bounded page processing, persisted cursors and counts, exact ambiguous-write reconciliation, status inspection, restart/resume coverage, and strict complete/cursor contract validation. The source adapter must pin the same immutable snapshot for every page; source-specific platform acceptance remains a release gate.
-- [x] Add `PlayerDataErasure.luau` as an opt-in adapter for the current `PlayerDataCore` profile family. It provides an exact name/scope/key template, bounded inventory, active-player kick hook, generation-aware same-key future-version erasure fence, and bounded historical-version purge; the durable manifest adapter is injected and must provide uncached reads plus atomic updates. The adapter refuses to certify its family by default and accepts additional application families. Coverage of all application key layouts and every writer/recreation path remains blocked until integrators supply the exhaustive inventory and the live-platform gate passes.
+- [x] Add `PlayerDataErasure.luau` as an opt-in adapter for the current `PlayerDataCore` profile family. It provides an exact name/scope/key template, bounded inventory, active-player kick hook, generation-bound same-key future-version erasure fence, and bounded historical-version purge. The durable manifest adapter is injected and must provide uncached reads plus atomic updates. The adapter refuses to certify its family by default and accepts additional application families. Live historical-version purge is disabled by default because Roblox marks `DataStore:RemoveVersionAsync` deprecated; an explicit opt-in exists only as a temporary workaround. Coverage of all application key layouts and every writer/recreation path remains blocked until integrators supply the exhaustive inventory and live-platform acceptance.
 - [x] Reject an erasure coordinator with zero declared key families; an empty family set must never be accepted as exhaustive RTBF coverage. `ShouldBlockWrites` now explicitly returns `write_blocked=true` when status reads are unknown or the durable manifest is corrupt/conflicting.
 - [ ] Keep the RTBF-completeness claim blocked until templates cover every user-associated key layout and the real platform acceptance test passes.
+- [x] Add deferred erasure regressions for stale-generation rejection, permanent no-recreation fencing, response-loss reconciliation, bounded multi-page historical cleanup, and coordinator integration; added to the final runner but not executed.
+- [ ] Replace the deprecated `DataStore:RemoveVersionAsync` purge path with a Roblox-supported alternative before claiming historical-version erasure is production-ready. The current adapter fails closed unless an operator explicitly opts into the deprecated method.
 - [x] Add bounded correlated operation traces with unique per-event IDs, cross-process-safe merge/deduplication, explicit `process_local` / `durable_store` / `durable_store_and_local` evidence labels, durability summaries, and payload/identity redaction.
 
 ### Slice 8: Verification and merge gates
