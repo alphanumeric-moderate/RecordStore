@@ -20,7 +20,7 @@ type Family = {
 	templates: { { name: string, scope: string, key: string } },
 	templates_verified: boolean,
 	inventory: (number, number) -> ({ ErasureItem }?, boolean | string),
-	fence_user: (number, string) -> (boolean, string?),
+	fence_user: (number, string, { ErasureItem }?) -> (boolean, string?),
 	dependencies_clear: (ErasureItem, number) -> (boolean, string?),
 	redact_or_delete_if_generation: (ErasureItem, number, string) -> (string, string?),
 }
@@ -155,17 +155,32 @@ local function new(manifest_store: any, options: Options?): any
 				},
 			}, true
 		end,
-		fence_user = function(user_id: number, erasure_id: string): (boolean, string?)
+		fence_user = function(
+			user_id: number,
+			erasure_id: string,
+			planned_items: { ErasureItem }?
+		): (boolean, string?)
 			if not valid_user_id(user_id) or not valid_text(erasure_id, 96) then
 				return false, "invalid erasure identity"
+			end
+			if type(planned_items) ~= "table" or #planned_items ~= 1 then
+				return false, "PlayerDataCore erasure requires exactly one generation-bound profile inventory item"
+			end
+			local planned = planned_items[1]
+			if type(planned) ~= "table" or planned.name ~= profile_store_name
+				or planned.scope ~= profile_scope or planned.key ~= resolve_key(user_id)
+				or not math.isfinite(planned.generation) or planned.generation < 0
+				or math.floor(planned.generation) ~= planned.generation
+			then
+				return false, "planned profile inventory identity or generation is invalid"
 			end
 			local kicked, kick_error = kick_active_player(user_id, erasure_id)
 			if not kicked then return false, kick_error or "active player could not be fenced" end
 			local _, code, message = record_store.erase_user_data_async(
-				profile_store_name, profile_scope, resolve_key(user_id),
-				user_id, erasure_id, nil, operation_deadline
+				profile_store_name, profile_scope, planned.key,
+				user_id, erasure_id, planned.generation, operation_deadline
 			)
-			if code ~= "success" then return false, message or ("profile fence failed: " .. tostring(code)) end
+			if code ~= "success" then return false, message or ("generation-aware profile fence failed: " .. tostring(code)) end
 			return true, nil
 		end,
 		dependencies_clear = function(item: ErasureItem, user_id: number): (boolean, string?)
