@@ -194,8 +194,8 @@ function Adapter.new(config: Options)
 		end
 		if count_items ~= #raw_page then error("DataStoreKeyPages current page is not a dense array", 2) end
 		for _, raw_key in ipairs(raw_page) do
-			local name = if type(raw_key) == "table" then (raw_key :: { [string]: unknown }).KeyName else nil
-			if not valid_text(name, MAX_KEY_BYTES)
+			local key_ok, name = pcall(function() return raw_key.KeyName end)
+			if not key_ok or not valid_text(name, MAX_KEY_BYTES)
 				or (prefix ~= "" and string.sub(name :: string, 1, #prefix) ~= prefix)
 			then
 				error("DataStoreKeyPages returned an invalid or out-of-prefix key", 2)
@@ -240,12 +240,17 @@ function Adapter.new(config: Options)
 		if type(clear) ~= "boolean" then
 			return { status = "unknown", eligible = false, dependencies_clear = false, generation = generation, message = dependency_error or "dependency check did not return a boolean" }
 		end
+		local version: string? = nil
+		if key_info ~= nil then
+			local version_ok, observed_version = pcall(function() return key_info.Version end)
+			if version_ok and observed_version ~= nil then version = tostring(observed_version) end
+		end
 		return {
 			status = "success",
 			eligible = eligible,
 			dependencies_clear = clear,
 			generation = generation,
-			version = if type(key_info) == "table" then tostring((key_info :: { [string]: unknown }).Version or "") else nil,
+			version = version,
 			message = eligibility_error or dependency_error,
 		}
 	end
