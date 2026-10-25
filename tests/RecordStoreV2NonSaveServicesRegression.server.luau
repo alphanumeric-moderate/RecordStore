@@ -813,6 +813,7 @@ local per_item_fence_erasure = V2.Erasure.new(per_item_fence_store, {
 			per_item_fence_calls += 1
 			return per_item_fence_calls == 1
 		end,
+		dependencies_clear = function() return true end,
 		redact_or_delete_if_generation = function()
 			per_item_delete_calls += 1
 			return "deleted"
