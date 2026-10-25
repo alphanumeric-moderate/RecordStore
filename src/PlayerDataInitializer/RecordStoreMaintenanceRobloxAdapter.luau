@@ -271,7 +271,10 @@ function Adapter.new(config: Options)
 		if type(action) ~= "string" or (action ~= "deleted" and action ~= "already_absent" and action ~= "skipped" and action ~= "unknown") then
 			return "unknown", message or "atomic delete adapter returned an unsupported result"
 		end
-		return action :: string, message
+		if action == "deleted" then return "deleted", message end
+		if action == "already_absent" then return "already_absent", message end
+		if action == "skipped" then return "skipped", message end
+		return "unknown", message
 	end
 
 	return table.freeze({

@@ -392,13 +392,14 @@ function Adapter.new(config: Config)
 				return inspection_failure("invalid", "eligible item must expose a non-negative generation"), "invalid generation"
 			end
 		end
-		return {
+		local normalized_inspection: Inspection = {
 			status = inspected.status,
 			eligible = inspected.eligible,
 			dependencies_clear = inspected.dependencies_clear,
 			generation = if type(inspected.generation) == "number" then inspected.generation else nil,
 			message = if type(inspected.message) == "string" then inspected.message else nil,
-		}, nil
+		}
+		return normalized_inspection, nil
 	end
 
 	function adapter:DeleteIfGeneration(item: unknown, expected_generation: number): (string, string?)
