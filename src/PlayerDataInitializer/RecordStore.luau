@@ -2724,6 +2724,11 @@ do
 	end
 
 	local function ok(code: string, message_id: string?, message: EmbeddedMailboxDict?, error_message: string?): EmbeddedMailboxResult
+		local message_dict = as_dict(message)
+		if message_dict ~= nil then
+			local public_id = if type(message_dict.Id) == "string" then message_dict.Id else message_dict.public_id
+			if type(public_id) == "string" then message_id = public_id end
+		end
 		return { code = code, message_id = message_id, message = message, error = error_message }
 	end
 
@@ -3029,6 +3034,18 @@ do
 			return nil, guid_error
 		end
 		return result_route_key(self, "m2g-", "generated:" .. guid), nil
+	end
+
+	function MailboxV2._legacy_route_key(self: EmbeddedMailbox, legacy_id: string): string
+		return result_route_key(self, "m2l-", "legacy-v3:" .. legacy_id)
+	end
+
+	function MailboxV2._route_from_public_id(self: EmbeddedMailbox, message_id: string): string
+		local prefix = string.sub(message_id, 1, 4)
+		if prefix == "m2i-" or prefix == "m2g-" or prefix == "m2l-" then
+			return message_id
+		end
+		return self:_legacy_route_key(message_id)
 	end
 
 	function MailboxV2._manifest_key(self: EmbeddedMailbox, kind: string): string
@@ -3576,7 +3593,7 @@ do
 			token = token,
 			request_text = request_text,
 			request = clone_json(request),
-			sender_job_id = self.sender_job_id,
+			sender_job_id = if type(request.legacy_sender_job_id) == "string" then request.legacy_sender_job_id else self.sender_job_id,
 			phase = "reserved",
 			created_at = self:_now(),
 			placement_generation = 1,
@@ -3703,7 +3720,7 @@ do
 
 	function MailboxV2._record_snapshot(self: EmbeddedMailbox, record: EmbeddedMailboxDict): EmbeddedMailboxDict
 		return {
-			Id = record.route,
+			Id = if type(record.public_id) == "string" then record.public_id else record.route,
 			Type = record.message_type,
 			Data = clone_json(record.payload),
 			SenderJobId = if type(record.sender_job_id) == "string" then record.sender_job_id else "",
@@ -4373,7 +4390,12 @@ do
 					version = VERSION,
 					owner = clone_owner(self.owner),
 					route = route,
+					public_id = if type(request.public_id) == "string" then request.public_id else nil,
 					request_text = request_text,
+					migration_target = request.migration_target,
+					legacy_migration_id = request.legacy_migration_id,
+					legacy_last_replay_token = request.legacy_last_replay_token,
+					legacy_terminal_lock_token = request.legacy_terminal_lock_token,
 					message_type = request.message_type,
 					payload = clone_json(request.payload),
 					sender_job_id = if type(entry.sender_job_id) == "string" then entry.sender_job_id else "",
@@ -4382,11 +4404,12 @@ do
 					ordering_sequence = ordering_sequence,
 					available_at = if is_finite(request.available_at) then request.available_at else entry.created_at,
 					expires_at = request.expires_at,
-					created_at = entry.created_at,
+					created_at = if is_finite(request.legacy_created_at) then request.legacy_created_at else entry.created_at,
 					updated_at = preparing_now,
-					attempts = 0,
-					total_attempts = 0,
-					replay_count = 0,
+					attempts = if is_finite(request.legacy_attempts) then request.legacy_attempts else 0,
+					total_attempts = if is_finite(request.legacy_total_attempts) then request.legacy_total_attempts else 0,
+					replay_count = if is_finite(request.legacy_replay_count) then request.legacy_replay_count else 0,
+					last_error = if type(request.legacy_last_error) == "string" then request.legacy_last_error else nil,
 					state = "preparing",
 					reservation_token = token,
 					placement_generation = placement,
@@ -4654,31 +4677,290 @@ do
 		return publish_after_enqueue(self, self:_resume_reservation(route, entry))
 	end
 
+	local function make_legacy_import_request(
+		self: EmbeddedMailbox,
+		raw_legacy: unknown,
+		migration_id: string,
+		target: string
+	): (EmbeddedMailboxDict?, string?, string?)
+		local legacy = as_dict(raw_legacy)
+		if legacy == nil then return nil, nil, "legacy queue item must be a table" end
+		if not valid_text(migration_id, 96) then return nil, nil, "migration_id must be 1 to 96 bytes" end
+		if target ~= "active" and target ~= "dead_letter" then return nil, nil, "unsupported legacy migration target" end
+		local legacy_id = if type(legacy.id) == "string" then legacy.id else legacy.Id
+		local message_type = if type(legacy.type) == "string" then legacy.type else legacy.Type
+		local payload = if legacy.data ~= nil then legacy.data else legacy.Data
+		if not valid_text(legacy_id, MAX_KEY_LENGTH) then
+			return nil, nil, "legacy message ID must be 1 to " .. tostring(MAX_KEY_LENGTH) .. " bytes"
+		end
+		local id_prefix = string.sub(legacy_id, 1, 4)
+		if id_prefix == "m2i-" or id_prefix == "m2g-" or id_prefix == "m2l-" then
+			return nil, nil, "legacy message ID collides with a reserved V2 ID namespace"
+		end
+		if not valid_text(message_type, 100) then return nil, nil, "legacy message type must be 1 to 100 bytes" end
+
+		local attempts = if is_finite(legacy.attempts) then legacy.attempts else 0
+		local total_attempts = if is_finite(legacy.total_attempts) then legacy.total_attempts else attempts
+		local replay_count = if is_finite(legacy.replay_count) then legacy.replay_count else 0
+		if attempts < 0 or math.floor(attempts) ~= attempts
+			or total_attempts < attempts or math.floor(total_attempts) ~= total_attempts
+			or replay_count < 0 or math.floor(replay_count) ~= replay_count
+			or total_attempts > 9_007_199_254_740_991
+		then
+			return nil, nil, "legacy retry counters are malformed"
+		end
+
+		local created_seconds = if is_finite(legacy.created_at) then legacy.created_at else legacy.CreatedAt
+		if not is_finite(created_seconds) or (created_seconds :: number) < 0
+			or (created_seconds :: number) > 9_007_199_254_740
+		then
+			return nil, nil, "legacy created_at must be a finite Unix timestamp in seconds"
+		end
+		local created_at_ms = math.floor((created_seconds :: number) * 1000)
+		local sender_job_id = if type(legacy.sender_job_id) == "string" then legacy.sender_job_id
+			else if type(legacy.SenderJobId) == "string" then legacy.SenderJobId else ""
+		if #sender_job_id > 128 then return nil, nil, "legacy sender_job_id exceeds 128 bytes" end
+		local last_replay_token = legacy.last_replay_token
+		if last_replay_token ~= nil and (type(last_replay_token) ~= "string" or #last_replay_token > 256) then
+			return nil, nil, "legacy last_replay_token is malformed"
+		end
+		local last_error = if type(legacy.last_error) == "string" then legacy.last_error else legacy.LastError
+		if last_error ~= nil and (type(last_error) ~= "string" or #last_error > 1024) then
+			return nil, nil, "legacy last_error is malformed"
+		end
+		local terminal_lock_token = legacy.terminal_lock_token
+		if terminal_lock_token ~= nil and (type(terminal_lock_token) ~= "string" or #terminal_lock_token > 256) then
+			return nil, nil, "legacy terminal_lock_token is malformed"
+		end
+		local dead_lettered_at_ms = created_at_ms
+		local raw_dead_lettered_at = if is_finite(legacy.dead_lettered_at) then legacy.dead_lettered_at else legacy.DeadLetteredAt
+		if raw_dead_lettered_at ~= nil then
+			if not is_finite(raw_dead_lettered_at) or (raw_dead_lettered_at :: number) < 0
+				or (raw_dead_lettered_at :: number) > 9_007_199_254_740
+			then
+				return nil, nil, "legacy dead_lettered_at must be a finite Unix timestamp in seconds"
+			end
+			dead_lettered_at_ms = math.floor((raw_dead_lettered_at :: number) * 1000)
+		end
+		if target == "active" and self.options.strict_ordering_enabled ~= true then
+			return nil, nil, "legacy FIFO preservation requires strict_ordering_enabled=true"
+		end
+		local ordering_key = if target == "active" then "legacy-v3:" .. migration_id else nil
+		if ordering_key ~= nil and #ordering_key > MAX_ORDERING_KEY_LENGTH then
+			return nil, nil, "migration_id produces an oversized legacy ordering key"
+		end
+		local payload_size, payload_error = self:_encode_size(payload)
+		if payload_size == nil or payload_size > (self.options.max_payload_bytes :: number) then
+			return nil, nil, payload_error or "legacy payload exceeds the configured encoded-size cap"
+		end
+		local copy_ok, payload_copy = pcall(clone_json, payload)
+		if not copy_ok then return nil, nil, "legacy payload is not cloneable as JSON-compatible data" end
+		local request: EmbeddedMailboxDict = {
+			owner = clone_owner(self.owner),
+			idempotency_key = "legacy-v3:" .. migration_id .. ":" .. legacy_id,
+			migration_target = target,
+			legacy_migration_id = migration_id,
+			legacy_sender_job_id = sender_job_id,
+			public_id = legacy_id,
+			message_type = message_type,
+			payload = payload_copy,
+			priority = "normal",
+			ordering_key = ordering_key,
+			available_at = created_at_ms,
+			expires_at = nil,
+			legacy_created_at = created_at_ms,
+			legacy_updated_at = created_at_ms,
+			legacy_attempts = attempts,
+			legacy_total_attempts = total_attempts,
+			legacy_replay_count = replay_count,
+			legacy_last_replay_token = last_replay_token,
+			legacy_last_error = last_error,
+			legacy_terminal_lock_token = terminal_lock_token,
+			legacy_dead_lettered_at = dead_lettered_at_ms,
+		}
+		local request_text_ok, request_text = pcall(canonical, request)
+		if not request_text_ok or type(request_text) ~= "string" then
+			return nil, nil, "legacy queue item is not canonicalizable"
+		end
+		local request_size, size_error = self:_encode_size(request)
+		if request_size == nil or request_size > (self.options.max_request_bytes :: number) then
+			return nil, nil, size_error or "legacy request exceeds the configured encoded-size cap"
+		end
+		if #request_text > (self.options.preparation_max_entry_bytes :: number) then
+			return nil, nil, "legacy request is too large for the bounded preparation registry"
+		end
+		return request, request_text, nil
+	end
+
+	local function legacy_import_status(self: EmbeddedMailbox, route: string, request_text: string, legacy_id: string): EmbeddedMailboxResult?
+		local raw, read_error = self:_get_fresh(route)
+		if read_error ~= nil then
+			return ok("unknown", legacy_id, nil, "legacy import verification read failed: " .. read_error)
+		end
+		local current = as_dict(raw)
+		if raw ~= nil and current == nil then return ok("corrupt", legacy_id, nil, "legacy import target is malformed") end
+		if current == nil then return nil end
+		if current.version ~= VERSION then
+			return ok("unsupported_schema", legacy_id, nil, "legacy import target has an unsupported schema")
+		end
+		if not same_owner(current.owner, self.owner) then
+			return ok("conflict", legacy_id, nil, "legacy ID route belongs to another mailbox owner")
+		end
+		if current.public_id ~= legacy_id or current.request_text ~= request_text
+			or (current.migration_target ~= "active" and current.migration_target ~= "dead_letter")
+		then
+			return ok("conflict", legacy_id, self:_record_snapshot(current), "legacy ID is already bound to different content")
+		end
+		return ok("duplicate", legacy_id, self:_record_snapshot(current), nil)
+	end
+
+	function MailboxV2.ImportLegacyAsync(
+		self: EmbeddedMailbox,
+		legacy_message: unknown,
+		migration_id: string
+	): EmbeddedMailboxResult
+		local activation = self:_check_activation("migration")
+		if activation ~= nil then return activation end
+		local request, request_text, request_error = make_legacy_import_request(self, legacy_message, migration_id, "active")
+		if request == nil or request_text == nil then return ok("invalid", nil, nil, request_error) end
+		local legacy_id = request.public_id :: string
+		local route = self:_legacy_route_key(legacy_id)
+		local existing_status = legacy_import_status(self, route, request_text, legacy_id)
+		if existing_status ~= nil then
+			if existing_status.code ~= "duplicate" then return existing_status end
+			local existing = as_dict(existing_status.message)
+			if existing ~= nil and existing.State ~= "preparing" then return existing_status end
+			local entry, entry_error = self:_get_registry_entry(route)
+			if entry_error ~= nil then return ok("unknown", legacy_id, existing_status.message, entry_error) end
+			if entry == nil then return ok("unknown", legacy_id, existing_status.message, "preparing legacy import has no reservation") end
+			local resumed = self:_resume_reservation(route, entry)
+			resumed.message_id = legacy_id
+			return publish_after_enqueue(self, resumed)
+		end
+		local token, token_error = self:_guid()
+		if token == nil then return ok("invalid", legacy_id, nil, token_error) end
+		local entry, reserve_error = self:_reserve(route, request_text, request, token)
+		if entry == nil then
+			local code = if string.find(reserve_error or "", "capacity", 1, true) then "capacity"
+				elseif string.find(reserve_error or "", "conflict", 1, true) then "conflict"
+				elseif string.find(reserve_error or "", "unsupported schema", 1, true) then "unsupported_schema"
+				else "unknown"
+			return ok(code, legacy_id, nil, reserve_error)
+		end
+		local result = self:_resume_reservation(route, entry)
+		result.message_id = legacy_id
+		return publish_after_enqueue(self, result)
+	end
+
+	function MailboxV2.ImportLegacyDeadLetterAsync(
+		self: EmbeddedMailbox,
+		legacy_message: unknown,
+		migration_id: string
+	): EmbeddedMailboxResult
+		local activation = self:_check_activation("migration")
+		if activation ~= nil then return activation end
+		local request, request_text, request_error = make_legacy_import_request(self, legacy_message, migration_id, "dead_letter")
+		if request == nil or request_text == nil then return ok("invalid", nil, nil, request_error) end
+		local legacy_id = request.public_id :: string
+		local route = self:_legacy_route_key(legacy_id)
+		local existing_status = legacy_import_status(self, route, request_text, legacy_id)
+		if existing_status ~= nil then
+			if existing_status.code ~= "duplicate" then return existing_status end
+			local existing = as_dict(existing_status.message)
+			if existing ~= nil and existing.State == "dead_lettered" then return existing_status end
+			local existing_record, existing_error = self:_get_fresh(route)
+			local record = as_dict(existing_record)
+			if existing_error ~= nil or record == nil then
+				return ok("unknown", legacy_id, nil, existing_error or "dead-letter import record is unavailable")
+			end
+			if record.state ~= "dead_lettering" then
+				return ok("conflict", legacy_id, self:_record_snapshot(record), "legacy dead-letter import has an incompatible state")
+			end
+			local completed = self:_finish_dead_letter(route)
+			completed.message_id = legacy_id
+			return completed
+		end
+
+		local token, token_error = self:_guid()
+		if token == nil then return ok("invalid", legacy_id, nil, token_error) end
+		local now = self:_now()
+		local candidate: EmbeddedMailboxDict = {
+			version = VERSION,
+			owner = clone_owner(self.owner),
+			route = route,
+			public_id = legacy_id,
+			request_text = request_text,
+			migration_target = "dead_letter",
+			legacy_migration_id = migration_id,
+			legacy_last_replay_token = request.legacy_last_replay_token,
+			legacy_terminal_lock_token = request.legacy_terminal_lock_token,
+			message_type = request.message_type,
+			payload = clone_json(request.payload),
+			sender_job_id = if type(request.legacy_sender_job_id) == "string" then request.legacy_sender_job_id else "",
+			priority = "normal",
+			available_at = request.available_at,
+			expires_at = nil,
+			created_at = request.legacy_created_at,
+			updated_at = now,
+			attempts = request.legacy_attempts,
+			total_attempts = request.legacy_total_attempts,
+			replay_count = request.legacy_replay_count,
+			last_error = if type(request.legacy_last_error) == "string" then request.legacy_last_error else "Imported from legacy V3 dead-letter queue",
+			dead_letter_reason = if type(request.legacy_last_error) == "string" then request.legacy_last_error else "Imported from legacy V3 dead-letter queue",
+			legacy_dead_lettered_at = request.legacy_dead_lettered_at,
+			dead_letter_token = token,
+			dlq_placement_generation = 1,
+			state = "dead_lettering",
+			effect_outcome = "not_started",
+		}
+		local imported, import_error = self:_update_message(route, function(current)
+			if current ~= nil then return current end
+			return candidate
+		end)
+		if import_error ~= nil or imported == nil then
+			return ok("unknown", legacy_id, imported, import_error or "legacy dead-letter import outcome is unknown")
+		end
+		if imported.request_text ~= request_text or imported.public_id ~= legacy_id or imported.migration_target ~= "dead_letter" then
+			return ok("conflict", legacy_id, self:_record_snapshot(imported), "legacy dead-letter route is already bound to different content")
+		end
+		if imported.state == "dead_lettered" then
+			return ok("duplicate", legacy_id, self:_record_snapshot(imported), nil)
+		end
+		if imported.state ~= "dead_lettering" then
+			return ok("conflict", legacy_id, self:_record_snapshot(imported), "legacy dead-letter target has an incompatible state")
+		end
+		local completed = self:_finish_dead_letter(route)
+		completed.message_id = legacy_id
+		return completed
+	end
+
 	function MailboxV2.GetDeliveryAsync(self: EmbeddedMailbox, message_id: string): (EmbeddedMailboxDict?, EmbeddedMailboxResult)
 		if type(message_id) ~= "string" or #message_id == 0 or #message_id > MAX_KEY_LENGTH then
-			return nil, ok("invalid", message_id, nil, "message_id must be a valid v2 key")
+			return nil, ok("invalid", message_id, nil, "message_id must be a valid V2 or legacy message ID")
 		end
-		local raw, read_error = self:_get(message_id)
+		local route = self:_route_from_public_id(message_id)
+		local raw, read_error = self:_get(route)
 		if read_error ~= nil then
 			return nil, ok("unknown", message_id, nil, read_error)
 		end
 		local record = as_dict(raw)
 		if record ~= nil then
 			if not same_owner(record.owner, self.owner) then
-				return nil, ok("conflict", message_id, nil, "message key belongs to another owner")
+				return nil, ok("conflict", message_id, nil, "message route belongs to another owner")
 			end
 			if record.version ~= VERSION then
 				return nil, ok("unsupported_schema", message_id, nil, "canonical message version is unsupported")
 			end
 			return self:_record_snapshot(record), ok("success", message_id, nil, nil)
 		end
-		local entry, entry_error = self:_get_registry_entry(message_id)
+		local entry, entry_error = self:_get_registry_entry(route)
 		if entry_error ~= nil then
 			return nil, ok("unknown", message_id, nil, entry_error)
 		end
 		if entry ~= nil then
+			local request = as_dict(entry.request)
 			local snapshot = ({
-				Id = message_id,
+				Id = if request ~= nil and type(request.public_id) == "string" then request.public_id else message_id,
 				State = "preparing",
 				Phase = entry.phase,
 				CreatedAt = entry.created_at,
@@ -4688,7 +4970,6 @@ do
 		end
 		return nil, ok("not_found", message_id, nil, "no canonical message or active preparation is present")
 	end
-
 	function MailboxV2._rows(self: EmbeddedMailbox, kind: string): ({ EmbeddedMailboxDict }, string?)
 		local manifest, manifest_error = self:_get_manifest(kind)
 		if manifest == nil then
@@ -4881,7 +5162,8 @@ do
 			end
 			local next_record = clone_dict(raw)
 			next_record.state = "dead_lettered"
-			next_record.dead_lettered_at = dead_lettered_at
+			next_record.dead_lettered_at = if is_finite(next_record.legacy_dead_lettered_at)
+				then next_record.legacy_dead_lettered_at else dead_lettered_at
 			next_record.updated_at = dead_lettered_at
 			next_record.capacity_blocked = false
 			next_record.dlq_locator = { slot = locator.slot, generation = locator.generation }
@@ -5025,10 +5307,11 @@ do
 			return ok("invalid", message_id, nil, "claim_token must be 1 to 256 bytes")
 		end
 
+		local route = self:_route_from_public_id(message_id)
 		local now = self:_now()
 		local renewal_id, generation_error = self:_guid()
 		if renewal_id == nil then return ok("invalid", message_id, nil, generation_error) end
-		local renewed, update_error = self:_update_message(message_id, function(current)
+		local renewed, update_error = self:_update_message(route, function(current)
 			if current == nil or current.state ~= "claimed" or current.claim_token ~= claim_token then
 				return current
 			end
@@ -5056,7 +5339,7 @@ do
 		end)
 
 		if update_error ~= nil or renewed == nil then
-			local latest_value, read_error = self:_get(message_id)
+			local latest_value, read_error = self:_get(route)
 			local latest = as_dict(latest_value)
 			if read_error ~= nil then
 				return ok("unknown", message_id, nil, "claim renewal outcome is unknown; verification read failed: " .. read_error)
@@ -5552,11 +5835,12 @@ do
 	function MailboxV2.ReplayDeadLetterAsync(self: EmbeddedMailbox, message_id: string, operation_id: string): EmbeddedMailboxResult
 		local activation = self:_check_activation("replay")
 		if activation ~= nil then return activation end
+		local route = self:_route_from_public_id(message_id)
 		local replay_now = self:_now()
 		if type(operation_id) ~= "string" or operation_id == "" or #operation_id > 256 then
 			return ok("invalid", message_id, nil, "replay operation_id must be 1 to 256 bytes")
 		end
-		local record, read_error = self:_update_message(message_id, function(current)
+		local record, read_error = self:_update_message(route, function(current)
 			if current == nil or current.state ~= "dead_lettered" then
 				return current
 			end
@@ -5588,13 +5872,13 @@ do
 		if record.state ~= "replaying" or record.replay_operation_id ~= operation_id then
 			return ok("conflict", message_id, self:_record_snapshot(record), "message is not available for replay")
 		end
-		local sequenced_record, ordering_error = self:_ensure_replay_ordering_sequence(message_id, operation_id, record)
+		local sequenced_record, ordering_error = self:_ensure_replay_ordering_sequence(route, operation_id, record)
 		if sequenced_record == nil then
 			return ok("unknown", message_id, self:_record_snapshot(record), ordering_error or "replay ordering is unresolved")
 		end
 		record = sequenced_record
 		local locator, append_error = self:_append_index("active", {
-			route = message_id,
+			route = route,
 			placement_generation = record.pending_replay_generation,
 			reservation_token = operation_id,
 		})
@@ -5624,8 +5908,9 @@ do
 	function MailboxV2.DiscardDeadLetterAsync(self: EmbeddedMailbox, message_id: string, expected_replay_count: number): EmbeddedMailboxResult
 		local activation = self:_check_activation("discard")
 		if activation ~= nil then return activation end
+		local route = self:_route_from_public_id(message_id)
 		local discarded_at = self:_now()
-		local discarded, discard_error = self:_update_message(message_id, function(current)
+		local discarded, discard_error = self:_update_message(route, function(current)
 			if current == nil or current.state ~= "dead_lettered" or current.replay_count ~= expected_replay_count then
 				return current
 			end
