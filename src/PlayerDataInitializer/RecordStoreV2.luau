@@ -2019,24 +2019,44 @@ local function render_template(template, user_id)
 end
 
 local function new_erasure(store, families, options)
-	options = options or {}
-	families = families or {}
+	if type(store) ~= "table" or type(store.GetAsync) ~= "function" or type(store.UpdateAsync) ~= "function" then
+		error("erasure coordinator requires GetAsync and UpdateAsync storage adapters", 2)
+	end
+	if options == nil then options = {} elseif type(options) ~= "table" then error("erasure options must be a table", 2) end
+	if families == nil then families = {} elseif type(families) ~= "table" then error("erasure families must be an array", 2) end
+	local family_count = #families
+	if family_count > MAX_ERASURE_TEMPLATES or key_count(families) ~= family_count then
+		error("erasure families must be a dense array within the template limit", 2)
+	end
+	for family_index in pairs(families) do
+		if type(family_index) ~= "number" or not finite(family_index) or math.floor(family_index) ~= family_index
+			or family_index < 1 or family_index > family_count
+		then error("erasure families must be a dense numeric array", 2) end
+	end
 	local all_templates, by_name = {}, {}
 	for _, family in ipairs(families) do
+		if type(family) ~= "table" then error("erasure family must be a table", 2) end
 		if not valid_text(family.name, 48) or by_name[family.name] then error("erasure families need unique names", 2) end
 		by_name[family.name] = family
-		local templates = family.templates or {}
-		if #templates == 0 then error("each erasure family must declare at least one RTBF template", 2) end
+		local templates = family.templates
+		if type(templates) ~= "table" then error("each erasure family must declare a template array", 2) end
+		local template_count = #templates
+		if template_count == 0 then error("each erasure family must declare at least one RTBF template", 2) end
+		if key_count(templates) ~= template_count then error("RTBF templates must be a dense array", 2) end
+		for template_index in pairs(templates) do
+			if type(template_index) ~= "number" or not finite(template_index) or math.floor(template_index) ~= template_index
+				or template_index < 1 or template_index > template_count
+			then error("RTBF templates must be a dense numeric array", 2) end
+		end
 		for _, template in ipairs(templates) do
 			if type(template) ~= "table" then error("RTBF template must be table", 2) end
 			-- A partial locator would act as a wildcard for omitted DataStore names or
 			-- scopes. Require the complete exact name/scope/key identity in every
 			-- template; an empty scope is allowed for the platform default scope.
-			if type(template.name) ~= "string" or template.name == ""
-				or type(template.scope) ~= "string"
-				or type(template.key) ~= "string" or template.key == ""
+			if not valid_text(template.name, 50) or type(template.scope) ~= "string" or #template.scope > 50
+				or not valid_text(template.key, 50)
 			then
-				error("RTBF template must declare exact name, scope, and key fields", 2)
+				error("RTBF template must declare bounded exact DataStore name, scope, and key fields", 2)
 			end
 			local matchable = false
 			for _, field in ipairs({ "name", "scope", "key" }) do
@@ -2077,10 +2097,10 @@ local function new_erasure(store, families, options)
 			end
 			if by_name[entry.family] == nil then return false, "corrupt", "erasure entry references an unknown family" end
 			local item = entry.item
-			if not valid_text(item.key, 50) or not finite(item.generation)
-				or (item.name ~= nil and (type(item.name) ~= "string" or #item.name > 50))
-				or (item.scope ~= nil and (type(item.scope) ~= "string" or #item.scope > 50))
-			then return false, "corrupt", "erasure entry has an invalid locator or generation" end
+			if not valid_text(item.key, 50) or not finite(item.generation) or item.generation < 0
+				or math.floor(item.generation) ~= item.generation
+				or not valid_text(item.name, 50) or type(item.scope) ~= "string" or #item.scope > 50
+			then return false, "corrupt", "erasure entry has an invalid exact locator or generation" end
 			entry_counts[entry.family] = (entry_counts[entry.family] or 0) + 1
 		end
 		if manifest.rtbf_coverage_verified ~= true then
@@ -2167,12 +2187,13 @@ local function new_erasure(store, families, options)
 					local count, unmatched_count, unmatched_samples = 0, 0, {}
 					local seen_items = {}
 					for _, item in ipairs(items) do
-						if type(item) ~= "table" or not valid_text(item.key, 50) or not finite(item.generation) then
-							return { code = "invalid", family = family.name, message = "inventory items require key and observed generation" }
+						if type(item) ~= "table" or not valid_text(item.key, 50)
+							or not finite(item.generation) or item.generation < 0
+							or math.floor(item.generation) ~= item.generation
+							or not valid_text(item.name, 50) or type(item.scope) ~= "string" or #item.scope > 50
+						then
+							return { code = "invalid", family = family.name, message = "inventory items require exact name/scope/key and a non-negative integer generation" }
 						end
-						if (item.name ~= nil and type(item.name) ~= "string")
-							or (item.scope ~= nil and type(item.scope) ~= "string")
-						then return { code = "invalid", family = family.name, message = "inventory name and scope must be strings when supplied" } end
 						local locator = tostring(item.name or "") .. "\0" .. tostring(item.scope or "") .. "\0" .. item.key
 					if seen_items[locator] then return { code = "invalid", family = family.name, message = "inventory repeats a DataStore name/scope/key locator" } end
 						seen_items[locator] = true
@@ -2924,7 +2945,8 @@ local function new_maintenance()
 				end
 				if inspected.eligible == true and inspected.dependencies_clear == true then
 					local action, action_error = io_call(config.delete_if_generation, item, inspected.generation)
-					if action ~= "deleted" and action ~= "already_absent" and action ~= "skipped" and action ~= "unknown" and action ~= "dry_run" then
+					if action ~= "deleted" and action ~= "already_absent" and action ~= "skipped" and action ~= "unknown"
+						and not (action == "dry_run" and config.allow_dry_run == true) then
 						self.cursor = before_cursor
 						self.processed = before_processed
 						self.removed = before_removed
