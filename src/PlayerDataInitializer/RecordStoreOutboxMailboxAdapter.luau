@@ -113,8 +113,9 @@ local function validate_event(event: RecordStore.OutboxEvent): (boolean, string?
 		or (event.DestinationUserId ~= nil and not positive_integer(event.DestinationUserId))
 		or (event.CorrelationId ~= nil and (type(event.CorrelationId) ~= "string" or #event.CorrelationId > 256))
 		or (event.CausationId ~= nil and (type(event.CausationId) ~= "string" or #event.CausationId > 256))
-		or not math.isfinite(event.CreatedAt) or event.CreatedAt < 0
-		or not math.isfinite(event.Attempts) or math.floor(event.Attempts) ~= event.Attempts or event.Attempts < 0
+		or type(event.CreatedAt) ~= "number" or not math.isfinite(event.CreatedAt) or event.CreatedAt < 0
+		or type(event.Attempts) ~= "number" or not math.isfinite(event.Attempts)
+		or math.floor(event.Attempts) ~= event.Attempts or event.Attempts < 0
 		or (event.State ~= "pending" and event.State ~= "unknown")
 	then
 		return false, "outbox event identity, destination, payload, metadata, or dispatch state is invalid"
