@@ -1479,9 +1479,10 @@ local function new_doctor(record_store)
 		end
 		local identity, identity_error = resolve_quarantine_identity(record)
 		if identity == nil then return { code = "invalid", message = identity_error } end
+		local record_subject = is_record_subject(record)
 		local source_revision
 		local source_generation
-		if is_record_subject(record) then
+		if record_subject then
 			local active_ok, state, is_open = pcall(function()
 				return record:GetState(), record:IsOpen()
 			end)
@@ -1489,9 +1490,7 @@ local function new_doctor(record_store)
 				return { code = "fenced", message = "quarantine requires active Record ownership or an identity-only recovery call" }
 			end
 			local stats = record_stats(record)
-			if not finite(stats.revision) or not finite(stats.generation)
-				or not finite(stats.last_saved_revision)
-			then
+			if not finite(stats.revision) or not finite(stats.generation) or not finite(stats.last_saved_revision) then
 				return { code = "unknown", message = "record revision/generation could not be verified for durable quarantine" }
 			end
 			if expected_revision ~= nil and stats.revision ~= expected_revision then
@@ -1499,26 +1498,6 @@ local function new_doctor(record_store)
 			end
 			source_revision = stats.last_saved_revision
 			source_generation = stats.generation
-		else
-			local current_fence, current_code, current_error = durable_quarantine_fence(identity, nil)
-			if current_code ~= "success" or type(current_fence) ~= "table" then
-				return { code = current_code or "unknown", message = current_error or "profile identity could not be read for quarantine" }
-			end
-			if current_fence.Quarantined == true then
-				source_revision = current_fence.SourceRevision
-				source_generation = current_fence.SourceGeneration
-			elseif current_fence.Quarantined == false then
-				source_revision = current_fence.CurrentRevision
-				source_generation = current_fence.CurrentGeneration
-			else
-				return { code = "unknown", message = "profile identity has no confirmed generation/revision" }
-			end
-			if not finite(source_revision) or not finite(source_generation) then
-				return { code = "unknown", message = "durable generation/revision could not be verified for quarantine" }
-			end
-			if expected_revision ~= nil and expected_revision ~= source_revision then
-				return { code = "conflict", message = "durable profile revision changed after diagnosis" }
-			end
 		end
 		local identity_text = canonical({
 			store_name = identity.store_name, scope = identity.scope, profile_key = identity.profile_key,
@@ -1530,29 +1509,137 @@ local function new_doctor(record_store)
 		if existing_code == "unknown" or existing_code == "corrupt" then
 			return { code = existing_code, message = existing_error }
 		end
-		if existing ~= nil then
-			if existing.quarantine_id == quarantine_id and existing.status == "resolved" then
+		local current_fence, current_fence_code, current_fence_error = durable_quarantine_fence(identity, nil)
+		if current_fence_code == "fenced" then return { code = "fenced", message = current_fence_error } end
+		if current_fence_code ~= "success" or type(current_fence) ~= "table" then
+			return { code = current_fence_code or "unknown",
+				message = current_fence_error or "current profile generation/revision could not be verified" }
+		end
+		if current_fence.Quarantined == true then
+			if current_fence.QuarantineId ~= quarantine_id then
+				return { code = "conflict", message = "another quarantine owns the durable profile fence" }
+			end
+			if current_fence.Phase == "release_pending" then
+				if existing ~= nil and existing.quarantine_id ~= quarantine_id and existing.status ~= "resolved" then
+					return { code = "conflict", message = "another audit quarantine is active while a release is pending" }
+				end
+				if existing ~= nil and existing.quarantine_id == quarantine_id
+					and existing.status == "resolved" and existing.resolution_id ~= current_fence.ResolutionId
+				then
+					return { code = "conflict", message = "audit resolution conflicts with the release-pending same-key fence" }
+				end
+				local recovered_manifest = manifest_from_fence(current_fence)
+				recovered_manifest.fence_protocol = 1
+				if existing ~= nil and type(existing.history) == "table" then
+					recovered_manifest.history = copy(existing.history)
+				end
+				if existing ~= nil and existing.quarantine_id ~= quarantine_id and existing.status == "resolved" then
+					local history = if type(recovered_manifest.history) == "table" then recovered_manifest.history else {}
+					table.insert(history, {
+						quarantine_id = existing.quarantine_id,
+						status = existing.status,
+						operator_id = existing.operator_id,
+						reason = existing.reason,
+						observed_revision = existing.observed_revision,
+						observed_generation = existing.observed_generation,
+						created_at = existing.created_at,
+						updated_at = existing.updated_at,
+						resolution = copy(existing.resolution),
+					})
+					while #history > 16 do table.remove(history, 1) end
+					recovered_manifest.history = history
+				end
+				local _, recovery_error = adapter_call(quarantine_store, "UpdateAsync", key, function(old)
+					if old == nil then return copy(recovered_manifest) end
+					if type(old) ~= "table" or old.version ~= 1 or old.identity_text ~= identity_text then
+						return old
+					end
+					if old.quarantine_id == quarantine_id and old.status == "resolved"
+						and old.resolution_id == current_fence.ResolutionId
+					then return old end
+					if old.quarantine_id == quarantine_id and old.status == "release_pending"
+						and old.resolution_id == current_fence.ResolutionId
+					then return old end
+					if old.quarantine_id == quarantine_id and old.status == "quarantined" then
+						return copy(recovered_manifest)
+					end
+					if old.quarantine_id ~= quarantine_id and old.status == "resolved" then
+						return copy(recovered_manifest)
+					end
+					return old
+				end)
+				local recovered, recovered_code, recovered_error = read_quarantine_manifest(
+					quarantine_store, key, identity_text
+				)
+				if recovered_code ~= "success" or recovered == nil
+					or recovered.quarantine_id ~= quarantine_id
+					or recovered.resolution_id ~= current_fence.ResolutionId
+					or (recovered.status ~= "release_pending" and recovered.status ~= "resolved")
+				then
+					return { code = "unknown", status = "release_pending", fence = current_fence,
+						message = recovery_error or recovered_error
+							or "release-pending fence is durable but its audit manifest could not be recovered" }
+				end
+				return {
+					code = if recovered.status == "resolved" then "resolved_fenced" else "release_pending",
+					status = recovered.status,
+					manifest = recovered,
+					fence = current_fence,
+					reconciled = recovery_error ~= nil,
+					message = "durable release stage recovered; resume ResolveQuarantineAsync with the stored operator decision",
+				}
+			end
+			if current_fence.Phase ~= "quarantined" then
+				return { code = "conflict", message = "durable quarantine phase is not recognized" }
+			end
+			source_revision = current_fence.SourceRevision
+			source_generation = current_fence.SourceGeneration
+			if existing ~= nil and existing.quarantine_id == quarantine_id and existing.status == "resolved" then
+				return { code = "conflict", status = "resolved_fenced",
+					message = "audit says resolved while the authoritative same-key fence remains active" }
+			end
+		else
+			if existing ~= nil and existing.quarantine_id == quarantine_id and existing.status == "resolved" then
 				return { code = "duplicate", status = "resolved", manifest = existing }
 			end
-			if existing.quarantine_id == quarantine_id
-				and (existing.operator_id ~= operator_id or existing.reason ~= reason)
-			then
-				return { code = "conflict", status = existing.status,
-					message = "quarantine ID was already bound to a different operator decision" }
+			if existing ~= nil and existing.quarantine_id == quarantine_id and existing.status == "release_pending" then
+				return { code = "unknown", status = "release_pending",
+					message = "audit release is pending but its same-key fence is absent; operator reconciliation is required" }
 			end
-			if existing.quarantine_id ~= quarantine_id and existing.status ~= "resolved" then
+			if existing ~= nil and existing.quarantine_id ~= quarantine_id and existing.status ~= "resolved" then
 				return { code = "conflict", message = "another quarantine is active or awaiting resolution" }
 			end
-			if existing.quarantine_id == quarantine_id and existing.status == "release_pending" then
-				return { code = "conflict", status = existing.status,
-					message = "this quarantine is already resolving and cannot be re-opened" }
+			if not record_subject then
+				source_revision = current_fence.CurrentRevision
+				source_generation = current_fence.CurrentGeneration
+				if not finite(source_revision) or not finite(source_generation) then
+					return { code = "unknown", message = "durable generation/revision could not be verified for quarantine" }
+				end
+				if expected_revision ~= nil and expected_revision ~= source_revision then
+					return { code = "conflict", message = "durable profile revision changed after diagnosis" }
+				end
 			end
-			if existing.quarantine_id == quarantine_id then
+			if existing ~= nil and existing.quarantine_id == quarantine_id then
+				if existing.status ~= "quarantined"
+					or existing.operator_id ~= operator_id or existing.reason ~= reason
+				then
+					return { code = "conflict", status = existing.status,
+						message = "quarantine ID was already bound to a different operator decision or phase" }
+				end
 				source_revision = existing.observed_revision
 				source_generation = existing.observed_generation
-				operator_id = existing.operator_id
-				reason = existing.reason
 			end
+		end
+		if existing ~= nil and existing.quarantine_id ~= quarantine_id and existing.status ~= "resolved" then
+			return { code = "conflict", message = "another quarantine is active or awaiting resolution" }
+		end
+		if not finite(source_revision) or not finite(source_generation) then
+			return { code = "unknown", message = "source generation/revision could not be verified" }
+		end
+		if existing ~= nil and existing.quarantine_id == quarantine_id
+			and (existing.operator_id ~= operator_id or existing.reason ~= reason)
+		then
+			return { code = "conflict", message = "quarantine ID was already bound to a different operator decision" }
 		end
 		local fence_call_ok, fence, fence_code, fence_message = pcall(function()
 			return record_store.quarantine_profile_writes_async(
@@ -1586,7 +1673,8 @@ local function new_doctor(record_store)
 			fence_generation = fence.CurrentGeneration,
 			operator_id = operator_id,
 			reason = reason,
-			created_at = now,
+			created_at = if existing ~= nil and existing.quarantine_id == quarantine_id
+				then existing.created_at else now,
 			updated_at = now,
 		}
 		if existing ~= nil and existing.quarantine_id ~= quarantine_id and existing.status == "resolved" then
@@ -1607,7 +1695,7 @@ local function new_doctor(record_store)
 		elseif existing ~= nil and type(existing.history) == "table" then
 			proposed_manifest.history = copy(existing.history)
 		end
-		local persisted, persist_error = adapter_call(quarantine_store, "UpdateAsync", key, function(old)
+		local _, persist_error = adapter_call(quarantine_store, "UpdateAsync", key, function(old)
 			if old == nil then return copy(proposed_manifest) end
 			if type(old) ~= "table" or old.version ~= 1 or old.identity_text ~= identity_text then
 				return old
@@ -1638,7 +1726,6 @@ local function new_doctor(record_store)
 			reconciled = persist_error ~= nil,
 		}
 	end
-
 	function doctor.GetQuarantineStatusAsync(record, quarantine_store)
 		if type(quarantine_store) ~= "table"
 			or type(record_store.get_quarantine_fence_status_async) ~= "function"
