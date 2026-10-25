@@ -1004,6 +1004,29 @@ legacy_completed_store.values["rv2erase-u780"] = {
 local legacy_completed_erasure = V2.Erasure.new(legacy_completed_store, {}, {
 	verify_templates = function() return false end,
 })
+local resolved_store = new_store()
+resolved_store.values["rv2erase-u786"] = {
+	version = 1,
+	user_id = 786,
+	erasure_id = "resolved-without-proof",
+	status = "resolved",
+	cursor = 0,
+	completed_count = 0,
+	entries = {},
+	coverage = {},
+	rtbf_coverage_verified = false,
+}
+local resolved_erasure = V2.Erasure.new(resolved_store, {}, {
+	verify_templates = function() return false end,
+})
+local resolved_is_erased = resolved_erasure:IsErased(786)
+expect(resolved_is_erased == false,
+	"resolved manifest without completion evidence was reported as erased")
+local resolved_write_blocked, resolved_gate = resolved_erasure:ShouldBlockWrites(786)
+expect(resolved_write_blocked == true and resolved_gate.code == "resolution_unverified"
+	and resolved_gate.write_blocked == true,
+	"terminal resolved label without audited recreation evidence released the writer fence")
+
 local legacy_erased, legacy_erasure_status = legacy_completed_erasure:IsErased(780)
 expect(legacy_erased == nil and legacy_erasure_status.code == "coverage_unverified",
 	"legacy completed manifest without RTBF coverage proof was reported as erased")
