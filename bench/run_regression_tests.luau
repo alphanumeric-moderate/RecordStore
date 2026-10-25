@@ -21,6 +21,8 @@ for _, path in {
 	"src/PlayerDataInitializer/RecordStoreV2Acceleration.luau",
 	"src/PlayerDataInitializer/PlayerDataErasure.luau",
 	"src/PlayerDataInitializer/RecordStoreMaintenanceRunner.luau",
+	"src/PlayerDataInitializer/RecordStoreMaintenanceRobloxAdapter.luau",
+	"tests/RecordStoreMaintenanceRobloxAdapterRegression.server.luau",
 	"bench/DeterministicCrashSimulator.luau",
 	"bench/run_erasure_regression.luau",
 	"bench/run_crash_simulator_regression.luau",
@@ -109,4 +111,5 @@ Shim.run_script("tests/RecordStore_NonSaveRoadmapRegression.server.luau")
 Shim.run_script("bench/run_erasure_regression.luau")
 Shim.run_script("bench/run_crash_simulator_regression.luau")
 Shim.run_script("bench/run_acceleration_regression.luau")
+Shim.run_script("tests/RecordStoreMaintenanceRobloxAdapterRegression.server.luau")
 Shim.close()
