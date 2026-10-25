@@ -4951,7 +4951,9 @@ do
 			return nil, ok("invalid", message_id, nil, "message_id must be a valid V2 or legacy message ID")
 		end
 		local route = self:_route_from_public_id(message_id)
-		local raw, read_error = self:_get(route)
+		-- Public delivery reads are used to confirm durable outbox receipts and
+		-- migration imports, so they must bypass Roblox's short-lived GetAsync cache.
+		local raw, read_error = self:_get_fresh(route)
 		if read_error ~= nil then
 			return nil, ok("unknown", message_id, nil, read_error)
 		end
