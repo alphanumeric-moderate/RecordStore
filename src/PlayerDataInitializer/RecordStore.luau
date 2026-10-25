@@ -11593,6 +11593,466 @@ local function parse_erasure_fence(raw: unknown): (ErasureFenceMarker?, boolean,
 	}, true, nil
 end
 
+type QuarantineFenceMarker = {
+	version: number,
+	store_name: string,
+	scope: string,
+	profile_key: string,
+	quarantine_id: string,
+	source_implementation_version: number,
+	source_generation: number,
+	source_revision: number,
+	fence_generation: number,
+	operator_id: string,
+	reason: string,
+	created_at: number,
+	updated_at: number,
+	phase: string,
+	resolution_id: string?,
+	resolution_operator_id: string?,
+	resolution_reason: string?,
+	resolution_at: number?,
+}
+
+local function parse_quarantine_fence(raw: unknown): (QuarantineFenceMarker?, boolean, string?)
+	if type(raw) ~= "table" then return nil, false, nil end
+	local raw_marker = get_string_field(raw, QUARANTINE_FENCE_FIELD)
+	local stored_version = get_string_field(raw, "implementation_version")
+	if raw_marker == nil and stored_version ~= QUARANTINE_FENCE_IMPLEMENTATION_VERSION then
+		return nil, false, nil
+	end
+	if stored_version ~= QUARANTINE_FENCE_IMPLEMENTATION_VERSION then
+		return nil, true, "quarantine fence implementation marker is invalid"
+	end
+	if type(raw_marker) ~= "table" then return nil, true, "quarantine fence payload is malformed" end
+	local fields = raw_marker :: { [string]: unknown }
+	local version = fields.version
+	local store_name = fields.store_name
+	local scope = fields.scope
+	local profile_key = fields.profile_key
+	local quarantine_id = fields.quarantine_id
+	local source_implementation_version = fields.source_implementation_version
+	local source_generation = fields.source_generation
+	local source_revision = fields.source_revision
+	local fence_generation = fields.fence_generation
+	local operator_id = fields.operator_id
+	local reason = fields.reason
+	local created_at = fields.created_at
+	local updated_at = fields.updated_at
+	local phase = fields.phase
+	local resolution_id = fields.resolution_id
+	local resolution_operator_id = fields.resolution_operator_id
+	local resolution_reason = fields.resolution_reason
+	local resolution_at = fields.resolution_at
+	if version ~= 1
+		or not valid_text(store_name, 50)
+		or type(scope) ~= "string" or #scope > 50
+		or not valid_text(profile_key, 50)
+		or not valid_text(quarantine_id, 96)
+		or not finite_erasure_number(source_implementation_version)
+		or (source_implementation_version :: number) < 1
+		or math.floor(source_implementation_version :: number) ~= (source_implementation_version :: number)
+		or (source_implementation_version :: number) > prepared_envelope_cache._sidecar_protocol.max_readable_version
+		or not finite_erasure_number(source_generation)
+		or (source_generation :: number) < 0
+		or math.floor(source_generation :: number) ~= (source_generation :: number)
+		or not finite_erasure_number(source_revision)
+		or (source_revision :: number) < 0
+		or math.floor(source_revision :: number) ~= (source_revision :: number)
+		or not finite_erasure_number(fence_generation)
+		or math.floor(fence_generation :: number) ~= (fence_generation :: number)
+		or (fence_generation :: number) ~= math.max(1, (source_generation :: number) + 1)
+		or not valid_text(operator_id, 96)
+		or not valid_text(reason, 512)
+		or not finite_erasure_number(created_at)
+		or not finite_erasure_number(updated_at)
+		or (updated_at :: number) < (created_at :: number)
+		or (phase ~= "quarantined" and phase ~= "release_pending")
+	then
+		return nil, true, "quarantine fence fields failed validation"
+	end
+	if phase == "release_pending" then
+		if not valid_text(resolution_id, 96)
+			or not valid_text(resolution_operator_id, 96)
+			or not valid_text(resolution_reason, 512)
+			or not finite_erasure_number(resolution_at)
+		then
+			return nil, true, "quarantine release-pending fields failed validation"
+		end
+	elseif resolution_id ~= nil or resolution_operator_id ~= nil
+		or resolution_reason ~= nil or resolution_at ~= nil
+	then
+		return nil, true, "quarantined fence unexpectedly contains release-pending fields"
+	end
+	local raw_revision = get_string_field(raw, "revision")
+	local raw_generation = get_string_field(raw, "fencing_generation")
+	if raw_revision ~= (source_revision :: number) + 1 or raw_generation ~= fence_generation then
+		return nil, true, "quarantine fence envelope revision/generation does not match its marker"
+	end
+	return {
+		version = 1,
+		store_name = store_name :: string,
+		scope = scope :: string,
+		profile_key = profile_key :: string,
+		quarantine_id = quarantine_id :: string,
+		source_implementation_version = source_implementation_version :: number,
+		source_generation = source_generation :: number,
+		source_revision = source_revision :: number,
+		fence_generation = fence_generation :: number,
+		operator_id = operator_id :: string,
+		reason = reason :: string,
+		created_at = created_at :: number,
+		updated_at = updated_at :: number,
+		phase = phase :: string,
+		resolution_id = resolution_id :: string?,
+		resolution_operator_id = resolution_operator_id :: string?,
+		resolution_reason = resolution_reason :: string?,
+		resolution_at = resolution_at :: number?,
+	}, true, nil
+end
+
+local function quarantine_status_from_marker(
+	marker: QuarantineFenceMarker,
+	info: BackendInfo?,
+	raw: unknown
+): QuarantineFenceStatus
+	local fields = if type(raw) == "table" then raw :: { [string]: unknown } else {}
+	return {
+		Exists = true,
+		Quarantined = true,
+		Phase = marker.phase,
+		QuarantineId = marker.quarantine_id,
+		StoreName = marker.store_name,
+		Scope = marker.scope,
+		ProfileKey = marker.profile_key,
+		SourceGeneration = marker.source_generation,
+		SourceRevision = marker.source_revision,
+		OperatorId = marker.operator_id,
+		Reason = marker.reason,
+		CreatedAt = marker.created_at,
+		UpdatedAt = marker.updated_at,
+		ResolutionId = marker.resolution_id,
+		ResolutionOperatorId = marker.resolution_operator_id,
+		ResolutionReason = marker.resolution_reason,
+		ResolutionAt = marker.resolution_at,
+		Version = if info ~= nil then info.Version else nil,
+		CurrentGeneration = if type(fields.fencing_generation) == "number" then fields.fencing_generation else marker.fence_generation,
+		CurrentRevision = if type(fields.revision) == "number" then fields.revision else marker.source_revision + 1,
+		CurrentWriteId = if type(fields.write_id) == "string" then fields.write_id else nil,
+	}
+end
+
+local function get_quarantine_fence_status_internal(
+	name: string,
+	scope: string,
+	key: string,
+	operation_deadline: number?,
+	mock: boolean
+): (QuarantineFenceStatus?, ResultCode, string?)
+	local valid_identity, identity_message = validate_store_identity(name, scope, key)
+	if not valid_identity then return nil, "invalid", identity_message end
+	local deadline, deadline_error = resolve_operation_deadline(operation_deadline)
+	if deadline == nil then return nil, "invalid", deadline_error end
+	local backend = make_backend(name, scope, key, mock)
+	local raw, info, read_code, read_message = backend_get(backend, false, deadline, nil)
+	if read_code ~= nil then return nil, normalize_result_code(read_code) or "unknown", read_message end
+	if raw == nil then
+		return {
+			Exists = false, Quarantined = false, Phase = nil, QuarantineId = nil,
+			StoreName = name, Scope = scope, ProfileKey = key,
+			SourceGeneration = nil, SourceRevision = nil, OperatorId = nil, Reason = nil,
+			CreatedAt = nil, UpdatedAt = nil, ResolutionId = nil, ResolutionOperatorId = nil,
+			ResolutionReason = nil, ResolutionAt = nil, Version = nil,
+			CurrentGeneration = nil, CurrentRevision = nil, CurrentWriteId = nil,
+		}, "not_found", nil
+	end
+	local erased, erasure_present, erasure_error = parse_erasure_fence(raw)
+	if erasure_present then
+		if erased == nil then return nil, "corrupt", erasure_error or "erasure fence is corrupt" end
+		return nil, "fenced", "profile is permanently erased and cannot be quarantined"
+	end
+	local marker, marker_present, marker_error = parse_quarantine_fence(raw)
+	if marker_present then
+		if marker == nil then return nil, "corrupt", marker_error or "quarantine fence is corrupt" end
+		if marker.store_name ~= name or marker.scope ~= scope or marker.profile_key ~= key then
+			return nil, "conflict", "quarantine marker belongs to a different durable key identity"
+		end
+		return quarantine_status_from_marker(marker, info, raw), "success", nil
+	end
+	local envelope, parse_error, current_format = parse_envelope(raw)
+	if not current_format then
+		local result: ResultCode = if parse_error == "legacy payload" then "legacy"
+			elseif parse_error == "future implementation version" then "future_schema" else "corrupt"
+		return nil, result, parse_error or "profile envelope is not readable"
+	end
+	if envelope == nil then return nil, "corrupt", parse_error or "profile envelope is missing" end
+	return {
+		Exists = true,
+		Quarantined = false,
+		Phase = "not_quarantined",
+		QuarantineId = nil,
+		StoreName = name,
+		Scope = scope,
+		ProfileKey = key,
+		SourceGeneration = envelope.fencing_generation,
+		SourceRevision = envelope.revision,
+		OperatorId = nil,
+		Reason = nil,
+		CreatedAt = nil,
+		UpdatedAt = nil,
+		ResolutionId = nil,
+		ResolutionOperatorId = nil,
+		ResolutionReason = nil,
+		ResolutionAt = nil,
+		Version = if info ~= nil then info.Version else nil,
+		CurrentGeneration = envelope.fencing_generation,
+		CurrentRevision = envelope.revision,
+		CurrentWriteId = envelope.write_id,
+	}, "success", nil
+end
+
+local function preserve_update_metadata(info: BackendInfo?): ({ number }, Metadata)
+	if info == nil then return {}, {} end
+	return clone_user_ids(info.UserIds), clone_metadata(info.Metadata)
+end
+
+local function quarantine_profile_writes_internal(
+	name: string,
+	scope: string,
+	key: string,
+	quarantine_id: string,
+	operator_id: string,
+	reason: string,
+	expected_generation: number,
+	expected_revision: number,
+	operation_deadline: number?,
+	mock: boolean
+): (QuarantineFenceStatus?, ResultCode, string?)
+	local valid_identity, identity_message = validate_store_identity(name, scope, key)
+	if not valid_identity then return nil, "invalid", identity_message end
+	if not valid_text(quarantine_id, 96) or not valid_text(operator_id, 96)
+		or not valid_text(reason, 512)
+	then
+		return nil, "invalid", "quarantine ID, operator ID and reason must be bounded non-empty strings"
+	end
+	if not finite_erasure_number(expected_generation) or expected_generation < 0
+		or math.floor(expected_generation) ~= expected_generation
+		or not finite_erasure_number(expected_revision) or expected_revision < 0
+		or math.floor(expected_revision) ~= expected_revision
+	then
+		return nil, "invalid", "expected generation and revision must be non-negative integers"
+	end
+	local deadline, deadline_error = resolve_operation_deadline(operation_deadline)
+	if deadline == nil then return nil, "invalid", deadline_error end
+	local backend = make_backend(name, scope, key, mock)
+	local now = session_now_unix(mock)
+	local fence_write_id = HttpService:GenerateGUID(false)
+	local update_result, _, update_code, update_message = backend_update(backend, function(raw, info)
+		if raw == nil then return nil, nil, nil end
+		local erasure, erasure_present = parse_erasure_fence(raw)
+		if erasure_present or erasure ~= nil then return nil, nil, nil end
+		local existing, present = parse_quarantine_fence(raw)
+		if present then return nil, nil, nil end
+		local envelope, _, current_format = parse_envelope(raw)
+		if not current_format or envelope == nil
+			or envelope.fencing_generation ~= expected_generation
+			or envelope.revision ~= expected_revision
+		then
+			return nil, nil, nil
+		end
+		local next_raw = copy_value(raw)
+		if type(next_raw) ~= "table" then return nil, nil, nil end
+		local mutable = next_raw :: { [string]: unknown }
+		local next_generation = math.max(1, envelope.fencing_generation + 1)
+		local marker: { [string]: unknown } = {
+			version = 1,
+			store_name = name,
+			scope = scope,
+			profile_key = key,
+			quarantine_id = quarantine_id,
+			source_implementation_version = envelope.implementation_version,
+			source_generation = envelope.fencing_generation,
+			source_revision = envelope.revision,
+			fence_generation = next_generation,
+			operator_id = operator_id,
+			reason = reason,
+			created_at = now,
+			updated_at = now,
+			phase = "quarantined",
+		}
+		mutable.implementation_version = QUARANTINE_FENCE_IMPLEMENTATION_VERSION
+		mutable.fencing_generation = next_generation
+		mutable.revision = envelope.revision + 1
+		mutable.updated_at = now
+		mutable.write_id = fence_write_id
+		mutable.session = nil
+		mutable[QUARANTINE_FENCE_FIELD] = marker
+		local size_ok = validate_serialized_size(mutable)
+		if not size_ok then return nil, nil, nil end
+		local user_ids, metadata = preserve_update_metadata(info)
+		return mutable, user_ids, metadata
+	end, deadline, nil)
+	local observed, status_code, status_message = get_quarantine_fence_status_internal(
+		name, scope, key, deadline - now_local(), mock
+	)
+	if status_code == "success" and observed ~= nil and observed.Quarantined then
+		if observed.QuarantineId ~= quarantine_id then
+			return nil, "conflict", "another quarantine already fences this profile"
+		end
+		if observed.Phase ~= "quarantined" then
+			return nil, "conflict", "this quarantine has already entered release resolution"
+		end
+		if observed.SourceGeneration ~= expected_generation or observed.SourceRevision ~= expected_revision then
+			return nil, "conflict", "existing quarantine fence was installed from a different source revision"
+		end
+		return observed, if update_code == nil then "success" else "success", nil
+	end
+	if status_code == "success" and observed ~= nil and not observed.Quarantined then
+		if observed.CurrentGeneration ~= expected_generation or observed.CurrentRevision ~= expected_revision then
+			return nil, "conflict", "profile changed before the same-key quarantine fence was installed"
+		end
+		return nil, if update_code ~= nil then normalize_result_code(update_code) or "unknown" else "unknown",
+			update_message or "same-key quarantine fence was not observed after the update"
+	end
+	if status_code == "fenced" then return nil, "fenced", status_message end
+	if status_code == "conflict" then return nil, "conflict", status_message end
+	if status_code == "corrupt" or status_code == "future_schema" or status_code == "legacy" then
+		return nil, status_code, status_message
+	end
+	return nil, normalize_result_code(update_code) or status_code or "unknown",
+		status_message or update_message or "quarantine fence outcome could not be reconciled"
+end
+
+local function mark_quarantine_release_pending_internal(
+	name: string,
+	scope: string,
+	key: string,
+	quarantine_id: string,
+	resolution_id: string,
+	operator_id: string,
+	reason: string,
+	expected_revision: number?,
+	operation_deadline: number?,
+	mock: boolean
+): (QuarantineFenceStatus?, ResultCode, string?)
+	local valid_identity, identity_message = validate_store_identity(name, scope, key)
+	if not valid_identity then return nil, "invalid", identity_message end
+	if not valid_text(quarantine_id, 96) or not valid_text(resolution_id, 96)
+		or not valid_text(operator_id, 96) or not valid_text(reason, 512)
+	then return nil, "invalid", "quarantine resolution identity and audit fields are invalid" end
+	if expected_revision ~= nil and (
+		not finite_erasure_number(expected_revision) or expected_revision < 0
+		or math.floor(expected_revision) ~= expected_revision
+	) then return nil, "invalid", "expected_revision must be a non-negative integer" end
+	local deadline, deadline_error = resolve_operation_deadline(operation_deadline)
+	if deadline == nil then return nil, "invalid", deadline_error end
+	local backend = make_backend(name, scope, key, mock)
+	local now = session_now_unix(mock)
+	local release_pending_write_id = "qrel-pending:" .. resolution_id
+	local _, _, update_code, update_message = backend_update(backend, function(raw, info)
+		local marker, present = parse_quarantine_fence(raw)
+		if not present or marker == nil or marker.quarantine_id ~= quarantine_id then return nil, nil, nil end
+		if expected_revision ~= nil and marker.source_revision ~= expected_revision then return nil, nil, nil end
+		if marker.phase == "release_pending" then
+			if marker.resolution_id ~= resolution_id then return nil, nil, nil end
+			return nil, nil, nil
+		end
+		local next_raw = copy_value(raw)
+		if type(next_raw) ~= "table" then return nil, nil, nil end
+		local mutable = next_raw :: { [string]: unknown }
+		local next_marker = table.clone(marker) :: { [string]: unknown }
+		next_marker.phase = "release_pending"
+		next_marker.resolution_id = resolution_id
+		next_marker.resolution_operator_id = operator_id
+		next_marker.resolution_reason = reason
+		next_marker.resolution_at = now
+		next_marker.updated_at = now
+		mutable[QUARANTINE_FENCE_FIELD] = next_marker
+		mutable.updated_at = now
+		mutable.write_id = release_pending_write_id
+		local size_ok = validate_serialized_size(mutable)
+		if not size_ok then return nil, nil, nil end
+		local user_ids, metadata = preserve_update_metadata(info)
+		return mutable, user_ids, metadata
+	end, deadline, nil)
+	local observed, status_code, status_message = get_quarantine_fence_status_internal(
+		name, scope, key, deadline - now_local(), mock
+	)
+	if status_code == "success" and observed ~= nil and observed.Quarantined
+		and observed.QuarantineId == quarantine_id and observed.Phase == "release_pending"
+		and observed.ResolutionId == resolution_id
+	then
+		return observed, "success", nil
+	end
+	if status_code == "success" and observed ~= nil and observed.Quarantined
+		and (observed.QuarantineId ~= quarantine_id or observed.ResolutionId ~= resolution_id)
+	then return nil, "conflict", "quarantine release request conflicts with the durable fence" end
+	return nil, normalize_result_code(update_code) or status_code or "unknown",
+		status_message or update_message or "release-pending fence transition could not be confirmed"
+end
+
+local function release_quarantine_fence_internal(
+	name: string,
+	scope: string,
+	key: string,
+	quarantine_id: string,
+	resolution_id: string,
+	operation_deadline: number?,
+	mock: boolean
+): (QuarantineFenceStatus?, ResultCode, string?)
+	local valid_identity, identity_message = validate_store_identity(name, scope, key)
+	if not valid_identity then return nil, "invalid", identity_message end
+	if not valid_text(quarantine_id, 96) or not valid_text(resolution_id, 96) then
+		return nil, "invalid", "quarantine ID and resolution ID are invalid"
+	end
+	local deadline, deadline_error = resolve_operation_deadline(operation_deadline)
+	if deadline == nil then return nil, "invalid", deadline_error end
+	local backend = make_backend(name, scope, key, mock)
+	local now = session_now_unix(mock)
+	local release_write_id = "qrel:" .. resolution_id
+	local _, _, update_code, update_message = backend_update(backend, function(raw, info)
+		local marker, present = parse_quarantine_fence(raw)
+		if not present or marker == nil or marker.quarantine_id ~= quarantine_id
+			or marker.phase ~= "release_pending" or marker.resolution_id ~= resolution_id
+		then return nil, nil, nil end
+		local next_raw = copy_value(raw)
+		if type(next_raw) ~= "table" then return nil, nil, nil end
+		local mutable = next_raw :: { [string]: unknown }
+		mutable.implementation_version = marker.source_implementation_version
+		mutable.revision = (get_string_field(raw, "revision") :: number) + 1
+		mutable.fencing_generation = marker.fence_generation + 1
+		mutable.updated_at = now
+		mutable.write_id = release_write_id
+		mutable.session = nil
+		mutable[QUARANTINE_FENCE_FIELD] = nil
+		local restored_envelope, restore_error, is_current = parse_envelope(mutable)
+		if not is_current or restored_envelope == nil then return nil, nil, nil end
+		local size_ok = validate_serialized_size(mutable)
+		if not size_ok then return nil, nil, nil end
+		local user_ids, metadata = preserve_update_metadata(info)
+		return mutable, user_ids, metadata
+	end, deadline, nil)
+	local observed, status_code, status_message = get_quarantine_fence_status_internal(
+		name, scope, key, deadline - now_local(), mock
+	)
+	if status_code == "success" and observed ~= nil and not observed.Quarantined then
+		if observed.CurrentWriteId == release_write_id then return observed, "success", nil end
+		if observed.CurrentGeneration ~= nil and observed.CurrentGeneration >= 2
+			and observed.CurrentWriteId == release_write_id
+		then return observed, "success", nil end
+		return nil, "conflict", "quarantine fence is absent but the release write identity could not be confirmed"
+	end
+	if status_code == "success" and observed ~= nil and observed.Quarantined then
+		if observed.QuarantineId ~= quarantine_id
+			or observed.Phase ~= "release_pending" or observed.ResolutionId ~= resolution_id
+		then return nil, "conflict", "durable quarantine fence changed before release" end
+		return nil, normalize_result_code(update_code) or "unknown",
+			update_message or "quarantine fence remains durable after the release attempt"
+	end
+	return nil, normalize_result_code(update_code) or status_code or "unknown",
+		status_message or update_message or "quarantine release outcome could not be reconciled"
+end
+
 local function get_erasure_status_internal(
 	name: string,
 	scope: string,
