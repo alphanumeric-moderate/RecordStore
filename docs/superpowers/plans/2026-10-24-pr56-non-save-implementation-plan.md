@@ -93,7 +93,7 @@
 
 ### Slice 7: Projections, erasure and operation tracing
 - [x] Add opt-in durable event-driven projections with monotonic revision checks, payload-fingerprinted bounded idempotency receipts (event-ID reuse with a different payload conflicts), durable bounded rebuild cursors, and durable uniqueness reservations.
-- [x] Harden resumable erasure execution: each RTBF template must specify exact DataStore name, scope, and key; inventories must explicitly certify completeness; malformed/oversized lists and unmatched locators fail closed; destructive execution is blocked until the stored plan proves coverage, and writer fences plus dependency checks are required/rechecked at each generation-aware delete boundary. Legacy completed manifests without coverage proof are unresolved, not proof of erasure.
+- [x] Harden resumable erasure execution: each RTBF template must specify exact DataStore name, scope, and key; inventories must explicitly certify completeness; malformed/oversized lists and unmatched locators fail closed; destructive execution is blocked until the stored plan proves coverage, and writer fences plus dependency checks are required/rechecked at each generation-aware delete boundary. `IsErased` reports completion only after a coverage-verified completed manifest; `ShouldBlockWrites` separately preserves the no-recreation fence while an erase is planned/in progress or a legacy manifest lacks proof.
 - [x] Add bounded redacted trace buffering and optional durable trace flush/read reconciliation.
 
 - [x] Add opt-in durable projection rebuild manifests with stable rebuild/snapshot identity, bounded page processing, persisted cursors and counts, exact ambiguous-write reconciliation, status inspection, restart/resume coverage, and strict complete/cursor contract validation. The source adapter must pin the same immutable snapshot for every page; source-specific platform acceptance remains a release gate.
@@ -104,7 +104,7 @@
 ### Slice 8: Verification and merge gates
 
 - [ ] Run all Luau checks and Lune regression stages for every delivered slice, including the new standalone maintenance-runner regression on the final head.
-- [ ] Complete fault-injection and focused CodSpeed evidence for every durable protocol/maintenance path. Mailbox V2 producer/acknowledgement/future-schema interleavings, compaction checkpoint replay, independent maintenance-runner checkpoint recovery and purchase-ledger expiry/conflict/capacity are covered by focused regression stages. Saga leg fault injection and a complete final-head benchmark/evidence run remain outstanding.
+- [ ] Complete fault-injection and focused CodSpeed evidence for every durable protocol/maintenance path. Mailbox V2 producer/acknowledgement/future-schema interleavings, compaction checkpoint replay (including counters), independent maintenance-runner checkpoint recovery, purchase-ledger expiry/conflict/capacity/legacy-marker behavior, and saga reserve/credit/refund/settle failures both before commit and after response loss have focused regression coverage. Complete final-head benchmark/evidence and real-platform acceptance remain outstanding.
 - [ ] Complete independent code review and inspect every changed file.
 - [ ] Keep live Roblox Studio/DataStore multi-server, throttling/cache, crash/shutdown, mixed-version rollout/rollback and RTBF template acceptance explicitly blocked until executed in a real test experience.
 
