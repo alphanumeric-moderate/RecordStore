@@ -9955,11 +9955,6 @@ local function mailbox_v2_migration_api(mock: boolean)
 	}
 end
 
-local mailbox_v2_migration_production = mailbox_v2_migration_api(false)
-RecordStore.begin_mailbox_v2_migration_async = mailbox_v2_migration_production.begin_mailbox_v2_migration_async
-RecordStore.get_mailbox_v2_migration_status_async = mailbox_v2_migration_production.get_mailbox_v2_migration_status_async
-RecordStore.get_mailbox_v2_migration_source_page_async = mailbox_v2_migration_production.get_mailbox_v2_migration_source_page_async
-
 
 local function normalize_queue_error(message: string): string
 	local printable = string.gsub(message, "[^ -~]", "?")
