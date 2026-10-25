@@ -106,11 +106,18 @@ local function validate_event(event: RecordStore.OutboxEvent): (boolean, string?
 		or type(event.EventType) ~= "string" or event.EventType == "" or #event.EventType > 100
 		or type(event.PayloadVersion) ~= "number" or not math.isfinite(event.PayloadVersion)
 		or math.floor(event.PayloadVersion) ~= event.PayloadVersion or event.PayloadVersion < 1
-		or type(event.DestinationStoreName) ~= "string" or event.DestinationStoreName == ""
-		or type(event.DestinationScope) ~= "string"
-		or type(event.DestinationProfileKey) ~= "string" or event.DestinationProfileKey == ""
+		or event.Payload == nil
+		or type(event.DestinationStoreName) ~= "string" or event.DestinationStoreName == "" or #event.DestinationStoreName > 50
+		or type(event.DestinationScope) ~= "string" or #event.DestinationScope > 50
+		or type(event.DestinationProfileKey) ~= "string" or event.DestinationProfileKey == "" or #event.DestinationProfileKey > 50
+		or (event.DestinationUserId ~= nil and not positive_integer(event.DestinationUserId))
+		or (event.CorrelationId ~= nil and (type(event.CorrelationId) ~= "string" or #event.CorrelationId > 256))
+		or (event.CausationId ~= nil and (type(event.CausationId) ~= "string" or #event.CausationId > 256))
+		or not math.isfinite(event.CreatedAt) or event.CreatedAt < 0
+		or not math.isfinite(event.Attempts) or math.floor(event.Attempts) ~= event.Attempts or event.Attempts < 0
+		or (event.State ~= "pending" and event.State ~= "unknown")
 	then
-		return false, "outbox event identity, destination, or payload version is invalid"
+		return false, "outbox event identity, destination, payload, metadata, or dispatch state is invalid"
 	end
 	return true, nil
 end
