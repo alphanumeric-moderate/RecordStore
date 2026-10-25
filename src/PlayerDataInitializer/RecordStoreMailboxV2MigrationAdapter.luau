@@ -52,7 +52,7 @@ function Adapter.bind(config: Config)
 		return config.store_name, config.scope, config.profile_key, config.migration_id,
 			config.queue_store_name, config.max_queue_bytes, config.operation_deadline
 	end
-	local function source_page(kind: string, migration_id: string, cursor: string?, limit: number): (any?, string?, boolean, string?)
+	local function source_page(kind: string, migration_id: string, cursor: string?, limit: number): (any?, string?, boolean, string?): (any?, string?, boolean, string?)
 		if migration_id ~= config.migration_id then return nil, nil, false, "migration ID mismatch" end
 		local name, scope, key, id, queue_store, max_bytes, deadline = args()
 		local items, next_cursor, complete, status, message =
@@ -67,7 +67,7 @@ function Adapter.bind(config: Config)
 		mailbox = config.mailbox,
 		page_size = config.page_size,
 		now_ms = config.now_ms,
-		freeze_legacy = function(migration_id: string): (boolean, string?)
+		freeze_legacy = function(migration_id: string): (boolean, string?): (boolean, string?)
 			if migration_id ~= config.migration_id then return false, "migration ID mismatch" end
 			local name, scope, key, id, queue_store, max_bytes, deadline = args()
 			local status, message = record_store.begin_mailbox_v2_migration_async(
@@ -75,7 +75,7 @@ function Adapter.bind(config: Config)
 			)
 			return status == "success", if status == "success" then nil else fail_result(status, message)
 		end,
-		verify_source_frozen = function(migration_id: string): (boolean, string?)
+		verify_source_frozen = function(migration_id: string): (boolean, string?): (boolean, string?)
 			if migration_id ~= config.migration_id then return false, "migration ID mismatch" end
 			local name, scope, key, id, queue_store, max_bytes, deadline = args()
 			local snapshot, status, message = record_store.get_mailbox_v2_migration_status_async(
@@ -93,7 +93,7 @@ function Adapter.bind(config: Config)
 		end,
 		load_checkpoint = config.load_checkpoint,
 		save_checkpoint = config.save_checkpoint,
-		verify_complete = function(migration_id: string, active_count: number, dead_letter_count: number): (boolean, string?)
+		verify_complete = function(migration_id: string, active_count: number, dead_letter_count: number): (boolean, string?): (boolean, string?)
 			if migration_id ~= config.migration_id then return false, "migration ID mismatch" end
 			local name, scope, key, id, queue_store, max_bytes, deadline = args()
 			local snapshot, status, message = record_store.get_mailbox_v2_migration_status_async(

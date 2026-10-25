@@ -202,7 +202,7 @@ function Runner.new(config: Config)
 		busy = false,
 	}
 
-	local function load()
+	local function load(): (Checkpoint?, string?)
 		local ok, raw, message = adapter_call(self.load_checkpoint, self.migration_id)
 		if not ok then return nil, "checkpoint read callback failed" end
 		if raw == nil then
@@ -214,7 +214,7 @@ function Runner.new(config: Config)
 		return checkpoint, nil
 	end
 
-	local function verify_frozen()
+	local function verify_frozen(): (boolean, string?)
 		local frozen_ok, frozen, frozen_message = adapter_call(self.verify_source_frozen, self.migration_id)
 		if not frozen_ok or frozen ~= true then
 			return false, if type(frozen_message) == "string" then frozen_message else "legacy source freeze is not confirmed"
@@ -376,7 +376,7 @@ function Runner.new(config: Config)
 			return { code = "invalid", message = "max_items must be an integer from 1 to 100" }
 		end
 		self.busy = true
-		local ok_call, output = pcall(function(): { code: string, message: string?, checkpoint: Checkpoint? }
+		local ok_call, output = pcall(function(): { [string]: any }
 			local checkpoint, checkpoint_error = ensure_checkpoint()
 			if checkpoint_error ~= nil or checkpoint == nil then
 				return { code = "unknown", message = checkpoint_error or "migration checkpoint is unavailable" }
@@ -407,7 +407,7 @@ function Runner.new(config: Config)
 	function self:Activate()
 		if self.busy then return { code = "busy" } end
 		self.busy = true
-		local ok_call, output = pcall(function(): { code: string, message: string?, checkpoint: Checkpoint? }
+		local ok_call, output = pcall(function(): { [string]: any }
 			local checkpoint, checkpoint_error = load()
 			if checkpoint_error ~= nil or checkpoint == nil then
 				return { code = "unknown", message = checkpoint_error or "migration checkpoint is unavailable" }

@@ -4687,33 +4687,38 @@ do
 		if legacy == nil then return nil, nil, "legacy queue item must be a table" end
 		if not valid_text(migration_id, 96) then return nil, nil, "migration_id must be 1 to 96 bytes" end
 		if target ~= "active" and target ~= "dead_letter" then return nil, nil, "unsupported legacy migration target" end
-		local legacy_id = if type(legacy.id) == "string" then legacy.id else legacy.Id
-		local message_type = if type(legacy.type) == "string" then legacy.type else legacy.Type
+		local legacy_id_value: unknown = if type(legacy.id) == "string" then legacy.id else legacy.Id
+		local message_type_value: unknown = if type(legacy.type) == "string" then legacy.type else legacy.Type
 		local payload = if legacy.data ~= nil then legacy.data else legacy.Data
-		if not valid_text(legacy_id, MAX_KEY_LENGTH) then
+		if not valid_text(legacy_id_value, MAX_KEY_LENGTH) then
 			return nil, nil, "legacy message ID must be 1 to " .. tostring(MAX_KEY_LENGTH) .. " bytes"
 		end
+		local legacy_id = legacy_id_value :: string
 		local id_prefix = string.sub(legacy_id, 1, 4)
 		if id_prefix == "m2i-" or id_prefix == "m2g-" or id_prefix == "m2l-" then
 			return nil, nil, "legacy message ID collides with a reserved V2 ID namespace"
 		end
-		if not valid_text(message_type, 100) then return nil, nil, "legacy message type must be 1 to 100 bytes" end
+		if not valid_text(message_type_value, 100) then return nil, nil, "legacy message type must be 1 to 100 bytes" end
+		local message_type = message_type_value :: string
 
 		local locked_until = legacy.locked_until
-		if locked_until ~= nil and (not is_finite(locked_until) or (locked_until :: number) < 0
-			or (locked_until :: number) > 9_007_199_254_740)
+		if locked_until ~= nil and (type(locked_until) ~= "number" or not is_finite(locked_until)
+			or locked_until < 0 or locked_until > 9_007_199_254_740)
 		then
 			return nil, nil, "legacy locked_until must be a finite Unix timestamp in seconds"
 		end
-		if target == "active" and is_finite(locked_until)
-			and (locked_until :: number) > self:_now() / 1000
+		if target == "active" and type(locked_until) == "number"
+			and is_finite(locked_until) and locked_until > self:_now() / 1000
 		then
 			return nil, nil, "legacy message still has an unexpired processing lease; wait for expiry and reconcile the old handler before migration"
 		end
 
-		local attempts = if is_finite(legacy.attempts) then legacy.attempts else 0
-		local total_attempts = if is_finite(legacy.total_attempts) then legacy.total_attempts else attempts
-		local replay_count = if is_finite(legacy.replay_count) then legacy.replay_count else 0
+		local attempts_raw = legacy.attempts
+		local total_attempts_raw = legacy.total_attempts
+		local replay_count_raw = legacy.replay_count
+		local attempts = if type(attempts_raw) == "number" and is_finite(attempts_raw) then attempts_raw else 0
+		local total_attempts = if type(total_attempts_raw) == "number" and is_finite(total_attempts_raw) then total_attempts_raw else attempts
+		local replay_count = if type(replay_count_raw) == "number" and is_finite(replay_count_raw) then replay_count_raw else 0
 		if attempts < 0 or math.floor(attempts) ~= attempts
 			or total_attempts < attempts or math.floor(total_attempts) ~= total_attempts
 			or replay_count < 0 or math.floor(replay_count) ~= replay_count
@@ -4722,13 +4727,16 @@ do
 			return nil, nil, "legacy retry counters are malformed"
 		end
 
-		local created_seconds = if is_finite(legacy.created_at) then legacy.created_at else legacy.CreatedAt
-		if not is_finite(created_seconds) or (created_seconds :: number) < 0
-			or (created_seconds :: number) > 9_007_199_254_740
+		local created_seconds_raw = legacy.created_at
+		local created_seconds_candidate: unknown = if type(created_seconds_raw) == "number" and is_finite(created_seconds_raw)
+			then created_seconds_raw else legacy.CreatedAt
+		if type(created_seconds_candidate) ~= "number" or not is_finite(created_seconds_candidate)
+			or created_seconds_candidate < 0 or created_seconds_candidate > 9_007_199_254_740
 		then
 			return nil, nil, "legacy created_at must be a finite Unix timestamp in seconds"
 		end
-		local created_at_ms = math.floor((created_seconds :: number) * 1000)
+		local created_seconds = created_seconds_candidate :: number
+		local created_at_ms = math.floor(created_seconds * 1000)
 		local sender_job_id = if type(legacy.sender_job_id) == "string" then legacy.sender_job_id
 			else if type(legacy.SenderJobId) == "string" then legacy.SenderJobId else ""
 		if #sender_job_id > 128 then return nil, nil, "legacy sender_job_id exceeds 128 bytes" end
@@ -4745,14 +4753,16 @@ do
 			return nil, nil, "legacy terminal_lock_token is malformed"
 		end
 		local dead_lettered_at_ms = created_at_ms
-		local raw_dead_lettered_at = if is_finite(legacy.dead_lettered_at) then legacy.dead_lettered_at else legacy.DeadLetteredAt
+		local dead_lettered_at_raw = legacy.dead_lettered_at
+		local raw_dead_lettered_at: unknown = if type(dead_lettered_at_raw) == "number" and is_finite(dead_lettered_at_raw)
+			then dead_lettered_at_raw else legacy.DeadLetteredAt
 		if raw_dead_lettered_at ~= nil then
-			if not is_finite(raw_dead_lettered_at) or (raw_dead_lettered_at :: number) < 0
-				or (raw_dead_lettered_at :: number) > 9_007_199_254_740
+			if type(raw_dead_lettered_at) ~= "number" or not is_finite(raw_dead_lettered_at)
+				or raw_dead_lettered_at < 0 or raw_dead_lettered_at > 9_007_199_254_740
 			then
 				return nil, nil, "legacy dead_lettered_at must be a finite Unix timestamp in seconds"
 			end
-			dead_lettered_at_ms = math.floor((raw_dead_lettered_at :: number) * 1000)
+			dead_lettered_at_ms = math.floor(raw_dead_lettered_at * 1000)
 		end
 		if target == "active" and self.options.strict_ordering_enabled ~= true then
 			return nil, nil, "legacy FIFO preservation requires strict_ordering_enabled=true"
@@ -9552,11 +9562,14 @@ local function legacy_queue_retirement_status(
 	if owner_name ~= expected_owner.name or owner_scope ~= expected_owner.scope or owner_key ~= expected_owner.key then
 		return false, "conflict", "legacy queue retirement marker belongs to a different record identity"
 	end
-	local retired_at = get_string_field(marker, "retired_at")
-	local source_version = get_string_field(marker, "source_implementation_version")
-	if not is_finite(retired_at) or (retired_at :: number) < 0 or source_version ~= 1 then
+	local retired_at_raw = marker.retired_at
+	local source_version = marker.source_implementation_version
+	if type(retired_at_raw) ~= "number" or not finite(retired_at_raw)
+		or retired_at_raw < 0 or source_version ~= 1
+	then
 		return false, "corrupt", "legacy queue retirement metadata is malformed"
 	end
+	local retired_at = retired_at_raw
 	return true, nil, nil
 end
 
@@ -9580,7 +9593,7 @@ local function ensure_legacy_queue_clear(
 		mock
 	)
 	local retired_at = queue_now_unix(mock)
-	if not is_finite(retired_at) or retired_at < 0 then
+	if not finite(retired_at) or retired_at < 0 then
 		return "invalid", "legacy queue retirement clock returned an invalid timestamp"
 	end
 
@@ -9612,7 +9625,7 @@ local function ensure_legacy_queue_clear(
 		if state ~= nil then state.queue_legacy_checked = true end
 		return nil, nil
 	end
-	if retired_code ~= nil then return retired_code, retired_message end
+	if retired_code ~= nil then return retired_code :: ResultCode, retired_message end
 
 	local messages, parse_message = parse_legacy_queue_envelope(fresh)
 	if messages == nil then
@@ -9773,13 +9786,16 @@ local function inspect_mailbox_v2_freeze_marker(
 	if stored_migration_id ~= migration_id then
 		return nil, nil, "conflict", "legacy queue is frozen by a different migration ID"
 	end
-	local frozen_at = get_string_field(marker, "frozen_at")
-	local source_version = get_string_field(marker, "source_implementation_version")
-	if type(frozen_at) ~= "number" or not math.isfinite(frozen_at) or frozen_at < 0
-		or (source_version ~= 2 and source_version ~= QUEUE_IMPLEMENTATION_VERSION)
+	local frozen_at_raw = marker.frozen_at
+	local source_version_raw = marker.source_implementation_version
+	if type(frozen_at_raw) ~= "number" or not math.isfinite(frozen_at_raw) or frozen_at_raw < 0
+		or type(source_version_raw) ~= "number"
+		or (source_version_raw ~= 2 and source_version_raw ~= QUEUE_IMPLEMENTATION_VERSION)
 	then
 		return nil, nil, "corrupt", "Mailbox V2 freeze metadata is malformed"
 	end
+	local frozen_at = frozen_at_raw
+	local source_version = source_version_raw
 
 	local source = table.clone(marker)
 	source.implementation_version = source_version
@@ -9815,7 +9831,7 @@ local function build_mailbox_v2_freeze_candidate(
 		then
 			local _, _, existing_code, existing_message = inspect_mailbox_v2_freeze_marker(marker, owner, migration_id)
 			if existing_code == nil then return nil, nil, nil end
-			return nil, existing_code, existing_message
+			return nil, existing_code :: ResultCode?, existing_message
 		end
 	end
 
@@ -9843,7 +9859,7 @@ local function build_mailbox_v2_freeze_candidate(
 	local source_version: number
 	if type(raw) == "table" then
 		source = table.clone(raw :: { [string]: unknown })
-		source_version = get_string_field(raw, "implementation_version") :: number
+		source_version = (raw :: { [string]: unknown }).implementation_version :: number
 	else
 		source = {
 			owner = owner,
@@ -9876,7 +9892,7 @@ local function begin_mailbox_v2_migration_internal(
 	local context, context_error, context_message = mailbox_v2_migration_context(
 		name, scope, key, migration_id, queue_store_name, max_queue_bytes, operation_deadline, mock
 	)
-	if context == nil then return context_error or "invalid", context_message end
+	if context == nil then return context_error or ("invalid" :: ResultCode), context_message end
 	local frozen_at = queue_now_unix(mock)
 	if not math.isfinite(frozen_at) or frozen_at < 0 then
 		return "invalid", "queue clock returned an invalid Unix timestamp"
@@ -9902,8 +9918,8 @@ local function begin_mailbox_v2_migration_internal(
 	local _, candidate_code, candidate_message = build_mailbox_v2_freeze_candidate(
 		fresh, context.owner, context.migration_id, frozen_at, context.max_bytes
 	)
-	if candidate_code ~= nil then return candidate_code, candidate_message end
-	if update_code ~= nil then return normalize_result_code(update_code) or "unknown", update_message or inspect_message end
+	if candidate_code ~= nil then return candidate_code :: ResultCode, candidate_message end
+	if update_code ~= nil then return normalize_result_code(update_code) or ("unknown" :: ResultCode), update_message or inspect_message end
 	return "unknown", "freeze update returned without a durable freeze marker"
 end
 
@@ -9920,12 +9936,12 @@ local function get_mailbox_v2_migration_status_internal(
 	local context, context_error, context_message = mailbox_v2_migration_context(
 		name, scope, key, migration_id, queue_store_name, max_queue_bytes, operation_deadline, mock
 	)
-	if context == nil then return nil, context_error or "invalid", context_message end
+	if context == nil then return nil, context_error or ("invalid" :: ResultCode), context_message end
 	local raw, _, code, message = backend_get(context.backend, false, context.deadline, nil)
 	if code ~= nil then return nil, normalize_result_code(code) or "unknown", message end
 	local _, status, marker_code, marker_message =
 		inspect_mailbox_v2_freeze_marker(raw, context.owner, context.migration_id)
-	if status == nil then return nil, marker_code or "migration", marker_message end
+	if status == nil then return nil, marker_code or ("migration" :: ResultCode), marker_message end
 	return status, "success", nil
 end
 
@@ -9961,12 +9977,12 @@ local function get_mailbox_v2_migration_source_page_internal(
 	local context, context_error, context_message = mailbox_v2_migration_context(
 		name, scope, key, migration_id, queue_store_name, max_queue_bytes, operation_deadline, mock
 	)
-	if context == nil then return nil, nil, false, context_error or "invalid", context_message end
+	if context == nil then return nil, nil, false, context_error or ("invalid" :: ResultCode), context_message end
 	local raw, _, code, message = backend_get(context.backend, false, context.deadline, nil)
 	if code ~= nil then return nil, nil, false, normalize_result_code(code) or "unknown", message end
 	local queue, _, marker_code, marker_message =
 		inspect_mailbox_v2_freeze_marker(raw, context.owner, context.migration_id)
-	if queue == nil then return nil, nil, false, marker_code or "migration", marker_message end
+	if queue == nil then return nil, nil, false, marker_code or ("migration" :: ResultCode), marker_message end
 	local source: { any } = if kind == "active" then queue.messages else queue.dead_letters
 	if offset > #source then return nil, nil, false, "conflict", "migration cursor exceeds the frozen source length" end
 	local amount = math.min(limit, #source - offset)
@@ -18568,8 +18584,8 @@ game:BindToClose(RecordStore.shutdown)
 
 table.freeze(RecordStore._internals.enqueue_static)
 table.freeze(RecordStore._internals)
-rawset(RecordStore, "_internals", nil)
-rawset(RecordStore, "_scheduler_runtime", nil)
+rawset(RecordStore :: any, "_internals", nil)
+rawset(RecordStore :: any, "_scheduler_runtime", nil)
 table.freeze(RecordStore)
 
 return RecordStore

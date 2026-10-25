@@ -498,13 +498,14 @@ local function backfill_permanent_ledger(
 		return result
 	end
 	local allowed_players: { [number]: boolean } = {}
-	for _, user_id in ipairs(identity.user_ids) do
+	local identity_user_ids = identity.user_ids :: { unknown }
+	for _, user_id in ipairs(identity_user_ids) do
 		if not is_positive_integer(user_id) then
 			result.code = "fenced"
 			result.message = "profile UserId metadata is malformed"
 			return result
 		end
-		allowed_players[user_id] = true
+		allowed_players[user_id :: number] = true
 	end
 
 	-- Validate the complete batch before the first write so malformed input
@@ -576,7 +577,9 @@ local function backfill_permanent_ledger(
 		}
 		local transaction_reducer: RecordStore.TransactionReducer = function(current_data, _unused)
 			local function marker(status: string): RecordStore.JsonValue
-				return { [PERMANENT_LEDGER_RESULT_KEY] = { status = status } }
+				local marker_payload: RecordStore.JsonValue = { status = status }
+				local result_value: RecordStore.JsonValue = { [PERMANENT_LEDGER_RESULT_KEY] = marker_payload }
+				return result_value
 			end
 			if type(current_data) ~= "table" then return current_data, marker("corrupt") end
 			local current = current_data :: { [string]: RecordStore.JsonValue }
