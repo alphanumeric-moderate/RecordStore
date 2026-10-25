@@ -159,7 +159,6 @@ do
 		"historical profile versions remain after a verified purge")
 	expect(history[1].Version == latest_progress.CurrentVersion,
 		"purge removed the latest durable erasure fence version")
-	record:Close()
 end
 
 -- More than one platform-sized version page must be purged over bounded passes.
