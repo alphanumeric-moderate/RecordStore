@@ -583,6 +583,34 @@ For products that require longer-lived uniqueness, set `permanent_purchase_ledge
 
 `src/PlayerDataInitializer/RecordStoreV2Acceleration.luau` implements the opt-in adapter required by `RecordStoreV2.BindMailboxWakeups`. It uses a bounded set of MessagingService topic shards, opaque owner fingerprints, bounded local registrations and coalesced wake-ups. An optional MemoryStore sorted-map hint cache is enabled explicitly and is also bounded; entries are advisory and may be overwritten, duplicated, delayed, dropped or expire. The adapter is disabled unless configured with `enabled = true` and started with `Start()`. Wake-ups are never proof that a durable message exists, was claimed or completed. Periodic durable polling and reconciliation must remain active.
 
+Example wiring (supply the same canonical owner identity used to construct the mailbox):
+
+```lua
+local Acceleration = require(
+    game:GetService("ServerScriptService").PlayerDataInitializer.RecordStoreV2Acceleration
+)
+local wakeups = Acceleration.new({
+    messaging_service = game:GetService("MessagingService"),
+    memory_store_service = game:GetService("MemoryStoreService"),
+    http_service = game:GetService("HttpService"),
+    server_id = game.JobId,
+    enabled = true,
+    enable_memory_store = false,
+})
+assert(wakeups:Start())
+
+-- v2_services is the value returned by RecordStoreV2.new(...).
+local bound, bind_error = v2_services.BindMailboxWakeups(
+    wakeups,
+    owner_identity,
+    mailbox,
+    handler,
+    4
+)
+assert(bound, bind_error)
+game:BindToClose(function() wakeups:Stop() end)
+```
+
 ## Deterministic protocol fault simulation
 
 `bench/DeterministicCrashSimulator.luau` provides an isolated virtual-time harness for replayable persistence failure schedules. It models per-key atomic updates, transform replay, pre-commit failure, commit-then-error response loss, per-server clock skew, process restart, request budgets, local read-cache staleness, MemoryStore TTL, and lossy/duplicated/delayed/reordered MessagingService hints. Trace records omit raw keys and payloads, and invariant callbacks stop at the first violation. The simulator is test infrastructure, not a Roblox service emulator; passing its scenarios cannot establish live DataStore, MemoryStore, MessagingService, platform receipt, or Studio behavior.

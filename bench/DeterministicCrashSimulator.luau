@@ -227,9 +227,6 @@ function Simulator.new(options)
 		self.store[key] = entry
 		self.versions[key] = self.versions[key] or {}
 		table.insert(self.versions[key], clone(entry))
-		for _, cache in pairs(self.cache) do
-			if cache[key] ~= nil then cache[key] = nil end
-		end
 		self.counters.writes += 1
 		return entry
 	end
@@ -339,6 +336,21 @@ function Simulator.new(options)
 			if raw.delay_ms ~= nil and (not finite(raw.delay_ms) or raw.delay_ms < 0 or raw.delay_ms > 86_400_000) then
 				return false, "fault rule delay_ms must be in [0, one day in milliseconds]"
 			end
+			if raw.ttl_ms ~= nil and (not finite(raw.ttl_ms) or raw.ttl_ms < 0 or raw.ttl_ms > 86_400_000) then
+				return false, "fault rule ttl_ms must be in [0, one day in milliseconds]"
+			end
+			if raw.operation_id ~= nil and not valid_text(raw.operation_id, 128) then
+				return false, "fault rule operation_id must be a non-empty string of at most 128 bytes"
+			end
+			if raw.key_family ~= nil and not valid_text(raw.key_family, 128) then
+				return false, "fault rule key_family must be a non-empty string of at most 128 bytes"
+			end
+			local concurrent_value = nil
+			if raw.concurrent_value ~= nil then
+				local clone_ok, clone_value = pcall(clone, raw.concurrent_value)
+				if not clone_ok then return false, "fault rule concurrent_value must be JSON-compatible" end
+				concurrent_value = clone_value
+			end
 			normalized[index] = {
 				operation = raw.operation,
 				phase = raw.phase,
@@ -348,7 +360,7 @@ function Simulator.new(options)
 				remaining = remaining,
 				delay_ms = raw.delay_ms,
 				ttl_ms = raw.ttl_ms,
-				concurrent_value = if raw.concurrent_value ~= nil then clone(raw.concurrent_value) else nil,
+				concurrent_value = concurrent_value,
 				operation_id = raw.operation_id,
 				key_family = raw.key_family,
 			}
@@ -531,7 +543,6 @@ function Simulator.new(options)
 		local old = self.store[key]
 		self.store[key] = nil
 		self.versions[key] = self.versions[key] or {}
-		for _, cache in pairs(self.cache) do cache[key] = nil end
 		self.counters.writes += 1
 		self:_trace(server, context and context.operation_id, context and context.key_family or "datastore", "remove", "committed", if old then "mock key removed" else "mock key was already absent")
 		if fault and fault.action == "commit_then_error" then error("simulated response loss after RemoveAsync", 2) end
@@ -882,7 +893,7 @@ function Simulator.new(options)
 								sim.counters.events_dropped += 1
 								return
 							end
-							if sim.now_ms - sent_global > ttl_ms then
+							if sim.now_ms - sent_global >= ttl_ms then
 								sim.counters.events_dropped += 1
 								sim:_trace(selected.server, options.operation_id, "messaging", "delivery", "expired", "best-effort hint exceeded its TTL")
 								return

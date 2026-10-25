@@ -43,6 +43,7 @@
 
 - [x] Ship the concrete opt-in MessagingService adapter consumed by `RecordStoreV2.BindMailboxWakeups`; use a fixed shard set, bounded local registrations/coalescing, event deduplication, and an explicit start/stop lifecycle.
 - [x] Add an optional fixed-slot MemoryStore hint path, disabled by default. Hint loss or collisions must never affect durable mailbox correctness.
+- [x] Align the simulator's MessagingService mock to Roblox's `SubscribeAsync(topic, callback)` and `PublishAsync(topic, message)` call shape; model cache staleness across servers instead of globally invalidating every reader's cache.
 - [ ] Add accelerator regression coverage in the final verification phase, including dropped, duplicated, delayed, stale and capacity-limited hints; durable polling must remain the recovery path.
 
 ### Slice 1: Audit and complete PR #37 non-save scheduling correctness
