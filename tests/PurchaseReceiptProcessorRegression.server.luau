@@ -123,6 +123,89 @@ expect(not pcall(function()
 	})
 end), "receipt processor accepted a retention window beyond the transaction limit")
 
+-- The permanent application-owned ledger remains effective after sidecar receipt expiry.
+local ledger_record = Mock.new("PurchasePermanentLedgerRegression", "global", "player-123", {
+	schema_version = 1,
+	autosave_interval = 1000,
+	lease_duration = 180,
+	lease_renewal = 60,
+	transactional_operations_enabled = true,
+})
+local ledger_open, ledger_open_message = ledger_record:Open({ coins = 0 })
+expect(ledger_open == "created" or ledger_open == "loaded", tostring(ledger_open_message))
+local ledger_records = { [123] = ledger_record }
+local ledger_grants = 0
+local ledger_processor = ReceiptProcessor.new({
+	get_record = function(user_id) return ledger_records[user_id] end,
+	receipt_retention_seconds = 60,
+	permanent_purchase_ledger_key = "purchase_ledger",
+	permanent_purchase_ledger_capacity = 2,
+	on_diagnostic = function(diagnostic) table.insert(diagnostics, diagnostic) end,
+})
+local ledger_handler = ledger_processor:CreateHandler({
+	[1001] = function(data)
+		ledger_grants += 1
+		local changed = table.clone(data)
+		changed.coins += 10
+		return changed, { granted = 10 }
+	end,
+	[1002] = function(data)
+		local changed = table.clone(data)
+		changed.coins += 100
+		return changed, { granted = 100 }
+	end,
+})
+local ledger_clock = 1000
+Mock.set_test_clock(function() return ledger_clock end)
+local permanent_purchase = { PurchaseId = "permanent-001", PlayerId = 123, ProductId = 1001 }
+expect(ledger_handler(permanent_purchase) == Enum.ProductPurchaseDecision.PurchaseGranted,
+	"first permanently tracked purchase was not granted")
+expect(ledger_record:Get().coins == 10 and ledger_grants == 1,
+	"first permanently tracked purchase did not apply exactly one grant")
+expect(type(ledger_record:Get().purchase_ledger) == "table"
+	and ledger_record:Get().purchase_ledger["permanent-001"].product_id == 1001,
+	"permanent ledger did not record purchase identity atomically with the grant")
+ledger_clock = 2000
+expect(ledger_handler(permanent_purchase) == Enum.ProductPurchaseDecision.PurchaseGranted,
+	"same purchase was not acknowledged after bounded transaction-receipt expiry")
+expect(ledger_record:Get().coins == 10 and ledger_grants == 1,
+	"permanent ledger failed to suppress a grant after transaction-receipt expiry")
+ledger_clock = 3000
+local permanent_conflict = table.clone(permanent_purchase)
+permanent_conflict.ProductId = 1002
+expect(ledger_handler(permanent_conflict) == Enum.ProductPurchaseDecision.NotProcessedYet,
+	"permanent ledger acknowledged a purchase ID rebound to another product")
+expect(ledger_record:Get().coins == 10 and ledger_grants == 1,
+	"permanent-ledger identity conflict changed profile data")
+local second_permanent = { PurchaseId = "permanent-002", PlayerId = 123, ProductId = 1001 }
+expect(ledger_handler(second_permanent) == Enum.ProductPurchaseDecision.PurchaseGranted,
+	"second distinct purchase did not fit in the configured permanent ledger")
+expect(ledger_record:Get().coins == 20 and ledger_grants == 2,
+	"second distinct purchase was not granted once")
+local overflow_permanent = { PurchaseId = "permanent-003", PlayerId = 123, ProductId = 1001 }
+expect(ledger_handler(overflow_permanent) == Enum.ProductPurchaseDecision.NotProcessedYet,
+	"permanent purchase ledger overflow was acknowledged instead of failing closed")
+expect(ledger_record:Get().coins == 20 and ledger_grants == 2,
+	"ledger capacity failure mutated currency")
+expect(diagnostics[#diagnostics].category == "permanent_purchase_ledger_capacity",
+	"ledger capacity failure was not diagnosed")
+expect(not pcall(function()
+	ReceiptProcessor.new({
+		get_record = function() return ledger_record end,
+		receipt_retention_seconds = 60,
+		permanent_purchase_ledger_capacity = 2,
+	})
+end), "ledger capacity was accepted without an application data field")
+expect(not pcall(function()
+	ReceiptProcessor.new({
+		get_record = function() return ledger_record end,
+		receipt_retention_seconds = 60,
+		permanent_purchase_ledger_key = "__recordstore_bad",
+	})
+end), "reserved internal data namespace was accepted for the purchase ledger")
+expect(ledger_record:Close() == "closed", "permanent purchase ledger profile did not close")
+Mock.set_test_clock(function() return 1000 end)
+
 local original_transact = record.TransactAsync
 local original_status_lookup = record.GetTransactionStatusAsync
 record.TransactAsync = function()
