@@ -45,6 +45,9 @@ export type Config = {
 	checkpoint_key: string,
 	initial_cursor: string?,
 	page_size: number?,
+	inventory_manifest_id: string,
+	expected_purchase_count: number,
+	verify_complete_inventory: (string, string, number, number) -> (boolean, string?),
 }
 
 export type RunResult = {
@@ -56,6 +59,9 @@ export type RunResult = {
 	duplicate_count: number,
 	cursor: string?,
 	done: boolean,
+	inventory_manifest_id: string,
+	expected_purchase_count: number,
+	inventory_verified: boolean,
 	message: string?,
 }
 
@@ -66,6 +72,9 @@ type Checkpoint = {
 	revision: number,
 	cursor: string?,
 	done: boolean,
+	inventory_manifest_id: string,
+	expected_purchase_count: number,
+	inventory_verified: boolean,
 	pages_processed: number,
 	purchases_processed: number,
 	backfilled_count: number,
@@ -81,6 +90,9 @@ type NormalizedConfig = {
 	checkpoint_key: string,
 	initial_cursor: string?,
 	page_size: number,
+	inventory_manifest_id: string,
+	expected_purchase_count: number,
+	verify_complete_inventory: (string, string, number, number) -> (boolean, string?),
 }
 
 local MAX_PAGE_SIZE = 16
@@ -107,6 +119,9 @@ local function copy_checkpoint(value: Checkpoint): Checkpoint
 		revision = value.revision,
 		cursor = value.cursor,
 		done = value.done,
+		inventory_manifest_id = value.inventory_manifest_id,
+		expected_purchase_count = value.expected_purchase_count,
+		inventory_verified = value.inventory_verified,
 		pages_processed = value.pages_processed,
 		purchases_processed = value.purchases_processed,
 		backfilled_count = value.backfilled_count,
@@ -120,6 +135,7 @@ local function valid_checkpoint(raw: unknown, config: NormalizedConfig): (Checkp
 	for key in pairs(value) do
 		if key ~= "version" and key ~= "job_id" and key ~= "source_revision"
 			and key ~= "revision" and key ~= "cursor" and key ~= "done"
+			and key ~= "inventory_manifest_id" and key ~= "expected_purchase_count" and key ~= "inventory_verified"
 			and key ~= "pages_processed" and key ~= "purchases_processed"
 			and key ~= "backfilled_count" and key ~= "duplicate_count"
 		then
@@ -128,6 +144,11 @@ local function valid_checkpoint(raw: unknown, config: NormalizedConfig): (Checkp
 	end
 	if value.version ~= 1 or value.job_id ~= config.job_id
 		or value.source_revision ~= config.source_revision
+		or value.inventory_manifest_id ~= config.inventory_manifest_id
+		or value.expected_purchase_count ~= config.expected_purchase_count
+		or type(value.inventory_verified) ~= "boolean"
+		or value.inventory_verified ~= value.done
+		or (value.done and value.purchases_processed ~= config.expected_purchase_count)
 		or not nonnegative_integer(value.revision)
 		or not valid_cursor(value.cursor) or type(value.done) ~= "boolean"
 		or not nonnegative_integer(value.pages_processed)
@@ -149,6 +170,9 @@ local function valid_checkpoint(raw: unknown, config: NormalizedConfig): (Checkp
 		revision = value.revision :: number,
 		cursor = value.cursor :: string?,
 		done = value.done :: boolean,
+		inventory_manifest_id = value.inventory_manifest_id :: string,
+		expected_purchase_count = value.expected_purchase_count :: number,
+		inventory_verified = value.inventory_verified :: boolean,
 		pages_processed = value.pages_processed :: number,
 		purchases_processed = value.purchases_processed :: number,
 		backfilled_count = value.backfilled_count :: number,
@@ -164,6 +188,9 @@ local function same_checkpoint(left: Checkpoint?, right: Checkpoint): boolean
 		and left.revision == right.revision
 		and left.cursor == right.cursor
 		and left.done == right.done
+		and left.inventory_manifest_id == right.inventory_manifest_id
+		and left.expected_purchase_count == right.expected_purchase_count
+		and left.inventory_verified == right.inventory_verified
 		and left.pages_processed == right.pages_processed
 		and left.purchases_processed == right.purchases_processed
 		and left.backfilled_count == right.backfilled_count
@@ -177,6 +204,7 @@ local function normalize_config(value: unknown): NormalizedConfig
 		if key ~= "job_id" and key ~= "source_revision" and key ~= "source"
 			and key ~= "processor" and key ~= "checkpoint_store" and key ~= "checkpoint_key"
 			and key ~= "initial_cursor" and key ~= "page_size"
+			and key ~= "inventory_manifest_id" and key ~= "expected_purchase_count" and key ~= "verify_complete_inventory"
 		then
 			error("unsupported purchase migration runner option: " .. tostring(key), 3)
 		end
@@ -200,6 +228,9 @@ local function normalize_config(value: unknown): NormalizedConfig
 		error("checkpoint_store must implement uncached GetAsyncFresh and atomic UpdateAsync", 3)
 	end
 	if not valid_text(fields.checkpoint_key, 50) then error("checkpoint_key must be 1 to 50 bytes", 3) end
+	if not valid_text(fields.inventory_manifest_id, 128) then error("inventory_manifest_id must be 1 to 128 bytes", 3) end
+	if not nonnegative_integer(fields.expected_purchase_count) then error("expected_purchase_count must be a non-negative integer", 3) end
+	if type(fields.verify_complete_inventory) ~= "function" then error("verify_complete_inventory must verify an immutable inventory manifest", 3) end
 	if not valid_cursor(fields.initial_cursor) then error("initial_cursor exceeds the 512-byte cursor limit", 3) end
 	local page_size = if fields.page_size == nil then 16 else fields.page_size
 	if type(page_size) ~= "number" or not math.isfinite(page_size)
@@ -216,6 +247,9 @@ local function normalize_config(value: unknown): NormalizedConfig
 		checkpoint_key = fields.checkpoint_key :: string,
 		initial_cursor = fields.initial_cursor :: string?,
 		page_size = page_size :: number,
+		inventory_manifest_id = fields.inventory_manifest_id :: string,
+		expected_purchase_count = fields.expected_purchase_count :: number,
+		verify_complete_inventory = fields.verify_complete_inventory :: (string, string, number, number) -> (boolean, string?),
 	})
 end
 
@@ -233,7 +267,22 @@ function MigrationRunner.new(config: Config)
 				version = 1,
 				job_id = normalized.job_id,
 				source_revision = normalized.source_revision,
-				revision = 0,
+				revision = 0,								job_id = normalized.job_id,
+				source_revision = normalized.source_revision,
+				revision = 0,job_id = normalized.job_id,
+				job_id = normalized.job_id,
+				source_revision = normalized.source_revision,
+				revision = 0,inventory_manifest_id = normalized.inventory_manifest_id,
+				job_id = normalized.job_id,
+				source_revision = normalized.source_revision,
+				revision = 0,expected_purchase_count = normalized.expected_purchase_count,
+				job_id = normalized.job_id,
+				source_revision = normalized.source_revision,
+				revision = 0,inventory_verified = false,
+				job_id = normalized.job_id,
+				source_revision = normalized.source_revision,
+				revision = 0,source_revision = normalized.source_revision,
+
 				cursor = normalized.initial_cursor,
 				done = false,
 				pages_processed = 0,
@@ -287,6 +336,9 @@ function MigrationRunner.new(config: Config)
 			duplicate_count = checkpoint.duplicate_count,
 			cursor = checkpoint.cursor,
 			done = checkpoint.done,
+			inventory_manifest_id = checkpoint.inventory_manifest_id,
+			expected_purchase_count = checkpoint.expected_purchase_count,
+			inventory_verified = checkpoint.inventory_verified,
 			message = message,
 		}
 	end
@@ -305,6 +357,9 @@ function MigrationRunner.new(config: Config)
 				duplicate_count = 0,
 				cursor = normalized.initial_cursor,
 				done = false,
+				inventory_manifest_id = normalized.inventory_manifest_id,
+				expected_purchase_count = normalized.expected_purchase_count,
+				inventory_verified = false,
 				message = read_error or "migration checkpoint is unavailable",
 			}
 		end
@@ -321,7 +376,22 @@ function MigrationRunner.new(config: Config)
 				version = 1,
 				job_id = normalized.job_id,
 				source_revision = normalized.source_revision,
-				revision = 0,
+				revision = 0,								job_id = normalized.job_id,
+				source_revision = normalized.source_revision,
+				revision = 0,job_id = normalized.job_id,
+				job_id = normalized.job_id,
+				source_revision = normalized.source_revision,
+				revision = 0,inventory_manifest_id = normalized.inventory_manifest_id,
+				job_id = normalized.job_id,
+				source_revision = normalized.source_revision,
+				revision = 0,expected_purchase_count = normalized.expected_purchase_count,
+				job_id = normalized.job_id,
+				source_revision = normalized.source_revision,
+				revision = 0,inventory_verified = false,
+				job_id = normalized.job_id,
+				source_revision = normalized.source_revision,
+				revision = 0,source_revision = normalized.source_revision,
+
 				cursor = normalized.initial_cursor,
 				done = false,
 				pages_processed = 0,
@@ -339,7 +409,22 @@ function MigrationRunner.new(config: Config)
 					version = 1,
 					job_id = normalized.job_id,
 					source_revision = normalized.source_revision,
-					revision = 0,
+					revision = 0,										job_id = normalized.job_id,
+					source_revision = normalized.source_revision,
+					revision = 0,job_id = normalized.job_id,
+					job_id = normalized.job_id,
+					source_revision = normalized.source_revision,
+					revision = 0,inventory_manifest_id = normalized.inventory_manifest_id,
+					job_id = normalized.job_id,
+					source_revision = normalized.source_revision,
+					revision = 0,expected_purchase_count = normalized.expected_purchase_count,
+					job_id = normalized.job_id,
+					source_revision = normalized.source_revision,
+					revision = 0,inventory_verified = false,
+					job_id = normalized.job_id,
+					source_revision = normalized.source_revision,
+					revision = 0,source_revision = normalized.source_revision,
+
 					cursor = normalized.initial_cursor,
 					done = false,
 					pages_processed = 0,
@@ -394,6 +479,26 @@ function MigrationRunner.new(config: Config)
 			end
 			local next_cursor = page_fields.next_cursor :: string?
 			local done = page_fields.done :: boolean
+			local proposed_purchase_count = checkpoint.purchases_processed + item_count
+			if proposed_purchase_count > normalized.expected_purchase_count then
+				return result("incomplete_inventory", checkpoint, "historical source exceeded the declared PurchaseId manifest count; cursor was not advanced")
+			end
+			if done then
+				if proposed_purchase_count ~= normalized.expected_purchase_count then
+					return result("incomplete_inventory", checkpoint, "terminal source page does not reconcile to the declared PurchaseId manifest count; terminal cursor was not advanced")
+				end
+				local verify_ok, verified, verify_error = pcall(
+					normalized.verify_complete_inventory,
+					normalized.inventory_manifest_id,
+					normalized.source_revision,
+					normalized.expected_purchase_count,
+					proposed_purchase_count
+				)
+				if not verify_ok or verified ~= true then
+					return result("incomplete_inventory", checkpoint,
+						"independent inventory manifest verification did not confirm completeness: " .. tostring(verify_error or verified or "verifier rejected manifest"))
+				end
+			end
 			if done and next_cursor ~= nil then
 				return result("conflict", checkpoint, "terminal historical source page must not include a continuation cursor")
 			end
@@ -426,7 +531,22 @@ function MigrationRunner.new(config: Config)
 					version = 1,
 					job_id = normalized.job_id,
 					source_revision = normalized.source_revision,
-					revision = checkpoint.revision + 1,
+					revision = checkpoint.revision + 1,										job_id = normalized.job_id,
+					source_revision = normalized.source_revision,
+					revision = checkpoint.revision + 1,job_id = normalized.job_id,
+					job_id = normalized.job_id,
+					source_revision = normalized.source_revision,
+					revision = checkpoint.revision + 1,inventory_manifest_id = normalized.inventory_manifest_id,
+					job_id = normalized.job_id,
+					source_revision = normalized.source_revision,
+					revision = checkpoint.revision + 1,expected_purchase_count = normalized.expected_purchase_count,
+					job_id = normalized.job_id,
+					source_revision = normalized.source_revision,
+					revision = checkpoint.revision + 1,inventory_verified = done,
+					job_id = normalized.job_id,
+					source_revision = normalized.source_revision,
+					revision = checkpoint.revision + 1,source_revision = normalized.source_revision,
+
 					cursor = next_cursor,
 					done = done,
 					pages_processed = checkpoint.pages_processed + 1,
@@ -443,7 +563,22 @@ function MigrationRunner.new(config: Config)
 					version = 1,
 					job_id = normalized.job_id,
 					source_revision = normalized.source_revision,
-					revision = checkpoint.revision + 1,
+					revision = checkpoint.revision + 1,										job_id = normalized.job_id,
+					source_revision = normalized.source_revision,
+					revision = checkpoint.revision + 1,job_id = normalized.job_id,
+					job_id = normalized.job_id,
+					source_revision = normalized.source_revision,
+					revision = checkpoint.revision + 1,inventory_manifest_id = normalized.inventory_manifest_id,
+					job_id = normalized.job_id,
+					source_revision = normalized.source_revision,
+					revision = checkpoint.revision + 1,expected_purchase_count = normalized.expected_purchase_count,
+					job_id = normalized.job_id,
+					source_revision = normalized.source_revision,
+					revision = checkpoint.revision + 1,inventory_verified = done,
+					job_id = normalized.job_id,
+					source_revision = normalized.source_revision,
+					revision = checkpoint.revision + 1,source_revision = normalized.source_revision,
+
 					cursor = next_cursor,
 					done = done,
 					pages_processed = checkpoint.pages_processed + 1,
@@ -464,7 +599,22 @@ function MigrationRunner.new(config: Config)
 				version = 1,
 				job_id = normalized.job_id,
 				source_revision = normalized.source_revision,
-				revision = 0,
+				revision = 0,								job_id = normalized.job_id,
+				source_revision = normalized.source_revision,
+				revision = 0,job_id = normalized.job_id,
+				job_id = normalized.job_id,
+				source_revision = normalized.source_revision,
+				revision = 0,inventory_manifest_id = normalized.inventory_manifest_id,
+				job_id = normalized.job_id,
+				source_revision = normalized.source_revision,
+				revision = 0,expected_purchase_count = normalized.expected_purchase_count,
+				job_id = normalized.job_id,
+				source_revision = normalized.source_revision,
+				revision = 0,inventory_verified = false,
+				job_id = normalized.job_id,
+				source_revision = normalized.source_revision,
+				revision = 0,source_revision = normalized.source_revision,
+
 				cursor = normalized.initial_cursor,
 				done = false,
 				pages_processed = 0,
