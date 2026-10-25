@@ -5,18 +5,17 @@ local Adapter = {}
 
 export type Inspection = {
 	status: string,
-	eligible?: boolean,
-	dependencies_clear?: boolean,
-	generation?: number,
-	message?: string,
+	eligible: boolean?,
+	dependencies_clear: boolean?,
+	generation: number?,
+	message: string?,
 }
 
 type FamilyInspection = {
 	status: string,
 	eligible: boolean,
 	dependencies_clear: boolean,
-	generation?: number,
-	message?: string,
+	[string]: any,
 }
 
 export type Family = {
@@ -90,6 +89,16 @@ local function copy_checkpoint(value: Checkpoint): Checkpoint
 		processed = value.processed,
 		removed = value.removed,
 		status = value.status,
+	}
+end
+
+local function inspection_failure(status: string, message: string): Inspection
+	return {
+		status = status,
+		eligible = nil,
+		dependencies_clear = nil,
+		generation = nil,
+		message = message,
 	}
 end
 
@@ -339,29 +348,32 @@ function Adapter.new(config: Config)
 
 	function adapter:Inspect(item: unknown): (Inspection?, string?)
 		if type(item) ~= "table" then
-			return { status = "invalid", message = "inventory item must be a table" }, "invalid inventory item"
+			return inspection_failure("invalid", "inventory item must be a table"), "invalid inventory item"
 		end
 		local locator = item :: { [string]: unknown }
 		local family_name = locator.family_name
 		local key = locator.key
 		if type(family_name) ~= "string" or type(key) ~= "string" then
-			return { status = "invalid", message = "inventory item lacks family_name or key" }, "invalid inventory locator"
+			return inspection_failure("invalid", "inventory item lacks family_name or key"), "invalid inventory locator"
 		end
 		local family = family_by_name[family_name]
 		if family == nil or locator.store_name ~= family.store_name or locator.scope ~= (family.scope or "") then
-			return { status = "invalid", message = "inventory locator does not match the explicit family catalog" }, "catalog mismatch"
+			return inspection_failure("invalid", "inventory locator does not match the explicit family catalog"), "catalog mismatch"
 		end
 		local prefix = family.prefix or ""
 		if #key > MAX_NAME_BYTES or (prefix ~= "" and string.sub(key, 1, #prefix) ~= prefix) then
-			return { status = "invalid", message = "inventory key is outside the declared family prefix" }, "family prefix mismatch"
+			return inspection_failure("invalid", "inventory key is outside the declared family prefix"), "family prefix mismatch"
 		end
 		local ok, store_or_error = pcall(function()
 			return get_store(family.store_name, family.scope)
 		end)
-		if not ok then return { status = "unknown", message = tostring(store_or_error) }, tostring(store_or_error) end
+		if not ok then
+			local message = tostring(store_or_error)
+			return inspection_failure("unknown", message), message
+		end
 		local value, key_info, read_error = read_fresh(store_or_error, key)
 		if read_error ~= nil then
-			return { status = "unknown", message = read_error }, read_error
+			return inspection_failure("unknown", read_error), read_error
 		end
 		if value == nil then
 			return { status = "success", eligible = false, dependencies_clear = true, generation = 0, message = nil }, nil
@@ -369,18 +381,24 @@ function Adapter.new(config: Config)
 		local called, inspected, inspect_error = pcall(family.inspect, key, value, key_info)
 		if not called or type(inspected) ~= "table" or inspected.status ~= "success" then
 			local message = if not called then tostring(inspected) else inspect_error or "family inspection did not confirm success"
-			return { status = "unknown", message = message }, message
+			return inspection_failure("unknown", message), message
 		end
 		if type(inspected.eligible) ~= "boolean" or type(inspected.dependencies_clear) ~= "boolean" then
-			return { status = "invalid", message = "family inspection omitted eligibility or dependency status" }, "invalid family inspection result"
+			return inspection_failure("invalid", "family inspection omitted eligibility or dependency status"), "invalid family inspection result"
 		end
 		if inspected.eligible then
 			local generation = inspected.generation
 			if not nonnegative_integer(generation) then
-				return { status = "invalid", message = "eligible item must expose a non-negative generation" }, "invalid generation"
+				return inspection_failure("invalid", "eligible item must expose a non-negative generation"), "invalid generation"
 			end
 		end
-		return inspected :: FamilyInspection, nil
+		return {
+			status = inspected.status,
+			eligible = inspected.eligible,
+			dependencies_clear = inspected.dependencies_clear,
+			generation = if type(inspected.generation) == "number" then inspected.generation else nil,
+			message = if type(inspected.message) == "string" then inspected.message else nil,
+		}, nil
 	end
 
 	function adapter:DeleteIfGeneration(item: unknown, expected_generation: number): (string, string?)
