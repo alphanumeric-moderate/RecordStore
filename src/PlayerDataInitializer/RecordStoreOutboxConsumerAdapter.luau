@@ -59,6 +59,13 @@ export type Processor = {
 	GetMailbox: (self: Processor, record: RecordStore.Record) -> (any?, string?, string?),
 	ProcessNextAsync: (self: Processor, record: RecordStore.Record) -> ProcessResult,
 	ProcessBatchAsync: (self: Processor, record: RecordStore.Record, max_messages: number?) -> ProcessResult,
+	PruneInboxReceiptsAsync: (
+		self: Processor,
+		record: RecordStore.Record,
+		older_than_unix: number,
+		operation_id: string,
+		max_items: number?
+	) -> ProcessResult,
 	Invalidate: (self: Processor, record: RecordStore.Record) -> (),
 }
 
@@ -445,6 +452,37 @@ function OutboxConsumerAdapter.new(config: Config): Processor
 				code = "incomplete",
 				processed = processed,
 				message = "message cap reached; resume on the next worker iteration",
+			}
+		end,
+		PruneInboxReceiptsAsync = function(_self, record, older_than_unix, operation_id, max_items)
+			local identity, identity_error = validate_record(record)
+			if identity == nil then return { code = "fenced", message = identity_error } end
+			if type(older_than_unix) ~= "number" or not math.isfinite(older_than_unix) or older_than_unix < 0 then
+				return { code = "invalid", message = "older_than_unix must be a finite non-negative Unix timestamp" }
+			end
+			if not valid_text(operation_id, 256) then
+				return { code = "invalid", message = "operation_id must be a stable non-empty string of at most 256 bytes" }
+			end
+			local maximum = if max_items == nil then 16 else max_items
+			if type(maximum) ~= "number" or not math.isfinite(maximum)
+				or math.floor(maximum) ~= maximum or maximum < 1 or maximum > MAX_BATCH_MESSAGES
+			then
+				return { code = "invalid", message = "max_items must be an integer from 1 to 16" }
+			end
+			local ok, result = pcall(function()
+				return RecordStoreV2.Inbox.PruneReceipts(record, older_than_unix, maximum, operation_id)
+			end)
+			if not ok or type(result) ~= "table" or type(result.code) ~= "string" then
+				local detail = if ok then "Inbox receipt pruning returned no structured result" else tostring(result)
+				emit(normalized, "destination_inbox_prune_unknown", nil, "unknown", detail)
+				return { code = "unknown", message = detail }
+			end
+			local row = result :: { [string]: unknown }
+			return {
+				code = row.code :: string,
+				processed = if type(row.pruned) == "number" then row.pruned else nil,
+				message = if type(row.message) == "string" then row.message else nil,
+				native_code = row.code :: string,
 			}
 		end,
 		Invalidate = function(_self, record)
