@@ -173,7 +173,7 @@ function Runner.new(maintenance, config)
 	end
 	function runner:Run(max_steps, batch_size, budget_ms)
 		local step_limit = math.clamp(math.floor(max_steps or 8), 1, 64)
-		local size = math.clamp(math.floor(batch_size or 32), 1, 256)
+		local size = math.clamp(math.floor(batch_size or 1), 1, 256)
 		local per_step_budget = math.clamp(math.floor(budget_ms or 25), 1, 1000)
 		local result = { code = "yielded", job_id = config.job_id, mode = mode }
 		for _ = 1, step_limit do
