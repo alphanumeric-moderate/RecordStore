@@ -26,6 +26,9 @@ export type Config = {
 	receipt_retention_seconds: number,
 	permanent_purchase_ledger_key: string?,
 	permanent_purchase_ledger_capacity: number?,
+	-- Acknowledges that pre-existing PurchaseIds were backfilled or do not exist.
+	-- This is an operator assertion, not automatic proof of the migration.
+	permanent_purchase_ledger_migration_complete: boolean?,
 	on_diagnostic: ((diagnostic: Diagnostic) -> ())?,
 }
 
@@ -43,6 +46,7 @@ type NormalizedConfig = {
 	receipt_retention_seconds: number,
 	permanent_purchase_ledger_key: string?,
 	permanent_purchase_ledger_capacity: number?,
+	permanent_purchase_ledger_migration_complete: boolean,
 	on_diagnostic: ((diagnostic: Diagnostic) -> ())?,
 }
 
@@ -64,6 +68,7 @@ local function normalize_config(config: unknown): NormalizedConfig
 			and option_name ~= "receipt_retention_seconds"
 			and option_name ~= "permanent_purchase_ledger_key"
 			and option_name ~= "permanent_purchase_ledger_capacity"
+			and option_name ~= "permanent_purchase_ledger_migration_complete"
 			and option_name ~= "on_diagnostic"
 		then
 			error("unsupported purchase receipt option: " .. tostring(option_name), 3)
@@ -84,14 +89,23 @@ local function normalize_config(config: unknown): NormalizedConfig
 
 	local ledger_key = values.permanent_purchase_ledger_key
 	local ledger_capacity = values.permanent_purchase_ledger_capacity
+	local ledger_migration_complete = values.permanent_purchase_ledger_migration_complete
+	if ledger_migration_complete ~= nil and type(ledger_migration_complete) ~= "boolean" then
+		error("permanent_purchase_ledger_migration_complete must be a boolean", 3)
+	end
 	if ledger_key == nil then
 		if ledger_capacity ~= nil then
 			error("permanent_purchase_ledger_capacity requires permanent_purchase_ledger_key", 3)
+		end
+		if ledger_migration_complete == true then
+			error("permanent_purchase_ledger_migration_complete requires permanent_purchase_ledger_key", 3)
 		end
 	elseif type(ledger_key) ~= "string" or ledger_key == "" or #ledger_key > 96
 		or string.sub(ledger_key, 1, #"__recordstore_") == "__recordstore_"
 	then
 		error("permanent_purchase_ledger_key must be a non-reserved application data field of 1 to 96 bytes", 3)
+	elseif ledger_migration_complete ~= true then
+		error("permanent purchase ledger requires permanent_purchase_ledger_migration_complete=true after backfill or confirmation that no earlier purchases need importing", 3)
 	end
 	if ledger_capacity ~= nil and (type(ledger_capacity) ~= "number"
 		or not math.isfinite(ledger_capacity) or math.floor(ledger_capacity) ~= ledger_capacity
@@ -110,6 +124,7 @@ local function normalize_config(config: unknown): NormalizedConfig
 		receipt_retention_seconds = retention :: number,
 		permanent_purchase_ledger_key = ledger_key :: string?,
 		permanent_purchase_ledger_capacity = (ledger_capacity or (if ledger_key ~= nil then MAX_PERMANENT_PURCHASE_LEDGER_ENTRIES else nil)) :: number?,
+		permanent_purchase_ledger_migration_complete = ledger_migration_complete == true,
 		on_diagnostic = on_diagnostic :: ((diagnostic: Diagnostic) -> ())?,
 	}
 	return table.freeze(normalized)
