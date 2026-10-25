@@ -11487,6 +11487,7 @@ export type ErasurePurgeProgress = {
 	Removed: number,
 	Complete: boolean,
 	CurrentVersion: string?,
+	RetentionUntil: number?,
 }
 
 type ErasureFenceMarker = {
@@ -11780,17 +11781,13 @@ local function purge_erased_versions_internal(
 	erasure_id: string,
 	max_versions: number?,
 	operation_deadline: number?,
-	mock: boolean,
-	allow_deprecated_remove_version: boolean?
+	mock: boolean
 ): (ErasurePurgeProgress?, ResultCode, string?)
 	local valid_identity, identity_message = validate_store_identity(name, scope, key)
 	if not valid_identity then return nil, "invalid", identity_message end
 	if not valid_erasure_user_id(user_id) then return nil, "invalid", "user_id must be a positive integer" end
 	if type(erasure_id) ~= "string" or erasure_id == "" or #erasure_id > 96 then
 		return nil, "invalid", "erasure_id must be 1 to 96 bytes"
-	end
-	if allow_deprecated_remove_version ~= nil and type(allow_deprecated_remove_version) ~= "boolean" then
-		return nil, "invalid", "allow_deprecated_remove_version must be a boolean"
 	end
 	local limit = if max_versions == nil then 16 else max_versions
 	if not finite_erasure_number(limit) or math.floor(limit) ~= limit or limit < 1 or limit > 64 then
@@ -11820,16 +11817,35 @@ local function purge_erased_versions_internal(
 	end
 	local current_found = false
 	local historical_version_found = false
+	local fence_created_ms: number? = nil
 	for _, entry in ipairs(entries) do
-		if entry.Version == current_version then current_found = true
-		else historical_version_found = true end
+		if entry.Version == current_version then
+			current_found = true
+			fence_created_ms = entry.CreatedTime
+		else
+			historical_version_found = true
+		end
 	end
 	if not current_found then
 		return nil, "conflict", "the durable erasure fence version is missing from version history"
 	end
-	if not mock and historical_version_found and allow_deprecated_remove_version ~= true then
+	if not finite_erasure_number(fence_created_ms) or (fence_created_ms :: number) < 0 then
+		return nil, "unknown", "the durable erasure fence has no verified platform creation timestamp"
+	end
+	local retention_until = math.ceil((fence_created_ms :: number) / 1000) + 30 * 24 * 60 * 60
+	if not mock and historical_version_found then
+		if session_now_unix(false) < retention_until then
+			return {
+				UserId = user_id,
+				ErasureId = erasure_id,
+				Removed = 0,
+				Complete = false,
+				CurrentVersion = current_version,
+				RetentionUntil = retention_until,
+			}, "success", nil
+		end
 		return nil, "unsupported",
-			"historical purge requires deprecated DataStore:RemoveVersionAsync; pass allow_deprecated_remove_version=true only after reviewing the platform limitation"
+			"historical versions remain after the documented 30-day automatic retention window; purge remains incomplete and requires platform investigation"
 	end
 	local removed = 0
 	for _, entry in ipairs(entries) do
@@ -11851,31 +11867,8 @@ local function purge_erased_versions_internal(
 					end
 				end
 			else
-				local store = backend.store
-				if store == nil then return nil, "invalid", "backend store is missing" end
-				if not acquire_request(nil, deadline, false, Enum.DataStoreRequestType.RemoveVersionAsync) then
-					return nil, "budget", "historical version removal request deadline exceeded"
-				end
-				local remove_ok, remove_error = pcall(function()
-					store:RemoveVersionAsync(key, entry.Version)
-				end)
-				release_slot()
-				if not remove_ok then
-					local after_failure, after_code = list_versions_internal(
-						name, scope, key, Enum.SortDirection.Descending, nil, nil, MAX_ERASURE_HISTORY_SCAN, deadline - now_local(), false
-					)
-					if after_code ~= "success" or after_failure == nil then
-						return nil, "unknown", tostring(remove_error)
-					end
-					local still_present = false
-					for _, current_entry in ipairs(after_failure) do
-						if current_entry.Version == entry.Version then
-							still_present = true
-							break
-						end
-					end
-					if still_present then return nil, "unknown", tostring(remove_error) end
-				end
+				return nil, "unsupported",
+					"live historical-version deletion is not attempted because Roblox deprecates RemoveVersionAsync; wait for documented retention expiry"
 			end
 			removed += 1
 			local refreshed, refreshed_code, refreshed_message = get_erasure_status_internal(
@@ -11927,6 +11920,7 @@ local function purge_erased_versions_internal(
 		Removed = removed,
 		Complete = complete,
 		CurrentVersion = current_version,
+		RetentionUntil = if complete then nil else retention_until,
 	}, "success", nil
 end
 
@@ -11961,12 +11955,10 @@ function RecordStore.purge_erased_versions_async(
 	user_id: number,
 	erasure_id: string,
 	max_versions: number?,
-	operation_deadline: number?,
-	allow_deprecated_remove_version: boolean?
+	operation_deadline: number?
 ): (ErasurePurgeProgress?, ResultCode, string?)
 	return purge_erased_versions_internal(
-		name, scope, key, user_id, erasure_id, max_versions, operation_deadline, false,
-		allow_deprecated_remove_version
+		name, scope, key, user_id, erasure_id, max_versions, operation_deadline, false
 	)
 end
 
