@@ -21,13 +21,24 @@ local function valid_integer(value, minimum)
 		and math.floor(value) == value and value >= minimum
 end
 
+local CHECKPOINT_STATUSES = {
+	idle = true,
+	incomplete = true,
+	completed = true,
+	unknown = true,
+	paused = true,
+}
+
 local function validate_checkpoint(value, job_id)
 	if type(value) ~= "table" then return nil end
 	if value.version ~= 1 or value.job_id ~= job_id
 		or not valid_integer(value.revision, 1)
 		or (value.cursor ~= nil and not valid_text(value.cursor, MAX_CURSOR_BYTES))
 		or not valid_integer(value.processed, 0) or not valid_integer(value.removed, 0)
-		or type(value.status) ~= "string"
+		or value.removed > value.processed
+		or type(value.status) ~= "string" or CHECKPOINT_STATUSES[value.status] ~= true
+		or (value.status == "completed" and value.cursor ~= nil)
+		or (value.status == "incomplete" and value.cursor == nil)
 	then
 		return nil
 	end
