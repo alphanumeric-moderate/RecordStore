@@ -123,4 +123,24 @@ expect(not pcall(function()
 	})
 end), "receipt processor accepted a retention window beyond the transaction limit")
 
+local original_transact = record.TransactAsync
+local original_status_lookup = record.GetTransactionStatusAsync
+record.TransactAsync = function()
+	return nil, "unknown", "injected unresolved transaction"
+end
+record.GetTransactionStatusAsync = function()
+	return nil
+end
+local unresolved_result = handler({
+	PurchaseId = "purchase-status-unavailable",
+	PlayerId = 123,
+	ProductId = 1001,
+})
+expect(unresolved_result == Enum.ProductPurchaseDecision.NotProcessedYet,
+	"nil transaction-status lookup raised or incorrectly acknowledged an uncertain purchase")
+expect(diagnostics[#diagnostics].category == "transaction_status_unresolved",
+	"nil transaction-status lookup was not diagnosed as unresolved")
+record.TransactAsync = original_transact
+record.GetTransactionStatusAsync = original_status_lookup
+
 record:Close()

@@ -228,18 +228,28 @@ local function create_handler(
 					request
 				)
 			end)
-			if status_lookup_ok and durable_status.code == "committed" then
+			local status_result = if type(durable_status) == "table"
+				then durable_status :: { [string]: unknown }
+				else nil
+			if status_lookup_ok and status_result ~= nil and status_result.code == "committed" then
 				return purchase_granted
 			end
-			if status_lookup_ok and durable_status.code == "conflict" then
+			if status_lookup_ok and status_result ~= nil and status_result.code == "conflict" then
 				emit_diagnostic(config, "transaction_conflict", "conflict",
-					durable_status.message, validated_product_id)
+					if type(status_result.message) == "string" then status_result.message else nil,
+					validated_product_id)
 				return not_processed_yet
 			end
-			local lookup_message = if status_lookup_ok then durable_status.message else tostring(durable_status)
-			emit_diagnostic(config, "transaction_status_unresolved",
-				if status_lookup_ok then durable_status.code else "unknown",
-				lookup_message or tostring(_result), validated_product_id)
+			local lookup_message = if status_lookup_ok and status_result ~= nil
+				then status_result.message
+				elseif status_lookup_ok then "transaction status lookup returned no structured result"
+				else tostring(durable_status)
+			local lookup_status = if status_lookup_ok and status_result ~= nil
+				then tostring(status_result.code or "unknown")
+				else "unknown"
+			emit_diagnostic(config, "transaction_status_unresolved", lookup_status,
+				if type(lookup_message) == "string" then lookup_message else tostring(lookup_message or _result),
+				validated_product_id)
 			return not_processed_yet
 		end
 
