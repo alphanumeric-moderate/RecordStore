@@ -219,7 +219,7 @@ local function valid_checkpoint(raw: unknown, config: NormalizedConfig): (Checkp
 		or value.inventory_verified ~= value.done
 		or (value.done and (value.purchases_processed ~= config.expected_purchase_count
 			or value.inventory_digest ~= config.expected_inventory_digest))
-		or not nonnegative_integer(value.revision)
+		or not positive_integer(value.revision)
 		or not valid_cursor(value.cursor) or type(value.done) ~= "boolean"
 		or (value.done == true and value.cursor ~= nil)
 		or (value.done == false and value.revision ~= 0 and value.cursor == nil)
