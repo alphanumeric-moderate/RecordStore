@@ -2333,6 +2333,10 @@ local function new_erasure(store, families, options)
 				local clear, dependency_error = io_call(family.dependencies_clear, entry.item, user_id)
 				if clear ~= true then return { code = "blocked", cursor = index - 1, message = dependency_error or "live dependency blocks deletion" } end
 			end
+			-- This fence recheck is a preflight only. The family adapter must atomically
+			-- validate the same durable erasure_id fence and observed generation inside
+			-- the mutation; a separate fence check followed by an unconditional delete
+			-- still has a check/delete race.
 			local status, action_error = io_call(family.redact_or_delete_if_generation, entry.item, user_id, erasure_id)
 			if status ~= "deleted" and status ~= "redacted" then
 				adapter_call(store, "UpdateAsync", key, function(old)
