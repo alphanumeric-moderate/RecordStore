@@ -165,7 +165,7 @@ local function new(manifest_store: any, options: Options?): any
 					end
 					local current_version = status.Version
 					for _, entry in ipairs(history) do
-						if entry.Version ~= current_version and not entry.IsDeleted then
+						if entry.Version ~= current_version then
 							return nil, "profile has historical versions; erasure is blocked until allow_deprecated_remove_version is explicitly enabled or an approved retention path is supplied"
 						end
 					end
