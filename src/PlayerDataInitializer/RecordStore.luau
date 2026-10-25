@@ -11497,9 +11497,13 @@ type ErasureFenceMarker = {
 	fence_generation: number,
 }
 
-local function valid_erasure_user_id(value: unknown): boolean
+local function finite_erasure_number(value: unknown): boolean
 	return type(value) == "number" and math.isfinite(value)
-		and math.floor(value) == value and value >= 1
+end
+
+local function valid_erasure_user_id(value: unknown): boolean
+	return finite_erasure_number(value)
+		and math.floor(value :: number) == (value :: number) and (value :: number) >= 1
 end
 
 local function user_ids_include(user_ids: { number }?, user_id: number): boolean
@@ -11528,22 +11532,22 @@ local function parse_erasure_fence(raw: unknown): (ErasureFenceMarker?, boolean,
 	if version ~= 1
 		or not valid_erasure_user_id(user_id)
 		or type(erasure_id) ~= "string" or erasure_id == "" or #erasure_id > 96
-		or not finite(erased_at)
-		or not finite(source_generation) or source_generation < 0 or math.floor(source_generation) ~= source_generation
-		or not finite(source_revision) or source_revision < 0 or math.floor(source_revision) ~= source_revision
-		or not finite(fence_generation) or math.floor(fence_generation) ~= fence_generation
+		or not finite_erasure_number(erased_at)
+		or not finite_erasure_number(source_generation) or source_generation < 0 or math.floor(source_generation) ~= source_generation
+		or not finite_erasure_number(source_revision) or source_revision < 0 or math.floor(source_revision) ~= source_revision
+		or not finite_erasure_number(fence_generation) or math.floor(fence_generation) ~= fence_generation
 		or fence_generation ~= math.max(1, source_generation + 1)
 	then
 		return nil, true, "erasure fence fields failed validation"
 	end
 	return {
 		version = version,
-		user_id = user_id,
-		erasure_id = erasure_id,
-		erased_at = erased_at,
-		source_generation = source_generation,
-		source_revision = source_revision,
-		fence_generation = fence_generation,
+		user_id = user_id :: number,
+		erasure_id = erasure_id :: string,
+		erased_at = erased_at :: number,
+		source_generation = source_generation :: number,
+		source_revision = source_revision :: number,
+		fence_generation = fence_generation :: number,
 	}, true, nil
 end
 
@@ -11631,7 +11635,7 @@ local function erase_user_data_internal(
 		return nil, "invalid", "erasure_id must be 1 to 96 bytes"
 	end
 	if expected_generation ~= nil and (
-		not finite(expected_generation) or expected_generation < 0
+		not finite_erasure_number(expected_generation) or expected_generation < 0
 		or math.floor(expected_generation) ~= expected_generation
 	) then
 		return nil, "invalid", "expected_generation must be a non-negative integer"
@@ -11766,7 +11770,7 @@ local function purge_erased_versions_internal(
 		return nil, "invalid", "erasure_id must be 1 to 96 bytes"
 	end
 	local limit = if max_versions == nil then 16 else max_versions
-	if not finite(limit) or math.floor(limit) ~= limit or limit < 1 or limit > 64 then
+	if not finite_erasure_number(limit) or math.floor(limit) ~= limit or limit < 1 or limit > 64 then
 		return nil, "invalid", "max_versions must be an integer from 1 to 64"
 	end
 	local deadline, deadline_error = resolve_operation_deadline(operation_deadline)
