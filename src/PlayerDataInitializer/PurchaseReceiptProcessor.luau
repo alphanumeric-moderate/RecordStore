@@ -24,6 +24,8 @@ export type Diagnostic = {
 export type Config = {
 	get_record: (player_id: number) -> RecordStore.Record?,
 	receipt_retention_seconds: number,
+	permanent_purchase_ledger_key: string?,
+	permanent_purchase_ledger_capacity: number?,
 	on_diagnostic: ((diagnostic: Diagnostic) -> ())?,
 }
 
@@ -39,6 +41,8 @@ export type Processor = {
 type NormalizedConfig = {
 	get_record: (player_id: number) -> RecordStore.Record?,
 	receipt_retention_seconds: number,
+	permanent_purchase_ledger_key: string?,
+	permanent_purchase_ledger_capacity: number?,
 	on_diagnostic: ((diagnostic: Diagnostic) -> ())?,
 }
 
@@ -46,6 +50,8 @@ local OPERATION_ID_PREFIX = "purchase:"
 local MAX_OPERATION_ID_BYTES = 256
 local MAX_PURCHASE_ID_BYTES = MAX_OPERATION_ID_BYTES - #OPERATION_ID_PREFIX
 local MAX_RECEIPT_RETENTION_SECONDS = 31_536_000
+local MAX_PERMANENT_PURCHASE_LEDGER_ENTRIES = 8192
+local PERMANENT_LEDGER_RESULT_KEY = "recordstore_internal_purchase_ledger_status_v1"
 
 local function normalize_config(config: unknown): NormalizedConfig
 	if type(config) ~= "table" then
@@ -56,6 +62,8 @@ local function normalize_config(config: unknown): NormalizedConfig
 	for option_name in pairs(values) do
 		if option_name ~= "get_record"
 			and option_name ~= "receipt_retention_seconds"
+			and option_name ~= "permanent_purchase_ledger_key"
+			and option_name ~= "permanent_purchase_ledger_capacity"
 			and option_name ~= "on_diagnostic"
 		then
 			error("unsupported purchase receipt option: " .. tostring(option_name), 3)
@@ -74,6 +82,24 @@ local function normalize_config(config: unknown): NormalizedConfig
 		error("receipt_retention_seconds must be from 1 to 31536000", 3)
 	end
 
+	local ledger_key = values.permanent_purchase_ledger_key
+	local ledger_capacity = values.permanent_purchase_ledger_capacity
+	if ledger_key == nil then
+		if ledger_capacity ~= nil then
+			error("permanent_purchase_ledger_capacity requires permanent_purchase_ledger_key", 3)
+		end
+	elseif type(ledger_key) ~= "string" or ledger_key == "" or #ledger_key > 96
+		or string.sub(ledger_key, 1, #"__recordstore_") == "__recordstore_"
+	then
+		error("permanent_purchase_ledger_key must be a non-reserved application data field of 1 to 96 bytes", 3)
+	end
+	if ledger_capacity ~= nil and (type(ledger_capacity) ~= "number"
+		or not math.isfinite(ledger_capacity) or math.floor(ledger_capacity) ~= ledger_capacity
+		or ledger_capacity < 1 or ledger_capacity > MAX_PERMANENT_PURCHASE_LEDGER_ENTRIES)
+	then
+		error("permanent_purchase_ledger_capacity must be an integer from 1 to 8192", 3)
+	end
+
 	local on_diagnostic = values.on_diagnostic
 	if on_diagnostic ~= nil and type(on_diagnostic) ~= "function" then
 		error("on_diagnostic must be a function when provided", 3)
@@ -82,6 +108,8 @@ local function normalize_config(config: unknown): NormalizedConfig
 	local normalized: NormalizedConfig = {
 		get_record = get_record :: (player_id: number) -> RecordStore.Record?,
 		receipt_retention_seconds = retention :: number,
+		permanent_purchase_ledger_key = ledger_key :: string?,
+		permanent_purchase_ledger_capacity = (ledger_capacity or (if ledger_key ~= nil then MAX_PERMANENT_PURCHASE_LEDGER_ENTRIES else nil)) :: number?,
 		on_diagnostic = on_diagnostic :: ((diagnostic: Diagnostic) -> ())?,
 	}
 	return table.freeze(normalized)
@@ -204,7 +232,57 @@ local function create_handler(
 			product_id = validated_product_id,
 		}
 		local transaction_reducer: RecordStore.TransactionReducer = function(current_data, _unused)
-			return grant_reducer(current_data, receipt_context)
+			local ledger_key = config.permanent_purchase_ledger_key
+			if ledger_key == nil then
+				return grant_reducer(current_data, receipt_context)
+			end
+			local function ledger_result(ledger_status: string): RecordStore.JsonValue
+				return { [PERMANENT_LEDGER_RESULT_KEY] = ledger_status }
+			end
+			if type(current_data) ~= "table" then
+				return current_data, ledger_result("corrupt")
+			end
+			local current = current_data :: { [string]: RecordStore.JsonValue }
+			for key in pairs(current) do
+				if type(key) ~= "string" then return current_data, ledger_result("corrupt") end
+			end
+			local raw_ledger = current[ledger_key]
+			if raw_ledger ~= nil and type(raw_ledger) ~= "table" then
+				return current_data, ledger_result("corrupt")
+			end
+			local ledger: { [string]: { [string]: unknown } } = if type(raw_ledger) == "table"
+				then table.clone(raw_ledger :: { [string]: { [string]: unknown } })
+				else {}
+			local prior_count = 0
+			for prior_id, prior in pairs(ledger) do
+				if type(prior_id) ~= "string" or prior_id == "" or type(prior) ~= "table"
+					or not is_positive_integer(prior.player_id) or not is_positive_integer(prior.product_id)
+				then
+					return current_data, ledger_result("corrupt")
+				end
+				prior_count += 1
+			end
+			local prior = ledger[validated_purchase_id]
+			if prior ~= nil then
+				if prior.player_id == validated_player_id and prior.product_id == validated_product_id then
+					return current_data, ledger_result("duplicate")
+				end
+				return current_data, ledger_result("conflict")
+			end
+			if prior_count >= (config.permanent_purchase_ledger_capacity :: number) then
+				return current_data, ledger_result("capacity")
+			end
+			local next_data, result = grant_reducer(current_data, receipt_context)
+			if type(next_data) ~= "table" then
+				return current_data, ledger_result("invalid_grant")
+			end
+			ledger[validated_purchase_id] = {
+				player_id = validated_player_id,
+				product_id = validated_product_id,
+			}
+			local committed_data = table.clone(next_data :: { [string]: RecordStore.JsonValue })
+			committed_data[ledger_key] = ledger
+			return committed_data, result
 		end
 
 		local transaction_ok, _result, status, message = pcall(function()
@@ -217,7 +295,25 @@ local function create_handler(
 				}
 			)
 		end)
+		local function defer_for_permanent_ledger(result_value: unknown): boolean
+			if type(result_value) ~= "table" then return false end
+			local ledger_status = (result_value :: { [string]: unknown })[PERMANENT_LEDGER_RESULT_KEY]
+			if ledger_status == "duplicate" then return false end
+			if ledger_status == "conflict" or ledger_status == "capacity"
+				or ledger_status == "corrupt" or ledger_status == "invalid_grant"
+			then
+				local category = if ledger_status == "conflict" then "permanent_purchase_conflict"
+					elseif ledger_status == "capacity" then "permanent_purchase_ledger_capacity"
+					elseif ledger_status == "corrupt" then "permanent_purchase_ledger_corrupt"
+					else "purchase_grant_rejected"
+				emit_diagnostic(config, category, tostring(ledger_status),
+					"permanent purchase ledger did not authorize a new grant", validated_product_id)
+				return true
+			end
+			return false
+		end
 		if transaction_ok and (status == "committed" or status == "duplicate") then
+			if defer_for_permanent_ledger(_result) then return not_processed_yet end
 			return purchase_granted
 		end
 
@@ -229,6 +325,7 @@ local function create_handler(
 				)
 			end)
 			if status_lookup_ok and durable_status ~= nil and durable_status.code == "committed" then
+				if defer_for_permanent_ledger(durable_status.result) then return not_processed_yet end
 				return purchase_granted
 			end
 			if status_lookup_ok and durable_status ~= nil and durable_status.code == "conflict" then
