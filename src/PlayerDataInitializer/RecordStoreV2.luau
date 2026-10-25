@@ -2415,6 +2415,15 @@ local function new_erasure(store, families, options)
 			return { code = "coverage_unverified", cursor = manifest.cursor, completed_count = manifest.completed_count, rtbf_coverage_verified = false, message = "live template verification did not pass before erasure" }
 		end
 		if manifest.status == "completed" then return { code = "committed", completed_count = manifest.completed_count or 0, cursor = manifest.cursor, rtbf_coverage_verified = true } end
+		local function family_inventory_items(family_name)
+			local items = {}
+			for _, planned_entry in ipairs(manifest.entries) do
+				if planned_entry.family == family_name then
+					items[#items + 1] = copy(planned_entry.item)
+				end
+			end
+			return items
+		end
 		for _, family in ipairs(self.families) do
 			if type(family.fence_user) ~= "function"
 				or type(family.dependencies_clear) ~= "function"
@@ -2422,7 +2431,11 @@ local function new_erasure(store, families, options)
 			then
 				return { code = "unsupported", message = "family needs writer fence, dependency check, and generation-aware delete/redact" }
 			end
-			local fenced, fence_error = io_call(family.fence_user, user_id, erasure_id)
+			-- Supply the exact inventoried generations. A family adapter that can
+			-- mutate the source key must compare these generations within its durable
+			-- fence mutation, instead of permanently fencing a newer unseen generation.
+			local planned_items = family_inventory_items(family.name)
+			local fenced, fence_error = io_call(family.fence_user, user_id, erasure_id, planned_items)
 			if fenced ~= true then return { code = "retryable", message = fence_error or "writer fence unconfirmed" } end
 		end
 		local cursor, completed = manifest.cursor or 0, manifest.completed_count or 0
@@ -2432,7 +2445,9 @@ local function new_erasure(store, families, options)
 			-- Fences can expire or be revoked while a bounded batch is running. Recheck
 			-- at the per-item deletion boundary; the delete adapter must still compare
 			-- the observed generation atomically with its mutation.
-			local item_fenced, item_fence_error = io_call(family.fence_user, user_id, erasure_id)
+			local item_fenced, item_fence_error = io_call(
+				family.fence_user, user_id, erasure_id, { copy(entry.item) }
+			)
 			if item_fenced ~= true then
 				return {
 					code = "retryable",
