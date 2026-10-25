@@ -11,6 +11,8 @@ for _, path in {
 	"src/PlayerDataInitializer/PurchaseReceiptProcessor.luau",
 	"src/PlayerDataInitializer/RecordStoreOutboxMailboxAdapter.luau",
 	"src/PlayerDataInitializer/RecordStoreV2.luau",
+	"src/PlayerDataInitializer/RecordStoreMaintenanceRunner.luau",
+	"bench/run_offline_maintenance_runner_regression.luau",
 	"tests/RecordStoreV2NonSaveServicesRegression.server.luau",
 	"tests/RecordStore_OutboxMailboxAdapterRegression.server.luau",
 	"src/PlayerDataInitializer/PlayerDataCore.luau",
