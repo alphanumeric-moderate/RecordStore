@@ -325,6 +325,41 @@ do
 		"duplicate-only import did not complete with reconciled counters")
 end
 
+-- A completed checkpoint cannot retain a continuation cursor.
+do
+	local calls = { count = 0 }
+	local backing = make_checkpoint_store()
+	local source = make_source({
+		["<initial>"] = page({ purchase("terminal-cursor-001") }, nil, true),
+	}, "snapshot-terminal-cursor", calls)
+	local job_id = "historical-import-terminal-cursor"
+	backing.values["purchase-migration:" .. job_id] = {
+		version = 2,
+		job_id = job_id,
+		source_revision = source.source_revision,
+		revision = 1,
+		cursor = "after-terminal-page",
+		done = true,
+		inventory_manifest_id = "manifest:" .. source.source_revision,
+		expected_purchase_count = source.inventory_count,
+		expected_inventory_digest = source.inventory_digest,
+		inventory_digest = source.inventory_digest,
+		inventory_verified = true,
+		pages_processed = 1,
+		purchases_processed = source.inventory_count,
+		backfilled_count = source.inventory_count,
+		duplicate_count = 0,
+	}
+	local processor = make_processor()
+	local runner = new_runner(job_id, source, processor, backing)
+	local status = runner:GetStatusAsync()
+	expect(status.code == "unknown" and status.done == false,
+		"runner accepted a completed migration checkpoint that retained a continuation cursor")
+	local result = runner:RunBatchAsync(1)
+	expect(result.code == "unknown" and calls.count == 0 and processor.calls == 0,
+		"runner read or imported source purchases after rejecting an inconsistent terminal checkpoint")
+end
+
 -- Corrupt durable checkpoints are surfaced as unknown and never silently reset
 -- the cursor to the beginning of an existing migration.
 do
