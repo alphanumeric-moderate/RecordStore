@@ -180,6 +180,46 @@ local duplicate_resolution = V2.ProfileDoctor.ResolveQuarantineAsync(
 expect(duplicate_resolution.code == "duplicate",
 	"same resolution retry was not idempotent after release")
 
+local recovery_record = open_profile("QuarantineFenceRegression", "identity-recovery")
+local recovery_identity = {
+	store_name = "QuarantineFenceRegression",
+	scope = "global",
+	profile_key = "identity-recovery",
+}
+local before_recovery_fence, before_recovery_code = RecordStore.Mock.get_quarantine_fence_status_async(
+	recovery_identity.store_name, recovery_identity.scope, recovery_identity.profile_key
+)
+expect(before_recovery_code == "success" and before_recovery_fence ~= nil
+	and before_recovery_fence.Quarantined == false,
+	"identity-recovery profile did not expose its current durable revision/generation")
+local orphaned_fence, orphaned_code = RecordStore.Mock.quarantine_profile_writes_async(
+	recovery_identity.store_name, recovery_identity.scope, recovery_identity.profile_key,
+	"quarantine-identity-recovery", "operator-3", "recover after server restart",
+	before_recovery_fence.CurrentGeneration, before_recovery_fence.CurrentRevision
+)
+expect(orphaned_code == "success" and orphaned_fence ~= nil and orphaned_fence.Quarantined == true,
+	"failed to create the simulated fence-before-manifest crash state")
+local recovery_manifest_store = new_store()
+local recovered_quarantine = V2.ProfileDoctor.QuarantineAsync(
+	recovery_identity, recovery_manifest_store, "quarantine-identity-recovery",
+	"operator-3", "recover after server restart", before_recovery_fence.CurrentRevision
+)
+expect(recovered_quarantine.code == "committed",
+	"identity-only quarantine recovery did not repair the missing audit manifest: "
+		.. tostring(recovered_quarantine.code))
+local recovered_status = V2.ProfileDoctor.GetQuarantineStatusAsync(recovery_identity, recovery_manifest_store)
+expect(recovered_status.code == "success" and recovered_status.status == "quarantined",
+	"identity-only quarantine status failed after recovering an orphan fence")
+local recovery_resolution = V2.ProfileDoctor.ResolveQuarantineAsync(
+	recovery_identity, recovery_manifest_store, "quarantine-identity-recovery",
+	"operator-3", "verified recovery after server restart", before_recovery_fence.CurrentRevision
+)
+expect(recovery_resolution.code == "committed" and recovery_resolution.status == "resolved",
+	"identity-only resolution could not recover a durable quarantine after restart")
+local recovered_writer = V2.ProfileDoctor.CheckWritableAsync(recovery_identity, recovery_manifest_store)
+expect(recovered_writer.code == "success" and recovered_writer.allowed == true,
+	"identity-only release remained blocked after confirmed audit and fence completion")
+
 local erase_record = open_profile("QuarantineFenceRegression", "erase-over-quarantine")
 local erase_manifest = new_store()
 local erase_quarantine = quarantine(
