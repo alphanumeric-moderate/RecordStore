@@ -1541,6 +1541,10 @@ local function saga_coordinator(store, options)
 		if value.phase == "manual_resolution_required" and type(value.manual_resolution) ~= "table" then return false end
 		return true
 	end
+	local function read_saga_record(key)
+		local method = if type(store.GetAsyncFresh) == "function" then "GetAsyncFresh" else "GetAsync"
+		return adapter_call(store, method, key)
+	end
 	local function update_saga(id, request, mutate)
 		local material = canonical(request)
 		local key, now = "rv2s-" .. digest(id), os.time()
@@ -1592,7 +1596,7 @@ local function saga_coordinator(store, options)
 			return changed
 		end)
 		if message then
-			local seen = adapter_call(store, "GetAsync", key)
+			local seen = read_saga_record(key)
 			if type(seen) == "table" and type(candidate) == "table"
 				and seen.transfer_id == id and seen.request_material == material
 			then
@@ -1609,7 +1613,7 @@ local function saga_coordinator(store, options)
 	end
 	function api:GetStatus(id)
 		if not valid_text(id, 128) then return { code = "invalid" } end
-		local value, message = adapter_call(store, "GetAsync", "rv2s-" .. digest(id))
+		local value, message = read_saga_record("rv2s-" .. digest(id))
 		if message then return { code = "unknown", message = message } end
 		if not value then return { code = "not_found" } end
 		if value.transfer_id ~= id then return { code = "conflict", message = "saga route collision" } end
@@ -1699,7 +1703,9 @@ local function saga_coordinator(store, options)
 		})
 		if not resolution_request_material then return { code = "invalid", message = resolution_request_error } end
 		local observed = self:GetStatus(id)
-		if observed.code == "unknown" or observed.code == "not_found" or observed.code == "invalid" then
+		if observed.code == "unknown" or observed.code == "not_found" or observed.code == "invalid"
+			or observed.code == "corrupt" or observed.code == "conflict"
+		then
 			return { code = observed.code, transfer_id = id, message = observed.message }
 		end
 		if observed.transfer_id ~= id or observed.request_material ~= request_bytes then
@@ -1779,7 +1785,8 @@ local function saga_coordinator(store, options)
 					and prior_phase ~= "compensation_pending"
 				then return nil, "conflict" end
 				current.phase = prior_phase
-				current.status = "pending"
+				current.status = if prior_phase == "compensation_pending"
+					then "reconciliation_required" else "pending"
 				current.last_error = nil
 			elseif decision == "confirm_settled" then
 				current.phase = "settled"
