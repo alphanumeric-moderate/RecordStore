@@ -259,8 +259,8 @@ do
 		"late first-time join recreated a key already fenced by erasure")
 end
 
--- Default production configuration must block before fencing a profile when
--- historical versions exist and the only available purge API is deprecated.
+-- Planning may verify a bounded historical inventory without deleting data.
+-- Execute remains fenced by the durable marker and waits for documented version retention.
 do
 	local user_id = 205
 	local _, key = create_profile(user_id, 20)
