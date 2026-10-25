@@ -215,6 +215,10 @@ function OutboxMailboxAdapter.new(config: Config): Processor
 			correlation_id = event.CorrelationId,
 			causation_id = event.CausationId,
 			source_created_at = event.CreatedAt,
+			destination_store_name = event.DestinationStoreName,
+			destination_scope = event.DestinationScope,
+			destination_profile_key = event.DestinationProfileKey,
+			destination_user_id = event.DestinationUserId,
 		}
 		local call_ok, result = pcall(function()
 			return mailbox:EnqueueAsync(event.EventType, payload, { idempotency_key = event.EventId })
