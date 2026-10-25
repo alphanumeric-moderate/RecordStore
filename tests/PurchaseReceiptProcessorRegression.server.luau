@@ -168,14 +168,48 @@ local ledger_handler = ledger_processor:CreateHandler({
 		changed.coins += 100
 		return changed, { granted = 100 }
 	end,
+	[1003] = function()
+		return { "not-a-profile-map" }, { granted = 999 }
+	end,
 })
 local ledger_clock = 1000
 Mock.set_test_clock(function() return ledger_clock end)
+
+-- A sidecar receipt from a pre-ledger processor cannot prove that the permanent
+-- ledger was populated, so the upgraded processor must fail closed on that result.
+local original_ledger_transact = ledger_record.TransactAsync
+ledger_record.TransactAsync = function()
+	return { granted = 10 }, "duplicate", nil
+end
+local unmarked_receipt = ledger_handler({
+	PurchaseId = "permanent-legacy-unmarked",
+	PlayerId = 123,
+	ProductId = 1001,
+})
+expect(unmarked_receipt == Enum.ProductPurchaseDecision.NotProcessedYet,
+	"ledger-enabled processor acknowledged a duplicate receipt without permanent-ledger proof")
+expect(ledger_record:Get().coins == 0 and ledger_record:Get().purchase_ledger == nil,
+	"unmarked legacy receipt mutated profile data or silently populated the ledger")
+expect(diagnostics[#diagnostics].category == "permanent_purchase_ledger_marker_missing",
+	"legacy receipt without ledger proof was not diagnosed")
+ledger_record.TransactAsync = original_ledger_transact
+
 local permanent_purchase = { PurchaseId = "permanent-001", PlayerId = 123, ProductId = 1001 }
 expect(ledger_handler(permanent_purchase) == Enum.ProductPurchaseDecision.PurchaseGranted,
 	"first permanently tracked purchase was not granted")
 expect(ledger_record:Get().coins == 10 and ledger_grants == 1,
 	"first permanently tracked purchase did not apply exactly one grant")
+local invalid_shape_purchase = {
+	PurchaseId = "permanent-invalid-map",
+	PlayerId = 123,
+	ProductId = 1003,
+}
+expect(ledger_handler(invalid_shape_purchase) == Enum.ProductPurchaseDecision.NotProcessedYet,
+	"permanent ledger accepted a grant reducer that returned an array instead of a profile map")
+expect(ledger_record:Get().coins == 10 and ledger_grants == 1,
+	"invalid grant output mutated profile data")
+expect(diagnostics[#diagnostics].category == "purchase_grant_rejected",
+	"invalid grant output was not diagnosed")
 expect(type(ledger_record:Get().purchase_ledger) == "table"
 	and ledger_record:Get().purchase_ledger["permanent-001"].product_id == 1001,
 	"permanent ledger did not record purchase identity atomically with the grant")
