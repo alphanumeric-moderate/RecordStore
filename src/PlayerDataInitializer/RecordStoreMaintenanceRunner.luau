@@ -121,7 +121,7 @@ function Runner.new(maintenance, config)
 				removed = next_removed,
 				status = next_status,
 			}
-			local saved, save_error = call(config.persist_checkpoint, proposed, revision)
+			local saved, save_error = call(config.persist_checkpoint, table.clone(proposed), revision)
 			if saved == true then
 				revision = proposed.revision
 				last_checkpoint = proposed
@@ -194,7 +194,7 @@ function Runner.new(maintenance, config)
 		return result
 	end
 	function runner:GetCheckpoint()
-		return last_checkpoint
+		return if last_checkpoint ~= nil then table.clone(last_checkpoint) else nil
 	end
 	return runner
 end
