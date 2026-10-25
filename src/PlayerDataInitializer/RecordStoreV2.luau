@@ -2185,7 +2185,12 @@ local function new_erasure(store, families, options)
 		end
 		if manifest.status == "completed" then return { code = "committed", completed_count = manifest.completed_count or 0, cursor = manifest.cursor, rtbf_coverage_verified = true } end
 		for _, family in ipairs(self.families) do
-			if type(family.fence_user) ~= "function" or type(family.redact_or_delete_if_generation) ~= "function" then return { code = "unsupported", message = "family needs writer fence and generation-aware delete/redact" } end
+			if type(family.fence_user) ~= "function"
+				or type(family.dependencies_clear) ~= "function"
+				or type(family.redact_or_delete_if_generation) ~= "function"
+			then
+				return { code = "unsupported", message = "family needs writer fence, dependency check, and generation-aware delete/redact" }
+			end
 			local fenced, fence_error = io_call(family.fence_user, user_id, erasure_id)
 			if fenced ~= true then return { code = "retryable", message = fence_error or "writer fence unconfirmed" } end
 		end
