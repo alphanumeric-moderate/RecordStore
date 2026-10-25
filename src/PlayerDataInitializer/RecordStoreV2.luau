@@ -2459,7 +2459,17 @@ local function new_erasure(store, families, options)
 		if status.code == "unknown" or status.code == "conflict" or status.code == "corrupt" then
 			return nil, status
 		end
-		if status.status == "resolved" then return false, status end
+		if status.status == "resolved" then
+			-- A generic terminal label is not proof that user data was erased or
+			-- that recreation is safe. The application must reconcile the audited
+			-- resolution and explicitly clear its own writer fence.
+			return true, {
+				code = "resolution_unverified",
+				write_blocked = true,
+				message = "resolved erasure manifest does not independently prove safe recreation",
+				observed = status,
+			}
+		end
 		if status.status == "planned" or status.status == "in_progress" then return true, status end
 		if status.status == "completed" then
 			local coverage_ok, coverage_code, coverage_message = validate_plan_manifest(status, user_id)
