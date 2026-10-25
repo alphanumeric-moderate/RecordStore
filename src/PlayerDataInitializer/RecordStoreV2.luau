@@ -1598,6 +1598,10 @@ local function new_doctor(record_store)
 				return { code = "conflict", status = "resolved_fenced",
 					message = "audit says resolved while the authoritative same-key fence remains active" }
 			end
+			if existing ~= nil and existing.quarantine_id == quarantine_id and existing.status == "release_pending" then
+				return { code = "conflict", status = "release_pending",
+					message = "quarantine release has started; resume ResolveQuarantineAsync with its recorded decision" }
+			end
 		else
 			if existing ~= nil and existing.quarantine_id == quarantine_id and existing.status == "resolved" then
 				return { code = "duplicate", status = "resolved", manifest = existing }
@@ -1872,6 +1876,45 @@ local function new_doctor(record_store)
 		local manifest, manifest_code, manifest_error = read_quarantine_manifest(
 			quarantine_store, key, identity_text
 		)
+		if manifest_code == "not_found" and fence.Quarantined == true then
+			local recovered_manifest = manifest_from_fence(fence)
+			recovered_manifest.fence_protocol = 1
+			local _, recovery_error = adapter_call(quarantine_store, "UpdateAsync", key, function(old)
+				if old == nil then return copy(recovered_manifest) end
+				if type(old) ~= "table" or old.version ~= 1 or old.identity_text ~= identity_text then
+					return old
+				end
+				if old.quarantine_id == quarantine_id
+					and (old.status == "quarantined" or old.status == "release_pending" or old.status == "resolved")
+				then return old end
+				if old.quarantine_id ~= quarantine_id and old.status == "resolved" then
+					local next_manifest = copy(recovered_manifest)
+					local history = if type(old.history) == "table" then copy(old.history) else {}
+					table.insert(history, {
+						quarantine_id = old.quarantine_id,
+						status = old.status,
+						operator_id = old.operator_id,
+						reason = old.reason,
+						observed_revision = old.observed_revision,
+						observed_generation = old.observed_generation,
+						created_at = old.created_at,
+						updated_at = old.updated_at,
+						resolution = copy(old.resolution),
+					})
+					while #history > 16 do table.remove(history, 1) end
+					next_manifest.history = history
+					return next_manifest
+				end
+				return old
+			end)
+			manifest, manifest_code, manifest_error = read_quarantine_manifest(
+				quarantine_store, key, identity_text
+			)
+			if manifest_code ~= "success" or manifest == nil then
+				return { code = "unknown", status = fence.Phase, fence = fence,
+					message = recovery_error or manifest_error or "orphaned quarantine fence audit recovery is unresolved" }
+			end
+		end
 		if manifest_code ~= "success" or manifest == nil then
 			return { code = manifest_code or "unknown", message = manifest_error or "quarantine audit manifest is missing" }
 		end
