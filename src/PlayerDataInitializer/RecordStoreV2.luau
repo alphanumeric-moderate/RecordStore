@@ -2055,6 +2055,82 @@ local function new_erasure(store, families, options)
 		for _, entry in ipairs(all_templates) do table.insert(result, { family = entry.family, template = render_template(entry.template, user_id) }) end
 		return result, nil
 	end
+	local function validate_plan_manifest(manifest, user_id)
+		local entries = manifest.entries
+		if type(entries) ~= "table" or #entries > MAX_ERASURE_ITEMS or key_count(entries) ~= #entries then
+			return false, "corrupt", "erasure entries are not a bounded dense array"
+		end
+		for entry_index in pairs(entries) do
+			if type(entry_index) ~= "number" or not finite(entry_index) or math.floor(entry_index) ~= entry_index
+				or entry_index < 1 or entry_index > #entries
+			then return false, "corrupt", "erasure entries are not a dense numeric array" end
+		end
+		local entry_counts, seen_locators = {}, {}
+		for _, entry in ipairs(entries) do
+			if type(entry) ~= "table" or not valid_text(entry.family, 48) or type(entry.item) ~= "table" then
+				return false, "corrupt", "erasure entry has an invalid family or item record"
+			end
+			if by_name[entry.family] == nil then return false, "corrupt", "erasure entry references an unknown family" end
+			local item = entry.item
+			if not valid_text(item.key, 50) or not finite(item.generation)
+				or (item.name ~= nil and (type(item.name) ~= "string" or #item.name > 50))
+				or (item.scope ~= nil and (type(item.scope) ~= "string" or #item.scope > 50))
+			then return false, "corrupt", "erasure entry has an invalid locator or generation" end
+			entry_counts[entry.family] = (entry_counts[entry.family] or 0) + 1
+		end
+		if manifest.rtbf_coverage_verified ~= true then
+			return false, "coverage_unverified", "manifest does not contain verified exhaustive RTBF coverage"
+		end
+		local rendered = coordinator:RenderTemplates(user_id)
+		local snapshot = manifest.template_snapshot
+		if type(snapshot) ~= "table" then
+			return false, "coverage_unverified", "manifest lacks its verified template snapshot"
+		end
+		local current_ok, current_text = pcall(canonical, rendered)
+		local snapshot_ok, snapshot_text = pcall(canonical, snapshot)
+		if not current_ok or not snapshot_ok or current_text ~= snapshot_text then
+			return false, "coverage_unverified", "current RTBF templates differ from the plan's verified snapshot"
+		end
+		for _, entry in ipairs(entries) do
+			local item, matched = entry.item, false
+			if type(item.name) ~= "string" or type(item.scope) ~= "string" then
+				return false, "coverage_unverified", "verified entries must include exact DataStore name and scope"
+			end
+			local locator = item.name .. "\0" .. item.scope .. "\0" .. item.key
+			if seen_locators[locator] then return false, "corrupt", "erasure plan repeats a DataStore locator" end
+			seen_locators[locator] = true
+			for _, template_entry in ipairs(rendered) do
+				if template_entry.family == entry.family then
+					local template = template_entry.template
+					if item.name == template.name and item.scope == template.scope and item.key == template.key then
+						matched = true
+						break
+					end
+				end
+			end
+			if not matched then return false, "coverage_unverified", "planned locator no longer matches a verified RTBF template" end
+		end
+		local coverage = manifest.coverage
+		if type(coverage) ~= "table" or key_count(coverage) ~= #self.families then
+			return false, "coverage_unverified", "coverage rows do not match the declared family inventory"
+		end
+		for family_name in pairs(coverage) do
+			if type(family_name) ~= "string" or by_name[family_name] == nil then
+				return false, "coverage_unverified", "coverage contains an undeclared family"
+			end
+		end
+		for _, family in ipairs(self.families) do
+			local row = coverage[family.name]
+			if family.templates_verified ~= true or type(row) ~= "table"
+				or row.status ~= "template_verified_by_integrator" or row.inventory_complete ~= true
+				or row.unmatched_count ~= 0 or not finite(row.count) or math.floor(row.count) ~= row.count
+				or row.count < 0 or row.count ~= (entry_counts[family.name] or 0)
+			then
+				return false, "coverage_unverified", "a family no longer proves complete inventory and template coverage"
+			end
+		end
+		return true, nil, nil
+	end
 	function coordinator:PlanAsync(user_id, erasure_id)
 		if not finite(user_id) or user_id < 1 or math.floor(user_id) ~= user_id or not valid_text(erasure_id, 96) then return { code = "invalid" } end
 		local entries, coverage, rendered = {}, {}, self:RenderTemplates(user_id)
@@ -2124,13 +2200,15 @@ local function new_erasure(store, families, options)
 			end
 		end
 		local template_ok = if type(options.verify_templates) == "function" then io_call(options.verify_templates, user_id, rendered) else false
-		local verified = #self.families > 0
+		local snapshot_ok = pcall(canonical, rendered)
+		local template_snapshot = if snapshot_ok then copy(rendered) else nil
+		local verified = #self.families > 0 and template_snapshot ~= nil
 		for _, row in pairs(coverage) do
 			if row.status ~= "template_verified_by_integrator" or row.inventory_complete ~= true or row.unmatched_count ~= 0 then verified = false end
 		end
 		local manifest = {
 			version = 1, user_id = user_id, erasure_id = erasure_id, status = "planned", cursor = 0,
-			completed_count = 0, entries = entries, coverage = coverage,
+			completed_count = 0, entries = entries, coverage = coverage, template_snapshot = template_snapshot,
 			rtbf_coverage_verified = verified and template_ok == true, created_at = os.time(), updated_at = os.time(),
 		}
 		local value, message = adapter_call(store, "UpdateAsync", manifest_key(user_id), function(old)
@@ -2157,6 +2235,10 @@ local function new_erasure(store, families, options)
 				and value.status ~= "blocked" and value.status ~= "completed" and value.status ~= "resolved")
 		then return { code = "corrupt", message = "existing erasure manifest failed validation" } end
 		local result = copy(value)
+		if value.rtbf_coverage_verified == true then
+			local coverage_ok, coverage_code, coverage_message = validate_plan_manifest(value, user_id)
+			if not coverage_ok then result.code = coverage_code or "coverage_unverified"; result.message = coverage_message; return result end
+		end
 		result.code = "success"
 		return result
 	end
@@ -2171,17 +2253,25 @@ local function new_erasure(store, families, options)
 			or not finite(manifest.cursor) or math.floor(manifest.cursor) ~= manifest.cursor
 			or manifest.cursor < 0 or manifest.cursor > #manifest.entries
 			or not finite(manifest.completed_count) or math.floor(manifest.completed_count) ~= manifest.completed_count
-			or manifest.completed_count < 0
+			or manifest.completed_count < 0 or manifest.completed_count ~= manifest.cursor
+			or (manifest.status ~= "planned" and manifest.status ~= "in_progress" and manifest.status ~= "unknown"
+				and manifest.status ~= "blocked" and manifest.status ~= "completed" and manifest.status ~= "resolved")
 		then return { code = "corrupt", message = "erasure manifest failed execution validation" } end
 		if manifest.status == "resolved" then return { code = "resolved", completed_count = manifest.completed_count or 0, cursor = manifest.cursor } end
-		if manifest.rtbf_coverage_verified ~= true then
+		local coverage_ok, coverage_code, coverage_message = validate_plan_manifest(manifest, user_id)
+		if not coverage_ok then
 			return {
-				code = "coverage_unverified",
+				code = coverage_code or "coverage_unverified",
 				cursor = manifest.cursor or 0,
 				completed_count = manifest.completed_count or 0,
 				rtbf_coverage_verified = false,
-				message = "destructive erasure is blocked until every family inventory and template is verified",
+				message = coverage_message or "destructive erasure is blocked until every family inventory and template is verified",
 			}
+		end
+		local rendered = self:RenderTemplates(user_id)
+		local template_ok = if type(options.verify_templates) == "function" then io_call(options.verify_templates, user_id, rendered) else false
+		if template_ok ~= true then
+			return { code = "coverage_unverified", cursor = manifest.cursor, completed_count = manifest.completed_count, rtbf_coverage_verified = false, message = "live template verification did not pass before erasure" }
 		end
 		if manifest.status == "completed" then return { code = "committed", completed_count = manifest.completed_count or 0, cursor = manifest.cursor, rtbf_coverage_verified = true } end
 		for _, family in ipairs(self.families) do
@@ -2305,10 +2395,11 @@ local function new_erasure(store, families, options)
 			return false, status
 		end
 		if status.status == "completed" then
-			if status.rtbf_coverage_verified ~= true then
+			local coverage_ok, coverage_code, coverage_message = validate_plan_manifest(status, user_id)
+			if not coverage_ok then
 				return nil, {
-					code = "coverage_unverified",
-					message = "manifest says completed but does not prove exhaustive RTBF coverage",
+					code = coverage_code or "coverage_unverified",
+					message = coverage_message or "manifest says completed but does not prove exhaustive RTBF coverage",
 					observed = status,
 				}
 			end
@@ -2332,11 +2423,12 @@ local function new_erasure(store, families, options)
 		if status.status == "resolved" then return false, status end
 		if status.status == "planned" or status.status == "in_progress" then return true, status end
 		if status.status == "completed" then
-			if status.rtbf_coverage_verified == true then return true, status end
+			local coverage_ok, coverage_code, coverage_message = validate_plan_manifest(status, user_id)
+			if coverage_ok then return true, status end
 			return true, {
-				code = "coverage_unverified",
+				code = coverage_code or "coverage_unverified",
 				write_blocked = true,
-				message = "write/recreation must remain blocked until RTBF coverage is reconciled",
+				message = coverage_message or "write/recreation must remain blocked until RTBF coverage is reconciled",
 				observed = status,
 			}
 		end
