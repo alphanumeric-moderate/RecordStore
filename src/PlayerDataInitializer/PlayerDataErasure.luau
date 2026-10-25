@@ -33,7 +33,6 @@ type Options = {
 	profile_scope: string?,
 	key_prefix: string?,
 	operation_deadline: number?,
-	allow_deprecated_remove_version: boolean?,
 	profile_family_verified: boolean?,
 	verify_templates: ((number, { any }) -> boolean)?,
 	additional_families: { any }?,
@@ -82,11 +81,6 @@ local function new(manifest_store: any, options: Options?): any
 		type(operation_deadline) ~= "number" or not math.isfinite(operation_deadline)
 		or operation_deadline <= 0
 	) then error("operation_deadline must be finite and positive", 2) end
-	if config.allow_deprecated_remove_version ~= nil
-		and type(config.allow_deprecated_remove_version) ~= "boolean"
-	then
-		error("allow_deprecated_remove_version must be a boolean", 2)
-	end
 	if config.verify_templates == nil or type(config.verify_templates) ~= "function" then
 		error("PlayerDataErasure requires verify_templates; a hard-coded template is not proof of live coverage", 2)
 	end
@@ -152,23 +146,15 @@ local function new(manifest_store: any, options: Options?): any
 			local generation = 0
 			if status ~= nil then
 				generation = if status.Erased then status.SourceGeneration or 0 else status.Generation
-				if config.allow_deprecated_remove_version ~= true then
-					local history, history_code, history_message = record_store.list_versions_async(
-						profile_store_name, profile_scope, key, Enum.SortDirection.Descending,
-						nil, nil, 1024, operation_deadline
-					)
-					if history_code ~= "success" or history == nil then
-						return nil, history_message or ("historical inventory failed: " .. tostring(history_code))
-					end
-					if #history >= 1024 then
-						return nil, "historical inventory reached the 1,024-version bound; erasure is blocked until an explicit retention path is configured"
-					end
-					local current_version = status.Version
-					for _, entry in ipairs(history) do
-						if entry.Version ~= current_version then
-							return nil, "profile has historical versions; erasure is blocked until allow_deprecated_remove_version is explicitly enabled or an approved retention path is supplied"
-						end
-					end
+				local history, history_code, history_message = record_store.list_versions_async(
+					profile_store_name, profile_scope, key, Enum.SortDirection.Descending,
+					nil, nil, 1024, operation_deadline
+				)
+				if history_code ~= "success" or history == nil then
+					return nil, history_message or ("historical inventory failed: " .. tostring(history_code))
+				end
+				if #history >= 1024 then
+					return nil, "historical inventory reached the 1,024-version bound; erasure is blocked until a larger verified retention scan is configured"
 				end
 			end
 			return {
@@ -241,14 +227,18 @@ local function new(manifest_store: any, options: Options?): any
 					erase_message or ("generation-aware profile erasure returned " .. tostring(erase_code))
 			end
 			local progress, purge_code, purge_message = record_store.purge_erased_versions_async(
-				profile_store_name, profile_scope, item.key, user_id, erasure_id, 16, operation_deadline,
-				config.allow_deprecated_remove_version == true
+				profile_store_name, profile_scope, item.key, user_id, erasure_id, 16, operation_deadline
 			)
 			if purge_code ~= "success" or progress == nil then
 				return if purge_code == "unknown" then "unknown" else "retryable",
 					purge_message or ("historical profile purge returned " .. tostring(purge_code))
 			end
 			if progress.Complete ~= true then
+				local retention_until = progress.RetentionUntil
+				if type(retention_until) == "number" and math.isfinite(retention_until) then
+					return "retryable", "historical profile versions are retained by Roblox until approximately Unix time "
+						.. tostring(retention_until) .. "; keep the writer fence and resume the same erasure ID after retention expiry"
+				end
 				return "retryable", "historical profile purge remains incomplete; resume the same erasure ID"
 			end
 			return "redacted", nil
