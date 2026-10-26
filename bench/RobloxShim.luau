@@ -107,6 +107,9 @@ local loaded_player_data_erasure: any = nil
 local loaded_purchase_datastore_authority: any = nil
 local loaded_purchase_authority_migration_runner: any = nil
 local loaded_purchase_inventory_manifest: any = nil
+local loaded_purchase_entitlement_authority: any = nil
+local loaded_purchase_entitlement_coordinator: any = nil
+local loaded_purchase_entitlement_handler: any = nil
 local loaded_recordstore_sha256: any = nil
 local loaded_maintenance_roblox_adapter: any = nil
 
@@ -119,6 +122,9 @@ local PlayerDataErasureInstance = table.freeze({ Name = "PlayerDataErasure", Cla
 local PurchaseDataStoreAuthorityInstance = table.freeze({ Name = "PurchaseDataStoreAuthority", ClassName = "ModuleScript" })
 local PurchaseAuthorityMigrationRunnerInstance = table.freeze({ Name = "PurchaseAuthorityMigrationRunner", ClassName = "ModuleScript" })
 local PurchaseInventoryManifestInstance = table.freeze({ Name = "PurchaseInventoryManifest", ClassName = "ModuleScript" })
+local PurchaseEntitlementAuthorityInstance = table.freeze({ Name = "PurchaseEntitlementDataStoreAuthority", ClassName = "ModuleScript" })
+local PurchaseEntitlementCoordinatorInstance = table.freeze({ Name = "PurchaseEntitlementReceiptCoordinator", ClassName = "ModuleScript" })
+local PurchaseEntitlementHandlerInstance = table.freeze({ Name = "PurchaseEntitlementReceiptHandler", ClassName = "ModuleScript" })
 local RecordStoreSHA256Instance = table.freeze({ Name = "RecordStoreSHA256", ClassName = "ModuleScript" })
 local RecordStoreMaintenanceRobloxAdapterInstance = table.freeze({ Name = "RecordStoreMaintenanceRobloxAdapter", ClassName = "ModuleScript" })
 local PlayerDataInitializer = {
@@ -131,6 +137,9 @@ local PlayerDataInitializer = {
 	PurchaseDataStoreAuthority = PurchaseDataStoreAuthorityInstance,
 	PurchaseAuthorityMigrationRunner = PurchaseAuthorityMigrationRunnerInstance,
 	PurchaseInventoryManifest = PurchaseInventoryManifestInstance,
+	PurchaseEntitlementDataStoreAuthority = PurchaseEntitlementAuthorityInstance,
+	PurchaseEntitlementReceiptCoordinator = PurchaseEntitlementCoordinatorInstance,
+	PurchaseEntitlementReceiptHandler = PurchaseEntitlementHandlerInstance,
 	RecordStoreSHA256 = RecordStoreSHA256Instance,
 	RecordStoreMaintenanceRobloxAdapter = RecordStoreMaintenanceRobloxAdapterInstance,
 }
@@ -257,6 +266,39 @@ local function load_purchase_inventory_manifest(): any
 	return loaded_purchase_inventory_manifest
 end
 
+local function load_purchase_entitlement_authority(): any
+	if loaded_purchase_entitlement_authority ~= nil then return loaded_purchase_entitlement_authority end
+	local module_environment = table.clone(Shim.environment)
+	module_environment.script = { Parent = PlayerDataInitializer }
+	local chunk = luau.load(fs.readFile("src/PlayerDataInitializer/PurchaseEntitlementDataStoreAuthority.luau"), {
+		debugName = "PurchaseEntitlementDataStoreAuthority", environment = module_environment,
+	})
+	loaded_purchase_entitlement_authority = chunk()
+	return loaded_purchase_entitlement_authority
+end
+
+local function load_purchase_entitlement_coordinator(): any
+	if loaded_purchase_entitlement_coordinator ~= nil then return loaded_purchase_entitlement_coordinator end
+	local module_environment = table.clone(Shim.environment)
+	module_environment.script = { Parent = PlayerDataInitializer }
+	local chunk = luau.load(fs.readFile("src/PlayerDataInitializer/PurchaseEntitlementReceiptCoordinator.luau"), {
+		debugName = "PurchaseEntitlementReceiptCoordinator", environment = module_environment,
+	})
+	loaded_purchase_entitlement_coordinator = chunk()
+	return loaded_purchase_entitlement_coordinator
+end
+
+local function load_purchase_entitlement_handler(): any
+	if loaded_purchase_entitlement_handler ~= nil then return loaded_purchase_entitlement_handler end
+	local module_environment = table.clone(Shim.environment)
+	module_environment.script = { Parent = PlayerDataInitializer }
+	local chunk = luau.load(fs.readFile("src/PlayerDataInitializer/PurchaseEntitlementReceiptHandler.luau"), {
+		debugName = "PurchaseEntitlementReceiptHandler", environment = module_environment,
+	})
+	loaded_purchase_entitlement_handler = chunk()
+	return loaded_purchase_entitlement_handler
+end
+
 local function load_maintenance_roblox_adapter(): any
 	if loaded_maintenance_roblox_adapter ~= nil then return loaded_maintenance_roblox_adapter end
 	local module_environment = table.clone(Shim.environment)
@@ -348,6 +390,9 @@ local function shim_require(target: any)
 	if target == PurchaseAuthorityMigrationRunnerInstance then return load_purchase_authority_migration_runner() end
 	if target == RecordStoreSHA256Instance then return load_recordstore_sha256() end
 	if target == PurchaseInventoryManifestInstance then return load_purchase_inventory_manifest() end
+	if target == PurchaseEntitlementAuthorityInstance then return load_purchase_entitlement_authority() end
+	if target == PurchaseEntitlementCoordinatorInstance then return load_purchase_entitlement_coordinator() end
+	if target == PurchaseEntitlementHandlerInstance then return load_purchase_entitlement_handler() end
 	if target == RecordStoreMaintenanceRobloxAdapterInstance then return load_maintenance_roblox_adapter() end
 	return require(target)
 end
