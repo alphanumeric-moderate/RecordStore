@@ -82,6 +82,16 @@ end)
 expect(rejected == nil and string.find(rejected_error or "", "reconcile") ~= nil,
 	"activation proceeded without independent verifier approval")
 
+local awaiting_live_acceptance = valid_manifest()
+awaiting_live_acceptance.live_acceptance_complete = false
+awaiting_live_acceptance.live_acceptance_evidence_ref = nil
+expect(Manifest.validate(awaiting_live_acceptance) ~= nil,
+	"an inventory with pending live acceptance could not be independently staged")
+local not_live_ready = Manifest.verify_for_activation(awaiting_live_acceptance, function()
+	return true
+end)
+expect(not_live_ready == nil, "activation bypassed the live Roblox acceptance gate")
+
 local verifier_called = false
 local incomplete = valid_manifest()
 incomplete.writers[1].family_ids = {}
@@ -171,6 +181,11 @@ expect(another_purchase.code == "already_owned", "a user who already owns a life
 local status = authority:GetStatusAsync("VIP_LIFETIME", 1001)
 expect(status.code == "owned" and status.record.purchase_id == "purchase-1",
 	"fresh entitlement status read did not return the permanent ownership record")
+
+local invalid_request = authority:ReserveAsync("VIP_LIFETIME", 1001, 0, "bad-product")
+expect(invalid_request.code == "invalid", "malformed product identity was not rejected")
+local purchase_id_reuse = authority:ReserveAsync("VIP_LIFETIME", 1001, 501, "purchase-1")
+expect(purchase_id_reuse.code == "owned", "an already committed original purchase was not recognized")
 
 local other_user = authority:ReserveAsync("VIP_LIFETIME", 1002, 501, "purchase-3")
 expect(other_user.code == "claimed", "one user's entitlement claim incorrectly blocked another user")
