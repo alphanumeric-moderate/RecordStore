@@ -1,5 +1,6 @@
 --!strict
 local AuthorityModule = {}
+local SHA256 = require(script.Parent:WaitForChild("RecordStoreSHA256"))
 
 export type EntitlementRecord = {
 	version: number,
@@ -57,7 +58,6 @@ type Authority = {
 }
 
 local VERSION = 1
-local HASH_MODULUS = 4294967296
 local MAX_ENTITLEMENT_ID_BYTES = 128
 local MAX_PURCHASE_ID_BYTES = 247
 local MAX_STORE_NAME_BYTES = 50
@@ -85,19 +85,9 @@ local function finite_timestamp(value: unknown): boolean
 end
 
 local function entitlement_key_material(entitlement_id: string, player_id: number): string
-	return tostring(player_id) .. ":" .. entitlement_id
-end
-
-local function digest(value: string): string
-	local h1, h2, h3, h4 = 2166136261, 2246822519, 3266489917, 668265263
-	for index = 1, #value do
-		local byte = string.byte(value, index)
-		h1 = (h1 * 33 + byte) % HASH_MODULUS
-		h2 = (h2 * 65599 + byte) % HASH_MODULUS
-		h3 = (h3 * 257 + byte) % HASH_MODULUS
-		h4 = (h4 * 131071 + byte) % HASH_MODULUS
-	end
-	return string.format("%08x%08x%08x%08x", h1, h2, h3, h4)
+	return tostring(plocal function digest(value: string): string
+	return string.sub(SHA256.digest(value), 1, 32)
+end("%08x%08x%08x%08x", h1, h2, h3, h4)
 end
 
 local function copy_record(record: EntitlementRecord): EntitlementRecord
