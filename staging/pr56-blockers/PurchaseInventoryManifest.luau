@@ -220,7 +220,7 @@ end
 
 function PurchaseManifest.verify_import_source(
 	raw: unknown,
-	verify_source: ({ [string]: any }, any) -> (boolean, string?)
+	verify_source: ({ [string]: any }) -> (boolean, string?)
 ): ({ [string]: any }?, string?)
 	local manifest, validation_error = PurchaseManifest.validate(raw)
 	if manifest == nil then return nil, validation_error end
@@ -234,7 +234,7 @@ end
 function PurchaseManifest.bind_runner_config(
 	raw_manifest: unknown,
 	raw_bindings: unknown,
-	verify_source: ({ [string]: any }) -> (boolean, string?),
+	verify_source: ({ [string]: any }, any) -> (boolean, string?),
 	verify_terminal_inventory: TerminalVerifier
 ): ({ [string]: any }?, { [string]: any }?, string?)
 	if type(raw_bindings) ~= "table" then return nil, nil, "runner bindings must be a table" end
