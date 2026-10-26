@@ -239,7 +239,7 @@ function ErasureBinding.bind(
 		local ok, accepted, message = pcall(verify_attestation, verified_manifest, frozen_adapters, runtime)
 		if not ok then return false, "RTBF attestation verifier failed: " .. tostring(accepted) end
 		if accepted ~= true then return false, tostring(message or "RTBF attestation was not independently accepted") end
-		return true, nil
+		return true, ""
 	end)
 	if activated == nil then
 		return nil, nil, activation_error or "RTBF activation verifier rejected the inventory manifest"
