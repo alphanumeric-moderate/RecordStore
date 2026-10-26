@@ -12,6 +12,10 @@ These modules are intentionally staged outside `src/PlayerDataInitializer`. They
 
 - `PurchaseEntitlementDataStoreAuthority.luau`: optional non-expiring per-player lifetime-entitlement authority for product types that really require uniqueness. It is separate from the globally keyed PurchaseId authority. It exposes reserve/commit/backfill/status operations, uncached status reads, request-budget/shared-governor hooks, identity collision checks and ambiguous-write reconciliation.
 
+
+
+- `PlayerDataErasureManifestBinding.luau`: binds an independently accepted RTBF manifest to the existing `PlayerDataErasure.new` configuration. It derives the profile store/scope/prefix and attestation fields from the reviewed profile family, requires a concrete callback set for every additional family, and freezes the normalized family bindings before the independent verifier sees them. It rejects external-inventory families and unsupported retain-only actions because the current erasure coordinator requires exact, renderable templates. A future coordinator would need an explicit versioned contract for dynamic key inventories before those can be activated.
+
 - `PurchaseEntitlementReceiptCoordinator.luau`: coordinates global PurchaseId claiming, lifetime-entitlement reservation, an idempotent profile grant, entitlement commit and terminal purchase commit. It defers on unknown outcomes and competing pending entitlements, and only acknowledges after durable terminal status is confirmed. The application must map only true lifetime-unique products and supply a stable, idempotent profile-grant adapter.
 
 ## Check order before integration
