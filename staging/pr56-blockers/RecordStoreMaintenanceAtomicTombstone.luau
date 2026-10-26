@@ -164,6 +164,20 @@ function AtomicTombstone.new(config: Options): Adapter
 		if not generation(current_generation) then return "unknown", "observed record has no valid fencing generation" end
 		if current_generation ~= expected_generation then return "skipped", "record generation changed before the tombstone was confirmed" end
 		if raw[job_fence_field] ~= job_id then return "skipped", "same-key job fence does not match this maintenance job" end
+		local eligible, eligibility_error = callback_boolean(
+			config.is_eligible, value, key_info, expected_generation, job_id
+		)
+		if not eligible then
+			return if eligibility_error == nil then "skipped" else "unknown",
+				eligibility_error or "record is no longer eligible for maintenance deletion"
+		end
+		local dependencies_clear, dependency_error = callback_boolean(
+			config.dependencies_clear, value, key_info, expected_generation, job_id
+		)
+		if not dependencies_clear then
+			return if dependency_error == nil then "skipped" else "unknown",
+				dependency_error or "record dependencies are not confirmed clear"
+		end
 		return "unknown", "UpdateAsync did not confirm an expected-generation tombstone"
 	end
 
@@ -195,7 +209,7 @@ function AtomicTombstone.new(config: Options): Adapter
 			return "unknown", "maintenance clock did not return a finite non-negative timestamp"
 		end
 
-		local update_ok, updated_or_error, updated_info = pcall(function()
+		local update_ok, updated_or_error = pcall(function()
 			return store:UpdateAsync(key :: string, function(current: unknown, key_info: any): unknown?
 				if current == nil then return nil end
 				if type(current) ~= "table" then return nil end
@@ -205,11 +219,11 @@ function AtomicTombstone.new(config: Options): Adapter
 				if raw[job_fence_field] ~= job_id then return nil end
 
 				local snapshot = clone(current)
-				local eligible, eligibility_error = callback_boolean(
+				local eligible = callback_boolean(
 					config.is_eligible, snapshot, key_info, expected_generation, job_id
 				)
 				if not eligible then return nil end
-				local dependencies_clear, dependency_error = callback_boolean(
+				local dependencies_clear = callback_boolean(
 					config.dependencies_clear, snapshot, key_info, expected_generation, job_id
 				)
 				if not dependencies_clear then return nil end
