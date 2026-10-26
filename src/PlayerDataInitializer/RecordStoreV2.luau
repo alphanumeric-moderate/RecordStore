@@ -2711,6 +2711,18 @@ local function render_template(template, user_id)
 	return result
 end
 
+local function matches_erasure_template(item, template)
+	if template.locator_mode == "external_inventory" then
+		return valid_text(template.inventory_source_ref, 512)
+			and item.name == template.name
+			and item.scope == template.scope
+			and item.key ~= template.key
+			and valid_text(item.key, 50)
+	end
+	return template.locator_mode == nil or template.locator_mode == "user_id_template"
+		and item.name == template.name and item.scope == template.scope and item.key == template.key
+end
+
 local function new_erasure(store, families, options)
 	if type(store) ~= "table" or type(store.GetAsyncFresh) ~= "function" or type(store.UpdateAsync) ~= "function" then
 		error("erasure coordinator requires GetAsyncFresh and UpdateAsync; cached reads cannot authorize erasure state changes", 2)
@@ -2754,19 +2766,31 @@ local function new_erasure(store, families, options)
 		end
 		for _, template in ipairs(templates) do
 			if type(template) ~= "table" then error("RTBF template must be table", 2) end
-			-- A partial locator would act as a wildcard for omitted DataStore names or
-			-- scopes. Require the complete exact name/scope/key identity in every
-			-- template; an empty scope is allowed for the platform default scope.
 			if not valid_text(template.name, 50) or type(template.scope) ~= "string" or #template.scope > 50
 				or not valid_text(template.key, 50)
 			then
 				error("RTBF template must declare bounded exact DataStore name, scope, and key fields", 2)
 			end
-			local matchable = false
-			for _, field in ipairs({ "name", "scope", "key" }) do
-				if string.find(template[field], "{user_id}", 1, true) then matchable = true end
+			if template.locator_mode == "external_inventory" then
+				if not valid_text(template.inventory_source_ref, 512)
+					or string.find(template.name, "{user_id}", 1, true) ~= nil
+					or string.find(template.scope, "{user_id}", 1, true) ~= nil
+					or select(2, string.gsub(template.key, "{user_id}", "")) ~= 1
+				then
+					error("external RTBF locators require an exact store/scope, a single key placeholder, and an inventory source reference", 2)
+				end
+			elseif template.locator_mode == nil or template.locator_mode == "user_id_template" then
+				if template.inventory_source_ref ~= nil then
+					error("static RTBF templates must not declare an external inventory source", 2)
+				end
+				local matchable = false
+				for _, field in ipairs({ "name", "scope", "key" }) do
+					if string.find(template[field], "{user_id}", 1, true) then matchable = true end
+				end
+				if not matchable then error("RTBF template must place {user_id} in name, scope, or key", 2) end
+			else
+				error("RTBF template locator_mode is unsupported", 2)
 			end
-			if not matchable then error("RTBF template must place {user_id} in name, scope, or key", 2) end
 			table.insert(all_templates, { family = family.name, template = copy(template) })
 			if #all_templates > MAX_ERASURE_TEMPLATES then error("RTBF templates exceed 100-template limit", 2) end
 		end
@@ -2841,12 +2865,11 @@ local function new_erasure(store, families, options)
 			if seen_locators[locator] then return false, "corrupt", "erasure plan repeats a DataStore locator" end
 			seen_locators[locator] = true
 			for _, template_entry in ipairs(rendered) do
-				if template_entry.family == entry.family then
-					local template = template_entry.template
-					if item.name == template.name and item.scope == template.scope and item.key == template.key then
-						matched = true
-						break
-					end
+				if template_entry.family == entry.family
+					and matches_erasure_template(item, template_entry.template)
+				then
+					matched = true
+					break
 				end
 			end
 			if not matched then return false, "coverage_unverified", "planned locator no longer matches a verified RTBF template" end
@@ -2915,13 +2938,11 @@ local function new_erasure(store, families, options)
 						seen_items[locator] = true
 						local matched_template = false
 						for _, template_entry in ipairs(rendered) do
-							if template_entry.family == family.name then
-								local matches = true
-								for _, field in ipairs({ "name", "scope", "key" }) do
-									local expected = template_entry.template[field]
-									if type(expected) == "string" and item[field] ~= expected then matches = false; break end
-								end
-								if matches then matched_template = true; break end
+							if template_entry.family == family.name
+								and matches_erasure_template(item, template_entry.template)
+							then
+								matched_template = true
+								break
 							end
 						end
 						if not matched_template then
