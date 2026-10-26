@@ -109,6 +109,9 @@ jobs:
       - name: Regression - lifetime purchase entitlements
         timeout-minutes: 2
         run: timeout --signal=TERM --kill-after=5s 60s lune run bench/run_purchase_entitlement_regression.luau
+      - name: Regression - lifetime entitlement erasure fences
+        timeout-minutes: 2
+        run: timeout --signal=TERM --kill-after=5s 60s lune run bench/run_entitlement_authority_erasure_regression.luau
 
       - name: Regression - atomic maintenance tombstone
         timeout-minutes: 2
