@@ -484,7 +484,7 @@ function AuthorityModule.new(raw_options: Options): Authority
 		if raw == nil then return result("not_found", nil, nil) end
 		local record, row_error = row_for_identity(raw, id :: string, subject :: number)
 		if record == nil then
-			local code = if string.sub(row_error or "", 1, 9) == "conflict: " then "conflict" else "corrupt"
+			local code = if string.sub(row_error or "", 1, 10) == "conflict: " then "conflict" else "corrupt"
 			return result(code, nil, row_error)
 		end
 		return result(record.status == "owned" and "owned" or "pending", record, nil)
