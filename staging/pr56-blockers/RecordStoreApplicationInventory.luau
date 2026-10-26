@@ -62,7 +62,11 @@ local function positive_timestamp(value: unknown): boolean
 end
 
 local function valid_commit(value: unknown): boolean
-	if not valid_text(value, 40) or #value ~= 40 then return false end
+	if type(value) ~= "string" or value == "" or #value ~= 40
+		or string.find(value, "%c") ~= nil
+	then
+		return false
+	end
 	for index = 1, #value do
 		if string.find(HEX, string.sub(value, index, index), 1, true) == nil then
 			return false
@@ -110,24 +114,14 @@ local function valid_id_list(value: unknown, minimum: number, maximum: number): 
 	return copied, nil
 end
 
-local function same_set(left: { string }, right: { string }): boolean
-	if #left ~= #right then return false end
-	local found: { [string]: boolean } = {}
-	for _, item in ipairs(left) do found[item] = true end
-	for _, item in ipairs(right) do
-		if not found[item] then return false end
-	end
-	return true
-end
-
 local function normalize_family(raw: unknown): ({ [string]: any }?, string?)
 	if type(raw) ~= "table" then return nil, "family is not a table" end
 	local row = raw :: { [string]: any }
 	if not exact_fields(row, FAMILY_FIELDS) then return nil, "family contains an unsupported field" end
 	if not valid_text(row.id, MAX_ID_BYTES)
 		or not valid_text(row.store_name, MAX_NAME_BYTES)
-		or not valid_text(row.scope, MAX_NAME_BYTES)
-		or not valid_text(row.key_template, MAX_NAME_BYTES)
+		or type(row.scope) ~= "string" or #row.scope > MAX_NAME_BYTES
+		or string.find(row.scope, "%c") ~= nil
 		or not valid_text(row.generation_field, MAX_ID_BYTES)
 		or not valid_text(row.fence_field, MAX_ID_BYTES)
 		or not valid_text(row.evidence_ref, MAX_EVIDENCE_BYTES)
@@ -139,19 +133,21 @@ local function normalize_family(raw: unknown): ({ [string]: any }?, string?)
 	end
 	local locator_mode = row.locator_mode
 	if locator_mode == "user_id_template" then
-		if select(2, string.gsub(row.key_template, "{user_id}", "")) ~= 1 then
+		if not valid_text(row.key_template, MAX_NAME_BYTES) then
+			return nil, "user ID key template must be 1 to 50 bytes"
+		end
+		local key_template = row.key_template :: string
+		if select(2, string.gsub(key_template, "{user_id}", "")) ~= 1 then
 			return nil, "user ID key templates must contain exactly one {user_id} placeholder"
 		end
-		local max_key = string.gsub(row.key_template, "{user_id}", MAX_ROBLOX_USER_ID)
+		local max_key = string.gsub(key_template, "{user_id}", MAX_ROBLOX_USER_ID)
 		if #max_key > MAX_NAME_BYTES then
 			return nil, "expanded user ID key template exceeds Roblox's 50-byte key bound"
 		end
 		if row.inventory_source_ref ~= nil then return nil, "template locator must not include an external inventory source" end
 	elseif locator_mode == "external_inventory" then
-		if string.find(row.key_template, "{user_id}", 1, true) ~= nil
-			or not valid_text(row.inventory_source_ref, MAX_EVIDENCE_BYTES)
-		then
-			return nil, "external inventory locators require an evidence reference and no inferred user ID key template"
+		if row.key_template ~= nil or not valid_text(row.inventory_source_ref, MAX_EVIDENCE_BYTES) then
+			return nil, "external inventory locators require an inventory evidence reference and no guessed key template"
 		end
 	else
 		return nil, "family locator mode is unsupported"
@@ -256,7 +252,10 @@ function Manifest.validate(raw: unknown): ({ [string]: any }?, string?)
 		local family, family_error = normalize_family(raw_family)
 		if family == nil then return nil, family_error end
 		if family_by_id[family.id] ~= nil then return nil, "manifest contains a duplicate family ID" end
-		local locator = family.store_name .. "\0" .. family.scope .. "\0" .. family.key_template
+		local locator_key = if family.locator_mode == "user_id_template"
+			then family.key_template
+			else "external:" .. family.inventory_source_ref
+		local locator = family.store_name .. "\0" .. family.scope .. "\0" .. locator_key
 		if locator_by_identity[locator] then return nil, "manifest contains duplicate key-family locators" end
 		locator_by_identity[locator] = true
 		family_by_id[family.id] = family
