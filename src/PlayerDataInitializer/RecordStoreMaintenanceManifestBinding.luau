@@ -1,5 +1,6 @@
 --!strict
 local Binder = {}
+local AtomicTombstone = require(script.Parent:WaitForChild("RecordStoreMaintenanceAtomicTombstone"))
 
 export type FamilyPolicy = {
 	family_name: string,
@@ -392,13 +393,13 @@ function Binder.bind(
 					message = nil,
 				}, nil
 			end
-			if row[family.job_fence_field] ~= manifest.job_id then
+			if row[family.job_fence_field] ~= nil and row[family.job_fence_field] ~= manifest.job_id then
 				return {
 					status = "success",
 					eligible = false,
 					dependencies_clear = false,
 					generation = observed_generation,
-					message = "same-key maintenance job fence is not installed",
+					message = "another maintenance job owns the same-key fence",
 				}, nil
 			end
 			local eligible, eligibility_error = policy_boolean(
@@ -462,6 +463,97 @@ function Binder.bind(
 				and read_generation(row) == expected_generation + 1
 				and row[family.job_fence_field] == manifest.job_id
 		end
+		local atomic_delete = AtomicTombstone.new({
+			store_name = family.store_name,
+			scope = family.scope,
+			key_prefix = family.prefix,
+			job_id = manifest.job_id,
+			generation_field = family.generation_field,
+			job_fence_field = family.job_fence_field,
+			data_store_service = runtime.data_store_service,
+			new_get_options = if runtime.instance_factory ~= nil then function()
+				local options = runtime.instance_factory("DataStoreGetOptions")
+				options.UseCache = false
+				return options
+			end else nil,
+			is_eligible = function(value: unknown, key_info: any, expected_generation: number, job_id: string): boolean
+				if job_id ~= manifest.job_id or read_generation(value) ~= expected_generation
+					or type(value) ~= "table"
+				then
+					return false
+				end
+				local row = value :: { [string]: any }
+				if row[family.tombstone_field] == true
+					or (row[family.job_fence_field] ~= nil and row[family.job_fence_field] ~= manifest.job_id)
+				then
+					return false
+				end
+				local eligible = policy_boolean(policy.is_eligible, row, key_info, expected_generation, job_id)
+				return eligible
+			end,
+			dependencies_clear = function(value: unknown, key_info: any, expected_generation: number, job_id: string): boolean
+				if job_id ~= manifest.job_id or read_generation(value) ~= expected_generation
+					or type(value) ~= "table"
+				then
+					return false
+				end
+				local row = value :: { [string]: any }
+				if row[family.tombstone_field] == true
+					or row[family.job_fence_field] ~= manifest.job_id
+						and row[family.job_fence_field] ~= nil
+				then
+					return false
+				end
+				local clear = policy_boolean(policy.dependencies_clear, row, key_info, expected_generation, job_id)
+				return clear
+			end,
+			make_tombstone = function(
+				value: unknown,
+				_key_info: any,
+				expected_generation: number,
+				job_id: string,
+				_now_unix: number
+			): unknown?
+				if job_id ~= manifest.job_id or not generation(expected_generation)
+					or expected_generation >= MAX_INTEGER or type(value) ~= "table"
+				then
+					return nil
+				end
+				local row = value :: { [string]: any }
+				if read_generation(row) ~= expected_generation
+					or row[family.job_fence_field] ~= manifest.job_id
+					or row[family.tombstone_field] == true
+				then
+					return nil
+				end
+				local result = clone(row) :: { [string]: any }
+				result[family.generation_field] = expected_generation + 1
+				result[family.job_fence_field] = manifest.job_id
+				result[family.tombstone_field] = true
+				result[family.tombstone_job_field] = manifest.job_id
+				result[family.tombstone_source_generation_field] = expected_generation
+				return result
+			end,
+			is_tombstone = function(value: unknown, expected_generation: number, job_id: string): boolean
+				if job_id ~= manifest.job_id or not generation(expected_generation) or type(value) ~= "table" then
+					return false
+				end
+				local row = value :: { [string]: any }
+				return row[family.tombstone_field] == true
+					and row[family.tombstone_job_field] == manifest.job_id
+					and row[family.tombstone_source_generation_field] == expected_generation
+					and read_generation(row) == expected_generation + 1
+					and row[family.job_fence_field] == manifest.job_id
+			end,
+		})
+		local function delete_if_generation(
+			store: any,
+			item: any,
+			expected_generation: number,
+			job_id: string
+		): (string, string?)
+			return atomic_delete:FenceAndDeleteIfGeneration(store, item, expected_generation, job_id)
+		end
 		bound_families[#bound_families + 1] = table.freeze({
 			name = family.name,
 			store_name = family.store_name,
@@ -474,6 +566,7 @@ function Binder.bind(
 			can_delete = can_delete,
 			make_tombstone = make_tombstone,
 			is_tombstone = is_tombstone,
+			delete_if_generation = delete_if_generation,
 		})
 	end
 	table.freeze(bound_families)
