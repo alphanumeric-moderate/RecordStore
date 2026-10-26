@@ -5,6 +5,7 @@ on:
   push:
     branches:
       - main
+      - feat/pr56-blocker-staging-2026-10-26
 
 permissions:
   contents: read
