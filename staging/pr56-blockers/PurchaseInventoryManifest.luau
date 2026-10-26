@@ -210,7 +210,7 @@ function PurchaseManifest.verify_completion(
 	local checkpoint = raw_checkpoint :: { [string]: any }
 	local completion = raw_completion :: { [string]: any }
 	if not exact_fields(completion, COMPLETION_FIELDS) then return nil, "completion evidence contains an unsupported field" end
-	if checkpoint.done ~= true
+	if checkpoint.done ~= true or checkpoint.cursor ~= nil
 		or not nonnegative_integer(checkpoint.revision) or checkpoint.revision < 1
 		or checkpoint.source_revision ~= manifest.source_revision
 		or checkpoint.inventory_manifest_id ~= manifest.manifest_id
@@ -253,7 +253,18 @@ function PurchaseManifest.verify_completion(
 		expected_inventory_digest = manifest.expected_inventory_digest,
 		inventory_verified = true,
 	}
-	local ok, accepted, message = pcall(verify_completion, manifest, normalized_checkpoint, table.freeze(completion))
+	local normalized_completion = table.freeze({
+		manifest_id = completion.manifest_id,
+		source_revision = completion.source_revision,
+		observed_purchase_count = completion.observed_purchase_count,
+		observed_inventory_digest = completion.observed_inventory_digest,
+		checkpoint_revision = completion.checkpoint_revision,
+		conflicts_reconciled = true,
+		conflict_reconciliation_evidence_ref = completion.conflict_reconciliation_evidence_ref,
+		live_acceptance_complete = true,
+		live_acceptance_evidence_ref = completion.live_acceptance_evidence_ref,
+	})
+	local ok, accepted, message = pcall(verify_completion, manifest, normalized_checkpoint, normalized_completion)
 	if not ok then return nil, "completion verifier failed: " .. tostring(accepted) end
 	if accepted ~= true then return nil, tostring(message or "purchase migration completion was not independently accepted") end
 	return manifest, nil
