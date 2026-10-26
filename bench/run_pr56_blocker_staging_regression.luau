@@ -14,6 +14,9 @@ local AtomicTombstone = luau.load(fs.readFile("staging/pr56-blockers/RecordStore
 local PurchaseManifest = luau.load(fs.readFile("staging/pr56-blockers/PurchaseInventoryManifest.luau"), {
 	debugName = "PurchaseInventoryManifest",
 })()
+local MigrationRunner = luau.load(fs.readFile("src/PlayerDataInitializer/PurchaseAuthorityMigrationRunner.luau"), {
+	debugName = "PurchaseAuthorityMigrationRunner",
+})()
 local EntitlementCoordinator = luau.load(fs.readFile("staging/pr56-blockers/PurchaseEntitlementReceiptCoordinator.luau"), {
 	debugName = "PurchaseEntitlementReceiptCoordinator",
 })()
@@ -473,6 +476,217 @@ local function valid_purchase_manifest()
 		deleted_accounts_included = true,
 	}
 end
+
+
+local bound_manifest_raw = valid_purchase_manifest()
+bound_manifest_raw.source_revision = "purchase-export-bound-r3"
+bound_manifest_raw.source_snapshot_id = "immutable-source-snapshot-r3"
+bound_manifest_raw.expected_purchase_count = 3
+bound_manifest_raw.expected_inventory_digest = "a578f266d343a958e0c48d5e9ff71520"
+local bound_rows = {
+	{ PurchaseId = "purchase-bound-001", PlayerId = 2001, ProductId = 501 },
+	{ PurchaseId = "purchase-bound-002", PlayerId = 2002, ProductId = 501 },
+	{ PurchaseId = "purchase-bound-003", PlayerId = 2003, ProductId = 501 },
+}
+local source_verification_calls = 0
+local terminal_verification_calls = 0
+local source_reader = {}
+function source_reader:read_page(cursor, maximum)
+	expect(maximum == 2, "bound purchase runner did not preserve its configured page bound")
+	if cursor == nil then
+		return {
+			items = { clone(bound_rows[1]) },
+			next_cursor = "bound-page-2",
+			done = false,
+			source_revision = bound_manifest_raw.source_revision,
+		}, nil
+	elseif cursor == "bound-page-2" then
+		return {
+			items = { clone(bound_rows[2]), clone(bound_rows[3]) },
+			next_cursor = nil,
+			done = true,
+			source_revision = bound_manifest_raw.source_revision,
+		}, nil
+	end
+	return nil, "unrecognized source cursor"
+end
+local migration_processor = { calls = 0, imported_ids = {} }
+function migration_processor:BackfillExternalAuthorityAsync(items, maximum)
+	self.calls += 1
+	expect(maximum == #items, "purchase migration processor received an unbounded batch")
+	for _, item in ipairs(items) do
+		self.imported_ids[#self.imported_ids + 1] = item.PurchaseId
+	end
+	return {
+		code = "complete",
+		processed_count = #items,
+		backfilled_count = #items,
+		duplicate_count = 0,
+		failed_index = nil,
+		message = nil,
+	}
+end
+local migration_checkpoint_store = { value = nil }
+function migration_checkpoint_store:GetAsyncFresh(key)
+	return clone(self.value), nil
+end
+function migration_checkpoint_store:UpdateAsync(key, transform)
+	local changed = transform(clone(self.value))
+	if changed ~= nil then self.value = clone(changed) end
+	return clone(self.value), nil
+end
+
+local binding_source_verified, source_manifest_error
+local bound_runner_config, bound_manifest, binding_error = PurchaseManifest.bind_runner_config(
+	bound_manifest_raw,
+	{
+		job_id = "purchase-bound-migration-r3",
+		source = source_reader,
+		processor = migration_processor,
+		checkpoint_store = migration_checkpoint_store,
+		checkpoint_key = "purchase-migration:bound-r3",
+		page_size = 2,
+	},
+	function(manifest)
+		source_verification_calls += 1
+		return manifest.source_snapshot_id == "immutable-source-snapshot-r3"
+			and manifest.source_revision == "purchase-export-bound-r3"
+			and manifest.expected_purchase_count == 3
+			and manifest.expected_inventory_digest == "a578f266d343a958e0c48d5e9ff71520",
+			"immutable source snapshot did not reconcile"
+	end,
+	function(manifest, manifest_id, source_revision, expected_count, observed_count, expected_digest, observed_digest)
+		terminal_verification_calls += 1
+		return manifest.manifest_id == manifest_id
+			and manifest.source_revision == source_revision
+			and expected_count == 3
+			and observed_count == 3
+			and expected_digest == "a578f266d343a958e0c48d5e9ff71520"
+			and observed_digest == "a578f266d343a958e0c48d5e9ff71520",
+			"terminal inventory evidence did not match the immutable manifest"
+	end
+)
+binding_source_verified = bound_runner_config ~= nil
+source_manifest_error = binding_error
+expect(binding_source_verified, source_manifest_error or "purchase manifest did not bind to the migration runner")
+expect(bound_manifest.manifest_id == bound_manifest_raw.manifest_id
+	and bound_runner_config.source_revision == bound_manifest_raw.source_revision
+	and bound_runner_config.inventory_manifest_id == bound_manifest_raw.manifest_id
+	and bound_runner_config.expected_purchase_count == 3
+	and bound_runner_config.expected_inventory_digest == "a578f266d343a958e0c48d5e9ff71520",
+	"bound runner config did not derive immutable inventory values from the reviewed manifest")
+expect(source_verification_calls == 1, "immutable source verifier did not run exactly once before migration")
+
+local unbound_config = {
+	job_id = "purchase-unbound",
+	source = source_reader,
+	processor = migration_processor,
+	checkpoint_store = migration_checkpoint_store,
+	checkpoint_key = "purchase-migration:unbound",
+	source_revision = "untrusted-override",
+}
+local unbound_verifier_calls = 0
+local unbound_result = PurchaseManifest.bind_runner_config(
+	bound_manifest_raw,
+	unbound_config,
+	function()
+		unbound_verifier_calls += 1
+		return true
+	end,
+	function() return true end
+)
+expect(unbound_result == nil and unbound_verifier_calls == 0,
+	"caller could override manifest-bound source revision before source verification")
+
+local bound_runner = MigrationRunner.new(bound_runner_config)
+local bound_first_page = bound_runner:RunBatchAsync(1)
+expect(bound_first_page.code == "incomplete" and bound_first_page.done == false
+	and bound_first_page.cursor == "bound-page-2",
+	"first bound purchase page did not persist a resumable cursor")
+expect(migration_processor.calls == 1 and bound_first_page.purchases_processed == 1,
+	"first bound purchase page did not reconcile its import counters")
+local bound_terminal_page = bound_runner:RunBatchAsync(1)
+expect(bound_terminal_page.code == "completed" and bound_terminal_page.done == true
+	and bound_terminal_page.cursor == nil and bound_terminal_page.inventory_verified == true,
+	bound_terminal_page.message or "manifest-bound purchase migration did not complete")
+expect(bound_terminal_page.purchases_processed == 3 and bound_terminal_page.observed_inventory_digest == bound_manifest_raw.expected_inventory_digest,
+	"completed bound purchase migration does not match manifest count/digest")
+expect(migration_processor.calls == 2 and #migration_processor.imported_ids == 3,
+	"manifest-bound purchase migration did not import exactly the declared rows")
+expect(terminal_verification_calls == 1, "terminal verifier did not run exactly once for the terminal page")
+
+local bound_checkpoint = migration_checkpoint_store.value
+local bound_completion_evidence = {
+	manifest_id = bound_manifest.manifest_id,
+	source_revision = bound_manifest.source_revision,
+	observed_purchase_count = 3,
+	observed_inventory_digest = bound_manifest.expected_inventory_digest,
+	checkpoint_revision = bound_checkpoint.revision,
+	conflicts_reconciled = true,
+	conflict_reconciliation_evidence_ref = "evidence:bound-conflicts-reconciled",
+	live_acceptance_complete = true,
+	live_acceptance_evidence_ref = "evidence:bound-live-acceptance",
+}
+local bound_completion, bound_completion_error = PurchaseManifest.verify_completion(
+	bound_manifest_raw,
+	bound_checkpoint,
+	bound_completion_evidence,
+	function(manifest, checkpoint, completion)
+		return manifest.manifest_id == checkpoint.inventory_manifest_id
+			and checkpoint.done == true
+			and checkpoint.revision == completion.checkpoint_revision
+			and checkpoint.purchases_processed == manifest.expected_purchase_count
+			and checkpoint.inventory_verified == true
+	end
+)
+expect(bound_completion ~= nil,
+	bound_completion_error or "durable purchase checkpoint was not accepted by the final completion verifier")
+
+local rejected_checkpoint_store = { value = nil }
+function rejected_checkpoint_store:GetAsyncFresh(key)
+	return clone(self.value), nil
+end
+function rejected_checkpoint_store:UpdateAsync(key, transform)
+	local changed = transform(clone(self.value))
+	if changed ~= nil then self.value = clone(changed) end
+	return clone(self.value), nil
+end
+local rejected_processor = { calls = 0 }
+function rejected_processor:BackfillExternalAuthorityAsync(items, maximum)
+	self.calls += 1
+	return {
+		code = "complete",
+		processed_count = #items,
+		backfilled_count = #items,
+		duplicate_count = 0,
+		failed_index = nil,
+		message = nil,
+	}
+end
+local rejected_config, rejected_manifest, rejected_binding_error = PurchaseManifest.bind_runner_config(
+	bound_manifest_raw,
+	{
+		job_id = "purchase-bound-rejected-r3",
+		source = source_reader,
+		processor = rejected_processor,
+		checkpoint_store = rejected_checkpoint_store,
+		checkpoint_key = "purchase-migration:reject-r3",
+		page_size = 2,
+	},
+	function() return true end,
+	function() return false, "independent terminal evidence was rejected" end
+)
+expect(rejected_config ~= nil and rejected_manifest ~= nil and rejected_binding_error == nil,
+	"valid purchase manifest could not prepare a terminal-rejection test")
+local rejected_runner = MigrationRunner.new(rejected_config)
+local rejected_first = rejected_runner:RunBatchAsync(1)
+expect(rejected_first.code == "incomplete", "terminal rejection fixture did not persist its first page")
+local rejected_terminal = rejected_runner:RunBatchAsync(1)
+expect(rejected_terminal.code == "incomplete_inventory" and rejected_terminal.done == false,
+	"purchase migration advanced terminal checkpoint after its independent verifier rejected")
+expect(rejected_processor.calls == 1 and rejected_checkpoint_store.value.revision == 1
+	and rejected_checkpoint_store.value.cursor == "bound-page-2",
+	"rejected terminal inventory caused imports or cursor advancement beyond the last proven checkpoint")
 
 local purchase_manifest = valid_purchase_manifest()
 local purchase_manifest_normalized, purchase_manifest_error = PurchaseManifest.validate(purchase_manifest)
