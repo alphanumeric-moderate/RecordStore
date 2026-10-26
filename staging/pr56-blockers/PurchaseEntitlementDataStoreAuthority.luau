@@ -231,8 +231,8 @@ local function normalize_options(raw: unknown): NormalizedOptions
 		if type(scope) ~= "string" or #scope > MAX_SCOPE_BYTES or string.find(scope, "%c") ~= nil then
 			error("scope must be a string of at most 50 non-control bytes", 3)
 		end
-		local service = values.data_store_service or game:GetService("DataStoreService")
-		local store = service:GetDataStore(values.store_name :: string, scope)
+		local service: any = values.data_store_service or game:GetService("DataStoreService")
+		local store: any = service:GetDataStore(values.store_name :: string, scope)
 		local new_get_options = values.new_get_options
 		if new_get_options ~= nil and type(new_get_options) ~= "function" then
 			error("new_get_options must be a function when supplied", 3)
@@ -450,6 +450,9 @@ function AuthorityModule.new(raw_options: Options): Authority
 			raw = readback
 		end
 		if raw == nil then
+			if operation == "commit" and write_error == nil then
+				return result("not_found", nil, "entitlement must be claimed before it can be committed")
+			end
 			return result("unknown", nil, tostring(write_error or "entitlement write returned no durable row"))
 		end
 		return result_from_row(operation, raw, entitlement_id, player_id, product_id, purchase_id)
