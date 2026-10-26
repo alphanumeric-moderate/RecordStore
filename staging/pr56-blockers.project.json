@@ -5,13 +5,7 @@
     "ServerScriptService": {
       "$className": "ServerScriptService",
       "PR56BlockerCandidates": {
-        "$className": "Folder",
-        "RecordStoreApplicationInventory": {
-          "$path": "staging/pr56-blockers/RecordStoreApplicationInventory.luau"
-        },
-        "PurchaseEntitlementDataStoreAuthority": {
-          "$path": "staging/pr56-blockers/PurchaseEntitlementDataStoreAuthority.luau"
-        }
+        "$path": "staging/pr56-blockers"
       }
     }
   }
