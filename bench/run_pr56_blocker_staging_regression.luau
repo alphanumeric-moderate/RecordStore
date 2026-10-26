@@ -137,6 +137,7 @@ local erasure_config, erasure_manifest, erasure_bind_error = ErasureBinding.bind
 		erasure_attestation_calls += 1
 		return verified_manifest.manifest_id == "rtbf-inventory-2026-10-26"
 			and #family_adapters == 0
+			and table.isfrozen(family_adapters)
 			and runtime_options.verify_templates == erasure_runtime.verify_templates,
 			"RTBF runtime attestation failed"
 	end
@@ -234,6 +235,7 @@ local sidecar_config, sidecar_manifest, sidecar_bind_error = ErasureBinding.bind
 	function(verified_manifest, family_adapters)
 		return verified_manifest.families[2].id == "player-sidecar"
 			and #family_adapters == 1
+			and table.isfrozen(family_adapters)
 			and family_adapters[1].family_id == "player-sidecar",
 			"sidecar writer/family binding failed review"
 	end
