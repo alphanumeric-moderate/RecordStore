@@ -104,6 +104,8 @@ local loaded_outbox_mailbox_adapter: any = nil
 local loaded_outbox_consumer_adapter: any = nil
 local loaded_recordstore_v2: any = nil
 local loaded_player_data_erasure: any = nil
+local loaded_application_inventory: any = nil
+local loaded_erasure_manifest_binding: any = nil
 local loaded_purchase_datastore_authority: any = nil
 local loaded_purchase_authority_migration_runner: any = nil
 local loaded_purchase_inventory_manifest: any = nil
@@ -121,6 +123,8 @@ local RecordStoreV2Instance = table.freeze({ Name = "RecordStoreV2", ClassName =
 local OutboxMailboxAdapterInstance = table.freeze({ Name = "RecordStoreOutboxMailboxAdapter", ClassName = "ModuleScript" })
 local OutboxConsumerAdapterInstance = table.freeze({ Name = "RecordStoreOutboxConsumerAdapter", ClassName = "ModuleScript" })
 local PlayerDataErasureInstance = table.freeze({ Name = "PlayerDataErasure", ClassName = "ModuleScript" })
+local RecordStoreApplicationInventoryInstance = table.freeze({ Name = "RecordStoreApplicationInventory", ClassName = "ModuleScript" })
+local PlayerDataErasureManifestBindingInstance = table.freeze({ Name = "PlayerDataErasureManifestBinding", ClassName = "ModuleScript" })
 local PurchaseDataStoreAuthorityInstance = table.freeze({ Name = "PurchaseDataStoreAuthority", ClassName = "ModuleScript" })
 local PurchaseAuthorityMigrationRunnerInstance = table.freeze({ Name = "PurchaseAuthorityMigrationRunner", ClassName = "ModuleScript" })
 local PurchaseInventoryManifestInstance = table.freeze({ Name = "PurchaseInventoryManifest", ClassName = "ModuleScript" })
@@ -138,6 +142,8 @@ local PlayerDataInitializer = {
 	RecordStoreOutboxConsumerAdapter = OutboxConsumerAdapterInstance,
 	RecordStoreV2 = RecordStoreV2Instance,
 	PlayerDataErasure = PlayerDataErasureInstance,
+	RecordStoreApplicationInventory = RecordStoreApplicationInventoryInstance,
+	PlayerDataErasureManifestBinding = PlayerDataErasureManifestBindingInstance,
 	PurchaseDataStoreAuthority = PurchaseDataStoreAuthorityInstance,
 	PurchaseAuthorityMigrationRunner = PurchaseAuthorityMigrationRunnerInstance,
 	PurchaseInventoryManifest = PurchaseInventoryManifestInstance,
@@ -349,6 +355,26 @@ local function load_purchase_datastore_authority(): any
 	return loaded_purchase_datastore_authority
 end
 
+local function load_application_inventory(): any
+	if loaded_application_inventory ~= nil then return loaded_application_inventory end
+	local module_environment = table.clone(Shim.environment)
+	local chunk = luau.load(fs.readFile("src/PlayerDataInitializer/RecordStoreApplicationInventory.luau"), {
+		debugName = "RecordStoreApplicationInventory", environment = module_environment,
+	})
+	loaded_application_inventory = chunk()
+	return loaded_application_inventory
+end
+
+local function load_erasure_manifest_binding(): any
+	if loaded_erasure_manifest_binding ~= nil then return loaded_erasure_manifest_binding end
+	local module_environment = table.clone(Shim.environment)
+	local chunk = luau.load(fs.readFile("src/PlayerDataInitializer/PlayerDataErasureManifestBinding.luau"), {
+		debugName = "PlayerDataErasureManifestBinding", environment = module_environment,
+	})
+	loaded_erasure_manifest_binding = chunk()
+	return loaded_erasure_manifest_binding
+end
+
 local function load_player_data_erasure(): any
 	if loaded_player_data_erasure ~= nil then return loaded_player_data_erasure end
 	local module_environment = table.clone(Shim.environment)
@@ -414,6 +440,8 @@ local function shim_require(target: any)
 	if target == OutboxConsumerAdapterInstance then return load_outbox_consumer_adapter() end
 	if target == RecordStoreV2Instance then return load_recordstore_v2() end
 	if target == PlayerDataErasureInstance then return load_player_data_erasure() end
+	if target == RecordStoreApplicationInventoryInstance then return load_application_inventory() end
+	if target == PlayerDataErasureManifestBindingInstance then return load_erasure_manifest_binding() end
 	if target == PurchaseDataStoreAuthorityInstance then return load_purchase_datastore_authority() end
 	if target == PurchaseAuthorityMigrationRunnerInstance then return load_purchase_authority_migration_runner() end
 	if target == RecordStoreSHA256Instance then return load_recordstore_sha256() end
