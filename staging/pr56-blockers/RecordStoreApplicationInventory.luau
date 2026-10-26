@@ -163,7 +163,7 @@ local function normalize_family(raw: unknown): ({ [string]: any }?, string?)
 		generation_field = row.generation_field,
 		fence_field = row.fence_field,
 		action = row.action,
-		writer_ids = writer_ids,
+		writer_ids = table.freeze(writer_ids),
 		evidence_ref = row.evidence_ref,
 	}
 	if row.inventory_source_ref ~= nil then family.inventory_source_ref = row.inventory_source_ref end
@@ -194,7 +194,7 @@ local function normalize_writer(raw: unknown): ({ [string]: any }?, string?)
 	local writer = {
 		id = row.id,
 		source_path = row.source_path,
-		family_ids = family_ids,
+		family_ids = table.freeze(family_ids),
 		fence_mode = row.fence_mode,
 		fence_evidence_ref = row.fence_evidence_ref,
 	}
