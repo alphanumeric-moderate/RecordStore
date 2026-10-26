@@ -106,6 +106,10 @@ jobs:
         timeout-minutes: 2
         run: timeout --signal=TERM --kill-after=5s 60s lune run bench/run_maintenance_atomic_tombstone_regression.luau
 
+      - name: Regression - maintenance manifest binding
+        timeout-minutes: 2
+        run: timeout --signal=TERM --kill-after=5s 60s lune run bench/run_maintenance_manifest_binding_regression.luau
+
       - name: Run the benchmarks
         timeout-minutes: 16
         uses: CodSpeedHQ/action@v5
