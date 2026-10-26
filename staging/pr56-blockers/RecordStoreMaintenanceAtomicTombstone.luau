@@ -283,7 +283,7 @@ function AtomicTombstone.new(config: Options): Adapter
 			if action == "fenced" then return action, fenced_generation, nil end
 			if action == "unknown" then
 				local readback, key_info, read_error = read_fresh(store, key :: string)
-				if read_error ~= nil then return "unknown", nil, message .. "; readback failed: " .. read_error end
+				if read_error ~= nil then return "unknown", nil, (message or "maintenance fence outcome unresolved") .. "; readback failed: " .. read_error end
 				return classify_fence_readback(readback, key_info, expected_generation, job_id)
 			end
 		end
