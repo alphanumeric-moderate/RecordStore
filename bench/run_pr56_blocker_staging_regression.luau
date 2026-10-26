@@ -207,7 +207,10 @@ local corrupt_authority = Authority.new({
 	store_adapter = corrupt_store,
 	now_unix = function() return now end,
 })
-local key_digest = Authority.DigestKey("ent:", "COLLISION", 1006)
+local seeded = corrupt_authority:ReserveAsync("COLLISION", 1006, 501, "seed-purchase")
+expect(seeded.code == "claimed", "collision fixture could not create a durable row")
+local key_digest = next(corrupt_store.rows)
+expect(key_digest ~= nil, "collision fixture did not write a key")
 corrupt_store.rows[key_digest] = {
 	version = 1,
 	entitlement_id = "DIFFERENT",
