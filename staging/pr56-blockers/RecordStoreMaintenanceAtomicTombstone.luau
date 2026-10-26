@@ -165,14 +165,14 @@ function AtomicTombstone.new(config: Options): Adapter
 		if current_generation ~= expected_generation then return "skipped", "record generation changed before the tombstone was confirmed" end
 		if raw[job_fence_field] ~= job_id then return "skipped", "same-key job fence does not match this maintenance job" end
 		local eligible, eligibility_error = callback_boolean(
-			config.is_eligible, value, key_info, expected_generation, job_id
+			config.is_eligible, clone(value), key_info, expected_generation, job_id
 		)
 		if not eligible then
 			return if eligibility_error == nil then "skipped" else "unknown",
 				eligibility_error or "record is no longer eligible for maintenance deletion"
 		end
 		local dependencies_clear, dependency_error = callback_boolean(
-			config.dependencies_clear, value, key_info, expected_generation, job_id
+			config.dependencies_clear, clone(value), key_info, expected_generation, job_id
 		)
 		if not dependencies_clear then
 			return if dependency_error == nil then "skipped" else "unknown",
