@@ -724,22 +724,31 @@ end
 
 local atomic_item = { name = "Profiles", scope = "global", key = "Player_1" }
 local atomic_adapter = make_atomic_adapter()
-local atomic_store = make_atomic_store(make_atomic_profile(4, "job-atomic-1", true, true))
-local atomic_action, atomic_error = atomic_adapter:DeleteIfGeneration(
+local atomic_store = make_atomic_store(make_atomic_profile(4, nil, true, true))
+local acquired_fence, fenced_generation, fence_error = atomic_adapter:FenceIfGeneration(
 	atomic_store, atomic_item, 4, "job-atomic-1"
 )
-expect(atomic_action == "deleted", atomic_error or "same-key fenced tombstone did not commit")
+expect(acquired_fence == "fenced" and fenced_generation == 5,
+	fence_error or "same-key generation fence was not atomically acquired")
 expect(atomic_store.row.fencing_generation == 5
 	and atomic_store.row.maintenance_fence_job_id == "job-atomic-1"
-	and atomic_store.row.tombstone_source_generation == 4,
-	"tombstone did not advance the generation and retain the same-key job fence")
+	and atomic_store.row.tombstone ~= true,
+	"maintenance fencing did not atomically advance the generation and claim the job")
+local atomic_action, atomic_error = atomic_adapter:DeleteIfGeneration(
+	atomic_store, atomic_item, fenced_generation, "job-atomic-1"
+)
+expect(atomic_action == "deleted", atomic_error or "same-key fenced tombstone did not commit")
+expect(atomic_store.row.fencing_generation == 6
+	and atomic_store.row.maintenance_fence_job_id == "job-atomic-1"
+	and atomic_store.row.tombstone_source_generation == 5,
+	"tombstone did not advance the fenced generation and retain the same-key job fence")
 expect(atomic_store.row.payload.coins == 100 and atomic_store.row.payload.flags.keep == true,
 	"tombstone callback did not preserve its explicitly retained payload")
 
-local atomic_retry, atomic_retry_error = atomic_adapter:DeleteIfGeneration(
+local atomic_retry, atomic_retry_error = atomic_adapter:FenceAndDeleteIfGeneration(
 	atomic_store, atomic_item, 4, "job-atomic-1"
 )
-expect(atomic_retry == "deleted", atomic_retry_error or "tombstone response-loss retry was not idempotent")
+expect(atomic_retry == "deleted", atomic_retry_error or "composite fence/tombstone retry was not idempotent")
 
 local wrong_fence_store = make_atomic_store(make_atomic_profile(4, "different-job", true, true))
 local wrong_fence_action = atomic_adapter:DeleteIfGeneration(
@@ -748,7 +757,7 @@ local wrong_fence_action = atomic_adapter:DeleteIfGeneration(
 expect(wrong_fence_action == "skipped" and wrong_fence_store.row.tombstone ~= true,
 	"a foreign same-key job fence did not block deletion")
 
-local stale_generation_store = make_atomic_store(make_atomic_profile(4, "job-atomic-1", true, true))
+local stale_generation_store = make_atomic_store(make_atomic_profile(4, nil, true, true))
 stale_generation_store.before_update = function(store)
 	store.row.fencing_generation = 5
 	store.row.payload.coins = 999
@@ -760,22 +769,47 @@ expect(stale_generation_action == "skipped" and stale_generation_store.row.paylo
 	and stale_generation_store.row.tombstone ~= true,
 	"a concurrent generation change was overwritten by a stale deletion")
 
-local ineligible_store = make_atomic_store(make_atomic_profile(4, "job-atomic-1", false, true))
+local ineligible_store = make_atomic_store(make_atomic_profile(4, nil, false, true))
+local ineligible_fence = atomic_adapter:FenceIfGeneration(ineligible_store, atomic_item, 4, "job-atomic-1")
+expect(ineligible_fence == "skipped" and ineligible_store.row.fencing_generation == 4
+	and ineligible_store.row.maintenance_fence_job_id == nil,
+	"an ineligible record acquired a maintenance fence")
 local ineligible_action = atomic_adapter:DeleteIfGeneration(ineligible_store, atomic_item, 4, "job-atomic-1")
 expect(ineligible_action == "skipped" and ineligible_store.row.tombstone ~= true,
 	"a record that was not eligible was tombstoned")
 
-local dependent_store = make_atomic_store(make_atomic_profile(4, "job-atomic-1", true, false))
+local dependent_store = make_atomic_store(make_atomic_profile(4, nil, true, false))
+local dependent_fence = atomic_adapter:FenceIfGeneration(dependent_store, atomic_item, 4, "job-atomic-1")
+expect(dependent_fence == "skipped" and dependent_store.row.fencing_generation == 4
+	and dependent_store.row.maintenance_fence_job_id == nil,
+	"a record with unresolved dependencies acquired a maintenance fence")
 local dependent_action = atomic_adapter:DeleteIfGeneration(dependent_store, atomic_item, 4, "job-atomic-1")
 expect(dependent_action == "skipped" and dependent_store.row.tombstone ~= true,
 	"a record with unresolved dependencies was tombstoned")
 
-local lost_response_store = make_atomic_store(make_atomic_profile(4, "job-atomic-1", true, true))
-lost_response_store.lose_next_response = true
-local lost_response_action, lost_response_error = atomic_adapter:DeleteIfGeneration(
+local lost_fence_store = make_atomic_store(make_atomic_profile(4, nil, true, true))
+lost_fence_store.lose_next_response = true
+local lost_fence_action, lost_fence_generation, lost_fence_error = atomic_adapter:FenceIfGeneration(
+	lost_fence_store, atomic_item, 4, "job-atomic-1"
+)
+expect(lost_fence_action == "fenced" and lost_fence_generation == 5,
+	lost_fence_error or "fence commit response loss was not reconciled from fresh state")
+
+local lost_response_store = make_atomic_store(make_atomic_profile(4, nil, true, true))
+local before_lost_delete, before_lost_delete_generation = atomic_adapter:FenceIfGeneration(
 	lost_response_store, atomic_item, 4, "job-atomic-1"
 )
+expect(before_lost_delete == "fenced" and before_lost_delete_generation == 5,
+	"tombstone response-loss fixture could not acquire the writer fence")
+lost_response_store.lose_next_response = true
+local lost_response_action, lost_response_error = atomic_adapter:DeleteIfGeneration(
+	lost_response_store, atomic_item, before_lost_delete_generation, "job-atomic-1"
+)
 expect(lost_response_action == "deleted", lost_response_error or "tombstone commit response loss was not reconciled")
+local lost_response_retry = atomic_adapter:FenceAndDeleteIfGeneration(
+	lost_response_store, atomic_item, 4, "job-atomic-1"
+)
+expect(lost_response_retry == "deleted", "composite operation did not reconcile an already committed tombstone")
 
 local unavailable_store = make_atomic_store(make_atomic_profile(4, "job-atomic-1", true, true))
 unavailable_store.throw_before_update = true
