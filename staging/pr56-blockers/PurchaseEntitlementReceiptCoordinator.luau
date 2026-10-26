@@ -341,6 +341,14 @@ end
 
 function Coordinator.new(config: Options)
 	if type(config) ~= "table" then error("config must be a table", 2) end
+	for key in pairs(config) do
+		if key ~= "purchase_authority" and key ~= "entitlement_authority"
+			and key ~= "entitlement_by_product_id" and key ~= "grant_profile_once"
+			and key ~= "verify_activation"
+		then
+			error("unsupported lifetime entitlement coordinator option: " .. tostring(key), 2)
+		end
+	end
 	if type(config.purchase_authority) ~= "table" then error("purchase_authority is required", 2) end
 	if type(config.entitlement_authority) ~= "table" then error("entitlement_authority is required", 2) end
 	if type(config.entitlement_by_product_id) ~= "table" then error("product_entitlement_by_id is required", 2) end
