@@ -241,7 +241,9 @@ function ErasureBinding.bind(
 		if accepted ~= true then return false, tostring(message or "RTBF attestation was not independently accepted") end
 		return true, nil
 	end)
-	if activated == nil then return nil, nil, activation_error end
+	if activated == nil then
+		return nil, nil, activation_error or "RTBF activation verifier rejected the inventory manifest"
+	end
 	if activated.manifest_id ~= manifest.manifest_id or activated.revision ~= manifest.revision then
 		return nil, nil, "activated RTBF manifest changed between validation and binding"
 	end
