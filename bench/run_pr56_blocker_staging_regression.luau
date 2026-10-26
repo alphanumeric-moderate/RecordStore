@@ -1347,6 +1347,67 @@ expect(replay_decision.action == "acknowledge", "replayed lifetime purchase was 
 expect(receipt_grant_calls[receipt_one.PurchaseId] == 1, "committed purchase replay called profile grant again")
 
 do
+	local committed_missing_auth = make_purchase_authority()
+	committed_missing_auth.rows["purchase-committed-missing-entitlement"] = {
+		PurchaseId = "purchase-committed-missing-entitlement",
+		PlayerId = 1120,
+		ProductId = 501,
+		Status = "committed",
+		Outcome = "historical",
+	}
+	local committed_missing_store = make_store()
+	local committed_missing_coordinator, _, committed_missing_grants = make_coordinator(
+		committed_missing_auth, committed_missing_store, {}
+	)
+	local missing_entitlement_decision = committed_missing_coordinator:Process({
+		PurchaseId = "purchase-committed-missing-entitlement",
+		PlayerId = 1120,
+		ProductId = 501,
+	})
+	expect(missing_entitlement_decision.action == "defer"
+		and missing_entitlement_decision.status == "purchase_committed_entitlement_unverified",
+		"a committed historical PurchaseId bypassed an absent lifetime-entitlement record")
+	expect(committed_missing_grants["purchase-committed-missing-entitlement"] == nil,
+		"unverified historical entitlement state invoked a profile grant")
+
+	local previously_owned_store = make_store()
+	local previous_entitlement_authority = Authority.new({
+		key_prefix = "ent:",
+		store_adapter = previously_owned_store,
+		now_unix = function() return now end,
+	})
+	local previous_reservation = previous_entitlement_authority:ReserveAsync(
+		"VIP_LIFETIME", 1121, 501, "purchase-lifetime-previous-owner"
+	)
+	expect(previous_reservation.code == "claimed", "could not seed prior lifetime entitlement")
+	local previous_commit = previous_entitlement_authority:CommitAsync(
+		"VIP_LIFETIME", 1121, 501, "purchase-lifetime-previous-owner"
+	)
+	expect(previous_commit.code == "committed", "could not persist prior lifetime entitlement")
+	local committed_duplicate_auth = make_purchase_authority()
+	committed_duplicate_auth.rows["purchase-lifetime-duplicate-after-commit"] = {
+		PurchaseId = "purchase-lifetime-duplicate-after-commit",
+		PlayerId = 1121,
+		ProductId = 501,
+		Status = "committed",
+		Outcome = "historical",
+	}
+	local committed_duplicate_coordinator, _, committed_duplicate_grants = make_coordinator(
+		committed_duplicate_auth, previously_owned_store, {}
+	)
+	local committed_duplicate_decision = committed_duplicate_coordinator:Process({
+		PurchaseId = "purchase-lifetime-duplicate-after-commit",
+		PlayerId = 1121,
+		ProductId = 501,
+	})
+	expect(committed_duplicate_decision.action == "acknowledge"
+		and committed_duplicate_decision.status == "lifetime_entitlement_already_owned",
+		"committed duplicate receipt did not reconcile against the authoritative lifetime owner")
+	expect(committed_duplicate_grants["purchase-lifetime-duplicate-after-commit"] == nil,
+		"already-owned committed duplicate invoked profile grant")
+end
+
+do
 expect(receipt_coordinator:HandlesProduct(501) and not receipt_coordinator:HandlesProduct(999),
 	"lifetime coordinator product routing did not match its frozen map")
 local purchase_granted = Shim.environment.Enum.ProductPurchaseDecision.PurchaseGranted
