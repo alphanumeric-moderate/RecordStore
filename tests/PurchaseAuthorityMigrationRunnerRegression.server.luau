@@ -212,7 +212,7 @@ do
 		nil,
 		nil,
 		nil,
-		"00000000000000000000000000000000"
+		"0000000000000000000000000000000000000000000000000000000000000000"
 	)
 	local result = runner:RunBatchAsync(1)
 	expect(result.code == "incomplete_inventory"
@@ -334,7 +334,8 @@ do
 	}, "snapshot-terminal-cursor", calls)
 	local job_id = "historical-import-terminal-cursor"
 	backing.values["purchase-migration:" .. job_id] = {
-		version = 2,
+		version = 3,
+		digest_algorithm = "sha256-chain-v1",
 		job_id = job_id,
 		source_revision = source.source_revision,
 		revision = 1,
@@ -369,7 +370,8 @@ do
 	}, "snapshot-revision-zero", calls)
 	local job_id = "historical-import-revision-zero"
 	backing.values["purchase-migration:" .. job_id] = {
-		version = 2,
+		version = 3,
+		digest_algorithm = "sha256-chain-v1",
 		job_id = job_id,
 		source_revision = source.source_revision,
 		revision = 0,
