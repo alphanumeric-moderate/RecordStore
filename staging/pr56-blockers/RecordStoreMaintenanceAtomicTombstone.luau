@@ -26,6 +26,7 @@ export type Options = {
 export type Adapter = {
 	FenceIfGeneration: (self: Adapter, store: any, item: unknown, expected_generation: number, job_id: string) -> (string, number?, string?),
 	DeleteIfGeneration: (self: Adapter, store: any, item: unknown, expected_generation: number, job_id: string) -> (string, string?),
+	FenceAndDeleteIfGeneration: (self: Adapter, store: any, item: unknown, expected_generation: number, job_id: string) -> (string, string?),
 }
 
 local MAX_KEY_BYTES = 50
@@ -301,6 +302,66 @@ function AtomicTombstone.new(config: Options): Adapter
 				.. (message and "; " .. message or "")
 		end
 		return action, fenced_generation, message
+	end
+
+	function self:FenceAndDeleteIfGeneration(
+		store: any,
+		item: unknown,
+		expected_generation: number,
+		job_id: string
+	): (string, string?)
+		local fence_action, fenced_generation, fence_error = self:FenceIfGeneration(
+			store, item, expected_generation, job_id
+		)
+		if fence_action == "fenced" and fenced_generation ~= nil then
+			local delete_action, delete_error = self:DeleteIfGeneration(
+				store, item, fenced_generation, job_id
+			)
+			if delete_action == "deleted" then return "deleted", nil end
+			local locator = if type(item) == "table" then item :: { [string]: unknown } else nil
+			local name = if locator ~= nil and type(locator.name) == "string" then locator.name
+				elseif locator ~= nil then locator.store_name else nil
+			local key = if locator ~= nil then locator.key else nil
+			if name == config.store_name and locator ~= nil and locator.scope == config.scope
+				and valid_text(key, MAX_KEY_BYTES)
+				and (prefix == "" or string.sub(key :: string, 1, #prefix) == prefix)
+			then
+				local observed, _, read_error = read_fresh(store, key :: string)
+				if read_error == nil then
+					local committed, validation_error = matches_tombstone(observed, fenced_generation, job_id)
+					if committed then return "deleted", nil end
+					if validation_error ~= nil and delete_action == "unknown" then
+						return "unknown", validation_error
+					end
+				elseif delete_action == "unknown" then
+					return "unknown", (delete_error or "tombstone outcome unresolved") .. "; readback failed: " .. read_error
+				end
+			end
+			return delete_action, delete_error
+		end
+
+		if job_id == config.job_id and generation(expected_generation)
+			and expected_generation <= MAX_GENERATION - 2 and type(store) == "table"
+			and type(item) == "table"
+		then
+			local locator = item :: { [string]: unknown }
+			local name = if type(locator.name) == "string" then locator.name else locator.store_name
+			local key = locator.key
+			if name == config.store_name and locator.scope == config.scope
+				and valid_text(key, MAX_KEY_BYTES)
+				and (prefix == "" or string.sub(key :: string, 1, #prefix) == prefix)
+			then
+				local observed, _, read_error = read_fresh(store, key :: string)
+				if read_error == nil then
+					local committed, validation_error = matches_tombstone(observed, expected_generation + 1, job_id)
+					if committed then return "deleted", nil end
+					if validation_error ~= nil and fence_action == "unknown" then return "unknown", validation_error end
+				elseif fence_action == "unknown" then
+					return "unknown", (fence_error or "maintenance fence outcome unresolved") .. "; readback failed: " .. read_error
+				end
+			end
+		end
+		return fence_action, fence_error
 	end
 
 	function self:DeleteIfGeneration(
