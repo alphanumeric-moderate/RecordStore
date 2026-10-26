@@ -292,7 +292,7 @@ local function read_fresh(
 	options: NormalizedOptions,
 	key: string
 ): (unknown, string?)
-	return call_store(options, "GetAsync", function()
+	return call_store(options, "read", function()
 		return options.store_adapter:GetAsyncFresh(key)
 	end)
 end
@@ -302,7 +302,7 @@ local function update(
 	key: string,
 	transform: (unknown) -> unknown?
 ): (unknown, string?)
-	return call_store(options, "UpdateAsync", function()
+	return call_store(options, "update", function()
 		return options.store_adapter:UpdateAsync(key, transform)
 	end)
 end
