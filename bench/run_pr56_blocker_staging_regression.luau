@@ -88,8 +88,10 @@ local normalized, manifest_error = Manifest.validate(valid_manifest())
 expect(normalized ~= nil and manifest_error == nil, manifest_error or "valid reviewed inventory manifest was rejected")
 expect(normalized.manifest_id == "rtbf-inventory-2026-10-26", "manifest identity changed")
 expect(table.isfrozen(normalized) and table.isfrozen(normalized.families)
-	and table.isfrozen(normalized.families[1]) and table.isfrozen(normalized.writers[1]),
-	"normalized manifest and nested catalog entries must be immutable")
+	and table.isfrozen(normalized.families[1]) and table.isfrozen(normalized.writers[1])
+	and table.isfrozen(normalized.families[1].writer_ids)
+	and table.isfrozen(normalized.writers[1].family_ids),
+	"normalized manifest, nested catalog entries, and relationship lists must be immutable")
 
 local activation, activation_error = Manifest.verify_for_activation(valid_manifest(), function(value)
 	return value.manifest_id == "rtbf-inventory-2026-10-26"
@@ -532,6 +534,17 @@ local activated_purchase_manifest, activation_manifest_error = PurchaseManifest.
 )
 expect(activated_purchase_manifest ~= nil,
 	activation_manifest_error or "verified purchase completion could not be activated")
+expect(not table.isfrozen(source_completion),
+	"purchase verifier validation froze the caller-owned completion table")
+
+local terminal_cursor_checkpoint = clone(source_checkpoint)
+terminal_cursor_checkpoint.cursor = "not-terminal"
+expect(PurchaseManifest.verify_completion(
+	purchase_manifest,
+	terminal_cursor_checkpoint,
+	source_completion,
+	function() return true end
+) == nil, "purchase migration activation accepted a completed checkpoint with a cursor")
 
 local wrong_checkpoint_revision = clone(source_checkpoint)
 wrong_checkpoint_revision.revision = 4
@@ -779,5 +792,87 @@ expect(loss_decision.action == "acknowledge",
 	loss_decision.message or "cross-key entitlement and purchase commit response loss was not reconciled")
 expect(loss_auth.rows["purchase-two-commits"].Status == "committed",
 	"purchase authority did not reconcile a response lost after terminal commit")
+
+
+local budget_calls = {}
+local budget_store = make_store()
+local budget_limited_authority = Authority.new({
+	key_prefix = "ent:",
+	store_adapter = budget_store,
+	now_unix = function() return now end,
+	get_request_budget = function(operation)
+		budget_calls[#budget_calls + 1] = operation
+		return 0
+	end,
+})
+local budget_limited_result = budget_limited_authority:ReserveAsync(
+	"BUDGETED", 1501, 501, "purchase-budgeted"
+)
+expect(budget_limited_result.code == "unknown" and #budget_calls >= 2,
+	"exhausted request budget did not block entitlement mutation and reconciliation reads")
+expect(budget_calls[1] == "update" and budget_calls[2] == "read",
+	"entitlement request budget callback was not called with shared governor operation names")
+expect(next(budget_store.rows) == nil, "budget exhaustion still mutated durable entitlement state")
+
+local governed_store = make_store()
+local governed_calls = {}
+local governed_authority = Authority.new({
+	key_prefix = "ent:",
+	store_adapter = governed_store,
+	now_unix = function() return now end,
+	get_request_budget = function(operation)
+		governed_calls[#governed_calls + 1] = "budget:" .. operation
+		return 2
+	end,
+	request_runner = function(operation, call)
+		governed_calls[#governed_calls + 1] = "run:" .. operation
+		return call()
+	end,
+})
+local governed_result = governed_authority:ReserveAsync("GOVERNED", 1502, 501, "purchase-governed")
+expect(governed_result.code == "claimed", "shared-governor entitlement write failed despite available budget")
+expect(table.find(governed_calls, "budget:update") ~= nil
+	and table.find(governed_calls, "run:update") ~= nil,
+	"entitlement request did not flow through shared budget/governor hooks")
+
+local mutation_isolation_adapter = make_atomic_adapter({
+	is_eligible = function(value)
+		value.dependencies_clear = false
+		value.payload.coins = -1
+		return value.eligible == true
+	end,
+	dependencies_clear = function(value)
+		return value.dependencies_clear == true and value.payload.coins == 100
+	end,
+})
+local mutation_isolation_store = make_atomic_store(make_atomic_profile(4, "job-atomic-1", true, true))
+local mutation_isolation_action = mutation_isolation_adapter:DeleteIfGeneration(
+	mutation_isolation_store, atomic_item, 4, "job-atomic-1"
+)
+expect(mutation_isolation_action == "deleted" and mutation_isolation_store.row.payload.coins == 100,
+	"one maintenance policy callback could mutate the snapshot seen by later checks or tombstone creation")
+
+local exhausted_generation_store = make_atomic_store(make_atomic_profile(9007199254740991, "job-atomic-1", true, true))
+local exhausted_generation_action = atomic_adapter:DeleteIfGeneration(
+	exhausted_generation_store,
+	atomic_item,
+	9007199254740991,
+	"job-atomic-1"
+)
+expect(exhausted_generation_action == "skipped" and exhausted_generation_store.row.tombstone ~= true,
+	"maintenance tombstone attempted to increment a generation beyond the exact integer range")
+
+local yielding_policy_adapter = make_atomic_adapter({
+	is_eligible = function()
+		coroutine.yield()
+		return true
+	end,
+})
+local yielding_policy_store = make_atomic_store(make_atomic_profile(4, "job-atomic-1", true, true))
+local yielding_policy_action = yielding_policy_adapter:DeleteIfGeneration(
+	yielding_policy_store, atomic_item, 4, "job-atomic-1"
+)
+expect(yielding_policy_action == "unknown" and yielding_policy_store.row.tombstone ~= true,
+	"yielding maintenance policy callback led to deletion")
 
 print("PR56 staged blocker regression checks passed")
