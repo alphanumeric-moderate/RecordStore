@@ -1,0 +1,36 @@
+name: PR56 blocker candidate regression
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+env:
+  LUNE_VERSION: "0.11.0"
+
+jobs:
+  staged-regression:
+    name: Verify staged PR56 blocker candidates
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Lune
+        timeout-minutes: 2
+        run: |
+          set -euo pipefail
+          curl -fsSL -o lune.zip "https://github.com/lune-org/lune/releases/download/v${LUNE_VERSION}/lune-${LUNE_VERSION}-linux-x86_64.zip"
+          mkdir -p "$HOME/.local/bin"
+          unzip -o lune.zip -d "$HOME/.local/bin"
+          chmod +x "$HOME/.local/bin/lune"
+          rm lune.zip
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Run staged blocker regression suite
+        timeout-minutes: 2
+        run: timeout --signal=TERM --kill-after=5s 60s lune run bench/run_pr56_blocker_staging_regression.luau
