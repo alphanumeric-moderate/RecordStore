@@ -13,6 +13,7 @@ export type Checkpoint = {
 	expected_purchase_count: number,
 	inventory_digest: string,
 	expected_inventory_digest: string,
+	digest_algorithm: string,
 	inventory_verified: boolean,
 }
 
@@ -54,6 +55,7 @@ local MANIFEST_FIELDS = {
 	row_order = true,
 	expected_purchase_count = true,
 	expected_inventory_digest = true,
+	digest_algorithm = true,
 	exported_at_unix = true,
 	review_status = true,
 	reviewed_by = true,
@@ -103,7 +105,7 @@ local function positive_timestamp(value: unknown): boolean
 end
 
 local function valid_digest(value: unknown): boolean
-	if type(value) ~= "string" or #value ~= 32 then return false end
+	if type(value) ~= "string" or #value ~= 64 then return false end
 	for index = 1, #value do
 		local byte = string.byte(value, index)
 		if not ((byte >= 48 and byte <= 57) or (byte >= 97 and byte <= 102)) then return false end
@@ -168,6 +170,9 @@ function PurchaseManifest.validate(raw: unknown): ({ [string]: any }?, string?)
 	then
 		return nil, "manifest purchase count, rolling digest, or export timestamp is invalid"
 	end
+	if value.digest_algorithm ~= "sha256-chain-v1" then
+		return nil, "manifest digest_algorithm must be sha256-chain-v1"
+	end
 	if value.row_order ~= "purchase_id_asc_player_id_asc_product_id_asc" then
 		return nil, "manifest must declare stable PurchaseId/PlayerId/ProductId ordering"
 	end
@@ -204,6 +209,7 @@ function PurchaseManifest.validate(raw: unknown): ({ [string]: any }?, string?)
 		row_order = value.row_order,
 		expected_purchase_count = value.expected_purchase_count,
 		expected_inventory_digest = value.expected_inventory_digest,
+		digest_algorithm = value.digest_algorithm,
 		exported_at_unix = value.exported_at_unix,
 		review_status = value.review_status,
 		reviewed_by = value.reviewed_by,
@@ -336,7 +342,8 @@ function PurchaseManifest.verify_completion(
 	local checkpoint = raw_checkpoint :: { [string]: any }
 	local completion = raw_completion :: { [string]: any }
 	if not exact_fields(completion, COMPLETION_FIELDS) then return nil, "completion evidence contains an unsupported field" end
-	if checkpoint.version ~= 2 or not valid_text(checkpoint.job_id, 96)
+	if checkpoint.version ~= 3 or checkpoint.digest_algorithm ~= manifest.digest_algorithm
+		or not valid_text(checkpoint.job_id, 96)
 		or checkpoint.done ~= true or checkpoint.cursor ~= nil
 		or not nonnegative_integer(checkpoint.revision) or checkpoint.revision < 1
 		or checkpoint.source_revision ~= manifest.source_revision
@@ -381,6 +388,7 @@ function PurchaseManifest.verify_completion(
 		expected_purchase_count = manifest.expected_purchase_count,
 		inventory_digest = checkpoint.inventory_digest,
 		expected_inventory_digest = manifest.expected_inventory_digest,
+		digest_algorithm = checkpoint.digest_algorithm,
 		inventory_verified = true,
 	}
 	local normalized_completion = table.freeze({
