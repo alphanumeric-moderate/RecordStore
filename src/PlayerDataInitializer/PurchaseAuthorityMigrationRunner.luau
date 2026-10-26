@@ -673,5 +673,7 @@ function MigrationRunner.new(config: Config)
 end
 
 return table.freeze({
+	ComputeInventoryDigest = MigrationRunner.ComputeInventoryDigest,
+	DigestAlgorithm = DIGEST_ALGORITHM,
 	new = MigrationRunner.new,
 })
