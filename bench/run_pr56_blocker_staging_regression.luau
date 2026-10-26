@@ -78,6 +78,7 @@ local function valid_manifest()
 	}
 end
 
+do
 local empty_scope_manifest = valid_manifest()
 empty_scope_manifest.families[1].scope = ""
 expect(Manifest.validate(empty_scope_manifest) ~= nil,
@@ -331,6 +332,8 @@ expect(Manifest.validate(no_terminal_proof) == nil, "an inventory without a comp
 local invalid_writer = valid_manifest()
 invalid_writer.writers[1].fence_mode = "preflight_only"
 expect(Manifest.validate(invalid_writer) == nil, "a preflight-only writer fence was accepted")
+
+end
 
 local function make_store()
 	local store = { rows = {}, lose_next_response = false, fail_reads = false }
@@ -622,6 +625,7 @@ local wrong_job_action = atomic_adapter:DeleteIfGeneration(
 expect(wrong_job_action == "skipped", "same-key deletion accepted a different job identity")
 
 
+do
 local function valid_purchase_manifest()
 	return {
 		schema_version = 1,
@@ -1204,6 +1208,8 @@ expect(loss_decision.action == "acknowledge",
 expect(loss_auth.rows["purchase-two-commits"].Status == "committed",
 	"purchase authority did not reconcile a response lost after terminal commit")
 
+
+end
 
 local budget_calls = {}
 local budget_store = make_store()
