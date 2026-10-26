@@ -1,0 +1,260 @@
+--!strict
+local AtomicTombstone = {}
+
+export type Key = {
+	name: string?,
+	store_name: string?,
+	scope: string,
+	key: string,
+}
+
+export type Options = {
+	store_name: string,
+	scope: string,
+	key_prefix: string?,
+	job_id: string,
+	generation_field: string?,
+	job_fence_field: string?,
+	new_get_options: (() -> any)?,
+	now_unix: (() -> number)?,
+	is_eligible: (unknown, any, number, string) -> boolean,
+	dependencies_clear: (unknown, any, number, string) -> boolean,
+	make_tombstone: (unknown, any, number, string, number) -> unknown?,
+	is_tombstone: (unknown, number, string) -> boolean,
+}
+
+export type Adapter = {
+	DeleteIfGeneration: (self: Adapter, store: any, item: unknown, expected_generation: number, job_id: string) -> (string, string?),
+}
+
+local MAX_KEY_BYTES = 50
+local MAX_JOB_ID_BYTES = 96
+local MAX_FIELD_BYTES = 128
+local MAX_GENERATION = 9007199254740991
+
+local function valid_text(value: unknown, maximum: number, allow_empty: boolean?): boolean
+	return type(value) == "string"
+		and (allow_empty == true or value ~= "")
+		and #value <= maximum
+		and string.find(value, "%c") == nil
+end
+
+local function generation(value: unknown): boolean
+	return type(value) == "number"
+		and math.isfinite(value)
+		and value >= 0
+		and value <= MAX_GENERATION
+		and math.floor(value) == value
+end
+
+local function clone(value: unknown, seen: { [table]: table }?): any
+	if type(value) ~= "table" then return value end
+	local source = value :: { [any]: any }
+	local memo = seen or {}
+	local prior = memo[source]
+	if prior ~= nil then return prior end
+	local result: { [any]: any } = {}
+	memo[source] = result
+	for key, child in pairs(source) do
+		result[clone(key, memo)] = clone(child, memo)
+	end
+	return result
+end
+
+local function invoke_pure(callback: (...any) -> any, ...: any): (boolean, any, string?)
+	local arguments = table.pack(...)
+	local returned: { [number]: any }? = nil
+	local thread = coroutine.create(function()
+		returned = table.pack(pcall(callback, table.unpack(arguments, 1, arguments.n)))
+	end)
+	local resumed, resume_error = coroutine.resume(thread)
+	if not resumed then return false, nil, tostring(resume_error) end
+	if coroutine.status(thread) ~= "dead" then
+		coroutine.close(thread)
+		return false, nil, "maintenance mutation callbacks must not yield"
+	end
+	local result = returned
+	if result == nil then return false, nil, "maintenance mutation callback did not return" end
+	if result[1] ~= true then return false, nil, tostring(result[2]) end
+	return true, result[2], nil
+end
+
+local function default_get_options(factory: (() -> any)?): any
+	local options = if factory ~= nil then factory() else Instance.new("DataStoreGetOptions")
+	if options == nil then error("could not create DataStoreGetOptions", 3) end
+	options.UseCache = false
+	return options
+end
+
+local function callback_boolean(
+	callback: (...any) -> any,
+	value: unknown,
+	key_info: any,
+	expected_generation: number,
+	job_id: string
+): (boolean, string?)
+	local ok, allowed, message = invoke_pure(callback, value, key_info, expected_generation, job_id)
+	if not ok then return false, message end
+	if type(allowed) ~= "boolean" then return false, "maintenance policy callback did not return a boolean" end
+	return allowed, if type(message) == "string" then message else nil
+end
+
+function AtomicTombstone.new(config: Options): Adapter
+	if type(config) ~= "table" then error("config must be a table", 2) end
+	if not valid_text(config.store_name, MAX_KEY_BYTES) then error("store_name is invalid", 2) end
+	if not valid_text(config.scope, MAX_KEY_BYTES, true) then error("scope is invalid", 2) end
+	local prefix = if config.key_prefix == nil then "" else config.key_prefix
+	if not valid_text(prefix, MAX_KEY_BYTES, true) then error("key_prefix is invalid", 2) end
+	if not valid_text(config.job_id, MAX_JOB_ID_BYTES) then error("job_id is invalid", 2) end
+
+	local generation_field = if config.generation_field == nil then "fencing_generation" else config.generation_field
+	local job_fence_field = if config.job_fence_field == nil then "maintenance_fence_job_id" else config.job_fence_field
+	if not valid_text(generation_field, MAX_FIELD_BYTES) or not valid_text(job_fence_field, MAX_FIELD_BYTES)
+		or generation_field == job_fence_field
+	then
+		error("generation_field and job_fence_field must be distinct valid top-level fields", 2)
+	end
+	if config.new_get_options ~= nil and type(config.new_get_options) ~= "function" then
+		error("new_get_options must be a function", 2)
+	end
+	if config.now_unix ~= nil and type(config.now_unix) ~= "function" then
+		error("now_unix must be a function", 2)
+	end
+	if type(config.is_eligible) ~= "function"
+		or type(config.dependencies_clear) ~= "function"
+		or type(config.make_tombstone) ~= "function"
+		or type(config.is_tombstone) ~= "function"
+	then
+		error("eligibility, dependency, tombstone creation, and tombstone verification callbacks are required", 2)
+	end
+
+	local get_options = function()
+		return default_get_options(config.new_get_options)
+	end
+	local now_unix = config.now_unix or os.time
+
+	local function read_fresh(store: any, key: string): (unknown, any?, string?)
+		local ok, value, key_info = pcall(function()
+			return store:GetAsync(key, get_options())
+		end)
+		if not ok then return nil, nil, tostring(value) end
+		return value, key_info, nil
+	end
+
+	local function matches_tombstone(value: unknown, expected_generation: number, job_id: string): (boolean, string?)
+		local ok, matched, message = invoke_pure(config.is_tombstone, value, expected_generation, job_id)
+		if not ok then return false, message end
+		if type(matched) ~= "boolean" then return false, "is_tombstone must return a boolean" end
+		return matched, if type(message) == "string" then message else nil
+	end
+
+	local function classify_readback(
+		value: unknown,
+		key_info: any,
+		expected_generation: number,
+		job_id: string
+	): (string, string?)
+		if value == nil then return "already_absent", nil end
+		local tombstone, tombstone_error = matches_tombstone(value, expected_generation, job_id)
+		if tombstone then return "deleted", nil end
+		if tombstone_error ~= nil then return "unknown", "could not validate tombstone after UpdateAsync: " .. tombstone_error end
+		if type(value) ~= "table" then return "unknown", "observed record is not a table" end
+		local raw = value :: { [string]: unknown }
+		local current_generation = raw[generation_field]
+		if not generation(current_generation) then return "unknown", "observed record has no valid fencing generation" end
+		if current_generation ~= expected_generation then return "skipped", "record generation changed before the tombstone was confirmed" end
+		if raw[job_fence_field] ~= job_id then return "skipped", "same-key job fence does not match this maintenance job" end
+		return "unknown", "UpdateAsync did not confirm an expected-generation tombstone"
+	end
+
+	local self: any = {}
+
+	function self:DeleteIfGeneration(
+		store: any,
+		item: unknown,
+		expected_generation: number,
+		job_id: string
+	): (string, string?)
+		if type(store) ~= "table" and type(store) ~= "userdata" then return "unknown", "target DataStore is unavailable" end
+		if type(item) ~= "table" then return "skipped", "maintenance locator must be a table" end
+		if not generation(expected_generation) then return "skipped", "expected generation is invalid" end
+		if job_id ~= config.job_id then return "skipped", "job identity does not match the configured maintenance job" end
+
+		local locator = item :: { [string]: unknown }
+		local name = if type(locator.name) == "string" then locator.name else locator.store_name
+		local scope = locator.scope
+		local key = locator.key
+		if name ~= config.store_name or scope ~= config.scope or not valid_text(key, MAX_KEY_BYTES)
+			or (prefix ~= "" and string.sub(key :: string, 1, #prefix) ~= prefix)
+		then
+			return "skipped", "maintenance locator is outside the configured store/scope/prefix"
+		end
+
+		local now_ok, now = pcall(now_unix)
+		if not now_ok or type(now) ~= "number" or not math.isfinite(now) or now < 0 then
+			return "unknown", "maintenance clock did not return a finite non-negative timestamp"
+		end
+
+		local update_ok, updated_or_error, updated_info = pcall(function()
+			return store:UpdateAsync(key :: string, function(current: unknown, key_info: any): unknown?
+				if current == nil then return nil end
+				if type(current) ~= "table" then return nil end
+				local raw = current :: { [string]: unknown }
+				local current_generation = raw[generation_field]
+				if not generation(current_generation) or current_generation ~= expected_generation then return nil end
+				if raw[job_fence_field] ~= job_id then return nil end
+
+				local snapshot = clone(current)
+				local eligible, eligibility_error = callback_boolean(
+					config.is_eligible, snapshot, key_info, expected_generation, job_id
+				)
+				if not eligible then return nil end
+				local dependencies_clear, dependency_error = callback_boolean(
+					config.dependencies_clear, snapshot, key_info, expected_generation, job_id
+				)
+				if not dependencies_clear then return nil end
+
+				local tombstone_ok, tombstone = invoke_pure(
+					config.make_tombstone, snapshot, key_info, expected_generation, job_id, now
+				)
+				if not tombstone_ok or type(tombstone) ~= "table" then return nil end
+				local candidate = tombstone :: { [string]: unknown }
+				if candidate[generation_field] ~= expected_generation + 1
+					or candidate[job_fence_field] ~= job_id
+				then
+					return nil
+				end
+				local candidate_matches, _ = matches_tombstone(tombstone, expected_generation, job_id)
+				if not candidate_matches then return nil end
+				return tombstone
+			end)
+		end)
+
+		if update_ok then
+			local tombstone, tombstone_error = matches_tombstone(updated_or_error, expected_generation, job_id)
+			if tombstone then return "deleted", nil end
+			if tombstone_error ~= nil then
+				local readback, _, read_error = read_fresh(store, key :: string)
+				if read_error ~= nil then return "unknown", tombstone_error .. "; readback failed: " .. read_error end
+				return classify_readback(readback, nil, expected_generation, job_id)
+			end
+		end
+
+		local readback, readback_info, read_error = read_fresh(store, key :: string)
+		if read_error ~= nil then
+			return "unknown", "tombstone outcome is unresolved"
+				.. (if not update_ok then ": " .. tostring(updated_or_error) else "")
+				.. "; uncached readback failed: " .. read_error
+		end
+		local action, message = classify_readback(readback, readback_info, expected_generation, job_id)
+		if action == "unknown" and not update_ok then
+			return "unknown", "UpdateAsync outcome is unresolved: " .. tostring(updated_or_error)
+				.. (message and "; " .. message or "")
+		end
+		return action, message
+	end
+
+	return table.freeze(self) :: Adapter
+end
+
+return AtomicTombstone
