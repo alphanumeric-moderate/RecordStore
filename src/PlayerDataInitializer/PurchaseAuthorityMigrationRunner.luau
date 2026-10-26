@@ -122,8 +122,8 @@ end
 
 local CHECKPOINT_VERSION = 3
 local DIGEST_ALGORITHM = "sha256-chain-v1"
-local DIGEST_DOMAIN = "RecordStore purchase inventory chain v1\\0"
-local EMPTY_INVENTORY_DIGEST = SHA256.digest(DIGEST_DOMAIN .. "empty\\0")
+local DIGEST_DOMAIN = "RecordStore purchase inventory chain v1\0"
+local EMPTY_INVENTORY_DIGEST = SHA256.digest(DIGEST_DOMAIN .. "empty\0")
 
 local function valid_digest(value: unknown): boolean
 	return type(value) == "string" and #value == 64 and string.match(value, "^[0-9a-f]+$") ~= nil
@@ -161,7 +161,7 @@ local function compute_inventory_digest(
 		then
 			return nil, "inventory digest row has a malformed PurchaseId, PlayerId or ProductId"
 		end
-		local material = DIGEST_DOMAIN .. "row\\0" .. digest .. "\\0"
+		local material = DIGEST_DOMAIN .. "row\0" .. digest .. "\0"
 			.. tostring(#(purchase_id :: string)) .. ":" .. (purchase_id :: string)
 			.. ":" .. tostring(player_id) .. ":" .. tostring(product_id) .. ";"
 		digest = SHA256.digest(material)
