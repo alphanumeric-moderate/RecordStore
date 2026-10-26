@@ -1345,6 +1345,7 @@ local replay_decision = receipt_coordinator:Process(receipt_one)
 expect(replay_decision.action == "acknowledge", "replayed lifetime purchase was not acknowledged")
 expect(receipt_grant_calls[receipt_one.PurchaseId] == 1, "committed purchase replay called profile grant again")
 
+do
 expect(receipt_coordinator:HandlesProduct(501) and not receipt_coordinator:HandlesProduct(999),
 	"lifetime coordinator product routing did not match its frozen map")
 local purchase_granted = Shim.environment.Enum.ProductPurchaseDecision.PurchaseGranted
@@ -1382,6 +1383,8 @@ local routing_failure_handler = EntitlementReceiptHandler.new(routing_failure_co
 end)
 expect(routing_failure_handler(receipt_one) == not_processed_yet and fallback_calls == 1,
 	"uncertain lifetime-product routing was not failed closed")
+
+end
 
 local second_lifetime_receipt = {
 	PurchaseId = "purchase-lifetime-2",
