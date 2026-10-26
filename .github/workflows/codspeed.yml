@@ -94,6 +94,10 @@ jobs:
         timeout-minutes: 2
         run: timeout --signal=TERM --kill-after=5s 60s lune run bench/run_maintenance_datastore_adapter_regression.luau
 
+      - name: Regression - SHA-256 known-answer vectors
+        timeout-minutes: 2
+        run: timeout --signal=TERM --kill-after=5s 60s lune run bench/run_sha256_regression.luau
+
       - name: Regression - purchase inventory manifest
         timeout-minutes: 2
         run: timeout --signal=TERM --kill-after=5s 60s lune run bench/run_purchase_inventory_manifest_regression.luau
