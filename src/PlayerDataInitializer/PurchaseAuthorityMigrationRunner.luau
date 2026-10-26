@@ -1,5 +1,6 @@
 --!strict
 local MigrationRunner = {}
+local SHA256 = require(script.Parent:WaitForChild("RecordStoreSHA256"))
 
 export type HistoricalPurchase = {
 	PurchaseId: string,
@@ -64,6 +65,7 @@ export type RunResult = {
 	expected_purchase_count: number,
 	expected_inventory_digest: string,
 	observed_inventory_digest: string,
+	digest_algorithm: string,
 	inventory_verified: boolean,
 	message: string?,
 }
@@ -79,6 +81,7 @@ type Checkpoint = {
 	expected_purchase_count: number,
 	expected_inventory_digest: string,
 	inventory_digest: string,
+	digest_algorithm: string,
 	inventory_verified: boolean,
 	pages_processed: number,
 	purchases_processed: number,
@@ -117,29 +120,26 @@ local function nonnegative_integer(value: unknown): boolean
 	return type(value) == "number" and math.isfinite(value) and value >= 0 and math.floor(value) == value
 end
 
-local CHECKPOINT_VERSION = 2
-local HASH_MODULUS = 4294967296
-local EMPTY_INVENTORY_DIGEST = "811c9dc585ebca77c2b2ae3d27d4eb2f"
+local CHECKPOINT_VERSION = 3
+local DIGEST_ALGORITHM = "sha256-chain-v1"
+local DIGEST_DOMAIN = "RecordStore purchase inventory chain v1\0"
+local EMPTY_INVENTORY_DIGEST = SHA256.digest(DIGEST_DOMAIN .. "empty\0")
 
 local function valid_digest(value: unknown): boolean
-	return type(value) == "string" and #value == 32 and string.match(value, "^[0-9a-f]+$") ~= nil
+	return type(value) == "string" and #value == 64 and string.match(value, "^[0-9a-f]+$") ~= nil
 end
 
 local function positive_integer(value: unknown): boolean
-	return type(value) == "number" and math.isfinite(value) and value >= 1 and math.floor(value) == value
+	return type(value) == "number" and math.isfinite(value) and value >= 1
+		and value <= 9007199254740991 and math.floor(value) == value
 end
 
-local function compute_inventory_digest(purchases: { HistoricalPurchase }, initial_digest: string?): (string?, string?)
-	local seed = if initial_digest == nil then EMPTY_INVENTORY_DIGEST else initial_digest
-	if not valid_digest(seed) then return nil, "starting inventory digest is malformed" end
-	local h1 = tonumber(string.sub(seed, 1, 8), 16)
-	local h2 = tonumber(string.sub(seed, 9, 16), 16)
-	local h3 = tonumber(string.sub(seed, 17, 24), 16)
-	local h4 = tonumber(string.sub(seed, 25, 32), 16)
-	if h1 == nil or h2 == nil or h3 == nil or h4 == nil then
-		return nil, "starting inventory digest is malformed"
-	end
-	local state = { h1 = h1, h2 = h2, h3 = h3, h4 = h4 }
+local function compute_inventory_digest(
+	purchases: { HistoricalPurchase },
+	initial_digest: string?
+): (string?, string?)
+	local digest = if initial_digest == nil then EMPTY_INVENTORY_DIGEST else initial_digest
+	if not valid_digest(digest) then return nil, "starting SHA-256 inventory digest is malformed" end
 	local count = #purchases
 	local seen = 0
 	for index in pairs(purchases) do
@@ -161,23 +161,18 @@ local function compute_inventory_digest(purchases: { HistoricalPurchase }, initi
 		then
 			return nil, "inventory digest row has a malformed PurchaseId, PlayerId or ProductId"
 		end
-		local material = tostring(#(purchase_id :: string)) .. ":" .. (purchase_id :: string)
+		local material = DIGEST_DOMAIN .. "row\0" .. digest .. "\0"
+			.. tostring(#(purchase_id :: string)) .. ":" .. (purchase_id :: string)
 			.. ":" .. tostring(player_id) .. ":" .. tostring(product_id) .. ";"
-		for index = 1, #material do
-			local byte = string.byte(material, index)
-			state.h1 = ((state.h1 :: number) * 33 + byte) % HASH_MODULUS
-			state.h2 = ((state.h2 :: number) * 65599 + byte) % HASH_MODULUS
-			state.h3 = ((state.h3 :: number) * 257 + byte) % HASH_MODULUS
-			state.h4 = ((state.h4 :: number) * 131071 + byte) % HASH_MODULUS
-		end
+		digest = SHA256.digest(material)
 	end
-	return string.format("%08x%08x%08x%08x",
-		state.h1, state.h2, state.h3, state.h4), nil
+	return digest, nil
 end
 
 local function copy_checkpoint(value: Checkpoint): Checkpoint
 	return {
 		version = value.version,
+		digest_algorithm = value.digest_algorithm,
 		job_id = value.job_id,
 		source_revision = value.source_revision,
 		revision = value.revision,
@@ -202,7 +197,7 @@ local function valid_checkpoint(raw: unknown, config: NormalizedConfig): (Checkp
 		if key ~= "version" and key ~= "job_id" and key ~= "source_revision"
 			and key ~= "revision" and key ~= "cursor" and key ~= "done"
 			and key ~= "inventory_manifest_id" and key ~= "expected_purchase_count"
-			and key ~= "expected_inventory_digest" and key ~= "inventory_digest" and key ~= "inventory_verified"
+			and key ~= "expected_inventory_digest" and key ~= "inventory_digest" and key ~= "digest_algorithm" and key ~= "inventory_verified"
 			and key ~= "pages_processed" and key ~= "purchases_processed"
 			and key ~= "backfilled_count" and key ~= "duplicate_count"
 		then
@@ -214,6 +209,7 @@ local function valid_checkpoint(raw: unknown, config: NormalizedConfig): (Checkp
 		or value.inventory_manifest_id ~= config.inventory_manifest_id
 		or value.expected_purchase_count ~= config.expected_purchase_count
 		or value.expected_inventory_digest ~= config.expected_inventory_digest
+		or value.digest_algorithm ~= DIGEST_ALGORITHM
 		or not valid_digest(value.inventory_digest)
 		or type(value.inventory_verified) ~= "boolean"
 		or value.inventory_verified ~= value.done
@@ -237,6 +233,7 @@ local function valid_checkpoint(raw: unknown, config: NormalizedConfig): (Checkp
 	end
 	return {
 		version = CHECKPOINT_VERSION,
+		digest_algorithm = value.digest_algorithm :: string,
 		job_id = value.job_id :: string,
 		source_revision = value.source_revision :: string,
 		revision = value.revision :: number,
@@ -265,6 +262,7 @@ local function same_checkpoint(left: Checkpoint?, right: Checkpoint): boolean
 		and left.inventory_manifest_id == right.inventory_manifest_id
 		and left.expected_purchase_count == right.expected_purchase_count
 		and left.expected_inventory_digest == right.expected_inventory_digest
+		and left.digest_algorithm == right.digest_algorithm
 		and left.inventory_digest == right.inventory_digest
 		and left.inventory_verified == right.inventory_verified
 		and left.pages_processed == right.pages_processed
@@ -307,7 +305,7 @@ local function normalize_config(value: unknown): NormalizedConfig
 	if not valid_text(fields.checkpoint_key, 50) then error("checkpoint_key must be 1 to 50 bytes", 3) end
 	if not valid_text(fields.inventory_manifest_id, 128) then error("inventory_manifest_id must be 1 to 128 bytes", 3) end
 	if not nonnegative_integer(fields.expected_purchase_count) then error("expected_purchase_count must be a non-negative integer", 3) end
-	if not valid_digest(fields.expected_inventory_digest) then error("expected_inventory_digest must be a 32-character lowercase hexadecimal digest", 3) end
+	if not valid_digest(fields.expected_inventory_digest) then error("expected_inventory_digest must be a 64-character lowercase hexadecimal SHA-256 digest", 3) end
 	if type(fields.verify_complete_inventory) ~= "function" then error("verify_complete_inventory must verify an immutable inventory manifest and digest", 3) end
 	if not valid_cursor(fields.initial_cursor) then error("initial_cursor exceeds the 512-byte cursor limit", 3) end
 	local page_size = if fields.page_size == nil then 16 else fields.page_size
@@ -348,6 +346,7 @@ function MigrationRunner.new(config: Config)
 		if raw == nil then
 			return {
 				version = CHECKPOINT_VERSION,
+				digest_algorithm = DIGEST_ALGORITHM,
 				job_id = normalized.job_id,
 				source_revision = normalized.source_revision,
 				inventory_manifest_id = normalized.inventory_manifest_id,
@@ -413,6 +412,7 @@ function MigrationRunner.new(config: Config)
 			expected_purchase_count = checkpoint.expected_purchase_count,
 			expected_inventory_digest = checkpoint.expected_inventory_digest,
 			observed_inventory_digest = checkpoint.inventory_digest,
+			digest_algorithm = checkpoint.digest_algorithm,
 			inventory_verified = checkpoint.inventory_verified,
 			message = message,
 		}
@@ -436,6 +436,7 @@ function MigrationRunner.new(config: Config)
 				expected_purchase_count = normalized.expected_purchase_count,
 				expected_inventory_digest = normalized.expected_inventory_digest,
 				observed_inventory_digest = EMPTY_INVENTORY_DIGEST,
+				digest_algorithm = DIGEST_ALGORITHM,
 				inventory_verified = false,
 				message = read_error or "migration checkpoint is unavailable",
 			}
@@ -451,6 +452,7 @@ function MigrationRunner.new(config: Config)
 			local checkpoint = read_checkpoint()
 			local safe_checkpoint = checkpoint or {
 				version = CHECKPOINT_VERSION,
+				digest_algorithm = DIGEST_ALGORITHM,
 				job_id = normalized.job_id,
 				source_revision = normalized.source_revision,
 				inventory_manifest_id = normalized.inventory_manifest_id,
@@ -474,6 +476,7 @@ function MigrationRunner.new(config: Config)
 			if checkpoint == nil then
 				local empty: Checkpoint = {
 					version = CHECKPOINT_VERSION,
+					digest_algorithm = DIGEST_ALGORITHM,
 					job_id = normalized.job_id,
 					source_revision = normalized.source_revision,
 					inventory_manifest_id = normalized.inventory_manifest_id,
@@ -595,6 +598,7 @@ function MigrationRunner.new(config: Config)
 				end
 				local next_checkpoint: Checkpoint = {
 					version = CHECKPOINT_VERSION,
+					digest_algorithm = DIGEST_ALGORITHM,
 					job_id = normalized.job_id,
 					source_revision = normalized.source_revision,
 					inventory_manifest_id = normalized.inventory_manifest_id,
@@ -617,6 +621,7 @@ function MigrationRunner.new(config: Config)
 			else
 				local next_checkpoint: Checkpoint = {
 					version = CHECKPOINT_VERSION,
+					digest_algorithm = DIGEST_ALGORITHM,
 					job_id = normalized.job_id,
 					source_revision = normalized.source_revision,
 					inventory_manifest_id = normalized.inventory_manifest_id,
@@ -643,6 +648,7 @@ function MigrationRunner.new(config: Config)
 		if checkpoint == nil then
 			local empty: Checkpoint = {
 				version = CHECKPOINT_VERSION,
+				digest_algorithm = DIGEST_ALGORITHM,
 				job_id = normalized.job_id,
 				source_revision = normalized.source_revision,
 				inventory_manifest_id = normalized.inventory_manifest_id,
@@ -667,5 +673,7 @@ function MigrationRunner.new(config: Config)
 end
 
 return table.freeze({
+	ComputeInventoryDigest = MigrationRunner.ComputeInventoryDigest,
+	DigestAlgorithm = DIGEST_ALGORITHM,
 	new = MigrationRunner.new,
 })
