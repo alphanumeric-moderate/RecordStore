@@ -490,7 +490,7 @@ local bound_rows = {
 }
 local source_verification_calls = 0
 local terminal_verification_calls = 0
-local source_reader = {}
+local source_reader = { snapshot_id = "immutable-source-snapshot-r3" }
 function source_reader:read_page(cursor, maximum)
 	expect(maximum == 2, "bound purchase runner did not preserve its configured page bound")
 	if cursor == nil then
@@ -547,9 +547,10 @@ local bound_runner_config, bound_manifest, binding_error = PurchaseManifest.bind
 		checkpoint_key = "purchase-migration:bound-r3",
 		page_size = 2,
 	},
-	function(manifest)
+	function(manifest, source)
 		source_verification_calls += 1
-		return manifest.source_snapshot_id == "immutable-source-snapshot-r3"
+		return source.snapshot_id == manifest.source_snapshot_id
+			and manifest.source_snapshot_id == "immutable-source-snapshot-r3"
 			and manifest.source_revision == "purchase-export-bound-r3"
 			and manifest.expected_purchase_count == 3
 			and manifest.expected_inventory_digest == "a578f266d343a958e0c48d5e9ff71520",
@@ -726,7 +727,10 @@ expect(PurchaseManifest.validate(unsupported_order) == nil,
 	"purchase inventory accepted an unstable order for its rolling digest")
 
 local source_checkpoint = {
+	version = 2,
+	job_id = "purchase-manifest-checkpoint-test",
 	done = true,
+	cursor = nil,
 	revision = 3,
 	source_revision = purchase_manifest.source_revision,
 	inventory_manifest_id = purchase_manifest.manifest_id,
