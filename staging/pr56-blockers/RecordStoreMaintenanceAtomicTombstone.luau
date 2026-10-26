@@ -24,6 +24,7 @@ export type Options = {
 }
 
 export type Adapter = {
+	FenceIfGeneration: (self: Adapter, store: any, item: unknown, expected_generation: number, job_id: string) -> (string, number?, string?),
 	DeleteIfGeneration: (self: Adapter, store: any, item: unknown, expected_generation: number, job_id: string) -> (string, string?),
 }
 
@@ -182,6 +183,125 @@ function AtomicTombstone.new(config: Options): Adapter
 	end
 
 	local self: any = {}
+
+	local function classify_fence_readback(
+		value: unknown,
+		key_info: any,
+		expected_generation: number,
+		job_id: string
+	): (string, number?, string?)
+		if value == nil then return "skipped", nil, "maintenance target is absent" end
+		if type(value) ~= "table" then return "unknown", nil, "observed target is not a table" end
+		local raw = value :: { [string]: unknown }
+		local current_generation = raw[generation_field]
+		if not generation(current_generation) then
+			return "unknown", nil, "observed target has no valid fencing generation"
+		end
+		if current_generation == expected_generation + 1 and raw[job_fence_field] == job_id then
+			return "fenced", expected_generation + 1, nil
+		end
+		if current_generation ~= expected_generation then
+			return "skipped", nil, "target generation changed before the maintenance fence was acquired"
+		end
+		if raw[job_fence_field] ~= nil and raw[job_fence_field] ~= job_id then
+			return "skipped", nil, "a different maintenance job owns the same-key fence"
+		end
+		local eligible, eligibility_error = callback_boolean(
+			config.is_eligible, clone(value), key_info, expected_generation, job_id
+		)
+		if not eligible then
+			return if eligibility_error == nil then "skipped" else "unknown", nil,
+				eligibility_error or "record is no longer eligible for maintenance"
+		end
+		local dependencies_clear, dependency_error = callback_boolean(
+			config.dependencies_clear, clone(value), key_info, expected_generation, job_id
+		)
+		if not dependencies_clear then
+			return if dependency_error == nil then "skipped" else "unknown", nil,
+				dependency_error or "record dependencies are not confirmed clear"
+		end
+		return "unknown", nil, "UpdateAsync did not confirm the same-key maintenance fence"
+	end
+
+	function self:FenceIfGeneration(
+		store: any,
+		item: unknown,
+		expected_generation: number,
+		job_id: string
+	): (string, number?, string?)
+		if type(store) ~= "table" and type(store) ~= "userdata" then return "unknown", nil, "target DataStore is unavailable" end
+		if type(item) ~= "table" then return "skipped", nil, "maintenance locator must be a table" end
+		if not generation(expected_generation) or expected_generation > MAX_GENERATION - 2 then
+			return "skipped", nil, "expected generation is invalid or cannot be safely fenced and tombstoned"
+		end
+		if job_id ~= config.job_id then return "skipped", nil, "job identity does not match the configured maintenance job" end
+
+		local locator = item :: { [string]: unknown }
+		local name = if type(locator.name) == "string" then locator.name else locator.store_name
+		local scope = locator.scope
+		local key = locator.key
+		if name ~= config.store_name or scope ~= config.scope or not valid_text(key, MAX_KEY_BYTES)
+			or (prefix ~= "" and string.sub(key :: string, 1, #prefix) ~= prefix)
+		then
+			return "skipped", nil, "maintenance locator is outside the configured store/scope/prefix"
+		end
+
+		local update_ok, updated_or_error = pcall(function()
+			return store:UpdateAsync(key :: string, function(current: unknown, key_info: any): unknown?
+				if type(current) ~= "table" then return nil end
+				local raw = current :: { [string]: unknown }
+				local current_generation = raw[generation_field]
+				if current_generation == expected_generation + 1 and raw[job_fence_field] == job_id then
+					return clone(current)
+				end
+				if not generation(current_generation) or current_generation ~= expected_generation then return nil end
+				if raw[job_fence_field] ~= nil and raw[job_fence_field] ~= job_id then return nil end
+
+				local eligible = callback_boolean(
+					config.is_eligible, clone(current), key_info, expected_generation, job_id
+				)
+				if not eligible then return nil end
+				local dependencies_clear = callback_boolean(
+					config.dependencies_clear, clone(current), key_info, expected_generation, job_id
+				)
+				if not dependencies_clear then return nil end
+
+				local fenced = clone(current) :: { [string]: unknown }
+				fenced[generation_field] = expected_generation + 1
+				fenced[job_fence_field] = job_id
+				if fenced[generation_field] ~= expected_generation + 1 or fenced[job_fence_field] ~= job_id then
+					return nil
+				end
+				return fenced
+			end)
+		end)
+		if update_ok then
+			local action, fenced_generation, message = classify_fence_readback(
+				updated_or_error, nil, expected_generation, job_id
+			)
+			if action == "fenced" then return action, fenced_generation, nil end
+			if action == "unknown" then
+				local readback, key_info, read_error = read_fresh(store, key :: string)
+				if read_error ~= nil then return "unknown", nil, message .. "; readback failed: " .. read_error end
+				return classify_fence_readback(readback, key_info, expected_generation, job_id)
+			end
+		end
+
+		local readback, key_info, read_error = read_fresh(store, key :: string)
+		if read_error ~= nil then
+			return "unknown", nil, "maintenance fence outcome is unresolved"
+				.. (if not update_ok then ": " .. tostring(updated_or_error) else "")
+				.. "; uncached readback failed: " .. read_error
+		end
+		local action, fenced_generation, message = classify_fence_readback(
+			readback, key_info, expected_generation, job_id
+		)
+		if action == "unknown" and not update_ok then
+			return "unknown", nil, "UpdateAsync outcome is unresolved: " .. tostring(updated_or_error)
+				.. (message and "; " .. message or "")
+		end
+		return action, fenced_generation, message
+	end
 
 	function self:DeleteIfGeneration(
 		store: any,
