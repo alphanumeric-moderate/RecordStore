@@ -2,8 +2,11 @@
 local PurchaseManifest = {}
 
 export type Checkpoint = {
+	version: number,
+	job_id: string,
 	done: boolean,
 	revision: number,
+	cursor: string?,
 	source_revision: string,
 	inventory_manifest_id: string,
 	purchases_processed: number,
@@ -217,7 +220,7 @@ end
 
 function PurchaseManifest.verify_import_source(
 	raw: unknown,
-	verify_source: ({ [string]: any }) -> (boolean, string?)
+	verify_source: ({ [string]: any }, any) -> (boolean, string?)
 ): ({ [string]: any }?, string?)
 	local manifest, validation_error = PurchaseManifest.validate(raw)
 	if manifest == nil then return nil, validation_error end
@@ -265,8 +268,13 @@ function PurchaseManifest.bind_runner_config(
 	if type(verify_terminal_inventory) ~= "function" then
 		return nil, nil, "an independent terminal inventory verifier is required"
 	end
-	local manifest, source_error = PurchaseManifest.verify_import_source(raw_manifest, verify_source)
-	if manifest == nil then return nil, nil, source_error end
+	local manifest, validation_error = PurchaseManifest.validate(raw_manifest)
+	if manifest == nil then return nil, nil, validation_error end
+	local source_call_ok, source_accepted, source_message = pcall(verify_source, manifest, bindings.source)
+	if not source_call_ok then return nil, nil, "source verifier failed: " .. tostring(source_accepted) end
+	if source_accepted ~= true then
+		return nil, nil, tostring(source_message or "immutable source binding was not independently verified")
+	end
 
 	local runner_config = {
 		job_id = bindings.job_id,
@@ -328,7 +336,8 @@ function PurchaseManifest.verify_completion(
 	local checkpoint = raw_checkpoint :: { [string]: any }
 	local completion = raw_completion :: { [string]: any }
 	if not exact_fields(completion, COMPLETION_FIELDS) then return nil, "completion evidence contains an unsupported field" end
-	if checkpoint.done ~= true or checkpoint.cursor ~= nil
+	if checkpoint.version ~= 2 or not valid_text(checkpoint.job_id, 96)
+		or checkpoint.done ~= true or checkpoint.cursor ~= nil
 		or not nonnegative_integer(checkpoint.revision) or checkpoint.revision < 1
 		or checkpoint.source_revision ~= manifest.source_revision
 		or checkpoint.inventory_manifest_id ~= manifest.manifest_id
@@ -361,8 +370,11 @@ function PurchaseManifest.verify_completion(
 	end
 	if type(verify_completion) ~= "function" then return nil, "an independent completion verifier is required" end
 	local normalized_checkpoint: Checkpoint = {
+		version = checkpoint.version,
+		job_id = checkpoint.job_id,
 		done = true,
 		revision = checkpoint.revision,
+		cursor = nil,
 		source_revision = checkpoint.source_revision,
 		inventory_manifest_id = checkpoint.inventory_manifest_id,
 		purchases_processed = checkpoint.purchases_processed,
