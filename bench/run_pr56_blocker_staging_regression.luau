@@ -750,6 +750,21 @@ local atomic_retry, atomic_retry_error = atomic_adapter:FenceAndDeleteIfGenerati
 )
 expect(atomic_retry == "deleted", atomic_retry_error or "composite fence/tombstone retry was not idempotent")
 
+local composite_store = make_atomic_store(make_atomic_profile(2, nil, true, true))
+local composite_action, composite_error = atomic_adapter:FenceAndDeleteIfGeneration(
+	composite_store, atomic_item, 2, "job-atomic-1"
+)
+expect(composite_action == "deleted",
+	composite_error or "single-call fence-and-tombstone did not acquire its fence before deletion")
+expect(composite_store.row.fencing_generation == 4
+	and composite_store.row.tombstone_source_generation == 3
+	and composite_store.row.maintenance_fence_job_id == "job-atomic-1",
+	"composite maintenance operation did not advance both fence and tombstone generations safely")
+local composite_retry = atomic_adapter:FenceAndDeleteIfGeneration(
+	composite_store, atomic_item, 2, "job-atomic-1"
+)
+expect(composite_retry == "deleted", "composite maintenance retry failed to recognize its durable tombstone")
+
 local wrong_fence_store = make_atomic_store(make_atomic_profile(4, "different-job", true, true))
 local wrong_fence_action = atomic_adapter:DeleteIfGeneration(
 	wrong_fence_store, atomic_item, 4, "job-atomic-1"
