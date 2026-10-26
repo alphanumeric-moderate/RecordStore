@@ -5,6 +5,7 @@ local Authority = Shim.environment.require(initializer:WaitForChild("PurchaseEnt
 local Coordinator = Shim.environment.require(initializer:WaitForChild("PurchaseEntitlementReceiptCoordinator"))
 local ReceiptHandler = Shim.environment.require(initializer:WaitForChild("PurchaseEntitlementReceiptHandler"))
 local Enum = Shim.environment.Enum
+local SHA256 = Shim.environment.require(initializer:WaitForChild("RecordStoreSHA256"))
 
 local function expect(value, message)
 	if not value then error(message, 2) end
@@ -140,6 +141,14 @@ local receipt = { PurchaseId = "entitlement-purchase-1", PlayerId = 4101, Produc
 local first = coordinator:Process(receipt)
 expect(first.action == "acknowledge" and first.status == "grant_committed",
 	first.message or "first lifetime entitlement did not complete")
+
+local expected_entitlement_key = "ent:" .. string.sub(
+	SHA256.digest(tostring(receipt.PlayerId) .. ":VIP_LIFETIME"), 1, 32
+)
+expect(entitlement_store.rows[expected_entitlement_key] ~= nil,
+	"lifetime entitlement authority must use the documented truncated SHA-256 key derivation")
+expect(#expected_entitlement_key <= 50,
+	"SHA-256 entitlement locator exceeded Roblox's key-length bound")
 expect(purchase_authority.rows[receipt.PurchaseId].Status == "committed"
 	and purchase_authority.rows[receipt.PurchaseId].Outcome == "granted",
 	"global PurchaseId authority was not terminally committed")
