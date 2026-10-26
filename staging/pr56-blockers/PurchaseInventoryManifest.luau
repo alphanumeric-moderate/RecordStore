@@ -3,6 +3,7 @@ local PurchaseManifest = {}
 
 export type Checkpoint = {
 	done: boolean,
+	revision: number,
 	source_revision: string,
 	inventory_manifest_id: string,
 	purchases_processed: number,
@@ -243,6 +244,7 @@ function PurchaseManifest.verify_completion(
 	if type(verify_completion) ~= "function" then return nil, "an independent completion verifier is required" end
 	local normalized_checkpoint: Checkpoint = {
 		done = true,
+		revision = checkpoint.revision,
 		source_revision = checkpoint.source_revision,
 		inventory_manifest_id = checkpoint.inventory_manifest_id,
 		purchases_processed = checkpoint.purchases_processed,
