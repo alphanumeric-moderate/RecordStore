@@ -134,6 +134,11 @@ local bad_template = valid_manifest()
 bad_template.families[1].key_template = "Player_{user_id}_{user_id}"
 expect(Manifest.validate(bad_template) == nil, "duplicate user ID placeholders were accepted")
 
+local aliased_generation_fence = valid_manifest()
+aliased_generation_fence.families[1].fence_field = aliased_generation_fence.families[1].generation_field
+expect(Manifest.validate(aliased_generation_fence) == nil,
+	"RTBF generation and fence fields were allowed to alias")
+
 local overlong_template = valid_manifest()
 overlong_template.families[1].key_template = string.rep("x", 40) .. "{user_id}"
 expect(Manifest.validate(overlong_template) == nil, "a key template that can exceed Roblox's key limit was accepted")
@@ -208,6 +213,8 @@ expect(status.code == "owned" and status.record.purchase_id == "purchase-1",
 
 local invalid_request = authority:ReserveAsync("VIP_LIFETIME", 1001, 0, "bad-product")
 expect(invalid_request.code == "invalid", "malformed product identity was not rejected")
+local unsafe_user_id = authority:ReserveAsync("VIP_LIFETIME", 9007199254740992, 501, "unsafe-user-id")
+expect(unsafe_user_id.code == "invalid", "an inexact integer identity beyond the safe range was accepted")
 local purchase_id_reuse = authority:ReserveAsync("VIP_LIFETIME", 1001, 501, "purchase-1")
 expect(purchase_id_reuse.code == "owned", "an already committed original purchase was not recognized")
 
@@ -736,6 +743,19 @@ local unmapped_decision = receipt_coordinator:Process({
 })
 expect(unmapped_decision.action == "not_applicable",
 	"lifetime coordinator intercepted a product without an entitlement mapping")
+
+local invalid_coordinator_config_ok = pcall(function()
+	EntitlementCoordinator.new({
+		purchase_authority = make_purchase_authority(),
+		entitlement_authority = receipt_entitlements,
+		entitlement_by_product_id = { [501] = "VIP_LIFETIME" },
+		grant_profile_once = function() return "granted" end,
+		verify_activation = function() return true end,
+		product_entitlement_by_id = { [501] = "VIP_LIFETIME" },
+	})
+end)
+expect(not invalid_coordinator_config_ok,
+	"coordinator silently accepted an unsupported/typoed option")
 
 local uncertain_auth = make_purchase_authority()
 local uncertain_store = make_store()
