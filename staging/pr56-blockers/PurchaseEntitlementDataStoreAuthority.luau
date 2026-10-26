@@ -38,6 +38,7 @@ export type Options = {
 	now_unix: (() -> number)?,
 	get_request_budget: ((string) -> number)?,
 	request_runner: RequestRunner?,
+	new_get_options: (() -> any)?,
 }
 
 type NormalizedOptions = {
@@ -212,6 +213,7 @@ local function normalize_options(raw: unknown): NormalizedOptions
 			and option_name ~= "key_prefix" and option_name ~= "store_adapter"
 			and option_name ~= "data_store_service" and option_name ~= "now_unix"
 			and option_name ~= "get_request_budget" and option_name ~= "request_runner"
+			and option_name ~= "new_get_options"
 		then
 			error("unsupported entitlement authority option: " .. tostring(option_name), 3)
 		end
@@ -348,7 +350,7 @@ local function result_from_row(
 	if raw == nil then return result("unknown", nil, "authoritative entitlement state could not be reconciled") end
 	local record, row_error = row_for_identity(raw, entitlement_id, player_id)
 	if record == nil then
-		local code = if string.sub(row_error or "", 1, 9) == "conflict: " then "conflict" else "corrupt"
+		local code = if string.sub(row_error or "", 1, 10) == "conflict: " then "conflict" else "corrupt"
 		return result(code, nil, row_error)
 	end
 	if operation == "status" then return result(record.status == "owned" and "owned" or "pending", record, nil) end
