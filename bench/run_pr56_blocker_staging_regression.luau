@@ -8,6 +8,9 @@ local Manifest = luau.load(fs.readFile("staging/pr56-blockers/RecordStoreApplica
 local Authority = luau.load(fs.readFile("staging/pr56-blockers/PurchaseEntitlementDataStoreAuthority.luau"), {
 	debugName = "PurchaseEntitlementDataStoreAuthority",
 })()
+local AtomicTombstone = luau.load(fs.readFile("staging/pr56-blockers/RecordStoreMaintenanceAtomicTombstone.luau"), {
+	debugName = "RecordStoreMaintenanceAtomicTombstone",
+})()
 
 local function expect(value, message)
 	if not value then error(message, 2) end
@@ -240,5 +243,179 @@ corrupt_store.rows[key_digest] = {
 }
 local collision = corrupt_authority:ReserveAsync("COLLISION", 1006, 501, "purchase-4")
 expect(collision.code == "conflict", "hashed-key identity collision did not fail closed")
+
+
+local function make_atomic_store(initial)
+	local store = {
+		row = clone(initial),
+		lose_next_response = false,
+		fail_reads = false,
+		throw_before_update = false,
+		before_update = nil,
+	}
+	function store:GetAsync(key, options)
+		expect(options ~= nil and options.UseCache == false, "atomic tombstone verification read must bypass cache")
+		if self.fail_reads then error("injected uncached read failure") end
+		return clone(self.row), { Version = "1" }
+	end
+	function store:UpdateAsync(key, transform)
+		if self.throw_before_update then error("injected failure before commit") end
+		if self.before_update ~= nil then
+			local callback = self.before_update
+			self.before_update = nil
+			callback(self)
+		end
+		local candidate = transform(clone(self.row), { Version = "1" })
+		if candidate ~= nil then self.row = clone(candidate) end
+		if self.lose_next_response then
+			self.lose_next_response = false
+			error("injected response loss after tombstone commit")
+		end
+		return clone(self.row), { Version = "2" }
+	end
+	return store
+end
+
+local function make_atomic_adapter(overrides)
+	local options = {
+		store_name = "Profiles",
+		scope = "global",
+		key_prefix = "Player_",
+		job_id = "job-atomic-1",
+		generation_field = "fencing_generation",
+		job_fence_field = "maintenance_fence_job_id",
+		new_get_options = function() return { UseCache = true } end,
+		now_unix = function() return 1792951000 end,
+		is_eligible = function(value)
+			return type(value) == "table" and value.eligible == true
+		end,
+		dependencies_clear = function(value)
+			return type(value) == "table" and value.dependencies_clear == true
+		end,
+		make_tombstone = function(value, _info, expected_generation, job_id, now)
+			return {
+				fencing_generation = expected_generation + 1,
+				maintenance_fence_job_id = job_id,
+				tombstone = true,
+				tombstone_job_id = job_id,
+				tombstone_source_generation = expected_generation,
+				tombstoned_at = now,
+				payload = value.payload,
+			}
+		end,
+		is_tombstone = function(value, expected_generation, job_id)
+			return type(value) == "table"
+				and value.tombstone == true
+				and value.tombstone_job_id == job_id
+				and value.tombstone_source_generation == expected_generation
+				and value.fencing_generation == expected_generation + 1
+				and value.maintenance_fence_job_id == job_id
+		end,
+	}
+	for key, value in pairs(overrides or {}) do options[key] = value end
+	return AtomicTombstone.new(options)
+end
+
+local function make_atomic_profile(generation, job_id, eligible, dependencies_clear)
+	return {
+		fencing_generation = generation,
+		maintenance_fence_job_id = job_id,
+		eligible = eligible,
+		dependencies_clear = dependencies_clear,
+		payload = { coins = 100, flags = { keep = true } },
+	}
+end
+
+local atomic_item = { name = "Profiles", scope = "global", key = "Player_1" }
+local atomic_adapter = make_atomic_adapter()
+local atomic_store = make_atomic_store(make_atomic_profile(4, "job-atomic-1", true, true))
+local atomic_action, atomic_error = atomic_adapter:DeleteIfGeneration(
+	atomic_store, atomic_item, 4, "job-atomic-1"
+)
+expect(atomic_action == "deleted", atomic_error or "same-key fenced tombstone did not commit")
+expect(atomic_store.row.fencing_generation == 5
+	and atomic_store.row.maintenance_fence_job_id == "job-atomic-1"
+	and atomic_store.row.tombstone_source_generation == 4,
+	"tombstone did not advance the generation and retain the same-key job fence")
+expect(atomic_store.row.payload.coins == 100 and atomic_store.row.payload.flags.keep == true,
+	"tombstone callback did not preserve its explicitly retained payload")
+
+local atomic_retry, atomic_retry_error = atomic_adapter:DeleteIfGeneration(
+	atomic_store, atomic_item, 4, "job-atomic-1"
+)
+expect(atomic_retry == "deleted", atomic_retry_error or "tombstone response-loss retry was not idempotent")
+
+local wrong_fence_store = make_atomic_store(make_atomic_profile(4, "different-job", true, true))
+local wrong_fence_action = atomic_adapter:DeleteIfGeneration(
+	wrong_fence_store, atomic_item, 4, "job-atomic-1"
+)
+expect(wrong_fence_action == "skipped" and wrong_fence_store.row.tombstone ~= true,
+	"a foreign same-key job fence did not block deletion")
+
+local stale_generation_store = make_atomic_store(make_atomic_profile(4, "job-atomic-1", true, true))
+stale_generation_store.before_update = function(store)
+	store.row.fencing_generation = 5
+	store.row.payload.coins = 999
+end
+local stale_generation_action = atomic_adapter:DeleteIfGeneration(
+	stale_generation_store, atomic_item, 4, "job-atomic-1"
+)
+expect(stale_generation_action == "skipped" and stale_generation_store.row.payload.coins == 999
+	and stale_generation_store.row.tombstone ~= true,
+	"a concurrent generation change was overwritten by a stale deletion")
+
+local ineligible_store = make_atomic_store(make_atomic_profile(4, "job-atomic-1", false, true))
+local ineligible_action = atomic_adapter:DeleteIfGeneration(ineligible_store, atomic_item, 4, "job-atomic-1")
+expect(ineligible_action == "skipped" and ineligible_store.row.tombstone ~= true,
+	"a record that was not eligible was tombstoned")
+
+local dependent_store = make_atomic_store(make_atomic_profile(4, "job-atomic-1", true, false))
+local dependent_action = atomic_adapter:DeleteIfGeneration(dependent_store, atomic_item, 4, "job-atomic-1")
+expect(dependent_action == "skipped" and dependent_store.row.tombstone ~= true,
+	"a record with unresolved dependencies was tombstoned")
+
+local lost_response_store = make_atomic_store(make_atomic_profile(4, "job-atomic-1", true, true))
+lost_response_store.lose_next_response = true
+local lost_response_action, lost_response_error = atomic_adapter:DeleteIfGeneration(
+	lost_response_store, atomic_item, 4, "job-atomic-1"
+)
+expect(lost_response_action == "deleted", lost_response_error or "tombstone commit response loss was not reconciled")
+
+local unavailable_store = make_atomic_store(make_atomic_profile(4, "job-atomic-1", true, true))
+unavailable_store.throw_before_update = true
+unavailable_store.fail_reads = true
+local unavailable_action = atomic_adapter:DeleteIfGeneration(
+	unavailable_store, atomic_item, 4, "job-atomic-1"
+)
+expect(unavailable_action == "unknown" and unavailable_store.row.tombstone ~= true,
+	"unreconciled storage errors were not reported as unknown")
+
+local malformed_tombstone_adapter = make_atomic_adapter({
+	make_tombstone = function(value, _info, _expected_generation, _job_id, _now)
+		return clone(value)
+	end,
+})
+local malformed_tombstone_store = make_atomic_store(make_atomic_profile(4, "job-atomic-1", true, true))
+local malformed_tombstone_action = malformed_tombstone_adapter:DeleteIfGeneration(
+	malformed_tombstone_store, atomic_item, 4, "job-atomic-1"
+)
+expect(malformed_tombstone_action == "unknown" and malformed_tombstone_store.row.tombstone ~= true,
+	"a malformed tombstone lacking the next generation was committed")
+
+local outside_prefix_action = atomic_adapter:DeleteIfGeneration(
+	make_atomic_store(make_atomic_profile(4, "job-atomic-1", true, true)),
+	{ name = "Profiles", scope = "global", key = "Other_1" },
+	4,
+	"job-atomic-1"
+)
+expect(outside_prefix_action == "skipped", "same-key deletion accepted an out-of-prefix locator")
+
+local wrong_job_action = atomic_adapter:DeleteIfGeneration(
+	make_atomic_store(make_atomic_profile(4, "job-atomic-1", true, true)),
+	atomic_item,
+	4,
+	"other-job"
+)
+expect(wrong_job_action == "skipped", "same-key deletion accepted a different job identity")
 
 print("PR56 staged blocker regression checks passed")
