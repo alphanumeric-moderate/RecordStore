@@ -98,11 +98,6 @@ local function text(value: unknown, maximum: number, allow_empty: boolean?): boo
 		and string.find(value, "%c") == nil
 end
 
-local function positive_integer(value: unknown): boolean
-	return type(value) == "number" and math.isfinite(value)
-		and value >= 1 and value <= MAX_INTEGER and math.floor(value) == value
-end
-
 local function generation(value: unknown): boolean
 	return type(value) == "number" and math.isfinite(value)
 		and value >= 0 and value <= MAX_INTEGER and math.floor(value) == value
@@ -381,7 +376,7 @@ function Binder.bind(
 		local function read_generation(value: unknown): number?
 			if type(value) ~= "table" then return nil end
 			local candidate = (value :: { [string]: unknown })[family.generation_field]
-			return if generation(candidate) then candidate else nil
+			return if generation(candidate) then candidate :: number else nil
 		end
 		local function inspect(key: string, value: unknown, key_info: any): ({ [string]: any }?, string?)
 			if type(value) ~= "table" then return nil, "record is not a table" end
