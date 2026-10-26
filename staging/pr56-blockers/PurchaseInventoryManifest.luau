@@ -210,8 +210,11 @@ function PurchaseManifest.verify_completion(
 	local completion = raw_completion :: { [string]: any }
 	if not exact_fields(completion, COMPLETION_FIELDS) then return nil, "completion evidence contains an unsupported field" end
 	if checkpoint.done ~= true
+		or not nonnegative_integer(checkpoint.revision)
 		or checkpoint.source_revision ~= manifest.source_revision
 		or checkpoint.inventory_manifest_id ~= manifest.manifest_id
+		or checkpoint.expected_purchase_count ~= manifest.expected_purchase_count
+		or checkpoint.expected_inventory_digest ~= manifest.expected_inventory_digest
 		or checkpoint.purchases_processed ~= manifest.expected_purchase_count
 		or checkpoint.inventory_digest ~= manifest.expected_inventory_digest
 		or checkpoint.inventory_verified ~= true
@@ -223,6 +226,7 @@ function PurchaseManifest.verify_completion(
 		or completion.observed_purchase_count ~= manifest.expected_purchase_count
 		or completion.observed_inventory_digest ~= manifest.expected_inventory_digest
 		or not nonnegative_integer(completion.checkpoint_revision)
+		or completion.checkpoint_revision ~= checkpoint.revision
 	then
 		return nil, "completion evidence does not reconcile to the reviewed source inventory"
 	end
