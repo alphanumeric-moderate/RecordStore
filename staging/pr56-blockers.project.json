@@ -1,0 +1,12 @@
+{
+  "name": "RecordStorePR56BlockerCandidates",
+  "tree": {
+    "$className": "DataModel",
+    "ServerScriptService": {
+      "$className": "ServerScriptService",
+      "PR56BlockerCandidates": {
+        "$path": "staging/pr56-blockers"
+      }
+    }
+  }
+}
