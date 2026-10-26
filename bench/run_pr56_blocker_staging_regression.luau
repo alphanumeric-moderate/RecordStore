@@ -4,9 +4,14 @@ local luau = require("@lune/luau")
 local Shim = require("./RobloxShim")
 local CoreRecordStore = Shim.load()
 local server_script_service = Shim.environment.game:GetService("ServerScriptService")
-local v2_module_instance = server_script_service:WaitForChild("PlayerDataInitializer"):WaitForChild("RecordStoreV2")
+local player_data_initializer = server_script_service:WaitForChild("PlayerDataInitializer")
+local v2_module_instance = player_data_initializer:WaitForChild("RecordStoreV2")
 local RecordStoreV2Factory = Shim.environment.require(v2_module_instance)
 local RecordStoreV2 = RecordStoreV2Factory.new(CoreRecordStore, CoreRecordStore.MailboxV2)
+local sha256_instance = player_data_initializer:WaitForChild("RecordStoreSHA256")
+local SHA256 = Shim.environment.require(sha256_instance)
+local migration_runner_instance = player_data_initializer:WaitForChild("PurchaseAuthorityMigrationRunner")
+local MigrationRunner = Shim.environment.require(migration_runner_instance)
 
 local Manifest = luau.load(fs.readFile("staging/pr56-blockers/RecordStoreApplicationInventory.luau"), {
 	debugName = "RecordStoreApplicationInventory",
@@ -23,9 +28,6 @@ local AtomicTombstone = luau.load(fs.readFile("staging/pr56-blockers/RecordStore
 local PurchaseManifest = luau.load(fs.readFile("staging/pr56-blockers/PurchaseInventoryManifest.luau"), {
 	debugName = "PurchaseInventoryManifest",
 })()
-local MigrationRunner = luau.load(fs.readFile("src/PlayerDataInitializer/PurchaseAuthorityMigrationRunner.luau"), {
-	debugName = "PurchaseAuthorityMigrationRunner",
-})()
 local EntitlementCoordinator = luau.load(fs.readFile("staging/pr56-blockers/PurchaseEntitlementReceiptCoordinator.luau"), {
 	debugName = "PurchaseEntitlementReceiptCoordinator",
 })()
@@ -33,6 +35,14 @@ local EntitlementCoordinator = luau.load(fs.readFile("staging/pr56-blockers/Purc
 local function expect(value, message)
 	if not value then error(message, 2) end
 end
+
+expect(SHA256.digest("") == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+	"SHA-256 empty-message vector did not match the standard result")
+expect(SHA256.digest("abc") == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+	"SHA-256 abc vector did not match the standard result")
+expect(SHA256.digest("The quick brown fox jumps over the lazy dog")
+	== "d7a8fbb307d7809469ca9abcb0082e4f8d5651e46d3cdb762d02d0bf37c9e592",
+	"SHA-256 multi-block padding vector did not match the standard result")
 
 local function clone(value)
 	if type(value) ~= "table" then return value end
@@ -876,7 +886,8 @@ local function valid_purchase_manifest()
 		legacy_receipt_paths = { "legacy-dev-product-receipts" },
 		row_order = "purchase_id_asc_player_id_asc_product_id_asc",
 		expected_purchase_count = 2,
-		expected_inventory_digest = string.rep("c", 32),
+		expected_inventory_digest = string.rep("c", 64),
+		digest_algorithm = "sha256-chain-v1",
 		exported_at_unix = 1792950000,
 		review_status = "approved",
 		reviewed_by = "independent-reviewer",
@@ -895,12 +906,14 @@ local bound_manifest_raw = valid_purchase_manifest()
 bound_manifest_raw.source_revision = "purchase-export-bound-r3"
 bound_manifest_raw.source_snapshot_id = "immutable-source-snapshot-r3"
 bound_manifest_raw.expected_purchase_count = 3
-bound_manifest_raw.expected_inventory_digest = "a578f266d343a958e0c48d5e9ff71520"
 local bound_rows = {
 	{ PurchaseId = "purchase-bound-001", PlayerId = 2001, ProductId = 501 },
 	{ PurchaseId = "purchase-bound-002", PlayerId = 2002, ProductId = 501 },
 	{ PurchaseId = "purchase-bound-003", PlayerId = 2003, ProductId = 501 },
 }
+local bound_digest, bound_digest_error = MigrationRunner.ComputeInventoryDigest(bound_rows)
+expect(bound_digest ~= nil, bound_digest_error or "could not compute SHA-256 chain digest for bound purchase fixture")
+bound_manifest_raw.expected_inventory_digest = bound_digest :: string
 local source_verification_calls = 0
 local terminal_verification_calls = 0
 local source_reader = { snapshot_id = "immutable-source-snapshot-r3" }
@@ -966,7 +979,7 @@ local bound_runner_config, bound_manifest, binding_error = PurchaseManifest.bind
 			and manifest.source_snapshot_id == "immutable-source-snapshot-r3"
 			and manifest.source_revision == "purchase-export-bound-r3"
 			and manifest.expected_purchase_count == 3
-			and manifest.expected_inventory_digest == "a578f266d343a958e0c48d5e9ff71520",
+			and manifest.expected_inventory_digest == bound_manifest_raw.expected_inventory_digest,
 			"immutable source snapshot did not reconcile"
 	end,
 	function(manifest, manifest_id, source_revision, expected_count, observed_count, expected_digest, observed_digest)
@@ -975,8 +988,8 @@ local bound_runner_config, bound_manifest, binding_error = PurchaseManifest.bind
 			and manifest.source_revision == source_revision
 			and expected_count == 3
 			and observed_count == 3
-			and expected_digest == "a578f266d343a958e0c48d5e9ff71520"
-			and observed_digest == "a578f266d343a958e0c48d5e9ff71520",
+			and expected_digest == bound_manifest_raw.expected_inventory_digest
+			and observed_digest == bound_manifest_raw.expected_inventory_digest,
 			"terminal inventory evidence did not match the immutable manifest"
 	end
 )
@@ -987,7 +1000,7 @@ expect(bound_manifest.manifest_id == bound_manifest_raw.manifest_id
 	and bound_runner_config.source_revision == bound_manifest_raw.source_revision
 	and bound_runner_config.inventory_manifest_id == bound_manifest_raw.manifest_id
 	and bound_runner_config.expected_purchase_count == 3
-	and bound_runner_config.expected_inventory_digest == "a578f266d343a958e0c48d5e9ff71520",
+	and bound_runner_config.expected_inventory_digest == bound_manifest_raw.expected_inventory_digest,
 	"bound runner config did not derive immutable inventory values from the reviewed manifest")
 expect(source_verification_calls == 1, "immutable source verifier did not run exactly once before migration")
 
@@ -1140,7 +1153,8 @@ expect(PurchaseManifest.validate(unsupported_order) == nil,
 	"purchase inventory accepted an unstable order for its rolling digest")
 
 local source_checkpoint = {
-	version = 2,
+	version = 3,
+	digest_algorithm = "sha256-chain-v1",
 	job_id = "purchase-manifest-checkpoint-test",
 	done = true,
 	cursor = nil,
