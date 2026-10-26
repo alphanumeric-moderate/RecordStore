@@ -268,7 +268,25 @@ local function process_receipt(options: NormalizedOptions, raw_receipt: unknown)
 		return decision("defer", "purchase_conflict", "purchase identity authority returned " .. purchase.Status)
 	end
 	if purchase.Status == "committed" then
-		return decision("acknowledge", "purchase_already_committed", nil)
+		local entitlement, entitlement_error = read_entitlement_status(options, entitlement_id, receipt)
+		if entitlement == nil then
+			return decision("defer", "purchase_committed_entitlement_unverified", entitlement_error)
+		end
+		local owner = entitlement.record
+		if entitlement.code ~= "owned" or type(owner) ~= "table" or owner.status ~= "owned" then
+			return decision(
+				"defer",
+				"purchase_committed_entitlement_unverified",
+				"committed PurchaseId has no reconciled durable lifetime entitlement"
+			)
+		end
+		if owner.purchase_id == receipt.PurchaseId then
+			if owner.product_id ~= receipt.ProductId then
+				return decision("defer", "entitlement_conflict", "owned entitlement PurchaseId is bound to another product")
+			end
+			return decision("acknowledge", "entitlement_already_committed", nil)
+		end
+		return decision("acknowledge", "lifetime_entitlement_already_owned", nil)
 	end
 	if purchase.Status ~= "claimed" then return decision("defer", "purchase_state_unknown", nil) end
 
