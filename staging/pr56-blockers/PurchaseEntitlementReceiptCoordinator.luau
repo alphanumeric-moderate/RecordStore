@@ -284,11 +284,14 @@ local function process_receipt(options: NormalizedOptions, raw_receipt: unknown)
 		end
 		local identity_ok, identity_error = entitlement_matches(owner, entitlement_id, receipt)
 		if not identity_ok then return decision("defer", "entitlement_conflict", identity_error) end
-		if (entitlement_code == "already_owned" or entitlement_code == "owned") and owner.status ~= "owned" then
-			return decision("defer", "entitlement_state_unknown", "owned entitlement status conflicts with the durable row")
-		end
-		if (entitlement_code == "claimed" or entitlement_code == "pending") and owner.status ~= "pending" then
-			return decision("defer", "entitlement_state_unknown", "pending entitlement status conflicts with the durable row")
+		if entitlement_code == "already_owned" or entitlement_code == "owned" then
+			if owner.status ~= "owned" then
+				return decision("defer", "entitlement_state_unknown", "owned entitlement status conflicts with the durable row")
+			end
+		elseif entitlement_code == "claimed" or entitlement_code == "pending" then
+			if owner.status ~= "pending" then
+				return decision("defer", "entitlement_state_unknown", "pending entitlement status conflicts with the durable row")
+			end
 		end
 	end
 
