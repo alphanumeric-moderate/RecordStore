@@ -191,7 +191,9 @@ function AtomicTombstone.new(config: Options): Adapter
 	): (string, string?)
 		if type(store) ~= "table" and type(store) ~= "userdata" then return "unknown", "target DataStore is unavailable" end
 		if type(item) ~= "table" then return "skipped", "maintenance locator must be a table" end
-		if not generation(expected_generation) then return "skipped", "expected generation is invalid" end
+		if not generation(expected_generation) or expected_generation >= MAX_GENERATION then
+			return "skipped", "expected generation is invalid or cannot be advanced safely"
+		end
 		if job_id ~= config.job_id then return "skipped", "job identity does not match the configured maintenance job" end
 
 		local locator = item :: { [string]: unknown }
@@ -218,16 +220,16 @@ function AtomicTombstone.new(config: Options): Adapter
 				if not generation(current_generation) or current_generation ~= expected_generation then return nil end
 				if raw[job_fence_field] ~= job_id then return nil end
 
-				local snapshot = clone(current)
 				local eligible = callback_boolean(
-					config.is_eligible, snapshot, key_info, expected_generation, job_id
+					config.is_eligible, clone(current), key_info, expected_generation, job_id
 				)
 				if not eligible then return nil end
 				local dependencies_clear = callback_boolean(
-					config.dependencies_clear, snapshot, key_info, expected_generation, job_id
+					config.dependencies_clear, clone(current), key_info, expected_generation, job_id
 				)
 				if not dependencies_clear then return nil end
 
+				local snapshot = clone(current)
 				local tombstone_ok, tombstone = invoke_pure(
 					config.make_tombstone, snapshot, key_info, expected_generation, job_id, now
 				)
