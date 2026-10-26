@@ -5,6 +5,9 @@ local luau = require("@lune/luau")
 local Manifest = luau.load(fs.readFile("staging/pr56-blockers/RecordStoreApplicationInventory.luau"), {
 	debugName = "RecordStoreApplicationInventory",
 })()
+local ErasureBinding = luau.load(fs.readFile("staging/pr56-blockers/PlayerDataErasureManifestBinding.luau"), {
+	debugName = "PlayerDataErasureManifestBinding",
+})()
 local Authority = luau.load(fs.readFile("staging/pr56-blockers/PurchaseEntitlementDataStoreAuthority.luau"), {
 	debugName = "PurchaseEntitlementDataStoreAuthority",
 })()
@@ -118,6 +121,171 @@ local not_live_ready = Manifest.verify_for_activation(awaiting_live_acceptance, 
 	return true
 end)
 expect(not_live_ready == nil, "activation bypassed the live Roblox acceptance gate")
+
+local erasure_runtime = {
+	verify_templates = function(user_id, rendered)
+		return user_id > 0 and type(rendered) == "table" and #rendered == 1
+	end,
+}
+local erasure_attestation_calls = 0
+local erasure_config, erasure_manifest, erasure_bind_error = ErasureBinding.bind(
+	Manifest,
+	valid_manifest(),
+	erasure_runtime,
+	{},
+	function(verified_manifest, family_adapters, runtime_options)
+		erasure_attestation_calls += 1
+		return verified_manifest.manifest_id == "rtbf-inventory-2026-10-26"
+			and #family_adapters == 0
+			and runtime_options.verify_templates == erasure_runtime.verify_templates,
+			"RTBF runtime attestation failed"
+	end
+)
+expect(erasure_config ~= nil, erasure_bind_error or "reviewed RTBF manifest did not bind to PlayerDataErasure")
+expect(erasure_manifest.manifest_id == "rtbf-inventory-2026-10-26"
+	and erasure_config.profile_store_name == "PlayerData_Test1"
+	and erasure_config.profile_scope == "global"
+	and erasure_config.key_prefix == "Player_"
+	and erasure_config.profile_family_verified == true
+	and erasure_config.writer_inventory_verified == true
+	and erasure_config.application_inventory_manifest_id == erasure_manifest.manifest_id,
+	"bound PlayerDataErasure options did not derive their profile identity and attestations from the reviewed manifest")
+expect(erasure_attestation_calls == 1
+	and table.isfrozen(erasure_config)
+	and table.isfrozen(erasure_config.additional_families),
+	"RTBF erasure config was not verified once and frozen")
+
+local override_verifier_called = false
+local unsafe_erasure_override = ErasureBinding.bind(
+	Manifest,
+	valid_manifest(),
+	{
+		profile_store_name = "UnreviewedOverride",
+		verify_templates = erasure_runtime.verify_templates,
+	},
+	{},
+	function()
+		override_verifier_called = true
+		return true
+	end
+)
+expect(unsafe_erasure_override == nil and not override_verifier_called,
+	"erasure binding allowed an unreviewed profile identity override")
+
+local external_profile_verifier_called = false
+local external_profile_binding = ErasureBinding.bind(
+	Manifest,
+	external_inventory_manifest,
+	erasure_runtime,
+	{},
+	function()
+		external_profile_verifier_called = true
+		return true
+	end
+)
+expect(external_profile_binding == nil and not external_profile_verifier_called,
+	"external inventory without exact templates was bound to the template-based erasure coordinator")
+
+local manifest_with_sidecar = valid_manifest()
+manifest_with_sidecar.families[2] = {
+	id = "player-sidecar",
+	store_name = "PlayerSidecars",
+	scope = "global",
+	locator_mode = "user_id_template",
+	key_template = "Sidecar_{user_id}",
+	generation_field = "generation",
+	fence_field = "erasure_fence",
+	action = "redact",
+	writer_ids = { "player-sidecar-writer" },
+	evidence_ref = "evidence:player-sidecar-inventory",
+}
+manifest_with_sidecar.writers[2] = {
+	id = "player-sidecar-writer",
+	source_path = "src/PlayerSidecar.luau",
+	family_ids = { "player-sidecar" },
+	fence_mode = "same_key_update_async",
+	fence_evidence_ref = "evidence:player-sidecar-writer-fence",
+}
+local sidecar_adapter = {
+	family_id = "player-sidecar",
+	action = "redact",
+	inventory = function()
+		return {}, true
+	end,
+	fence_user = function()
+		return true, nil
+	end,
+	dependencies_clear = function()
+		return true, nil
+	end,
+	redact_or_delete_if_generation = function()
+		return "redacted", nil
+	end,
+}
+local sidecar_config, sidecar_manifest, sidecar_bind_error = ErasureBinding.bind(
+	Manifest,
+	manifest_with_sidecar,
+	{
+		verify_templates = function(user_id, rendered)
+			return user_id > 0 and #rendered == 2
+		end,
+	},
+	{ sidecar_adapter },
+	function(verified_manifest, family_adapters)
+		return verified_manifest.families[2].id == "player-sidecar"
+			and #family_adapters == 1
+			and family_adapters[1].family_id == "player-sidecar",
+			"sidecar writer/family binding failed review"
+	end
+)
+expect(sidecar_config ~= nil,
+	sidecar_bind_error or "reviewed static-template sidecar did not bind")
+expect(sidecar_manifest.manifest_id == manifest_with_sidecar.manifest_id
+	and #sidecar_config.additional_families == 1
+	and sidecar_config.additional_families[1].name == "player-sidecar"
+	and sidecar_config.additional_families[1].templates[1].name == "PlayerSidecars"
+	and sidecar_config.additional_families[1].templates[1].key == "Sidecar_{user_id}"
+	and sidecar_config.additional_families[1].templates_verified == true,
+	"RTBF sidecar config did not preserve exact manifest templates and callbacks")
+expect(table.isfrozen(sidecar_config.additional_families[1])
+	and table.isfrozen(sidecar_config.additional_families[1].templates[1]),
+	"bound RTBF sidecar adapter is mutable")
+
+local missing_sidecar_verifier_called = false
+local missing_sidecar_config = ErasureBinding.bind(
+	Manifest,
+	manifest_with_sidecar,
+	{
+		verify_templates = erasure_runtime.verify_templates,
+	},
+	{},
+	function()
+		missing_sidecar_verifier_called = true
+		return true
+	end
+)
+expect(missing_sidecar_config == nil and not missing_sidecar_verifier_called,
+	"RTBF manifest with an unbound key family reached the activation verifier")
+
+local mismatched_sidecar_action = ErasureBinding.bind(
+	Manifest,
+	manifest_with_sidecar,
+	{ verify_templates = erasure_runtime.verify_templates },
+	{ {
+		family_id = "player-sidecar",
+		action = "tombstone",
+		inventory = sidecar_adapter.inventory,
+		fence_user = sidecar_adapter.fence_user,
+		dependencies_clear = sidecar_adapter.dependencies_clear,
+		redact_or_delete_if_generation = sidecar_adapter.redact_or_delete_if_generation,
+	} },
+	function()
+		return true
+	end
+)
+expect(mismatched_sidecar_action == nil,
+	"RTBF erasure adapter action did not match the reviewed manifest")
+
 
 local verifier_called = false
 local incomplete = valid_manifest()
