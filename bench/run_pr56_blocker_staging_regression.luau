@@ -33,6 +33,7 @@ local EntitlementCoordinator = luau.load(fs.readFile("staging/pr56-blockers/Purc
 })()
 local EntitlementReceiptHandler = luau.load(fs.readFile("staging/pr56-blockers/PurchaseEntitlementReceiptHandler.luau"), {
 	debugName = "PurchaseEntitlementReceiptHandler",
+	environment = Shim.environment,
 })()
 
 local function expect(value, message)
