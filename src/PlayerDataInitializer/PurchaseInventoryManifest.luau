@@ -14,6 +14,9 @@ export type Checkpoint = {
 	inventory_digest: string,
 	expected_inventory_digest: string,
 	digest_algorithm: string,
+	last_purchase_id: string?,
+	last_player_id: number?,
+	last_product_id: number?,
 	inventory_verified: boolean,
 }
 
@@ -102,6 +105,22 @@ end
 
 local function positive_timestamp(value: unknown): boolean
 	return type(value) == "number" and math.isfinite(value) and value > 0
+end
+
+local function valid_checkpoint_last_tuple(
+	processed_count: unknown,
+	purchase_id: unknown,
+	player_id: unknown,
+	product_id: unknown
+): boolean
+	if not nonnegative_integer(processed_count) then return false end
+	if processed_count == 0 then
+		return purchase_id == nil and player_id == nil and product_id == nil
+	end
+	return valid_text(purchase_id, 247)
+		and string.find(purchase_id :: string, "%c") == nil
+		and nonnegative_integer(player_id) and (player_id :: number) > 0
+		and nonnegative_integer(product_id) and (product_id :: number) > 0
 end
 
 local function valid_digest(value: unknown): boolean
@@ -342,7 +361,7 @@ function PurchaseManifest.verify_completion(
 	local checkpoint = raw_checkpoint :: { [string]: any }
 	local completion = raw_completion :: { [string]: any }
 	if not exact_fields(completion, COMPLETION_FIELDS) then return nil, "completion evidence contains an unsupported field" end
-	if checkpoint.version ~= 3 or checkpoint.digest_algorithm ~= manifest.digest_algorithm
+	if checkpoint.version ~= 4 or checkpoint.digest_algorithm ~= manifest.digest_algorithm
 		or not valid_text(checkpoint.job_id, 96)
 		or checkpoint.done ~= true or checkpoint.cursor ~= nil
 		or not nonnegative_integer(checkpoint.revision) or checkpoint.revision < 1
@@ -351,6 +370,7 @@ function PurchaseManifest.verify_completion(
 		or checkpoint.expected_purchase_count ~= manifest.expected_purchase_count
 		or checkpoint.expected_inventory_digest ~= manifest.expected_inventory_digest
 		or checkpoint.purchases_processed ~= manifest.expected_purchase_count
+		or not valid_checkpoint_last_tuple(checkpoint.purchases_processed, checkpoint.last_purchase_id, checkpoint.last_player_id, checkpoint.last_product_id)
 		or checkpoint.inventory_digest ~= manifest.expected_inventory_digest
 		or checkpoint.inventory_verified ~= true
 	then
@@ -388,6 +408,9 @@ function PurchaseManifest.verify_completion(
 		expected_purchase_count = manifest.expected_purchase_count,
 		inventory_digest = checkpoint.inventory_digest,
 		expected_inventory_digest = manifest.expected_inventory_digest,
+		last_purchase_id = checkpoint.last_purchase_id :: string?,
+		last_player_id = checkpoint.last_player_id :: number?,
+		last_product_id = checkpoint.last_product_id :: number?,
 		digest_algorithm = checkpoint.digest_algorithm,
 		inventory_verified = true,
 	}

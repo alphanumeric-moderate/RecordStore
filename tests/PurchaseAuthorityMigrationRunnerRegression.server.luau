@@ -334,7 +334,7 @@ do
 	}, "snapshot-terminal-cursor", calls)
 	local job_id = "historical-import-terminal-cursor"
 	backing.values["purchase-migration:" .. job_id] = {
-		version = 3,
+		version = 4,
 		digest_algorithm = "sha256-chain-v1",
 		job_id = job_id,
 		source_revision = source.source_revision,
@@ -350,6 +350,9 @@ do
 		purchases_processed = source.inventory_count,
 		backfilled_count = source.inventory_count,
 		duplicate_count = 0,
+		last_purchase_id = "terminal-cursor-001",
+		last_player_id = 123,
+		last_product_id = 1001,
 	}
 	local processor = make_processor()
 	local runner = new_runner(job_id, source, processor, backing)
@@ -370,7 +373,7 @@ do
 	}, "snapshot-revision-zero", calls)
 	local job_id = "historical-import-revision-zero"
 	backing.values["purchase-migration:" .. job_id] = {
-		version = 3,
+		version = 4,
 		digest_algorithm = "sha256-chain-v1",
 		job_id = job_id,
 		source_revision = source.source_revision,
@@ -386,6 +389,9 @@ do
 		purchases_processed = source.inventory_count,
 		backfilled_count = source.inventory_count,
 		duplicate_count = 0,
+		last_purchase_id = "revision-zero-001",
+		last_player_id = 123,
+		last_product_id = 1001,
 	}
 	local runner = new_runner(job_id, source, make_processor(), backing)
 	local status = runner:GetStatusAsync()
@@ -424,3 +430,59 @@ do
 	expect(run.code == "unknown" and calls.count == 0,
 		"runner read source data after rejecting a mismatched durable checkpoint")
 end
+
+
+-- Unsorted rows within a page are rejected before any import or checkpoint write.
+do
+	local calls = { count = 0 }
+	local backing = make_checkpoint_store()
+	local source = make_source({
+		["<initial>"] = page({ purchase("z-order-001"), purchase("a-order-001") }, nil, true),
+	}, "snapshot-unsorted-page", calls)
+	local processor = make_processor()
+	local runner = new_runner("historical-import-unsorted-page", source, processor, backing)
+	local result = runner:RunBatchAsync(1)
+	expect(result.code == "invalid" and result.purchases_processed == 0,
+		"out-of-order purchases within a page were accepted")
+	expect(processor.calls == 0 and backing.values["purchase-migration:historical-import-unsorted-page"] == nil,
+		"unsorted page caused an import or checkpoint write")
+end
+
+-- The last verified row survives checkpoints so resumed pages preserve global ordering.
+do
+	local calls = { count = 0 }
+	local backing = make_checkpoint_store()
+	local source = make_source({
+		["<initial>"] = page({ purchase("purchase-z") }, "page-2", false),
+		["page-2"] = page({ purchase("purchase-a") }, nil, true),
+	}, "snapshot-cross-page-order", calls)
+	local processor = make_processor()
+	local runner = new_runner("historical-import-cross-page-order", source, processor, backing)
+	local first = runner:RunBatchAsync(1)
+	expect(first.code == "incomplete" and first.cursor == "page-2",
+		"first page did not produce a resumable checkpoint")
+	local saved = backing.values["purchase-migration:historical-import-cross-page-order"]
+	expect(saved ~= nil and saved.last_purchase_id == "purchase-z"
+		and saved.last_player_id == 123 and saved.last_product_id == 1001,
+		"checkpoint did not persist the last verified ordering tuple")
+	local second = runner:RunBatchAsync(1)
+	expect(second.code == "invalid" and second.cursor == "page-2" and second.purchases_processed == 1,
+		"descending order across pages was accepted or advanced the cursor")
+	expect(processor.calls == 1,
+		"out-of-order resumed page was imported before rejection")
+end
+
+-- ProductId is the final deterministic tie-break when PurchaseId and PlayerId match.
+do
+	local calls = { count = 0 }
+	local backing = make_checkpoint_store()
+	local source = make_source({
+		["<initial>"] = page({ purchase("same-purchase", 1002), purchase("same-purchase", 1001) }, nil, true),
+	}, "snapshot-unsorted-tiebreak", calls)
+	local processor = make_processor()
+	local runner = new_runner("historical-import-unsorted-tiebreak", source, processor, backing)
+	local result = runner:RunBatchAsync(1)
+	expect(result.code == "invalid" and processor.calls == 0,
+		"descending ProductId tie-break order was accepted")
+end
+

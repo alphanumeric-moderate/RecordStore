@@ -87,6 +87,9 @@ type Checkpoint = {
 	purchases_processed: number,
 	backfilled_count: number,
 	duplicate_count: number,
+	last_purchase_id: string?,
+	last_player_id: number?,
+	last_product_id: number?,
 }
 
 type NormalizedConfig = {
@@ -120,7 +123,7 @@ local function nonnegative_integer(value: unknown): boolean
 	return type(value) == "number" and math.isfinite(value) and value >= 0 and math.floor(value) == value
 end
 
-local CHECKPOINT_VERSION = 3
+local CHECKPOINT_VERSION = 4
 local DIGEST_ALGORITHM = "sha256-chain-v1"
 local DIGEST_DOMAIN = "RecordStore purchase inventory chain v1\0"
 local EMPTY_INVENTORY_DIGEST = SHA256.digest(DIGEST_DOMAIN .. "empty\0")
@@ -132,6 +135,22 @@ end
 local function positive_integer(value: unknown): boolean
 	return type(value) == "number" and math.isfinite(value) and value >= 1
 		and value <= 9007199254740991 and math.floor(value) == value
+end
+
+local function valid_last_purchase_tuple(
+	processed_count: unknown,
+	purchase_id: unknown,
+	player_id: unknown,
+	product_id: unknown
+): boolean
+	if not nonnegative_integer(processed_count) then return false end
+	if processed_count == 0 then
+		return purchase_id == nil and player_id == nil and product_id == nil
+	end
+	return valid_text(purchase_id, 247)
+		and string.find(purchase_id :: string, "%c") == nil
+		and positive_integer(player_id)
+		and positive_integer(product_id)
 end
 
 local function compute_inventory_digest(
@@ -187,6 +206,9 @@ local function copy_checkpoint(value: Checkpoint): Checkpoint
 		purchases_processed = value.purchases_processed,
 		backfilled_count = value.backfilled_count,
 		duplicate_count = value.duplicate_count,
+		last_purchase_id = value.last_purchase_id,
+		last_player_id = value.last_player_id,
+		last_product_id = value.last_product_id,
 	}
 end
 
@@ -199,6 +221,7 @@ local function valid_checkpoint(raw: unknown, config: NormalizedConfig): (Checkp
 			and key ~= "inventory_manifest_id" and key ~= "expected_purchase_count"
 			and key ~= "expected_inventory_digest" and key ~= "inventory_digest" and key ~= "digest_algorithm" and key ~= "inventory_verified"
 			and key ~= "pages_processed" and key ~= "purchases_processed"
+			and key ~= "last_purchase_id" and key ~= "last_player_id" and key ~= "last_product_id"
 			and key ~= "backfilled_count" and key ~= "duplicate_count"
 		then
 			return nil, "checkpoint contains an unsupported field"
@@ -211,6 +234,7 @@ local function valid_checkpoint(raw: unknown, config: NormalizedConfig): (Checkp
 		or value.expected_inventory_digest ~= config.expected_inventory_digest
 		or value.digest_algorithm ~= DIGEST_ALGORITHM
 		or not valid_digest(value.inventory_digest)
+		or not valid_last_purchase_tuple(value.purchases_processed, value.last_purchase_id, value.last_player_id, value.last_product_id)
 		or type(value.inventory_verified) ~= "boolean"
 		or value.inventory_verified ~= value.done
 		or (value.done and (value.purchases_processed ~= config.expected_purchase_count
@@ -248,6 +272,9 @@ local function valid_checkpoint(raw: unknown, config: NormalizedConfig): (Checkp
 		purchases_processed = value.purchases_processed :: number,
 		backfilled_count = value.backfilled_count :: number,
 		duplicate_count = value.duplicate_count :: number,
+		last_purchase_id = value.last_purchase_id :: string?,
+		last_player_id = value.last_player_id :: number?,
+		last_product_id = value.last_product_id :: number?,
 	}, nil
 end
 
@@ -269,6 +296,9 @@ local function same_checkpoint(left: Checkpoint?, right: Checkpoint): boolean
 		and left.purchases_processed == right.purchases_processed
 		and left.backfilled_count == right.backfilled_count
 		and left.duplicate_count == right.duplicate_count
+		and left.last_purchase_id == right.last_purchase_id
+		and left.last_player_id == right.last_player_id
+		and left.last_product_id == right.last_product_id
 end
 
 local function normalize_config(value: unknown): NormalizedConfig
@@ -361,6 +391,9 @@ function MigrationRunner.new(config: Config)
 				purchases_processed = 0,
 				backfilled_count = 0,
 				duplicate_count = 0,
+				last_purchase_id = nil,
+				last_player_id = nil,
+				last_product_id = nil,
 			}, nil
 		end
 		return valid_checkpoint(raw, normalized)
@@ -467,6 +500,9 @@ function MigrationRunner.new(config: Config)
 				purchases_processed = 0,
 				backfilled_count = 0,
 				duplicate_count = 0,
+				last_purchase_id = nil,
+				last_player_id = nil,
+				last_product_id = nil,
 			}
 			return result("invalid", safe_checkpoint, "max_pages must be an integer from 1 to 8")
 		end
@@ -491,6 +527,9 @@ function MigrationRunner.new(config: Config)
 					purchases_processed = 0,
 					backfilled_count = 0,
 					duplicate_count = 0,
+				last_purchase_id = nil,
+				last_player_id = nil,
+				last_product_id = nil,
 				}
 				return result("unknown", empty, checkpoint_error or "migration checkpoint is unavailable")
 			end
@@ -542,6 +581,28 @@ function MigrationRunner.new(config: Config)
 			local observed_inventory_digest, digest_error = compute_inventory_digest(items, checkpoint.inventory_digest)
 			if observed_inventory_digest == nil then
 				return result("invalid", checkpoint, digest_error or "historical inventory digest could not be computed")
+			end
+			local previous_purchase_id = checkpoint.last_purchase_id
+			local previous_player_id = checkpoint.last_player_id
+			local previous_product_id = checkpoint.last_product_id
+			for _, purchase in ipairs(items) do
+				local purchase_id = purchase.PurchaseId :: string
+				local player_id = purchase.PlayerId :: number
+				local product_id = purchase.ProductId :: number
+				if previous_purchase_id ~= nil then
+					local previous_id = previous_purchase_id :: string
+					local previous_user = previous_player_id :: number
+					local previous_product = previous_product_id :: number
+					local out_of_order = purchase_id < previous_id
+						or (purchase_id == previous_id and player_id < previous_user)
+						or (purchase_id == previous_id and player_id == previous_user and product_id < previous_product)
+					if out_of_order then
+						return result("invalid", checkpoint, "historical rows violate the declared PurchaseId/PlayerId/ProductId order; cursor was not advanced")
+					end
+				end
+				previous_purchase_id = purchase_id
+				previous_player_id = player_id
+				previous_product_id = product_id
 			end
 			local proposed_purchase_count = checkpoint.purchases_processed + item_count
 			if proposed_purchase_count > normalized.expected_purchase_count then
@@ -613,6 +674,9 @@ function MigrationRunner.new(config: Config)
 					purchases_processed = checkpoint.purchases_processed + backfill_result.processed_count,
 					backfilled_count = checkpoint.backfilled_count + backfill_result.backfilled_count,
 					duplicate_count = checkpoint.duplicate_count + backfill_result.duplicate_count,
+					last_purchase_id = previous_purchase_id,
+					last_player_id = previous_player_id,
+					last_product_id = previous_product_id,
 				}
 				local save_code, save_error = persist_checkpoint(checkpoint.revision, next_checkpoint)
 				if save_code ~= "committed" and save_code ~= "duplicate" and save_code ~= "advanced" then
@@ -636,6 +700,9 @@ function MigrationRunner.new(config: Config)
 					purchases_processed = checkpoint.purchases_processed,
 					backfilled_count = checkpoint.backfilled_count,
 					duplicate_count = checkpoint.duplicate_count,
+					last_purchase_id = previous_purchase_id,
+					last_player_id = previous_player_id,
+					last_product_id = previous_product_id,
 				}
 				local save_code, save_error = persist_checkpoint(checkpoint.revision, next_checkpoint)
 				if save_code ~= "committed" and save_code ~= "duplicate" and save_code ~= "advanced" then
@@ -663,6 +730,9 @@ function MigrationRunner.new(config: Config)
 				purchases_processed = 0,
 				backfilled_count = 0,
 				duplicate_count = 0,
+				last_purchase_id = nil,
+				last_player_id = nil,
+				last_product_id = nil,
 			}
 			return result("unknown", empty, checkpoint_error or "migration checkpoint is unavailable")
 		end

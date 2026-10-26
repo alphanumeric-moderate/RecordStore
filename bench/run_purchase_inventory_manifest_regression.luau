@@ -145,7 +145,7 @@ local rejected_source = Manifest.bind_runner_config(
 expect(rejected_source == nil, "a rejected source verifier still produced a runner config")
 
 local checkpoint = {
-	version = 3,
+	version = 4,
 	job_id = "purchase-manifest-binding-r1",
 	done = true,
 	revision = 1,
@@ -153,6 +153,9 @@ local checkpoint = {
 	source_revision = "export-revision-r1",
 	inventory_manifest_id = "purchase-inventory-regression-r1",
 	purchases_processed = 0,
+	last_purchase_id = nil,
+	last_player_id = nil,
+	last_product_id = nil,
 	expected_purchase_count = 0,
 	inventory_digest = string.rep("a", 64),
 	expected_inventory_digest = string.rep("a", 64),
