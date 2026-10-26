@@ -2719,7 +2719,7 @@ local function matches_erasure_template(item, template)
 			and item.key ~= template.key
 			and valid_text(item.key, 50)
 	end
-	return template.locator_mode == nil or template.locator_mode == "user_id_template"
+	return (template.locator_mode == nil or template.locator_mode == "user_id_template")
 		and item.name == template.name and item.scope == template.scope and item.key == template.key
 end
 
