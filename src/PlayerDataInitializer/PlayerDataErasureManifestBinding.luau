@@ -191,7 +191,7 @@ function ErasureBinding.bind(
 		if family.locator_mode ~= "user_id_template" and family.locator_mode ~= "external_inventory" then
 			return nil, nil, "manifest family uses an unsupported locator mode"
 		end
-		if family.action ~= "tombstone" and family.action ~= "redact" then
+		if family.action ~= "tombstone" and family.action ~= "redact" and family.action ~= "retain_fence" then
 			return nil, nil, "current erasure coordinator does not support the manifest's declared family action"
 		end
 		if adapter.action ~= family.action then return nil, nil, "family adapter action does not match the reviewed manifest" end
@@ -208,6 +208,7 @@ function ErasureBinding.bind(
 			scope = family.scope,
 			key = key_template,
 			locator_mode = family.locator_mode,
+			action = family.action,
 		}
 		if family.locator_mode == "external_inventory" then
 			template.inventory_source_ref = family.inventory_source_ref
@@ -215,6 +216,9 @@ function ErasureBinding.bind(
 		local templates = table.freeze({ table.freeze(template) })
 		local normalized_adapter = table.freeze({
 			name = family.id,
+			action = family.action,
+			locator_mode = family.locator_mode,
+			inventory_source_ref = family.inventory_source_ref,
 			templates = templates,
 			templates_verified = true,
 			inventory = adapter.inventory,
