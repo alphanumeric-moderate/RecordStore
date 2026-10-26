@@ -116,7 +116,8 @@ local function valid_text(value: unknown, maximum: number): boolean
 end
 
 local function valid_cursor(value: unknown): boolean
-	return value == nil or (type(value) == "string" and #value <= MAX_CURSOR_BYTES)
+	return value == nil or (type(value) == "string" and value ~= ""
+		and #value <= MAX_CURSOR_BYTES and string.find(value, "%c") == nil)
 end
 
 local function nonnegative_integer(value: unknown): boolean

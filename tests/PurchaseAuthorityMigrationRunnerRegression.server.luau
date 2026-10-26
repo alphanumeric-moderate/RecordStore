@@ -486,3 +486,60 @@ do
 		"descending ProductId tie-break order was accepted")
 end
 
+
+
+-- Empty and control-character continuation cursors are not valid advancing tokens.
+do
+	for index, invalid_cursor in ipairs({ "", "bad\ncursor" }) do
+		local calls = { count = 0 }
+		local backing = make_checkpoint_store()
+		local job_id = "historical-import-invalid-cursor-" .. tostring(index)
+		local source = make_source({
+			["<initial>"] = page({ purchase("invalid-cursor-purchase-" .. tostring(index)) }, invalid_cursor, false),
+		}, "snapshot-invalid-cursor-" .. tostring(index), calls)
+		local processor = make_processor()
+		local runner = new_runner(job_id, source, processor, backing)
+		local result = runner:RunBatchAsync(1)
+		expect(result.code == "conflict" and result.pages_processed == 0 and result.cursor == nil,
+			"malformed continuation cursor was accepted")
+		expect(processor.calls == 0 and backing.values["purchase-migration:" .. job_id] == nil,
+			"malformed cursor caused an import or checkpoint write")
+	end
+end
+
+-- Version-3 checkpoints lack a verified last-row tuple and must not be silently resumed.
+do
+	local calls = { count = 0 }
+	local backing = make_checkpoint_store()
+	local source = make_source({
+		["<initial>"] = page({ purchase("legacy-v3-purchase") }, nil, true),
+	}, "snapshot-legacy-v3", calls)
+	local job_id = "historical-import-legacy-v3"
+	backing.values["purchase-migration:" .. job_id] = {
+		version = 3,
+		digest_algorithm = "sha256-chain-v1",
+		job_id = job_id,
+		source_revision = source.source_revision,
+		revision = 1,
+		cursor = "legacy-v3-cursor",
+		done = false,
+		inventory_manifest_id = "manifest:" .. source.source_revision,
+		expected_purchase_count = source.inventory_count,
+		expected_inventory_digest = source.inventory_digest,
+		inventory_digest = source.inventory_digest,
+		inventory_verified = false,
+		pages_processed = 1,
+		purchases_processed = source.inventory_count,
+		backfilled_count = source.inventory_count,
+		duplicate_count = 0,
+	}
+	local processor = make_processor()
+	local runner = new_runner(job_id, source, processor, backing)
+	local status = runner:GetStatusAsync()
+	expect(status.code == "unknown" and status.done == false,
+		"version-3 checkpoint without the ordering tuple was accepted")
+	local result = runner:RunBatchAsync(1)
+	expect(result.code == "unknown" and calls.count == 0 and processor.calls == 0,
+		"runner restarted source processing after rejecting a version-3 checkpoint")
+end
+
