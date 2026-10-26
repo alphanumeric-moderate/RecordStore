@@ -145,7 +145,6 @@ jobs:
       - name: Type-check isolated PR56 blocker candidate modules
         run: |
           set -euo pipefail
-          rojo sourcemap staging/pr56-blockers.project.json --include-non-scripts --output /tmp/pr56-blockers-sourcemap.json
           mapfile -t candidate_modules < <(find staging/pr56-blockers -type f -name '*.luau' -print | sort)
           test "${#candidate_modules[@]}" -gt 0
-          luau-lsp analyze --platform=roblox --definitions=/tmp/globalTypes.d.luau --sourcemap=/tmp/pr56-blockers-sourcemap.json "${candidate_modules[@]}"
+          luau-lsp analyze --platform=roblox --definitions=/tmp/globalTypes.d.luau --sourcemap=/tmp/sourcemap.json "${candidate_modules[@]}"
