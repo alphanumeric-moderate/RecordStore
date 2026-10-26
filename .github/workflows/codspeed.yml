@@ -78,6 +78,22 @@ jobs:
         timeout-minutes: 2
         run: timeout --signal=TERM --kill-after=5s 60s lune run bench/run_mailbox_v2_ordering_regression.luau
 
+      - name: Regression - independent maintenance runner
+        timeout-minutes: 2
+        run: timeout --signal=TERM --kill-after=5s 60s lune run bench/run_offline_maintenance_runner_regression.luau
+
+      - name: Regression - production DataStore adapter safety
+        timeout-minutes: 4
+        run: timeout --signal=TERM --kill-after=5s 240s lune run bench/run_production_adapter_safety_regression.luau
+
+      - name: Regression - real DataStore maintenance adapter contract
+        timeout-minutes: 2
+        run: timeout --signal=TERM --kill-after=5s 60s lune run bench/run_maintenance_roblox_adapter_regression.luau
+
+      - name: Regression - multi-family maintenance adapter catalog
+        timeout-minutes: 2
+        run: timeout --signal=TERM --kill-after=5s 60s lune run bench/run_maintenance_datastore_adapter_regression.luau
+
       - name: Run the benchmarks
         timeout-minutes: 16
         uses: CodSpeedHQ/action@v5

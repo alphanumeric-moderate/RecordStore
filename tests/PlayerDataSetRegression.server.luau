@@ -6,6 +6,15 @@ local Players = game:GetService("Players")
 local ServerScriptService = game:GetService("ServerScriptService")
 local RecordStore = require(ServerScriptService.RecordStore)
 local PlayerDataCore = require(ServerScriptService.PlayerDataCore)
+
+local zero_dirty_age_ok = pcall(function()
+	PlayerDataCore.new({
+		RecordStore = RecordStore.Mock,
+		MaxDirtyAgeSeconds = 0,
+	})
+end)
+assert(not zero_dirty_age_ok,
+	"PlayerDataCore must reject MaxDirtyAgeSeconds = 0 instead of silently using its default")
 local controller = PlayerDataCore.new({
 	RecordStore = RecordStore.Mock,
 })
@@ -131,6 +140,95 @@ local test_ok, test_error = pcall(function()
 	assert(persisted.admin == true, "non-leaderstat admin field was not persisted")
 	local close_result, close_message = verification_record:Close()
 	assert(close_result == "closed" or close_result == "fenced", close_message)
+
+	local legacy_record = RecordStore.Mock.get_record_raw(
+		"PlayerData_Test1",
+		"global",
+		"Player_" .. tostring(player.UserId)
+	) :: { [string]: any }
+	local legacy_data = legacy_record.data :: { [string]: any }
+	legacy_data.admin = nil
+	legacy_record.data = legacy_data
+	local seed_result, seed_message = RecordStore.Mock.seed_record_raw(
+		"PlayerData_Test1",
+		"global",
+		"Player_" .. tostring(player.UserId),
+		legacy_record
+	)
+	assert(seed_result == "success", seed_message)
+
+	local deferred_callbacks: { () -> () } = {}
+	local controlled_task: any = {
+		spawn = task.spawn,
+		wait = task.wait,
+		defer = function(callback: (...any) -> (), ...: any)
+			local args = table.pack(...)
+			deferred_callbacks[#deferred_callbacks + 1] = function()
+				callback(table.unpack(args, 1, args.n))
+			end
+			return nil
+		end,
+	}
+	local pressure_controller = PlayerDataCore.new({
+		RecordStore = RecordStore.Mock,
+		DurabilityMode = "read_only_on_risk",
+		MaxDirtyAgeSeconds = 0.1,
+		task = controlled_task,
+	})
+	player:SetAttribute("PlayerDataLoadStatus", "NotLoaded")
+	assert(pressure_controller:Start(), "durability backpressure controller failed to start")
+	local pressure_load_deadline = os.clock() + 10
+	while os.clock() < pressure_load_deadline
+		and player:GetAttribute("PlayerDataLoadStatus") ~= "Loaded"
+	do
+		task.wait(0.05)
+	end
+	assert(player:GetAttribute("PlayerDataLoadStatus") == "Loaded",
+		"durability backpressure controller failed to reload the test player")
+
+	local pressure_values = player:FindFirstChild("PlayerDataValues")
+	assert(pressure_values ~= nil, "durability backpressure values folder is missing")
+	local pressure_kills_instance = pressure_values:FindFirstChild("kills")
+	assert(pressure_kills_instance ~= nil and pressure_kills_instance:IsA("NumberValue"),
+		"durability backpressure kills value is missing")
+	local pressure_kills = pressure_kills_instance :: NumberValue
+	local pressure_baseline = pressure_kills.Value
+	local first_buffered_ok, first_buffered_message = pressure_controller.Set(
+		player, "kills", pressure_baseline + 1
+	)
+	assert(first_buffered_ok, first_buffered_message)
+	assert(pressure_kills.Value == pressure_baseline + 1,
+		"the first mutation should be accepted into the pending buffer")
+
+	task.wait(0.15)
+	local stale_buffer_set_ok, stale_buffer_set_message = pressure_controller.Set(
+		player, "kills", pressure_baseline + 2
+	)
+	assert(not stale_buffer_set_ok,
+		"Set must reject additional mutations after pending PlayerData changes exceed the dirty-age limit")
+	assert(string.find(tostring(stale_buffer_set_message), "pending PlayerData changes", 1, true) ~= nil,
+		"Set should identify pending-buffer age as the backpressure reason")
+
+	pressure_kills.Value = pressure_baseline + 3
+	assert(pressure_kills.Value == pressure_baseline + 1,
+		"Value.Changed must restore a mutation after pending PlayerData changes exceed the dirty-age limit")
+	assert(pressure_controller:Shutdown(), "durability backpressure controller failed to shut down")
+
+	local pressure_verification = RecordStore.Mock.new(
+		"PlayerData_Test1",
+		"global",
+		"Player_" .. tostring(player.UserId),
+		{ schema_version = 1 }
+	)
+	local pressure_open_result, pressure_open_message = pressure_verification:Open({})
+	assert(pressure_open_result == "loaded" or pressure_open_result == "created", pressure_open_message)
+	local pressure_persisted = pressure_verification:Get() :: { [string]: RecordStore.JsonValue }
+	assert(pressure_persisted.kills == pressure_baseline + 1,
+		"backpressure must preserve and flush the earlier accepted pending mutation")
+	assert(pressure_persisted.admin == false,
+		"read-only flush must first persist the already-accepted dirty schema-normalization snapshot")
+	local pressure_close_result, pressure_close_message = pressure_verification:Close()
+	assert(pressure_close_result == "closed" or pressure_close_result == "fenced", pressure_close_message)
 end)
 
 controller:Shutdown()

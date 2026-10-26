@@ -81,6 +81,7 @@ local Enum = table.freeze({
 		"StandardRemove",
 	}),
 	SortDirection = make_enum("SortDirection", { "Ascending", "Descending" }),
+	ProductPurchaseDecision = make_enum("ProductPurchaseDecision", { "PurchaseGranted", "NotProcessedYet" }),
 })
 
 local DateTime = table.freeze({
@@ -98,12 +99,48 @@ local Instance = table.freeze({
 local loaded_module: any = nil
 local loaded_scheduler_module: any = nil
 local loaded_mailbox_module: any = nil
+local loaded_receipt_processor: any = nil
+local loaded_outbox_mailbox_adapter: any = nil
+local loaded_outbox_consumer_adapter: any = nil
+local loaded_recordstore_v2: any = nil
+local loaded_player_data_erasure: any = nil
+local loaded_purchase_datastore_authority: any = nil
+local loaded_purchase_authority_migration_runner: any = nil
+local loaded_recordstore_sha256: any = nil
+local loaded_maintenance_roblox_adapter: any = nil
 
 local RecordStoreInstance = table.freeze({ Name = "RecordStore", ClassName = "ModuleScript" })
+local PurchaseReceiptProcessorInstance = table.freeze({ Name = "PurchaseReceiptProcessor", ClassName = "ModuleScript" })
+local RecordStoreV2Instance = table.freeze({ Name = "RecordStoreV2", ClassName = "ModuleScript" })
+local OutboxMailboxAdapterInstance = table.freeze({ Name = "RecordStoreOutboxMailboxAdapter", ClassName = "ModuleScript" })
+local OutboxConsumerAdapterInstance = table.freeze({ Name = "RecordStoreOutboxConsumerAdapter", ClassName = "ModuleScript" })
+local PlayerDataErasureInstance = table.freeze({ Name = "PlayerDataErasure", ClassName = "ModuleScript" })
+local PurchaseDataStoreAuthorityInstance = table.freeze({ Name = "PurchaseDataStoreAuthority", ClassName = "ModuleScript" })
+local PurchaseAuthorityMigrationRunnerInstance = table.freeze({ Name = "PurchaseAuthorityMigrationRunner", ClassName = "ModuleScript" })
+local RecordStoreSHA256Instance = table.freeze({ Name = "RecordStoreSHA256", ClassName = "ModuleScript" })
+local RecordStoreMaintenanceRobloxAdapterInstance = table.freeze({ Name = "RecordStoreMaintenanceRobloxAdapter", ClassName = "ModuleScript" })
+local PlayerDataInitializer = {
+	RecordStore = RecordStoreInstance,
+	PurchaseReceiptProcessor = PurchaseReceiptProcessorInstance,
+	RecordStoreOutboxMailboxAdapter = OutboxMailboxAdapterInstance,
+	RecordStoreOutboxConsumerAdapter = OutboxConsumerAdapterInstance,
+	RecordStoreV2 = RecordStoreV2Instance,
+	PlayerDataErasure = PlayerDataErasureInstance,
+	PurchaseDataStoreAuthority = PurchaseDataStoreAuthorityInstance,
+	PurchaseAuthorityMigrationRunner = PurchaseAuthorityMigrationRunnerInstance,
+	RecordStoreSHA256 = RecordStoreSHA256Instance,
+	RecordStoreMaintenanceRobloxAdapter = RecordStoreMaintenanceRobloxAdapterInstance,
+}
+function PlayerDataInitializer:WaitForChild(name: string): any
+	local child = self[name]
+	assert(child ~= nil, "module is not available: " .. name)
+	return child
+end
+function PlayerDataInitializer:FindFirstChild(name: string): any
+	return self[name]
+end
 local script = {
-	Parent = {
-		RecordStore = RecordStoreInstance,
-	},
+	Parent = PlayerDataInitializer,
 }
 
 local function load_scheduler(): any
@@ -142,8 +179,107 @@ local function load_record_store(source_path: string?): any
 	return loaded_module
 end
 
+local function load_recordstore_v2(): any
+	if loaded_recordstore_v2 ~= nil then return loaded_recordstore_v2 end
+	local chunk = luau.load(fs.readFile("src/PlayerDataInitializer/RecordStoreV2.luau"), {
+		debugName = "RecordStoreV2",
+		environment = Shim.environment,
+	})
+	loaded_recordstore_v2 = chunk()
+	return loaded_recordstore_v2
+end
+
+local function load_outbox_mailbox_adapter(): any
+	if loaded_outbox_mailbox_adapter ~= nil then return loaded_outbox_mailbox_adapter end
+	local module_environment = table.clone(Shim.environment)
+	module_environment.script = { Parent = PlayerDataInitializer }
+	local chunk = luau.load(fs.readFile("src/PlayerDataInitializer/RecordStoreOutboxMailboxAdapter.luau"), {
+		debugName = "RecordStoreOutboxMailboxAdapter", environment = module_environment,
+	})
+	loaded_outbox_mailbox_adapter = chunk()
+	return loaded_outbox_mailbox_adapter
+end
+
+local function load_outbox_consumer_adapter(): any
+	if loaded_outbox_consumer_adapter ~= nil then return loaded_outbox_consumer_adapter end
+	local module_environment = table.clone(Shim.environment)
+	module_environment.script = { Parent = PlayerDataInitializer }
+	local chunk = luau.load(fs.readFile("src/PlayerDataInitializer/RecordStoreOutboxConsumerAdapter.luau"), {
+		debugName = "RecordStoreOutboxConsumerAdapter", environment = module_environment,
+	})
+	loaded_outbox_consumer_adapter = chunk()
+	return loaded_outbox_consumer_adapter
+end
+
+local function load_receipt_processor(): any
+	if loaded_receipt_processor ~= nil then return loaded_receipt_processor end
+	local module_environment = table.clone(Shim.environment)
+	module_environment.script = { Parent = PlayerDataInitializer }
+	local chunk = luau.load(fs.readFile("src/PlayerDataInitializer/PurchaseReceiptProcessor.luau"), {
+		debugName = "PurchaseReceiptProcessor",
+		environment = module_environment,
+	})
+	loaded_receipt_processor = chunk()
+	return loaded_receipt_processor
+end
+
+local function load_recordstore_sha256(): any
+	if loaded_recordstore_sha256 ~= nil then return loaded_recordstore_sha256 end
+	local chunk = luau.load(fs.readFile("src/PlayerDataInitializer/RecordStoreSHA256.luau"), {
+		debugName = "RecordStoreSHA256", environment = Shim.environment,
+	})
+	loaded_recordstore_sha256 = chunk()
+	return loaded_recordstore_sha256
+end
+
+local function load_purchase_authority_migration_runner(): any
+	if loaded_purchase_authority_migration_runner ~= nil then return loaded_purchase_authority_migration_runner end
+	local module_environment = table.clone(Shim.environment)
+	module_environment.script = { Parent = PlayerDataInitializer }
+	local chunk = luau.load(fs.readFile("src/PlayerDataInitializer/PurchaseAuthorityMigrationRunner.luau"), {
+		debugName = "PurchaseAuthorityMigrationRunner", environment = module_environment,
+	})
+	loaded_purchase_authority_migration_runner = chunk()
+	return loaded_purchase_authority_migration_runner
+end
+
+local function load_maintenance_roblox_adapter(): any
+	if loaded_maintenance_roblox_adapter ~= nil then return loaded_maintenance_roblox_adapter end
+	local module_environment = table.clone(Shim.environment)
+	module_environment.script = { Parent = PlayerDataInitializer }
+	local chunk = luau.load(fs.readFile("src/PlayerDataInitializer/RecordStoreMaintenanceRobloxAdapter.luau"), {
+		debugName = "RecordStoreMaintenanceRobloxAdapter", environment = module_environment,
+	})
+	loaded_maintenance_roblox_adapter = chunk()
+	return loaded_maintenance_roblox_adapter
+end
+
+local function load_purchase_datastore_authority(): any
+	if loaded_purchase_datastore_authority ~= nil then return loaded_purchase_datastore_authority end
+	local module_environment = table.clone(Shim.environment)
+	module_environment.script = { Parent = PlayerDataInitializer }
+	local chunk = luau.load(fs.readFile("src/PlayerDataInitializer/PurchaseDataStoreAuthority.luau"), {
+		debugName = "PurchaseDataStoreAuthority", environment = module_environment,
+	})
+	loaded_purchase_datastore_authority = chunk()
+	return loaded_purchase_datastore_authority
+end
+
+local function load_player_data_erasure(): any
+	if loaded_player_data_erasure ~= nil then return loaded_player_data_erasure end
+	local module_environment = table.clone(Shim.environment)
+	module_environment.script = { Parent = PlayerDataInitializer }
+	local chunk = luau.load(fs.readFile("src/PlayerDataInitializer/PlayerDataErasure.luau"), {
+		debugName = "PlayerDataErasure",
+		environment = module_environment,
+	})
+	loaded_player_data_erasure = chunk()
+	return loaded_player_data_erasure
+end
+
 local ServerScriptService = {
 	RecordStore = RecordStoreInstance,
+	PlayerDataInitializer = PlayerDataInitializer,
 	WaitForChild = function(self, name: string)
 		local child = self[name]
 		assert(child ~= nil, "module is not available: " .. name)
@@ -154,7 +290,14 @@ local ServerScriptService = {
 	end,
 }
 
+local Players = {
+	GetPlayerByUserId = function(_self, _user_id: number)
+		return nil
+	end,
+}
+
 local services = {
+	Players = Players,
 	DataStoreService = DataStoreService,
 	HttpService = HttpService,
 	MessagingService = MessagingService,
@@ -180,6 +323,17 @@ local function shim_require(target: any)
 	if target == RecordStoreInstance then
 		return load_record_store()
 	end
+	if target == PurchaseReceiptProcessorInstance then
+		return load_receipt_processor()
+	end
+	if target == OutboxMailboxAdapterInstance then return load_outbox_mailbox_adapter() end
+	if target == OutboxConsumerAdapterInstance then return load_outbox_consumer_adapter() end
+	if target == RecordStoreV2Instance then return load_recordstore_v2() end
+	if target == PlayerDataErasureInstance then return load_player_data_erasure() end
+	if target == PurchaseDataStoreAuthorityInstance then return load_purchase_datastore_authority() end
+	if target == PurchaseAuthorityMigrationRunnerInstance then return load_purchase_authority_migration_runner() end
+	if target == RecordStoreSHA256Instance then return load_recordstore_sha256() end
+	if target == RecordStoreMaintenanceRobloxAdapterInstance then return load_maintenance_roblox_adapter() end
 	return require(target)
 end
 
@@ -193,6 +347,13 @@ Shim.environment = {
 	require = shim_require,
 }
 
+
+function Shim.set_service(name: string, service: any)
+	assert(loaded_module == nil, "services must be injected before RecordStore is loaded")
+	assert(type(name) == "string" and name ~= "", "service name must be a non-empty string")
+	assert(service ~= nil, "service must not be nil")
+	services[name] = service
+end
 -- Returns the RecordStore module, loaded inside the shimmed environment.
 function Shim.load(source_path: string?): any
 	return load_record_store(source_path)
