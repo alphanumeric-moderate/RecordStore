@@ -28,6 +28,7 @@ export type Family = {
 	can_delete: (value: unknown, key_info: any, expected_generation: number, job_id: string) -> boolean,
 	make_tombstone: (value: unknown, key_info: any, expected_generation: number, job_id: string) -> unknown?,
 	is_tombstone: (value: unknown, expected_generation: number, job_id: string) -> boolean,
+	delete_if_generation: ((store: any, item: any, expected_generation: number, job_id: string) -> (string, string?))?,
 }
 
 export type Config = {
@@ -237,6 +238,7 @@ function Adapter.new(config: Config)
 			or type(family.can_delete) ~= "function"
 			or type(family.make_tombstone) ~= "function"
 			or type(family.is_tombstone) ~= "function"
+			or (family.delete_if_generation ~= nil and type(family.delete_if_generation) ~= "function")
 		then
 			error("family " .. tostring(index) .. " is missing a valid store identity or required schema callbacks", 2)
 		end
@@ -455,6 +457,20 @@ function Adapter.new(config: Config)
 			return get_store(family.store_name, family.scope)
 		end)
 		if not store_ok then return "unknown", "could not open target DataStore: " .. tostring(store_or_error) end
+		if family.delete_if_generation ~= nil then
+			local called, action, message = pcall(
+				family.delete_if_generation,
+				store_or_error,
+				locator,
+				expected_generation,
+				config.job_id
+			)
+			if not called then return "unknown", tostring(action) end
+			if action ~= "deleted" and action ~= "already_absent" and action ~= "skipped" and action ~= "unknown" then
+				return "unknown", message or "custom same-key deletion protocol returned an unsupported result"
+			end
+			return action, if type(message) == "string" then message else nil
+		end
 		local existing, key_info, read_error = read_fresh(store_or_error, key)
 		if read_error ~= nil then return "unknown", read_error end
 		if existing == nil or family.is_tombstone(existing, expected_generation, config.job_id) then
