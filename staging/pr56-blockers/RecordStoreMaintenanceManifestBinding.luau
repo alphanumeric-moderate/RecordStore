@@ -105,7 +105,7 @@ end
 
 local function generation(value: unknown): boolean
 	return type(value) == "number" and math.isfinite(value)
-		and value >= 0 and value < MAX_INTEGER and math.floor(value) == value
+		and value >= 0 and value <= MAX_INTEGER and math.floor(value) == value
 end
 
 local function timestamp(value: unknown): boolean
@@ -343,13 +343,16 @@ function Binder.bind(
 	if runtime.mode == "execute" and (type(runtime.authorize) ~= "function" or type(runtime.assert_fence) ~= "function") then
 		return nil, nil, "execute mode requires authorization and a durable job-fence preflight"
 	end
-	if runtime.data_store_service ~= nil and type(runtime.data_store_service) ~= "table" then
+	if runtime.data_store_service ~= nil
+		and type(runtime.data_store_service) ~= "table"
+		and type(runtime.data_store_service) ~= "userdata"
+	then
 		return nil, nil, "data_store_service must be a table"
 	end
 	if runtime.instance_factory ~= nil and type(runtime.instance_factory) ~= "function" then
 		return nil, nil, "instance_factory must be a function"
 	end
-	local policies, policies_error = dense_array(runtime.policies, MAX_FAMILIES)
+	local policies, policies_error = dense_array(runtime.policies, 1, MAX_FAMILIES)
 	if policies == nil or #policies ~= #manifest.families then
 		return nil, nil, policies_error or "provide exactly one policy binding for every maintenance family"
 	end
