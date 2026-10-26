@@ -63,6 +63,7 @@ local MAX_PURCHASE_ID_BYTES = 247
 local MAX_STORE_NAME_BYTES = 50
 local MAX_SCOPE_BYTES = 50
 local MAX_KEY_PREFIX_BYTES = 18
+local MAX_SAFE_INTEGER = 9007199254740991
 
 local function valid_text(value: unknown, maximum: number): boolean
 	return type(value) == "string" and value ~= "" and #value <= maximum
@@ -71,7 +72,7 @@ end
 
 local function positive_integer(value: unknown): boolean
 	return type(value) == "number" and math.isfinite(value)
-		and value >= 1 and math.floor(value) == value
+		and value >= 1 and value <= MAX_SAFE_INTEGER and math.floor(value) == value
 end
 
 local function nonnegative_integer(value: unknown): boolean
