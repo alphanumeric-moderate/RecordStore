@@ -5,6 +5,7 @@
     "ServerScriptService": {
       "$className": "ServerScriptService",
       "PR56BlockerCandidates": {
+        "$className": "Folder",
         "$path": "staging/pr56-blockers"
       }
     }
