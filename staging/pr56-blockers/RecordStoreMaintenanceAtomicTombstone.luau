@@ -47,7 +47,7 @@ local function generation(value: unknown): boolean
 		and math.floor(value) == value
 end
 
-local function clone(value: unknown, seen: { [table]: table }?): any
+local function clone(value: unknown, seen: { [any]: any }?): any
 	if type(value) ~= "table" then return value end
 	local source = value :: { [any]: any }
 	local memo = seen or {}
