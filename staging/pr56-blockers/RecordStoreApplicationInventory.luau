@@ -124,6 +124,7 @@ local function normalize_family(raw: unknown): ({ [string]: any }?, string?)
 		or string.find(row.scope, "%c") ~= nil
 		or not valid_text(row.generation_field, MAX_ID_BYTES)
 		or not valid_text(row.fence_field, MAX_ID_BYTES)
+		or row.generation_field == row.fence_field
 		or not valid_text(row.evidence_ref, MAX_EVIDENCE_BYTES)
 	then
 		return nil, "family identity, schema path, or evidence reference is invalid"
