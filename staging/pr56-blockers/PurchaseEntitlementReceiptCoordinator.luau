@@ -384,6 +384,11 @@ function Coordinator.new(config: Options)
 		verify_activation = config.verify_activation,
 	})
 	local instance: any = {}
+	function instance:HandlesProduct(product_id: unknown): boolean
+		if not positive_integer(product_id) then return false end
+		return normalized.entitlement_by_product_id[product_id :: number] ~= nil
+	end
+
 	function instance:Process(receipt: unknown): Decision
 		return process_receipt(normalized, receipt)
 	end
