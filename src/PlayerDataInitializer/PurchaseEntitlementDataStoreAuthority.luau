@@ -20,6 +20,11 @@ export type Result = {
 	message: string?,
 }
 
+export type ErasureLocator = {
+	key: string,
+	generation: number,
+}
+
 export type StoreAdapter = {
 	GetAsyncFresh: (self: any, key: string) -> (unknown, string?),
 	UpdateAsync: (self: any, key: string, transform: (unknown) -> unknown?) -> (unknown, string?),
@@ -55,9 +60,12 @@ type Authority = {
 	CommitAsync: (self: Authority, entitlement_id: string, player_id: number, product_id: number, purchase_id: string) -> Result,
 	BackfillAsync: (self: Authority, entitlement_id: string, player_id: number, product_id: number, purchase_id: string) -> Result,
 	GetStatusAsync: (self: Authority, entitlement_id: string, player_id: number) -> Result,
+	GetErasureLocatorAsync: (self: Authority, entitlement_id: string, player_id: number) -> (ErasureLocator?, string?),
+	EraseRetainFenceAsync: (self: Authority, entitlement_id: string, player_id: number, expected_generation: number, erasure_id: string) -> Result,
 }
 
 local VERSION = 1
+local ERASED_VERSION = 2
 local MAX_ENTITLEMENT_ID_BYTES = 128
 local MAX_PURCHASE_ID_BYTES = 247
 local MAX_STORE_NAME_BYTES = 50
@@ -80,6 +88,11 @@ local function nonnegative_integer(value: unknown): boolean
 		and value >= 0 and math.floor(value) == value
 end
 
+local function valid_revision(value: unknown): boolean
+	return type(value) == "number" and math.isfinite(value)
+		and value >= 0 and value <= MAX_SAFE_INTEGER and math.floor(value) == value
+end
+
 local function finite_timestamp(value: unknown): boolean
 	return type(value) == "number" and math.isfinite(value) and value >= 0
 end
@@ -90,6 +103,70 @@ end
 
 local function digest(value: string): string
 	return string.sub(SHA256.digest(value), 1, 32)
+end
+
+local function validate_erasure_tombstone(
+	raw: unknown,
+	entitlement_id: string,
+	player_id: number
+): (number?, string?, string?)
+	if type(raw) ~= "table" then return nil, nil, "corrupt: erasure tombstone is not a table" end
+	local fields = raw :: { [string]: any }
+	local allowed_fields = {
+		version = true,
+		status = true,
+		revision = true,
+		created_at = true,
+		updated_at = true,
+		identity_digest = true,
+		erasure_fence = true,
+	}
+	for field in pairs(fields) do
+		if allowed_fields[field] ~= true then
+			return nil, nil, "corrupt: erasure tombstone retained an unapproved field"
+		end
+	end
+	if fields.version ~= ERASED_VERSION or fields.status ~= "erased"
+		or not positive_integer(fields.revision)
+		or not finite_timestamp(fields.created_at)
+		or not finite_timestamp(fields.updated_at)
+		or (fields.updated_at :: number) < (fields.created_at :: number)
+	then
+		return nil, nil, "corrupt: erasure tombstone schema, revision or timestamp is invalid"
+	end
+	if type(fields.identity_digest) ~= "string" or #fields.identity_digest ~= 64
+		or string.match(fields.identity_digest, "^[0-9a-f]+$") == nil
+	then
+		return nil, nil, "corrupt: erasure identity digest is malformed"
+	end
+	if fields.identity_digest ~= SHA256.digest(entitlement_key_material(entitlement_id, player_id)) then
+		return nil, nil, "conflict: hashed key contains a different entitlement identity"
+	end
+	if type(fields.erasure_fence) ~= "table" then
+		return nil, nil, "corrupt: erasure tombstone has no durable fence"
+	end
+	local fence = fields.erasure_fence :: { [string]: any }
+	local allowed_fence_fields = {
+		erasure_id = true,
+		source_revision = true,
+		fenced_revision = true,
+	}
+	for field in pairs(fence) do
+		if allowed_fence_fields[field] ~= true then
+			return nil, nil, "corrupt: erasure fence retained an unapproved field"
+		end
+	end
+	if not valid_text(fence.erasure_id, 96)
+		or string.find(fence.erasure_id, "%c") ~= nil
+		or not valid_revision(fence.source_revision)
+		or (fence.source_revision :: number) >= MAX_SAFE_INTEGER
+		or not positive_integer(fence.fenced_revision)
+		or fence.fenced_revision ~= fields.revision
+		or fence.fenced_revision ~= (fence.source_revision :: number) + 1
+	then
+		return nil, nil, "corrupt: erasure fence identity or generation transition is invalid"
+	end
+	return fields.revision :: number, fence.erasure_id :: string, nil
 end
 
 local function copy_record(record: EntitlementRecord): EntitlementRecord
@@ -341,6 +418,16 @@ local function result_from_row(
 	purchase_id: string?
 ): Result
 	if raw == nil then return result("unknown", nil, "authoritative entitlement state could not be reconciled") end
+	if type(raw) == "table" and (raw :: { [string]: any }).status == "erased" then
+		local tombstone_generation, _tombstone_id, tombstone_error = validate_erasure_tombstone(
+			raw, entitlement_id, player_id
+		)
+		if tombstone_generation == nil then
+			local code = if string.sub(tombstone_error or "", 1, 10) == "conflict: " then "conflict" else "corrupt"
+			return result(code, nil, tombstone_error)
+		end
+		return result("erased", nil, nil)
+	end
 	local record, row_error = row_for_identity(raw, entitlement_id, player_id)
 	if record == nil then
 		local code = if string.sub(row_error or "", 1, 10) == "conflict: " then "conflict" else "corrupt"
@@ -475,12 +562,135 @@ function AuthorityModule.new(raw_options: Options): Authority
 		local raw, read_error = read_fresh(options, key_for(id :: string, subject :: number))
 		if read_error ~= nil then return result("unknown", nil, "authoritative entitlement read failed: " .. tostring(read_error)) end
 		if raw == nil then return result("not_found", nil, nil) end
-		local record, row_error = row_for_identity(raw, id :: string, subject :: number)
-		if record == nil then
+		return result_from_row("status", raw, id :: string, subject :: number, nil, nil)
+	end
+
+	function self:GetErasureLocatorAsync(
+		entitlement_id: string,
+		player_id: number
+	): (ErasureLocator?, string?)
+		local id, subject, _, _, invalid = normalized_input(entitlement_id, player_id, nil, nil)
+		if invalid ~= nil then return nil, invalid end
+		local normalized_id = id :: string
+		local normalized_player = subject :: number
+		local key = key_for(normalized_id, normalized_player)
+		local raw, read_error = read_fresh(options, key)
+		if read_error ~= nil then
+			return nil, "authoritative entitlement erasure locator read failed: " .. tostring(read_error)
+		end
+		if raw == nil then
+			return table.freeze({ key = key, generation = 0 }), nil
+		end
+		if type(raw) == "table" and (raw :: { [string]: any }).status == "erased" then
+			local generation, _erasure_id, tombstone_error = validate_erasure_tombstone(
+				raw, normalized_id, normalized_player
+			)
+			if generation == nil then return nil, tombstone_error end
+			return table.freeze({ key = key, generation = generation }), nil
+		end
+		local record, row_error = row_for_identity(raw, normalized_id, normalized_player)
+		if record == nil then return nil, row_error or "entitlement row is corrupt" end
+		return table.freeze({ key = key, generation = record.revision }), nil
+	end
+
+	function self:EraseRetainFenceAsync(
+		entitlement_id: string,
+		player_id: number,
+		expected_generation: number,
+		erasure_id: string
+	): Result
+		local id, subject, _, _, invalid = normalized_input(entitlement_id, player_id, nil, nil)
+		if invalid ~= nil then return result("invalid", nil, invalid) end
+		if not valid_revision(expected_generation) then
+			return result("invalid", nil, "expected_generation must be a non-negative safe integer")
+		end
+		if expected_generation >= MAX_SAFE_INTEGER then
+			return result("invalid", nil, "expected_generation cannot advance beyond the safe-integer limit")
+		end
+		if not valid_text(erasure_id, 96) or string.find(erasure_id, "%c") ~= nil then
+			return result("invalid", nil, "erasure_id must be 1 to 96 non-control bytes")
+		end
+		local now_ok, now_value = pcall(options.now_unix)
+		if not now_ok or not finite_timestamp(now_value) then
+			return result("invalid", nil, "clock did not return a finite non-negative timestamp")
+		end
+		local now = now_value :: number
+		local normalized_id = id :: string
+		local normalized_player = subject :: number
+		local key = key_for(normalized_id, normalized_player)
+		local identity_digest = SHA256.digest(entitlement_key_material(normalized_id, normalized_player))
+		local function make_tombstone(created_at: number): { [string]: any }
+			return {
+				version = ERASED_VERSION,
+				status = "erased",
+				revision = expected_generation + 1,
+				created_at = created_at,
+				updated_at = math.max(created_at, now),
+				identity_digest = identity_digest,
+				erasure_fence = {
+					erasure_id = erasure_id,
+					source_revision = expected_generation,
+					fenced_revision = expected_generation + 1,
+				},
+			}
+		end
+		local observed, write_error = update(options, key, function(raw: unknown): unknown?
+			if raw == nil then
+				if expected_generation ~= 0 then return nil end
+				return make_tombstone(now)
+			end
+			if type(raw) ~= "table" then return nil end
+			local fields = raw :: { [string]: any }
+			if fields.status == "erased" then return nil end
+			local record = row_for_identity(raw, normalized_id, normalized_player)
+			if record == nil or record.revision ~= expected_generation then return nil end
+			return make_tombstone(record.created_at)
+		end)
+		local raw = observed
+		if write_error ~= nil or raw == nil then
+			local readback, read_error = read_fresh(options, key)
+			if read_error ~= nil then
+				return result("unknown", nil, "entitlement erasure could not be reconciled: "
+					.. tostring(write_error or "empty write response") .. "; readback failed: " .. tostring(read_error))
+			end
+			raw = readback
+		end
+		if raw == nil then
+			if write_error ~= nil then
+				return result("unknown", nil, "entitlement erasure write result is unresolved: " .. tostring(write_error))
+			end
+			return result("conflict", nil, "entitlement generation changed before the erasure tombstone was committed")
+		end
+		if type(raw) == "table" and (raw :: { [string]: any }).status == "erased" then
+			local generation, observed_erasure_id, tombstone_error = validate_erasure_tombstone(
+				raw, normalized_id, normalized_player
+			)
+			if generation == nil then
+				local code = if string.sub(tombstone_error or "", 1, 10) == "conflict: " then "conflict" else "corrupt"
+				return result(code, nil, tombstone_error)
+			end
+			local fields = raw :: { [string]: any }
+			local fence = fields.erasure_fence :: { [string]: any }
+			if observed_erasure_id == erasure_id
+				and fence.source_revision == expected_generation
+				and generation == expected_generation + 1
+			then
+				return result("erased", nil, nil)
+			end
+			return result("conflict", nil, "entitlement key is permanently fenced by another erasure identity")
+		end
+		local current_record, row_error = row_for_identity(raw, normalized_id, normalized_player)
+		if current_record == nil then
 			local code = if string.sub(row_error or "", 1, 10) == "conflict: " then "conflict" else "corrupt"
 			return result(code, nil, row_error)
 		end
-		return result(record.status == "owned" and "owned" or "pending", record, nil)
+		if current_record.revision ~= expected_generation then
+			return result("conflict", nil, "entitlement generation changed before the erasure tombstone was committed")
+		end
+		if write_error ~= nil then
+			return result("unknown", nil, "entitlement erasure write result is unresolved: " .. tostring(write_error))
+		end
+		return result("conflict", nil, "entitlement erasure transformer did not commit a tombstone")
 	end
 
 	return self :: Authority
