@@ -2754,19 +2754,38 @@ local function new_erasure(store, families, options)
 		end
 		for _, template in ipairs(templates) do
 			if type(template) ~= "table" then error("RTBF template must be table", 2) end
-			-- A partial locator would act as a wildcard for omitted DataStore names or
-			-- scopes. Require the complete exact name/scope/key identity in every
-			-- template; an empty scope is allowed for the platform default scope.
+			local locator_mode = template.locator_mode or "user_id_template"
 			if not valid_text(template.name, 50) or type(template.scope) ~= "string" or #template.scope > 50
+				or string.find(template.scope, "%c") ~= nil
 				or not valid_text(template.key, 50)
 			then
-				error("RTBF template must declare bounded exact DataStore name, scope, and key fields", 2)
+				error("RTBF template must declare bounded DataStore name, scope, and locator key", 2)
 			end
-			local matchable = false
-			for _, field in ipairs({ "name", "scope", "key" }) do
-				if string.find(template[field], "{user_id}", 1, true) then matchable = true end
+			if locator_mode == "external_inventory" then
+				if not require_inventory_attestation or not writer_inventory_verified
+					or not valid_text(application_inventory_manifest_id, 128)
+				then
+					error("external RTBF inventory requires an attested application manifest and writer audit", 2)
+				end
+				if not valid_text(template.inventory_source_ref, 512)
+					or template.key ~= "__rtbf_external__{user_id}"
+					or string.find(template.name, "{user_id}", 1, true) ~= nil
+					or string.find(template.scope, "{user_id}", 1, true) ~= nil
+				then
+					error("external RTBF inventory requires a source evidence reference, fixed store/scope, and the reserved locator marker", 2)
+				end
+			elseif locator_mode == "user_id_template" then
+				if template.inventory_source_ref ~= nil then
+					error("exact RTBF templates cannot declare external inventory evidence", 2)
+				end
+				local matchable = false
+				for _, field in ipairs({ "name", "scope", "key" }) do
+					if string.find(template[field], "{user_id}", 1, true) then matchable = true end
+				end
+				if not matchable then error("RTBF template must place {user_id} in name, scope, or key", 2) end
+			else
+				error("RTBF locator_mode must be user_id_template or external_inventory", 2)
 			end
-			if not matchable then error("RTBF template must place {user_id} in name, scope, or key", 2) end
 			table.insert(all_templates, { family = family.name, template = copy(template) })
 			if #all_templates > MAX_ERASURE_TEMPLATES then error("RTBF templates exceed 100-template limit", 2) end
 		end
@@ -2843,7 +2862,11 @@ local function new_erasure(store, families, options)
 			for _, template_entry in ipairs(rendered) do
 				if template_entry.family == entry.family then
 					local template = template_entry.template
-					if item.name == template.name and item.scope == template.scope and item.key == template.key then
+					local matches = item.name == template.name and item.scope == template.scope
+					if template.locator_mode ~= "external_inventory" then
+						matches = matches and item.key == template.key
+					end
+					if matches then
 						matched = true
 						break
 					end
@@ -2916,10 +2939,10 @@ local function new_erasure(store, families, options)
 						local matched_template = false
 						for _, template_entry in ipairs(rendered) do
 							if template_entry.family == family.name then
-								local matches = true
-								for _, field in ipairs({ "name", "scope", "key" }) do
-									local expected = template_entry.template[field]
-									if type(expected) == "string" and item[field] ~= expected then matches = false; break end
+								local template = template_entry.template
+								local matches = item.name == template.name and item.scope == template.scope
+								if template.locator_mode ~= "external_inventory" then
+									matches = matches and item.key == template.key
 								end
 								if matches then matched_template = true; break end
 							end
@@ -3051,6 +3074,87 @@ local function new_erasure(store, families, options)
 			local planned_items = family_inventory_items(family.name)
 			local fenced, fence_error = io_call(family.fence_user, user_id, erasure_id, planned_items)
 			if fenced ~= true then return { code = "retryable", message = fence_error or "writer fence unconfirmed" } end
+		end
+		-- Re-enumerate after every family writer fence is installed. The first inventory
+		-- may race with a writer; the fence must stop recreation, and this fresh scan
+		-- proves that the planned exact locator set is still exhaustive before deletion.
+		local planned_locators: { [string]: { [string]: boolean } } = {}
+		for _, entry in ipairs(manifest.entries) do
+			local family_locators = planned_locators[entry.family]
+			if family_locators == nil then
+				family_locators = {}
+				planned_locators[entry.family] = family_locators
+			end
+			local item = entry.item
+			family_locators[item.name .. "\0" .. item.scope .. "\0" .. item.key] = true
+		end
+		local function block_on_inventory_change(code: string, message_text: string)
+			local updated_at = os.time()
+			adapter_call(store, "UpdateAsync", key, function(old)
+				if type(old) ~= "table" or old.user_id ~= user_id or old.erasure_id ~= erasure_id
+					or old.status == "completed" or old.status == "resolved"
+				then
+					return old
+				end
+				local value = copy(old)
+				value.status = "blocked"
+				value.last_error = string.sub(message_text, 1, 256)
+				value.updated_at = updated_at
+				return value
+			end)
+			return {
+				code = code,
+				cursor = manifest.cursor,
+				completed_count = manifest.completed_count,
+				rtbf_coverage_verified = false,
+				message = message_text,
+			}
+		end
+		for _, family in ipairs(self.families) do
+			local observed, inventory_complete = io_call(family.inventory, user_id, MAX_ERASURE_ITEMS)
+			if type(observed) ~= "table" or inventory_complete ~= true then
+				return block_on_inventory_change("inventory_unverified",
+					"post-fence inventory could not prove completeness; writer fences remain installed")
+			end
+			if #observed > MAX_ERASURE_ITEMS or key_count(observed) ~= #observed then
+				return block_on_inventory_change("inventory_unverified",
+					"post-fence inventory exceeded its bounded dense-array contract; writer fences remain installed")
+			end
+			for item_index in pairs(observed) do
+				if type(item_index) ~= "number" or not finite(item_index)
+					or math.floor(item_index) ~= item_index or item_index < 1 or item_index > #observed
+				then
+					return block_on_inventory_change("inventory_unverified",
+						"post-fence inventory was not a dense numeric array; writer fences remain installed")
+				end
+			end
+			local expected = table.clone(planned_locators[family.name] or {})
+			local seen = {}
+			for _, item in ipairs(observed) do
+				if type(item) ~= "table" or not valid_text(item.name, 50)
+					or type(item.scope) ~= "string" or #item.scope > 50
+					or not valid_text(item.key, 50) or not finite(item.generation)
+					or item.generation < 0 or math.floor(item.generation) ~= item.generation
+				then
+					return block_on_inventory_change("inventory_unverified",
+						"post-fence inventory contains an invalid exact locator or generation; writer fences remain installed")
+				end
+				local locator = item.name .. "\0" .. item.scope .. "\0" .. item.key
+				if seen[locator] then
+					return block_on_inventory_change("inventory_unverified",
+						"post-fence inventory repeats a locator; writer fences remain installed")
+				end
+				seen[locator] = true
+				if expected[locator] ~= true then
+					return block_on_inventory_change("inventory_changed",
+						"post-fence inventory contains a key absent from the reviewed plan; re-plan while keeping writer fences installed")
+				end
+				expected[locator] = nil
+			end
+			if next(expected) ~= nil then
+				return block_on_inventory_change("inventory_changed",
+					"post-fence inventory is missing a planned key; re-plan while keeping writer fences installed")
+			end
 		end
 		local cursor, completed = manifest.cursor or 0, manifest.completed_count or 0
 		for index = cursor + 1, math.min(#manifest.entries, cursor + max_items) do

@@ -94,6 +94,10 @@ jobs:
         timeout-minutes: 2
         run: timeout --signal=TERM --kill-after=5s 60s lune run bench/run_maintenance_datastore_adapter_regression.luau
 
+      - name: Regression - staged PR56 blocker candidates
+        timeout-minutes: 2
+        run: timeout --signal=TERM --kill-after=5s 60s lune run bench/run_pr56_blocker_staging_regression.luau
+
       - name: Run the benchmarks
         timeout-minutes: 16
         uses: CodSpeedHQ/action@v5

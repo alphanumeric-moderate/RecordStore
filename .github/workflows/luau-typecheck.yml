@@ -141,3 +141,10 @@ jobs:
           test "${#modules[@]}" -gt 0
           printf 'Analyzing %s Luau source modules using declared modes\n' "${#modules[@]}"
           luau-lsp analyze --platform=roblox --definitions=/tmp/globalTypes.d.luau --sourcemap=/tmp/sourcemap.json "${modules[@]}"
+
+      - name: Type-check isolated PR56 blocker candidate modules
+        run: |
+          set -euo pipefail
+          mapfile -t candidate_modules < <(find staging/pr56-blockers -type f -name '*.luau' -print | sort)
+          test "${#candidate_modules[@]}" -gt 0
+          luau-lsp analyze --platform=roblox --definitions=/tmp/globalTypes.d.luau --sourcemap=/tmp/sourcemap.json "${candidate_modules[@]}"
