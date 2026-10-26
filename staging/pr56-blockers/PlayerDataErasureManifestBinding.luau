@@ -188,8 +188,8 @@ function ErasureBinding.bind(
 		local family = families_by_id[adapter.family_id]
 		if family == nil then return nil, nil, "family adapter is absent from the reviewed inventory manifest" end
 		if family.id == profile_family_id then return nil, nil, "profile family must be wired through PlayerDataErasure's built-in adapter" end
-		if family.locator_mode ~= "user_id_template" then
-			return nil, nil, "external-inventory families are not representable by the current exact-template erasure coordinator"
+		if family.locator_mode ~= "user_id_template" and family.locator_mode ~= "external_inventory" then
+			return nil, nil, "manifest family uses an unsupported locator mode"
 		end
 		if family.action ~= "tombstone" and family.action ~= "redact" then
 			return nil, nil, "current erasure coordinator does not support the manifest's declared family action"
@@ -201,13 +201,18 @@ function ErasureBinding.bind(
 		then
 			return nil, nil, "family adapter must supply inventory, writer fence, dependency and generation-aware erase callbacks"
 		end
-		local templates = table.freeze({
-			table.freeze({
-				name = family.store_name,
-				scope = family.scope,
-				key = family.key_template,
-			}),
-		})
+		local key_template = if family.locator_mode == "external_inventory"
+			then "__rtbf_external__{user_id}" else family.key_template
+		local template: { [string]: any } = {
+			name = family.store_name,
+			scope = family.scope,
+			key = key_template,
+			locator_mode = family.locator_mode,
+		}
+		if family.locator_mode == "external_inventory" then
+			template.inventory_source_ref = family.inventory_source_ref
+		end
+		local templates = table.freeze({ table.freeze(template) })
 		local normalized_adapter = table.freeze({
 			name = family.id,
 			templates = templates,
