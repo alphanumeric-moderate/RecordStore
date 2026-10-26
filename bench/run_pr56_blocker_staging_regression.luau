@@ -11,6 +11,12 @@ local Authority = luau.load(fs.readFile("staging/pr56-blockers/PurchaseEntitleme
 local AtomicTombstone = luau.load(fs.readFile("staging/pr56-blockers/RecordStoreMaintenanceAtomicTombstone.luau"), {
 	debugName = "RecordStoreMaintenanceAtomicTombstone",
 })()
+local PurchaseManifest = luau.load(fs.readFile("staging/pr56-blockers/PurchaseInventoryManifest.luau"), {
+	debugName = "PurchaseInventoryManifest",
+})()
+local EntitlementCoordinator = luau.load(fs.readFile("staging/pr56-blockers/PurchaseEntitlementReceiptCoordinator.luau"), {
+	debugName = "PurchaseEntitlementReceiptCoordinator",
+})()
 
 local function expect(value, message)
 	if not value then error(message, 2) end
@@ -65,6 +71,18 @@ local function valid_manifest()
 		},
 	}
 end
+
+local empty_scope_manifest = valid_manifest()
+empty_scope_manifest.families[1].scope = ""
+expect(Manifest.validate(empty_scope_manifest) ~= nil,
+	"exact empty DataStore scope was rejected")
+
+local external_inventory_manifest = valid_manifest()
+external_inventory_manifest.families[1].locator_mode = "external_inventory"
+external_inventory_manifest.families[1].key_template = nil
+external_inventory_manifest.families[1].inventory_source_ref = "evidence:external-key-inventory"
+expect(Manifest.validate(external_inventory_manifest) ~= nil,
+	"externally enumerated user-key families required a guessed key template")
 
 local normalized, manifest_error = Manifest.validate(valid_manifest())
 expect(normalized ~= nil and manifest_error == nil, manifest_error or "valid reviewed inventory manifest was rejected")
@@ -417,5 +435,349 @@ local wrong_job_action = atomic_adapter:DeleteIfGeneration(
 	"other-job"
 )
 expect(wrong_job_action == "skipped", "same-key deletion accepted a different job identity")
+
+
+local function valid_purchase_manifest()
+	return {
+		schema_version = 1,
+		kind = "purchase_inventory",
+		manifest_id = "purchase-inventory-2026-10-26",
+		source_revision = "purchase-export-r2",
+		source_snapshot_id = "immutable-snapshot-2026-10-26",
+		source_systems = { "marketplace-receipts" },
+		legacy_receipt_paths = { "legacy-dev-product-receipts" },
+		row_order = "purchase_id_asc_player_id_asc_product_id_asc",
+		expected_purchase_count = 2,
+		expected_inventory_digest = string.rep("c", 32),
+		exported_at_unix = 1792950000,
+		review_status = "approved",
+		reviewed_by = "independent-reviewer",
+		reviewed_at_unix = 1792950010,
+		source_evidence_ref = "evidence:purchase-source-export",
+		end_of_inventory_evidence_ref = "evidence:purchase-terminal-page",
+		duplicate_conflict_report_ref = "evidence:purchase-duplicates-conflicts",
+		coverage_review_ref = "evidence:purchase-coverage-review",
+		archived_accounts_included = true,
+		deleted_accounts_included = true,
+	}
+end
+
+local purchase_manifest = valid_purchase_manifest()
+local purchase_manifest_normalized, purchase_manifest_error = PurchaseManifest.validate(purchase_manifest)
+expect(purchase_manifest_normalized ~= nil, purchase_manifest_error or "valid purchase inventory manifest was rejected")
+expect(table.isfrozen(purchase_manifest_normalized)
+	and table.isfrozen(purchase_manifest_normalized.source_systems)
+	and table.isfrozen(purchase_manifest_normalized.legacy_receipt_paths),
+	"purchase inventory manifest was not deeply frozen")
+
+local import_manifest, import_manifest_error = PurchaseManifest.verify_import_source(
+	purchase_manifest,
+	function(manifest)
+		return manifest.manifest_id == purchase_manifest.manifest_id
+			and manifest.source_snapshot_id == purchase_manifest.source_snapshot_id
+	end
+)
+expect(import_manifest ~= nil, import_manifest_error or "independently verified purchase source could not be accepted")
+
+local unverified_import = PurchaseManifest.verify_import_source(purchase_manifest, function()
+	return false, "source snapshot did not reconcile"
+end)
+expect(unverified_import == nil, "purchase import accepted a rejected immutable-source verifier")
+
+local missing_legacy_inventory = valid_purchase_manifest()
+missing_legacy_inventory.legacy_receipt_paths = {}
+expect(PurchaseManifest.validate(missing_legacy_inventory) == nil,
+	"purchase inventory omitted the explicit legacy receipt-path inventory")
+
+local incomplete_accounts = valid_purchase_manifest()
+incomplete_accounts.archived_accounts_included = false
+expect(PurchaseManifest.validate(incomplete_accounts) == nil,
+	"purchase inventory omitted archived accounts")
+
+local unsupported_order = valid_purchase_manifest()
+unsupported_order.row_order = "page_order_without_stable_sort"
+expect(PurchaseManifest.validate(unsupported_order) == nil,
+	"purchase inventory accepted an unstable order for its rolling digest")
+
+local source_checkpoint = {
+	done = true,
+	revision = 3,
+	source_revision = purchase_manifest.source_revision,
+	inventory_manifest_id = purchase_manifest.manifest_id,
+	purchases_processed = purchase_manifest.expected_purchase_count,
+	expected_purchase_count = purchase_manifest.expected_purchase_count,
+	inventory_digest = purchase_manifest.expected_inventory_digest,
+	expected_inventory_digest = purchase_manifest.expected_inventory_digest,
+	inventory_verified = true,
+}
+local source_completion = {
+	manifest_id = purchase_manifest.manifest_id,
+	source_revision = purchase_manifest.source_revision,
+	observed_purchase_count = purchase_manifest.expected_purchase_count,
+	observed_inventory_digest = purchase_manifest.expected_inventory_digest,
+	checkpoint_revision = 3,
+	conflicts_reconciled = true,
+	conflict_reconciliation_evidence_ref = "evidence:reconciled-conflicts",
+	live_acceptance_complete = true,
+	live_acceptance_evidence_ref = "evidence:roblox-purchase-acceptance",
+}
+local activated_purchase_manifest, activation_manifest_error = PurchaseManifest.verify_completion(
+	purchase_manifest,
+	source_checkpoint,
+	source_completion,
+	function(manifest, checkpoint, completion)
+		return manifest.manifest_id == checkpoint.inventory_manifest_id
+			and checkpoint.revision == completion.checkpoint_revision
+	end
+)
+expect(activated_purchase_manifest ~= nil,
+	activation_manifest_error or "verified purchase completion could not be activated")
+
+local wrong_checkpoint_revision = clone(source_checkpoint)
+wrong_checkpoint_revision.revision = 4
+expect(PurchaseManifest.verify_completion(
+	purchase_manifest,
+	wrong_checkpoint_revision,
+	source_completion,
+	function() return true end
+) == nil, "purchase completion ignored a different durable checkpoint revision")
+
+local wrong_completion_count = clone(source_completion)
+wrong_completion_count.observed_purchase_count -= 1
+expect(PurchaseManifest.verify_completion(
+	purchase_manifest,
+	source_checkpoint,
+	wrong_completion_count,
+	function() return true end
+) == nil, "purchase completion accepted a count mismatch")
+
+local no_live_acceptance = clone(source_completion)
+no_live_acceptance.live_acceptance_complete = false
+no_live_acceptance.live_acceptance_evidence_ref = nil
+expect(PurchaseManifest.verify_completion(
+	purchase_manifest,
+	source_checkpoint,
+	no_live_acceptance,
+	function() return true end
+) == nil, "purchase migration activated without live fulfillment acceptance")
+
+local function make_purchase_authority()
+	local authority = { rows = {}, lose_next_commit = false }
+	function authority:ClaimAsync(purchase_id, player_id, product_id)
+		local existing = self.rows[purchase_id]
+		if existing ~= nil then
+			if existing.PlayerId ~= player_id or existing.ProductId ~= product_id then
+				return {
+					PurchaseId = purchase_id,
+					PlayerId = player_id,
+					ProductId = product_id,
+					Status = "conflict",
+				}, nil
+			end
+			return clone(existing), nil
+		end
+		local row = {
+			PurchaseId = purchase_id,
+			PlayerId = player_id,
+			ProductId = product_id,
+			Status = "claimed",
+		}
+		self.rows[purchase_id] = row
+		return clone(row), nil
+	end
+	function authority:CommitAsync(purchase_id, player_id, product_id, outcome)
+		local existing = self.rows[purchase_id]
+		if existing == nil then return nil, "not_found" end
+		if existing.PlayerId ~= player_id or existing.ProductId ~= product_id then
+			return {
+				PurchaseId = purchase_id,
+				PlayerId = player_id,
+				ProductId = product_id,
+				Status = "conflict",
+			}, nil
+		end
+		if existing.Status == "claimed" then
+			existing.Status = "committed"
+			existing.Outcome = outcome
+		end
+		if self.lose_next_commit then
+			self.lose_next_commit = false
+			return nil, "injected response loss after purchase commit"
+		end
+		return clone(existing), nil
+	end
+	function authority:GetStatusAsync(purchase_id, player_id, product_id)
+		local existing = self.rows[purchase_id]
+		if existing == nil then return nil, "not_found" end
+		if existing.PlayerId ~= player_id or existing.ProductId ~= product_id then
+			return {
+				PurchaseId = purchase_id,
+				PlayerId = player_id,
+				ProductId = product_id,
+				Status = "conflict",
+			}, nil
+		end
+		return clone(existing), nil
+	end
+	return authority
+end
+
+local function make_coordinator(purchase_authority, entitlement_store, grant_result, activation_ready)
+	local entitlement_authority = Authority.new({
+		key_prefix = "ent:",
+		store_adapter = entitlement_store,
+		now_unix = function() return now end,
+	})
+	local grant_calls = {}
+	local coordinator = EntitlementCoordinator.new({
+		purchase_authority = purchase_authority,
+		entitlement_authority = entitlement_authority,
+		entitlement_by_product_id = {
+			[501] = "VIP_LIFETIME",
+		},
+		grant_profile_once = function(receipt, operation_id)
+			expect(operation_id == "purchase:" .. receipt.PurchaseId,
+				"profile grant was not bound to the stable PurchaseId")
+			grant_calls[receipt.PurchaseId] = (grant_calls[receipt.PurchaseId] or 0) + 1
+			local status = grant_result[receipt.PurchaseId] or "granted"
+			if type(status) == "function" then return status(receipt, operation_id) end
+			return status, if status == "unknown" then "injected grant uncertainty" else nil
+		end,
+		verify_activation = activation_ready or function() return true end,
+	})
+	return coordinator, entitlement_authority, grant_calls
+end
+
+local receipt_auth = make_purchase_authority()
+local receipt_store = make_store()
+local receipt_grants = {}
+local receipt_coordinator, receipt_entitlements, receipt_grant_calls = make_coordinator(
+	receipt_auth, receipt_store, receipt_grants
+)
+local receipt_one = { PurchaseId = "purchase-lifetime-1", PlayerId = 1101, ProductId = 501 }
+local receipt_one_decision = receipt_coordinator:Process(receipt_one)
+expect(receipt_one_decision.action == "acknowledge",
+	receipt_one_decision.message or "valid lifetime purchase was not durably acknowledged")
+expect(receipt_auth.rows[receipt_one.PurchaseId].Status == "committed"
+	and receipt_auth.rows[receipt_one.PurchaseId].Outcome == "granted",
+	"purchase authority was not committed after profile grant and entitlement")
+expect(receipt_grant_calls[receipt_one.PurchaseId] == 1, "profile grant callback was not run exactly once in this attempt")
+local found_owned_entitlement = false
+for _, row in pairs(receipt_store.rows) do
+	if row.entitlement_id == "VIP_LIFETIME" and row.player_id == 1101 then
+		found_owned_entitlement = row.status == "owned" and row.purchase_id == receipt_one.PurchaseId
+	end
+end
+expect(found_owned_entitlement, "lifetime entitlement was not marked owned for the exact receipt")
+
+local replay_decision = receipt_coordinator:Process(receipt_one)
+expect(replay_decision.action == "acknowledge", "replayed lifetime purchase was not acknowledged")
+expect(receipt_grant_calls[receipt_one.PurchaseId] == 1, "committed purchase replay called profile grant again")
+
+local second_lifetime_receipt = {
+	PurchaseId = "purchase-lifetime-2",
+	PlayerId = 1101,
+	ProductId = 501,
+}
+local second_lifetime_decision = receipt_coordinator:Process(second_lifetime_receipt)
+expect(second_lifetime_decision.action == "acknowledge"
+	and second_lifetime_decision.status == "lifetime_entitlement_already_owned",
+	"separate purchase for an already-owned lifetime entitlement was not safely deduplicated")
+expect(receipt_auth.rows[second_lifetime_receipt.PurchaseId].Status == "committed"
+	and receipt_auth.rows[second_lifetime_receipt.PurchaseId].Outcome == "duplicate",
+	"already-owned lifetime receipt was acknowledged without a durable duplicate authority record")
+expect(receipt_grant_calls[second_lifetime_receipt.PurchaseId] == nil,
+	"duplicate lifetime purchase incorrectly repeated its profile grant")
+
+local reused_receipt_decision = receipt_coordinator:Process({
+	PurchaseId = receipt_one.PurchaseId,
+	PlayerId = 9999,
+	ProductId = 501,
+})
+expect(reused_receipt_decision.action == "defer",
+	"cross-user PurchaseId reuse was acknowledged by the lifetime coordinator")
+
+local gated_auth = make_purchase_authority()
+local gated_store = make_store()
+local gated_coordinator = make_coordinator(
+	gated_auth,
+	gated_store,
+	{},
+	function() return false, "manifest migration not accepted" end
+)
+local gated_decision = gated_coordinator:Process({
+	PurchaseId = "purchase-gated",
+	PlayerId = 1102,
+	ProductId = 501,
+})
+expect(gated_decision.action == "defer" and next(gated_auth.rows) == nil and next(gated_store.rows) == nil,
+	"disabled purchase activation gate allowed receipt side effects")
+
+local unmapped_decision = receipt_coordinator:Process({
+	PurchaseId = "purchase-unmapped",
+	PlayerId = 1101,
+	ProductId = 999,
+})
+expect(unmapped_decision.action == "not_applicable",
+	"lifetime coordinator intercepted a product without an entitlement mapping")
+
+local uncertain_auth = make_purchase_authority()
+local uncertain_store = make_store()
+local uncertain_grants = { ["purchase-grant-retry"] = "unknown" }
+local uncertain_coordinator, _, uncertain_calls = make_coordinator(
+	uncertain_auth, uncertain_store, uncertain_grants
+)
+local uncertain_receipt = { PurchaseId = "purchase-grant-retry", PlayerId = 1201, ProductId = 501 }
+local first_uncertain_decision = uncertain_coordinator:Process(uncertain_receipt)
+expect(first_uncertain_decision.action == "defer"
+	and uncertain_auth.rows[uncertain_receipt.PurchaseId].Status == "claimed",
+	"uncertain profile grant was prematurely acknowledged or globally committed")
+local pending_owner = false
+for _, row in pairs(uncertain_store.rows) do
+	if row.entitlement_id == "VIP_LIFETIME" and row.player_id == 1201 then
+		pending_owner = row.status == "pending" and row.purchase_id == uncertain_receipt.PurchaseId
+	end
+end
+expect(pending_owner, "uncertain grant did not retain the exact recoverable entitlement claim")
+uncertain_grants[uncertain_receipt.PurchaseId] = "granted"
+local retry_grant_decision = uncertain_coordinator:Process(uncertain_receipt)
+expect(retry_grant_decision.action == "acknowledge",
+	retry_grant_decision.message or "receipt did not recover after the profile grant became confirmable")
+expect(uncertain_calls[uncertain_receipt.PurchaseId] == 2,
+	"unknown profile grant was not retried under the same idempotency key")
+
+local competing_auth = make_purchase_authority()
+local competing_store = make_store()
+local competing_grants = { ["purchase-owner-pending"] = "unknown" }
+local competing_coordinator = make_coordinator(competing_auth, competing_store, competing_grants)
+local pending_receipt = { PurchaseId = "purchase-owner-pending", PlayerId = 1301, ProductId = 501 }
+expect(competing_coordinator:Process(pending_receipt).action == "defer",
+	"fixture did not create a pending lifetime entitlement")
+local competing_receipt = { PurchaseId = "purchase-owner-next", PlayerId = 1301, ProductId = 501 }
+local competing_decision = competing_coordinator:Process(competing_receipt)
+expect(competing_decision.action == "defer"
+	and competing_auth.rows[competing_receipt.PurchaseId].Status == "claimed"
+	and competing_grants[competing_receipt.PurchaseId] == nil,
+	"a competing receipt bypassed an unresolved lifetime entitlement reservation")
+
+local loss_auth = make_purchase_authority()
+local loss_store = make_store()
+local loss_grants = {
+	["purchase-two-commits"] = function()
+		loss_store.lose_next_response = true
+		loss_auth.lose_next_commit = true
+		return "granted"
+	end,
+}
+local loss_coordinator = make_coordinator(loss_auth, loss_store, loss_grants)
+local loss_decision = loss_coordinator:Process({
+	PurchaseId = "purchase-two-commits",
+	PlayerId = 1401,
+	ProductId = 501,
+})
+expect(loss_decision.action == "acknowledge",
+	loss_decision.message or "cross-key entitlement and purchase commit response loss was not reconciled")
+expect(loss_auth.rows["purchase-two-commits"].Status == "committed",
+	"purchase authority did not reconcile a response lost after terminal commit")
 
 print("PR56 staged blocker regression checks passed")
