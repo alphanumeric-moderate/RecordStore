@@ -1292,4 +1292,242 @@ local yielding_policy_action = yielding_policy_adapter:DeleteIfGeneration(
 expect(yielding_policy_action == "unknown" and yielding_policy_store.row.tombstone ~= true,
 	"yielding maintenance policy callback led to deletion")
 
+do
+	local MaintenanceBinder = luau.load(fs.readFile("staging/pr56-blockers/RecordStoreMaintenanceManifestBinding.luau"), {
+		debugName = "RecordStoreMaintenanceManifestBinding",
+	})()
+
+	local function maintenance_manifest()
+		return {
+			schema_version = 1,
+			kind = "maintenance_job",
+			manifest_id = "maintenance-inventory-2026-10-26",
+			revision = "maintenance-review-r2",
+			source_commit = string.rep("a", 40),
+			job_id = "maintenance-job-r2",
+			catalog_revision = "catalog-r2",
+			review_status = "approved",
+			reviewed_by = "independent-reviewer",
+			reviewed_at_unix = now,
+			inventory_evidence_ref = "evidence:maintenance-inventory",
+			policy_review_evidence_ref = "evidence:maintenance-policy",
+			fence_protocol_evidence_ref = "evidence:maintenance-writer-fence",
+			checkpoint_protocol_evidence_ref = "evidence:maintenance-checkpoint",
+			checkpoint_store_name = "MaintenanceCheckpoints",
+			checkpoint_scope = "global",
+			checkpoint_key = "maintenance-job-r2",
+			families = {
+				{
+					name = "player-profiles",
+					store_name = "Profiles",
+					scope = "global",
+					prefix = "Player_",
+					generation_field = "fencing_generation",
+					job_fence_field = "maintenance_fence_job_id",
+					tombstone_field = "maintenance_tombstone",
+					tombstone_job_field = "maintenance_tombstone_job_id",
+					tombstone_source_generation_field = "maintenance_tombstone_source_generation",
+					action = "tombstone",
+					inventory_evidence_ref = "evidence:profiles-inventory",
+					policy_evidence_ref = "evidence:profiles-policy",
+				},
+			},
+		}
+	end
+
+	local function maintenance_runtime(overrides)
+		local policy = {
+			family_name = "player-profiles",
+			is_eligible = function(value)
+				value.payload.mutated_by_policy = true
+				return value.eligible == true
+			end,
+			dependencies_clear = function(value)
+				return value.payload.token == "keep" and value.dependencies_clear == true
+			end,
+		}
+		local runtime = {
+			maintenance = { NewCompactor = function() end },
+			maintenance_runner = { new = function() end },
+			policies = { policy },
+			mode = "dry_run",
+		}
+		for key, value in pairs(overrides or {}) do runtime[key] = value end
+		return runtime, policy
+	end
+
+	local maintenance_runtime_value, maintenance_policy = maintenance_runtime()
+	local verifier_calls = 0
+	local maintenance_config, maintenance_manifest_value, maintenance_bind_error = MaintenanceBinder.bind(
+		maintenance_manifest(),
+		maintenance_runtime_value,
+		function(manifest, families)
+			verifier_calls += 1
+			return manifest.job_id == "maintenance-job-r2"
+				and #families == 1
+				and table.isfrozen(families)
+				and table.isfrozen(families[1]),
+				"maintenance attestation did not reconcile"
+		end
+	)
+	expect(maintenance_config ~= nil,
+		maintenance_bind_error or "reviewed maintenance manifest did not bind to adapter callbacks")
+	expect(maintenance_manifest_value.manifest_id == "maintenance-inventory-2026-10-26"
+		and maintenance_config.job_id == maintenance_manifest_value.job_id
+		and maintenance_config.catalog_revision == maintenance_manifest_value.catalog_revision
+		and maintenance_config.mode == "dry_run"
+		and #maintenance_config.families == 1
+		and verifier_calls == 1,
+		"bound maintenance config did not inherit reviewed identity or remain dry-run by default")
+	expect(table.isfrozen(maintenance_config) and table.isfrozen(maintenance_config.families),
+		"bound maintenance configuration is mutable")
+
+	local maintenance_family = maintenance_config.families[1]
+	local maintenance_row = {
+		fencing_generation = 4,
+		maintenance_fence_job_id = "maintenance-job-r2",
+		eligible = true,
+		dependencies_clear = true,
+		payload = { token = "keep" },
+	}
+	local inspection, inspection_error = maintenance_family.inspect(
+		"Player_1001", maintenance_row, nil
+	)
+	expect(inspection ~= nil and inspection_error == nil
+		and inspection.status == "success"
+		and inspection.eligible == true and inspection.dependencies_clear == true
+		and inspection.generation == 4,
+		inspection_error or "maintenance family inspection did not confirm safe eligibility")
+	expect(maintenance_row.payload.token == "keep"
+		and maintenance_row.payload.mutated_by_policy == nil,
+		"maintenance policy mutated the source record during inspection")
+	expect(maintenance_family.can_delete(
+		maintenance_row, nil, 4, "maintenance-job-r2"
+	), "same-row generation/job-fence check refused an eligible record")
+
+	local maintenance_tombstone = maintenance_family.make_tombstone(
+		maintenance_row, nil, 4, "maintenance-job-r2"
+	)
+	expect(type(maintenance_tombstone) == "table"
+		and maintenance_tombstone.fencing_generation == 5
+		and maintenance_tombstone.maintenance_fence_job_id == "maintenance-job-r2"
+		and maintenance_tombstone.maintenance_tombstone == true
+		and maintenance_tombstone.maintenance_tombstone_job_id == "maintenance-job-r2"
+		and maintenance_tombstone.maintenance_tombstone_source_generation == 4
+		and maintenance_tombstone.payload.token == "keep",
+		"maintenance tombstone did not advance generation while preserving the payload")
+	expect(maintenance_family.is_tombstone(maintenance_tombstone, 4, "maintenance-job-r2"),
+		"maintenance tombstone identity did not validate")
+	expect(not maintenance_family.can_delete(
+		maintenance_tombstone, nil, 5, "maintenance-job-r2"
+	), "already tombstoned row could be tombstoned again")
+
+	local stale_record = clone(maintenance_row)
+	expect(not maintenance_family.can_delete(stale_record, nil, 3, "maintenance-job-r2"),
+		"stale expected generation bypassed the same-mutation generation fence")
+	local foreign_fence_record = clone(maintenance_row)
+	foreign_fence_record.maintenance_fence_job_id = "other-job"
+	expect(not maintenance_family.can_delete(foreign_fence_record, nil, 4, "maintenance-job-r2"),
+		"record without this job's same-key fence was eligible")
+	local ineligible_record = clone(maintenance_row)
+	ineligible_record.eligible = false
+	expect(not maintenance_family.can_delete(ineligible_record, nil, 4, "maintenance-job-r2"),
+		"application eligibility callback was bypassed")
+	local dependent_record = clone(maintenance_row)
+	dependent_record.dependencies_clear = false
+	expect(not maintenance_family.can_delete(dependent_record, nil, 4, "maintenance-job-r2"),
+		"dependency callback was bypassed")
+
+	local rejected_attestation_calls = 0
+	local rejected_config = MaintenanceBinder.bind(
+		maintenance_manifest(),
+		maintenance_runtime_value,
+		function()
+			rejected_attestation_calls += 1
+			return false, "fence protocol did not reconcile"
+		end
+	)
+	expect(rejected_config == nil and rejected_attestation_calls == 1,
+		"maintenance manifest was accepted after independent attestation rejection")
+
+	local missing_policy_called = false
+	local missing_policy = MaintenanceBinder.bind(
+		maintenance_manifest(),
+		maintenance_runtime({ policies = {} }),
+		function()
+			missing_policy_called = true
+			return true
+		end
+	)
+	expect(missing_policy == nil and not missing_policy_called,
+		"maintenance manifest reached attestation with a missing family policy")
+
+	local overlap_manifest = maintenance_manifest()
+	overlap_manifest.families[2] = clone(overlap_manifest.families[1])
+	overlap_manifest.families[2].name = "overlapping-family"
+	overlap_manifest.families[2].prefix = "Player_Archive_"
+	overlap_manifest.families[2].inventory_evidence_ref = "evidence:second-inventory"
+	overlap_manifest.families[2].policy_evidence_ref = "evidence:second-policy"
+	local overlap_verified = false
+	expect(MaintenanceBinder.bind(
+		overlap_manifest,
+		maintenance_runtime({ policies = {
+			maintenance_policy,
+			{
+				family_name = "overlapping-family",
+				is_eligible = function() return true end,
+				dependencies_clear = function() return true end,
+			},
+		} }),
+		function()
+			overlap_verified = true
+			return true
+		end
+	) == nil and not overlap_verified,
+	"overlapping same-store family prefixes reached independent attestation")
+
+	local same_checkpoint_store = maintenance_manifest()
+	same_checkpoint_store.checkpoint_store_name = "Profiles"
+	same_checkpoint_store.checkpoint_scope = "global"
+	expect(MaintenanceBinder.bind(
+		same_checkpoint_store, maintenance_runtime(), function() return true end
+	) == nil, "checkpoint store sharing a target store/scope was accepted")
+
+	local unsupported_action = maintenance_manifest()
+	unsupported_action.families[1].action = "physical_delete"
+	expect(MaintenanceBinder.bind(
+		unsupported_action, maintenance_runtime(), function() return true end
+	) == nil, "physical deletion was accepted instead of durable tombstoning")
+
+	local execute_without_fence = MaintenanceBinder.bind(
+		maintenance_manifest(),
+		maintenance_runtime({ mode = "execute" }),
+		function() return true end
+	)
+	expect(execute_without_fence == nil,
+		"execute mode was enabled without authorization and durable fence preflight")
+
+	local yielding_runtime = maintenance_runtime({
+		policies = {{
+			family_name = "player-profiles",
+			is_eligible = function()
+				coroutine.yield()
+				return true
+			end,
+			dependencies_clear = function() return true end,
+		}},
+	})
+	local yielding_config = MaintenanceBinder.bind(
+		maintenance_manifest(), yielding_runtime, function() return true end
+	)
+	expect(yielding_config ~= nil, "valid maintenance policy callback could not be bound")
+	local yielding_inspection = yielding_config.families[1].inspect(
+		"Player_1001", maintenance_row, nil
+	)
+	expect(yielding_inspection == nil,
+		"yielding maintenance policy callback produced an actionable inspection")
+
+	print("PR56 maintenance manifest binding regressions passed")
+end
+
 print("PR56 staged blocker regression checks passed")
