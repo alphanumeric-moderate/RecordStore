@@ -1,6 +1,12 @@
 --!nocheck
 local fs = require("@lune/fs")
 local luau = require("@lune/luau")
+local Shim = require("./RobloxShim")
+local CoreRecordStore = Shim.load()
+local server_script_service = Shim.environment.game:GetService("ServerScriptService")
+local v2_module_instance = server_script_service:WaitForChild("PlayerDataInitializer"):WaitForChild("RecordStoreV2")
+local RecordStoreV2Factory = Shim.environment.require(v2_module_instance)
+local RecordStoreV2 = RecordStoreV2Factory.new(CoreRecordStore, CoreRecordStore.MailboxV2)
 
 local Manifest = luau.load(fs.readFile("staging/pr56-blockers/RecordStoreApplicationInventory.luau"), {
 	debugName = "RecordStoreApplicationInventory",
@@ -76,6 +82,30 @@ local function valid_manifest()
 			},
 		},
 	}
+end
+
+local function valid_manifest_with_external_family()
+	local manifest = valid_manifest()
+	manifest.families[#manifest.families + 1] = {
+		id = "purchase-authority",
+		store_name = "PurchaseAuthority",
+		scope = "global",
+		locator_mode = "external_inventory",
+		inventory_source_ref = "evidence:purchase-user-index",
+		generation_field = "fencing_generation",
+		fence_field = "erasure_fence",
+		action = "tombstone",
+		writer_ids = { "purchase-authority-writer" },
+		evidence_ref = "evidence:purchase-authority-family",
+	}
+	manifest.writers[#manifest.writers + 1] = {
+		id = "purchase-authority-writer",
+		source_path = "src/PlayerDataInitializer/PurchaseDataStoreAuthority.luau",
+		family_ids = { "purchase-authority" },
+		fence_mode = "same_key_update_async",
+		fence_evidence_ref = "evidence:purchase-authority-writer-fence",
+	}
+	return manifest
 end
 
 do
@@ -156,6 +186,47 @@ expect(erasure_attestation_calls == 1
 	and table.isfrozen(erasure_config)
 	and table.isfrozen(erasure_config.additional_families),
 	"RTBF erasure config was not verified once and frozen")
+
+local external_manifest = valid_manifest_with_external_family()
+local external_runtime = {
+	verify_templates = function(user_id, rendered)
+		if user_id ~= 1001 or type(rendered) ~= "table" or #rendered ~= 2 then return false end
+		for _, entry in ipairs(rendered) do
+			if entry.family == "purchase-authority" then
+				return entry.template.locator_mode == "external_inventory"
+					and entry.template.inventory_source_ref == "evidence:purchase-user-index"
+			end
+		end
+		return false
+	end,
+}
+local external_adapter = {
+	family_id = "purchase-authority",
+	action = "tombstone",
+	inventory = function() return {}, true end,
+	fence_user = function() return true end,
+	dependencies_clear = function() return true end,
+	redact_or_delete_if_generation = function() return "deleted" end,
+}
+local external_config, activated_external, external_bind_error = ErasureBinding.bind(
+	Manifest,
+	external_manifest,
+	external_runtime,
+	{ external_adapter },
+	function(verified_manifest, family_adapters)
+		return verified_manifest.families[2].locator_mode == "external_inventory"
+			and #family_adapters == 1 and table.isfrozen(family_adapters),
+			"external inventory attestation did not reconcile"
+	end
+)
+expect(external_config ~= nil,
+	external_bind_error or "reviewed dynamic RTBF family did not bind")
+expect(activated_external.manifest_id == external_manifest.manifest_id
+	and #external_config.additional_families == 1
+	and external_config.additional_families[1].templates[1].locator_mode == "external_inventory"
+	and external_config.additional_families[1].templates[1].inventory_source_ref == "evidence:purchase-user-index"
+	and external_config.additional_families[1].templates[1].key == "__rtbf_external__{user_id}",
+	"dynamic RTBF binding lost its explicit inventory mode, source evidence, or reserved marker")
 
 local override_verifier_called = false
 local unsafe_erasure_override = ErasureBinding.bind(
@@ -353,6 +424,125 @@ local function make_store()
 		return observed, nil
 	end
 	return store
+end
+
+
+local function make_external_erasure(inventory_items)
+	local manifest_store = make_store()
+	local deleted = {}
+	local fenced = {}
+	local profile_items = {
+		{ name = "PlayerData_Test1", scope = "global", key = "Player_1001", generation = 7 },
+	}
+	local function family(name, template, inventory)
+		return {
+			name = name,
+			templates = { template },
+			templates_verified = true,
+			inventory = inventory,
+			fence_user = function(user_id, erasure_id, planned)
+				if user_id ~= 1001 or erasure_id == "" or type(planned) ~= "table" then
+					return false, "invalid writer fence request"
+				end
+				fenced[name] = true
+				return true
+			end,
+			dependencies_clear = function() return true end,
+			redact_or_delete_if_generation = function(item, user_id, erasure_id)
+				if fenced[name] ~= true or user_id ~= 1001 or erasure_id == ""
+					or type(item) ~= "table" or type(item.generation) ~= "number"
+				then
+					return "skipped", "deletion attempted without a valid same-user fence"
+				end
+				deleted[#deleted + 1] = item.name .. "/" .. item.scope .. "/" .. item.key
+				return "deleted"
+			end,
+		}
+	end
+	local families = {
+		family("player-profile", {
+			name = "PlayerData_Test1",
+			scope = "global",
+			key = "Player_{user_id}",
+			locator_mode = "user_id_template",
+		}, function() return clone(profile_items), true end),
+		family("purchase-authority", {
+			name = "PurchaseAuthority",
+			scope = "global",
+			key = "__rtbf_external__{user_id}",
+			locator_mode = "external_inventory",
+			inventory_source_ref = "evidence:purchase-user-index",
+		}, function() return clone(inventory_items()), true end),
+	}
+	local erasure = RecordStoreV2.Erasure.new(manifest_store, families, {
+		require_inventory_attestation = true,
+		application_inventory_manifest_id = "rtbf-inventory-r4",
+		writer_inventory_verified = true,
+		verify_templates = function(user_id, rendered)
+			if user_id ~= 1001 or type(rendered) ~= "table" or #rendered ~= 2 then return false end
+			for _, entry in ipairs(rendered) do
+				if entry.family == "purchase-authority" then
+					return entry.template.locator_mode == "external_inventory"
+						and entry.template.inventory_source_ref == "evidence:purchase-user-index"
+				end
+			end
+			return false
+		end,
+	})
+	return erasure, manifest_store, deleted, fenced
+end
+
+do
+	local dynamic_items = {
+		{ name = "PurchaseAuthority", scope = "global", key = "receipt-user-1001-a", generation = 3 },
+		{ name = "PurchaseAuthority", scope = "global", key = "receipt-user-1001-b", generation = 9 },
+	}
+	local erasure, _, deleted = make_external_erasure(function() return dynamic_items end)
+	local plan = erasure:PlanAsync(1001, "erasure-external-new-key")
+	expect(plan.code == "success" and plan.rtbf_coverage_verified == true and #plan.entries == 3,
+		"attested dynamic inventory did not produce an exhaustive exact-key erasure plan")
+
+	dynamic_items[#dynamic_items + 1] = {
+		name = "PurchaseAuthority", scope = "global", key = "receipt-user-1001-created-after-plan", generation = 2,
+	}
+	local blocked = erasure:ExecuteAsync(1001, "erasure-external-new-key", 16)
+	expect(blocked.code == "inventory_changed" and #deleted == 0,
+		"post-plan key creation was not detected after writer fencing before deletion")
+
+	local stable_items = {
+		{ name = "PurchaseAuthority", scope = "global", key = "receipt-user-1001-a", generation = 3 },
+		{ name = "PurchaseAuthority", scope = "global", key = "receipt-user-1001-b", generation = 9 },
+	}
+	local complete_erasure, _, complete_deleted = make_external_erasure(function() return stable_items end)
+	local complete_plan = complete_erasure:PlanAsync(1001, "erasure-external-complete")
+	expect(complete_plan.code == "success" and complete_plan.rtbf_coverage_verified == true,
+		"stable external inventory did not establish an attested plan")
+	local completed = complete_erasure:ExecuteAsync(1001, "erasure-external-complete", 16)
+	expect(completed.code == "committed" and completed.rtbf_coverage_verified == true
+		and #complete_deleted == 3,
+		"stable external inventory did not complete through exact locators after the post-fence scan")
+
+	local without_attestation_ok = pcall(function()
+		RecordStoreV2.Erasure.new(make_store(), {
+			{
+				name = "external",
+				templates = {{
+					name = "PurchaseAuthority", scope = "global",
+					key = "__rtbf_external__{user_id}", locator_mode = "external_inventory",
+					inventory_source_ref = "evidence:purchase-user-index",
+				}},
+				templates_verified = true,
+				inventory = function() return {}, true end,
+				fence_user = function() return true end,
+				dependencies_clear = function() return true end,
+				redact_or_delete_if_generation = function() return "deleted" end,
+			},
+		}, {
+			verify_templates = function() return true end,
+		})
+	end)
+	expect(not without_attestation_ok,
+		"external inventory was accepted without an attested application manifest and writer audit")
 end
 
 local store = make_store()
