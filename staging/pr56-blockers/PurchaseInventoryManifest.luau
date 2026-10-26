@@ -13,10 +13,32 @@ export type Checkpoint = {
 	inventory_verified: boolean,
 }
 
+export type RunnerBindings = {
+	job_id: string,
+	source: any,
+	processor: any,
+	checkpoint_store: any,
+	checkpoint_key: string,
+	initial_cursor: string?,
+	page_size: number?,
+}
+
+export type TerminalVerifier = (
+	manifest: { [string]: any },
+	manifest_id: string,
+	source_revision: string,
+	expected_count: number,
+	observed_count: number,
+	expected_digest: string,
+	observed_digest: string
+) -> (boolean, string?)
+
 local MAX_TEXT = 512
 local MAX_ID = 128
 local MAX_SOURCES = 32
 local MAX_LEGACY_PATHS = 128
+local MAX_CURSOR_BYTES = 512
+local MAX_PAGE_SIZE = 16
 
 local MANIFEST_FIELDS = {
 	schema_version = true,
@@ -51,6 +73,16 @@ local COMPLETION_FIELDS = {
 	conflict_reconciliation_evidence_ref = true,
 	live_acceptance_complete = true,
 	live_acceptance_evidence_ref = true,
+}
+
+local RUNNER_BINDING_FIELDS = {
+	job_id = true,
+	source = true,
+	processor = true,
+	checkpoint_store = true,
+	checkpoint_key = true,
+	initial_cursor = true,
+	page_size = true,
 }
 
 local function valid_text(value: unknown, maximum: number): boolean
@@ -194,6 +226,92 @@ function PurchaseManifest.verify_import_source(
 	if not ok then return nil, "source verifier failed: " .. tostring(accepted) end
 	if accepted ~= true then return nil, tostring(message or "source inventory was not independently verified") end
 	return manifest, nil
+end
+
+function PurchaseManifest.bind_runner_config(
+	raw_manifest: unknown,
+	raw_bindings: unknown,
+	verify_source: ({ [string]: any }) -> (boolean, string?),
+	verify_terminal_inventory: TerminalVerifier
+): ({ [string]: any }?, { [string]: any }?, string?)
+	if type(raw_bindings) ~= "table" then return nil, nil, "runner bindings must be a table" end
+	local bindings = raw_bindings :: { [string]: any }
+	if not exact_fields(bindings, RUNNER_BINDING_FIELDS) then
+		return nil, nil, "runner bindings contain an unsupported or pre-bound manifest field"
+	end
+	if not valid_text(bindings.job_id, 96) then return nil, nil, "job_id must be 1 to 96 bytes" end
+	if type(bindings.source) ~= "table" or type(bindings.source.read_page) ~= "function" then
+		return nil, nil, "source must implement read_page over the reviewed immutable snapshot"
+	end
+	if type(bindings.processor) ~= "table" or type(bindings.processor.BackfillExternalAuthorityAsync) ~= "function" then
+		return nil, nil, "processor must implement BackfillExternalAuthorityAsync"
+	end
+	if type(bindings.checkpoint_store) ~= "table"
+		or type(bindings.checkpoint_store.GetAsyncFresh) ~= "function"
+		or type(bindings.checkpoint_store.UpdateAsync) ~= "function"
+	then
+		return nil, nil, "checkpoint_store must implement uncached GetAsyncFresh and atomic UpdateAsync"
+	end
+	if not valid_text(bindings.checkpoint_key, 50) then return nil, nil, "checkpoint_key must be 1 to 50 bytes" end
+	if bindings.initial_cursor ~= nil and not valid_text(bindings.initial_cursor, MAX_CURSOR_BYTES) then
+		return nil, nil, "initial_cursor exceeds the 512-byte cursor limit"
+	end
+	if bindings.page_size ~= nil and (not nonnegative_integer(bindings.page_size)
+		or bindings.page_size < 1 or bindings.page_size > MAX_PAGE_SIZE)
+	then
+		return nil, nil, "page_size must be an integer from 1 to 16"
+	end
+	if type(verify_source) ~= "function" then return nil, nil, "an independent source verifier is required" end
+	if type(verify_terminal_inventory) ~= "function" then
+		return nil, nil, "an independent terminal inventory verifier is required"
+	end
+	local manifest, source_error = PurchaseManifest.verify_import_source(raw_manifest, verify_source)
+	if manifest == nil then return nil, nil, source_error end
+
+	local runner_config = {
+		job_id = bindings.job_id,
+		source_revision = manifest.source_revision,
+		source = bindings.source,
+		processor = bindings.processor,
+		checkpoint_store = bindings.checkpoint_store,
+		checkpoint_key = bindings.checkpoint_key,
+		initial_cursor = bindings.initial_cursor,
+		page_size = bindings.page_size,
+		inventory_manifest_id = manifest.manifest_id,
+		expected_purchase_count = manifest.expected_purchase_count,
+		expected_inventory_digest = manifest.expected_inventory_digest,
+		verify_complete_inventory = function(
+			manifest_id: string,
+			source_revision: string,
+			expected_count: number,
+			observed_count: number,
+			expected_digest: string,
+			observed_digest: string
+		): (boolean, string?)
+			if manifest_id ~= manifest.manifest_id or source_revision ~= manifest.source_revision
+				or expected_count ~= manifest.expected_purchase_count
+				or observed_count ~= manifest.expected_purchase_count
+				or expected_digest ~= manifest.expected_inventory_digest
+				or observed_digest ~= manifest.expected_inventory_digest
+			then
+				return false, "terminal source page does not match the reviewed purchase manifest"
+			end
+			local ok, accepted, message = pcall(
+				verify_terminal_inventory,
+				manifest,
+				manifest_id,
+				source_revision,
+				expected_count,
+				observed_count,
+				expected_digest,
+				observed_digest
+			)
+			if not ok then return false, "terminal inventory verifier failed: " .. tostring(accepted) end
+			if accepted ~= true then return false, tostring(message or "terminal inventory verifier rejected the source") end
+			return true, nil
+		end,
+	}
+	return table.freeze(runner_config), manifest, nil
 end
 
 function PurchaseManifest.verify_completion(
