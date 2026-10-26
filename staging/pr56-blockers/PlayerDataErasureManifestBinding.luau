@@ -234,8 +234,9 @@ function ErasureBinding.bind(
 		end
 	end
 
+	local frozen_adapters = table.freeze(normalized_adapters)
 	local activated, activation_error = inventory_module.verify_for_activation(raw_manifest, function(verified_manifest)
-		local ok, accepted, message = pcall(verify_attestation, verified_manifest, normalized_adapters, runtime)
+		local ok, accepted, message = pcall(verify_attestation, verified_manifest, frozen_adapters, runtime)
 		if not ok then return false, "RTBF attestation verifier failed: " .. tostring(accepted) end
 		if accepted ~= true then return false, tostring(message or "RTBF attestation was not independently accepted") end
 		return true, nil
