@@ -49,7 +49,7 @@ function Handler.new(coordinator: Coordinator, fallback: ReceiptHandler): Receip
 			return coordinator:Process(receipt_info)
 		end)
 		if not process_ok or type(result) ~= "table" then return not_processed_yet() end
-		local decision = result :: { [string]: unknown }
+		local decision = result :: ReceiptDecision
 		if decision.action == "acknowledge"
 			and (decision.status == "grant_committed" or decision.status == "duplicate_grant_reconciled")
 		then
