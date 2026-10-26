@@ -151,10 +151,12 @@ local function read_row(
 	end
 
 	if fields.status == "erased" then
-		local fence = fields.erasure_fence
+		if type(fields.erasure_fence) ~= "table" then
+			return nil, "corrupt: erasure tombstone has no durable fence"
+		end
+		local fence = fields.erasure_fence :: { [string]: unknown }
 		if not valid_sha256_digest(fields.purchase_identity_digest)
 			or not valid_generation(fields.fencing_generation)
-			or type(fence) ~= "table"
 			or not valid_text(fence.erasure_id, 96)
 			or not valid_generation(fence.source_generation)
 			or fence.fenced_generation ~= fields.fencing_generation
@@ -468,11 +470,12 @@ function PurchaseDataStoreAuthority.new(config: Options): Authority
 			if observed.Status ~= "claimed" and observed.Status ~= "committed" then
 				return nil, "purchase authority locator is not an active, exact user-bound row"
 			end
-			local generation = observed.Generation
+			local observed_generation = observed.Generation
 			local key = key_for(id)
-			if not valid_generation(generation) or not valid_text(key, 50) then
+			if not valid_generation(observed_generation) or not valid_text(key, 50) then
 				return nil, "purchase authority locator generation or key is malformed"
 			end
+			local generation = observed_generation :: number
 			return table.freeze({
 				name = options.store_name,
 				scope = options.scope,
@@ -503,8 +506,10 @@ function PurchaseDataStoreAuthority.new(config: Options): Authority
 			if not finite_timestamp(now) then return nil, "authority clock returned an invalid timestamp" end
 			local key = key_for(id)
 			local ok, _, write_error = pcall(function()
-				return options.store_adapter:UpdateAsync(key, function(raw)
-					if type(raw) ~= "table" or raw.status == "erased" then return nil end
+				return options.store_adapter:UpdateAsync(key, function(raw_value)
+					if type(raw_value) ~= "table" then return nil end
+					local raw = raw_value :: { [string]: unknown }
+					if raw.status == "erased" then return nil end
 					local row, row_error = read_row(raw, id, user_id :: number, product :: number)
 					if row == nil or row_error ~= nil
 						or (row.Status ~= "claimed" and row.Status ~= "committed")
@@ -513,7 +518,7 @@ function PurchaseDataStoreAuthority.new(config: Options): Authority
 					end
 					local generation = row.Generation or 1
 					if generation ~= expected_generation or generation >= MAX_SAFE_INTEGER then return nil end
-					local fields = raw :: { [string]: unknown }
+					local fields = raw
 					return {
 						version = VERSION,
 						status = "erased",
@@ -541,15 +546,19 @@ function PurchaseDataStoreAuthority.new(config: Options): Authority
 			end
 			local fields = observed :: { [string]: unknown }
 			if fields.status == "erased" then
-				local fence = fields.erasure_fence
+				if type(fields.erasure_fence) ~= "table" then
+					return nil, "erasure tombstone read-back has no durable fence"
+				end
+				local fence = fields.erasure_fence :: { [string]: unknown }
+				local tombstone_generation = fields.fencing_generation
+				local generation_is_valid = valid_generation(tombstone_generation)
 				if not valid_sha256_digest(fields.purchase_identity_digest)
 					or fields.purchase_identity_digest ~= SHA256.digest(id)
-					or not valid_generation(fields.fencing_generation)
-					or type(fence) ~= "table"
+					or not generation_is_valid
 					or fence.erasure_id ~= erasure_id
 					or fence.source_generation ~= expected_generation
-					or fence.fenced_generation ~= fields.fencing_generation
-					or fields.fencing_generation ~= expected_generation + 1
+					or fence.fenced_generation ~= tombstone_generation
+					or tombstone_generation ~= expected_generation + 1
 					or fields.purchase_id ~= nil or fields.player_id ~= nil
 					or fields.product_id ~= nil or fields.outcome ~= nil
 					or not finite_timestamp(fields.created_at) or not finite_timestamp(fields.updated_at)
@@ -559,7 +568,7 @@ function PurchaseDataStoreAuthority.new(config: Options): Authority
 						PlayerId = user_id :: number,
 						ProductId = product :: number,
 						Status = "conflict",
-						Generation = if valid_generation(fields.fencing_generation) then fields.fencing_generation else nil,
+						Generation = if generation_is_valid then tombstone_generation :: number else nil,
 					}, nil
 				end
 				return {
@@ -567,7 +576,7 @@ function PurchaseDataStoreAuthority.new(config: Options): Authority
 					PlayerId = user_id :: number,
 					ProductId = product :: number,
 					Status = "erased",
-					Generation = fields.fencing_generation :: number,
+					Generation = tombstone_generation :: number,
 				}, nil
 			end
 			local observed_row, observed_error = read_row(observed, id, user_id :: number, product :: number)
