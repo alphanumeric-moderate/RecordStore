@@ -113,6 +113,7 @@ local loaded_purchase_entitlement_handler: any = nil
 local loaded_recordstore_sha256: any = nil
 local loaded_maintenance_roblox_adapter: any = nil
 local loaded_maintenance_atomic_tombstone: any = nil
+local loaded_maintenance_manifest_binding: any = nil
 
 local RecordStoreInstance = table.freeze({ Name = "RecordStore", ClassName = "ModuleScript" })
 local PurchaseReceiptProcessorInstance = table.freeze({ Name = "PurchaseReceiptProcessor", ClassName = "ModuleScript" })
@@ -129,6 +130,7 @@ local PurchaseEntitlementHandlerInstance = table.freeze({ Name = "PurchaseEntitl
 local RecordStoreSHA256Instance = table.freeze({ Name = "RecordStoreSHA256", ClassName = "ModuleScript" })
 local RecordStoreMaintenanceRobloxAdapterInstance = table.freeze({ Name = "RecordStoreMaintenanceRobloxAdapter", ClassName = "ModuleScript" })
 local RecordStoreMaintenanceAtomicTombstoneInstance = table.freeze({ Name = "RecordStoreMaintenanceAtomicTombstone", ClassName = "ModuleScript" })
+local RecordStoreMaintenanceManifestBindingInstance = table.freeze({ Name = "RecordStoreMaintenanceManifestBinding", ClassName = "ModuleScript" })
 local PlayerDataInitializer = {
 	RecordStore = RecordStoreInstance,
 	PurchaseReceiptProcessor = PurchaseReceiptProcessorInstance,
@@ -145,6 +147,7 @@ local PlayerDataInitializer = {
 	RecordStoreSHA256 = RecordStoreSHA256Instance,
 	RecordStoreMaintenanceRobloxAdapter = RecordStoreMaintenanceRobloxAdapterInstance,
 	RecordStoreMaintenanceAtomicTombstone = RecordStoreMaintenanceAtomicTombstoneInstance,
+	RecordStoreMaintenanceManifestBinding = RecordStoreMaintenanceManifestBindingInstance,
 }
 function PlayerDataInitializer:WaitForChild(name: string): any
 	local child = self[name]
@@ -302,6 +305,17 @@ local function load_purchase_entitlement_handler(): any
 	return loaded_purchase_entitlement_handler
 end
 
+local function load_maintenance_manifest_binding(): any
+	if loaded_maintenance_manifest_binding ~= nil then return loaded_maintenance_manifest_binding end
+	local module_environment = table.clone(Shim.environment)
+	module_environment.script = { Parent = PlayerDataInitializer }
+	local chunk = luau.load(fs.readFile("src/PlayerDataInitializer/RecordStoreMaintenanceManifestBinding.luau"), {
+		debugName = "RecordStoreMaintenanceManifestBinding", environment = module_environment,
+	})
+	loaded_maintenance_manifest_binding = chunk()
+	return loaded_maintenance_manifest_binding
+end
+
 local function load_maintenance_atomic_tombstone(): any
 	if loaded_maintenance_atomic_tombstone ~= nil then return loaded_maintenance_atomic_tombstone end
 	local module_environment = table.clone(Shim.environment)
@@ -409,6 +423,7 @@ local function shim_require(target: any)
 	if target == PurchaseEntitlementHandlerInstance then return load_purchase_entitlement_handler() end
 	if target == RecordStoreMaintenanceRobloxAdapterInstance then return load_maintenance_roblox_adapter() end
 	if target == RecordStoreMaintenanceAtomicTombstoneInstance then return load_maintenance_atomic_tombstone() end
+	if target == RecordStoreMaintenanceManifestBindingInstance then return load_maintenance_manifest_binding() end
 	return require(target)
 end
 
