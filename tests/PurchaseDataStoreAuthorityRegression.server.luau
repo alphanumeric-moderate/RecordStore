@@ -130,5 +130,56 @@ local still_claimed = authority:GetStatusAsync("purchase-inflight-history", 123,
 expect(still_claimed ~= nil and still_claimed.Status == "claimed",
 	"in-flight authority record changed during historical import")
 
+local erasure_locator, locator_error = authority:GetErasureLocatorAsync(
+	"purchase-global-001", 123, 1001
+)
+expect(erasure_locator ~= nil and erasure_locator.name == "PurchaseAuthorityRegression"
+	and erasure_locator.scope == "global" and erasure_locator.generation == 2
+	and type(erasure_locator.key) == "string",
+	"purchase authority did not expose an exact generation-bound RTBF locator: " .. tostring(locator_error))
+local stale_erasure, stale_erasure_error = authority:EraseRetainFenceAsync(
+	"purchase-global-001", 123, 1001, erasure_locator.generation - 1, "erase-stale-purchase"
+)
+expect(stale_erasure ~= nil and stale_erasure.Status == "conflict",
+	"stale purchase generation was allowed to install an erasure fence: " .. tostring(stale_erasure_error))
+local before_erase = backing.values[erasure_locator.key]
+expect(before_erase ~= nil and before_erase.status == "committed" and before_erase.player_id == 123,
+	"stale-generation rejection changed the authority record")
+
+backing.faults.lose_next_update_response = true
+local retained_fence, retain_error = authority:EraseRetainFenceAsync(
+	"purchase-global-001", 123, 1001, erasure_locator.generation, "erase-purchase-global-001"
+)
+expect(retained_fence ~= nil and retained_fence.Status == "erased"
+	and retained_fence.Generation == erasure_locator.generation + 1,
+	"purchase erasure did not reconcile a lost tombstone response: " .. tostring(retain_error))
+local erased_raw = backing.values[erasure_locator.key]
+expect(erased_raw ~= nil and erased_raw.status == "erased"
+	and erased_raw.purchase_id == nil and erased_raw.player_id == nil
+	and erased_raw.product_id == nil and erased_raw.outcome == nil,
+	"erasure tombstone retained the raw PurchaseId, PlayerId, ProductId or receipt outcome")
+expect(erased_raw.fencing_generation == erasure_locator.generation + 1
+	and erased_raw.erasure_fence.erasure_id == "erase-purchase-global-001"
+	and erased_raw.erasure_fence.source_generation == erasure_locator.generation
+	and type(erased_raw.purchase_identity_digest) == "string"
+	and #erased_raw.purchase_identity_digest == 64,
+	"erasure tombstone lost its durable generation fence or non-reversible identity digest")
+
+local replay_after_erasure = authority:ClaimAsync("purchase-global-001", 123, 1001)
+expect(replay_after_erasure ~= nil and replay_after_erasure.Status == "conflict",
+	"receipt replay recreated or reclaimed an erased PurchaseId")
+local commit_after_erasure = authority:CommitAsync("purchase-global-001", 123, 1001, "granted")
+expect(commit_after_erasure ~= nil and commit_after_erasure.Status == "conflict",
+	"late receipt commit overwrote a permanent erasure tombstone")
+local backfill_after_erasure = authority:BackfillAsync("purchase-global-001", 123, 1001)
+expect(backfill_after_erasure ~= nil and backfill_after_erasure.Status == "conflict",
+	"historical import recreated an erased PurchaseId")
+local repeated_erasure = authority:EraseRetainFenceAsync(
+	"purchase-global-001", 123, 1001, erasure_locator.generation, "erase-purchase-global-001"
+)
+expect(repeated_erasure ~= nil and repeated_erasure.Status == "erased"
+	and repeated_erasure.Generation == erasure_locator.generation + 1,
+	"same-ID erasure retry was not idempotent")
+
 Mock.reset()
 Shim.close()
