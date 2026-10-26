@@ -50,9 +50,13 @@ function Handler.new(coordinator: Coordinator, fallback: ReceiptHandler): Receip
 		end)
 		if not process_ok or type(result) ~= "table" then return not_processed_yet() end
 		local decision = result :: ReceiptDecision
-		if decision.action == "acknowledge"
-			and (decision.status == "grant_committed" or decision.status == "duplicate_grant_reconciled")
-		then
+		if decision.action == "acknowledge" and (
+			decision.status == "grant_committed"
+			or decision.status == "duplicate_grant_reconciled"
+			or decision.status == "purchase_already_committed"
+			or decision.status == "lifetime_entitlement_already_owned"
+			or decision.status == "entitlement_already_committed"
+		) then
 			return Enum.ProductPurchaseDecision.PurchaseGranted
 		end
 		return not_processed_yet()
