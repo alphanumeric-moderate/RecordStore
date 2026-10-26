@@ -1,6 +1,8 @@
 --!nocheck
 local Shim = require("./RobloxShim")
+local RecordStore = Shim.load()
 local initializer = Shim.environment.game:GetService("ServerScriptService"):WaitForChild("PlayerDataInitializer")
+local RecordStoreV2Factory = Shim.environment.require(initializer:WaitForChild("RecordStoreV2"))
 local Manifest = Shim.environment.require(initializer:WaitForChild("RecordStoreApplicationInventory"))
 local ErasureBinding = Shim.environment.require(initializer:WaitForChild("PlayerDataErasureManifestBinding"))
 
@@ -261,13 +263,118 @@ local identity_override = ErasureBinding.bind(
 expect(identity_override == nil and not identity_override_called,
 	"runtime option bypassed the manifest's reviewed profile identity")
 
-local unsupported_retain = external_manifest()
-unsupported_retain.families[2].action = "retain_fence"
-expect(Manifest.validate(unsupported_retain) ~= nil,
+local retention_manifest = external_manifest()
+retention_manifest.families[2].action = "retain_fence"
+expect(Manifest.validate(retention_manifest) ~= nil,
 	"retain-fence inventory could not be staged for review")
-expect(ErasureBinding.bind(
-	Manifest, unsupported_retain, runtime(2), { adapter("purchase-authority", "retain_fence") },
-	function() return true end
-) == nil, "unsupported retain-fence action was bound as a delete/redaction callback")
+local retention_config, retention_activated, retention_error = ErasureBinding.bind(
+	Manifest, retention_manifest, runtime(2), { adapter("purchase-authority", "retain_fence") },
+	function(value, adapters)
+		return value.families[2].action == "retain_fence"
+			and #adapters == 1 and adapters[1].action == "retain_fence",
+			"retain-fence action was not preserved through RTBF binding"
+	end
+)
+expect(retention_config ~= nil and retention_activated ~= nil,
+	retention_error or "retain-fence action was not bound as an explicit application policy")
+expect(retention_config.additional_families[1].action == "retain_fence"
+	and retention_config.additional_families[1].locator_mode == "external_inventory",
+	"bound retain-fence family lost its action or opaque-locator semantics")
 
-print("[RTBFManifest] reviewed inventory validation, reciprocal writer coverage, activation gating, external locators, immutable config binding, and fail-closed adapters passed")
+local opaque_key = "purchase_authority_0123456789abcdef"
+local row = {
+	purchase_id = "historical-purchase-opaque-77",
+	player_id = 77,
+	product_id = 9001,
+	fencing_generation = 4,
+	status = "committed",
+	outcome = "granted",
+}
+local manifest_store = { values = {} }
+function manifest_store:GetAsyncFresh(key)
+	return clone(self.values[key]), nil
+end
+function manifest_store:UpdateAsync(key, transform)
+	local proposed = transform(clone(self.values[key]))
+	if proposed ~= nil then self.values[key] = clone(proposed) end
+	return clone(self.values[key]), nil
+end
+
+local external_family = {
+	name = "purchase-authority",
+	templates = {
+		{
+			name = "PurchaseAuthority",
+			scope = "global",
+			key = "__rtbf_external__{user_id}",
+			locator_mode = "external_inventory",
+			inventory_source_ref = "evidence:purchase-user-index",
+		},
+	},
+	templates_verified = true,
+	inventory = function(user_id, maximum)
+		if user_id ~= 77 or maximum < 1 then return nil, "inventory identity or bound is invalid" end
+		return {
+			{
+				name = "PurchaseAuthority",
+				scope = "global",
+				key = opaque_key,
+				generation = row.fencing_generation,
+			},
+		}, true
+	end,
+	fence_user = function(user_id, erasure_id, planned_items)
+		if user_id ~= 77 or erasure_id ~= "erase-purchase-user-77"
+			or type(planned_items) ~= "table" or #planned_items ~= 1
+			or planned_items[1].key ~= opaque_key
+			or planned_items[1].generation ~= row.fencing_generation
+			or row.player_id ~= user_id
+		then
+			return false, "opaque purchase inventory/fence identity mismatch"
+		end
+		if row.erasure_fence ~= nil and row.erasure_fence ~= erasure_id then
+			return false, "another erasure owns the purchase authority fence"
+		end
+		row.erasure_fence = erasure_id
+		return true
+	end,
+	dependencies_clear = function(item, user_id)
+		return user_id == 77 and item.key == opaque_key and row.player_id == user_id
+	end,
+	redact_or_delete_if_generation = function(item, user_id, erasure_id)
+		if item.key ~= opaque_key or user_id ~= 77 or row.player_id ~= user_id
+			or item.generation ~= row.fencing_generation or row.erasure_fence ~= erasure_id
+		then
+			return "skipped", "opaque purchase row identity, generation, or fence changed"
+		end
+		row.player_id = nil
+		row.fencing_generation += 1
+		row.retained_uniqueness_fence = true
+		return "redacted"
+	end,
+}
+local v2 = RecordStoreV2Factory.new(RecordStore, RecordStore.MailboxV2)
+local coordinator = v2.Erasure.new(manifest_store, { external_family }, {
+	verify_templates = function(user_id, templates)
+		return user_id == 77 and #templates == 1
+			and templates[1].template.locator_mode == "external_inventory"
+			and templates[1].template.inventory_source_ref == "evidence:purchase-user-index"
+	end,
+	require_inventory_attestation = true,
+	application_inventory_manifest_id = "rtbf-inventory-regression-r1",
+	writer_inventory_verified = true,
+})
+local plan = coordinator:PlanAsync(77, "erase-purchase-user-77")
+expect(plan.code == "success" and plan.rtbf_coverage_verified == true,
+	plan.message or "complete external inventory was rejected during erasure planning")
+expect(plan.coverage["purchase-authority"].unmatched_count == 0
+	and plan.coverage["purchase-authority"].count == 1,
+	"opaque purchase key was not reconciled against its explicit inventory source")
+local executed = coordinator:ExecuteAsync(77, "erase-purchase-user-77", 8)
+expect(executed.code == "committed" and executed.rtbf_coverage_verified == true,
+	executed.message or "valid external-inventory erasure could not resume and complete")
+expect(row.player_id == nil and row.purchase_id == "historical-purchase-opaque-77"
+	and row.status == "committed" and row.retained_uniqueness_fence == true
+	and row.erasure_fence == "erase-purchase-user-77",
+	"retain-fence action did not remove the user identity while preserving purchase uniqueness")
+print("[RTBFManifest] external inventory planning/resume, retained uniqueness fence, manifest binding, and fail-closed activation passed")
