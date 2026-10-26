@@ -263,6 +263,9 @@ corrupt_store.rows[key_digest] = {
 }
 local collision = corrupt_authority:ReserveAsync("COLLISION", 1006, 501, "purchase-4")
 expect(collision.code == "conflict", "hashed-key identity collision did not fail closed")
+local collision_status = corrupt_authority:GetStatusAsync("COLLISION", 1006)
+expect(collision_status.code == "conflict",
+	"uncached entitlement status read misclassified a hashed-key identity collision")
 
 
 local function make_atomic_store(initial)
