@@ -31,6 +31,9 @@ local PurchaseManifest = luau.load(fs.readFile("staging/pr56-blockers/PurchaseIn
 local EntitlementCoordinator = luau.load(fs.readFile("staging/pr56-blockers/PurchaseEntitlementReceiptCoordinator.luau"), {
 	debugName = "PurchaseEntitlementReceiptCoordinator",
 })()
+local EntitlementReceiptHandler = luau.load(fs.readFile("staging/pr56-blockers/PurchaseEntitlementReceiptHandler.luau"), {
+	debugName = "PurchaseEntitlementReceiptHandler",
+})()
 
 local function expect(value, message)
 	if not value then error(message, 2) end
@@ -1341,6 +1344,44 @@ expect(found_owned_entitlement, "lifetime entitlement was not marked owned for t
 local replay_decision = receipt_coordinator:Process(receipt_one)
 expect(replay_decision.action == "acknowledge", "replayed lifetime purchase was not acknowledged")
 expect(receipt_grant_calls[receipt_one.PurchaseId] == 1, "committed purchase replay called profile grant again")
+
+expect(receipt_coordinator:HandlesProduct(501) and not receipt_coordinator:HandlesProduct(999),
+	"lifetime coordinator product routing did not match its frozen map")
+local purchase_granted = Shim.environment.Enum.ProductPurchaseDecision.PurchaseGranted
+local not_processed_yet = Shim.environment.Enum.ProductPurchaseDecision.NotProcessedYet
+local fallback_calls = 0
+local bridged_handler = EntitlementReceiptHandler.new(receipt_coordinator, function()
+	fallback_calls += 1
+	return purchase_granted
+end)
+expect(bridged_handler(receipt_one) == purchase_granted and fallback_calls == 0,
+	"bridged handler did not acknowledge a committed mapped lifetime receipt without fallback")
+
+local unrelated_receipt = { PurchaseId = "purchase-unrelated", PlayerId = 1103, ProductId = 999 }
+expect(bridged_handler(unrelated_receipt) == purchase_granted and fallback_calls == 1,
+	"unmapped product did not fall through to the existing receipt handler exactly once")
+
+local pending_coordinator = {
+	HandlesProduct = function(_, product_id) return product_id == 501 end,
+	Process = function() return { action = "defer", status = "profile_grant_unknown" } end,
+}
+local pending_handler = EntitlementReceiptHandler.new(pending_coordinator, function()
+	fallback_calls += 1
+	return purchase_granted
+end)
+expect(pending_handler(receipt_one) == not_processed_yet and fallback_calls == 1,
+	"mapped receipt with an unresolved lifetime grant fell through or was acknowledged")
+
+local routing_failure_coordinator = {
+	HandlesProduct = function() error("injected routing failure") end,
+	Process = function() return { action = "acknowledge", status = "grant_committed" } end,
+}
+local routing_failure_handler = EntitlementReceiptHandler.new(routing_failure_coordinator, function()
+	fallback_calls += 1
+	return purchase_granted
+end)
+expect(routing_failure_handler(receipt_one) == not_processed_yet and fallback_calls == 1,
+	"uncertain lifetime-product routing was not failed closed")
 
 local second_lifetime_receipt = {
 	PurchaseId = "purchase-lifetime-2",
