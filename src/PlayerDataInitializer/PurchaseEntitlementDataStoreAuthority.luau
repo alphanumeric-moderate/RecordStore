@@ -85,9 +85,11 @@ local function finite_timestamp(value: unknown): boolean
 end
 
 local function entitlement_key_material(entitlement_id: string, player_id: number): string
-	return tostring(plocal function digest(value: string): string
+	return tostring(player_id) .. ":" .. entitlement_id
+end
+
+local function digest(value: string): string
 	return string.sub(SHA256.digest(value), 1, 32)
-end("%08x%08x%08x%08x", h1, h2, h3, h4)
 end
 
 local function copy_record(record: EntitlementRecord): EntitlementRecord
