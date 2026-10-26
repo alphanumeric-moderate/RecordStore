@@ -30,6 +30,7 @@ local function valid_manifest()
 		review_status = "approved",
 		reviewed_by = "independent-reviewer",
 		reviewed_at_unix = 1792950000,
+		review_attestation_ref = "evidence:review-attestation",
 		inventory_complete = true,
 		inventory_evidence_ref = "evidence:rtbf-inventory",
 		writer_audit_complete = true,
