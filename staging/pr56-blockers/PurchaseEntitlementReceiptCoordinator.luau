@@ -329,7 +329,7 @@ function Coordinator.new(config: Options)
 	if type(config) ~= "table" then error("config must be a table", 2) end
 	if type(config.purchase_authority) ~= "table" then error("purchase_authority is required", 2) end
 	if type(config.entitlement_authority) ~= "table" then error("entitlement_authority is required", 2) end
-	if type(config.product_entitlement_by_id) ~= "table" then error("product_entitlement_by_id is required", 2) end
+	if type(config.entitlement_by_product_id) ~= "table" then error("product_entitlement_by_id is required", 2) end
 	if type(config.grant_profile_once) ~= "function" then error("grant_profile_once is required", 2) end
 	if type(config.verify_activation) ~= "function" then error("verify_activation is required", 2) end
 	for _, method in ipairs({ "ClaimAsync", "CommitAsync", "GetStatusAsync" }) do
@@ -344,7 +344,7 @@ function Coordinator.new(config: Options)
 	end
 	local mapping: { [number]: string } = {}
 	local count = 0
-	for product_id, entitlement_id in pairs(config.product_entitlement_by_id) do
+	for product_id, entitlement_id in pairs(config.entitlement_by_product_id) do
 		if not positive_integer(product_id) or not valid_text(entitlement_id, MAX_ENTITLEMENT_ID_BYTES) then
 			error("product entitlement map requires positive product IDs and valid entitlement IDs", 2)
 		end
