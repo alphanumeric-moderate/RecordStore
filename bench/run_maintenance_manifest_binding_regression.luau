@@ -159,9 +159,34 @@ expect(not family.can_delete(dependent, nil, 4, "maintenance-job-regression-r1")
 local unfenced = clone(row)
 unfenced.maintenance_fence_job_id = nil
 local unfenced_inspection = family.inspect("Player_1001", unfenced, nil)
-expect(unfenced_inspection ~= nil and unfenced_inspection.eligible == false
-	and unfenced_inspection.dependencies_clear == false,
-	"inspection did not fail closed for a missing same-key job fence")
+expect(unfenced_inspection ~= nil and unfenced_inspection.eligible == true
+	and unfenced_inspection.dependencies_clear == true,
+	"an unfenced eligible record must reach the same-key fence acquisition step")
+
+local unfenced_store = { value = clone(unfenced) }
+function unfenced_store:UpdateAsync(_key, transform)
+	local candidate = transform(clone(self.value), { Version = "maintenance-regression-v1" })
+	if candidate ~= nil then self.value = clone(candidate) end
+	return clone(self.value), { Version = "maintenance-regression-v2" }
+end
+function unfenced_store:GetAsync(_key, options)
+	expect(options ~= nil and options.UseCache == false,
+		"maintenance fence/tombstone reconciliation must bypass the DataStore cache")
+	return clone(self.value), { Version = "maintenance-regression-v2" }
+end
+local unfenced_action, unfenced_error = family.delete_if_generation(
+	unfenced_store,
+	{ name = "Profiles", scope = "global", key = "Player_1001" },
+	4,
+	"maintenance-job-regression-r1"
+)
+expect(unfenced_action == "deleted",
+	unfenced_error or "the production-bound delete path did not acquire a same-key fence before tombstoning")
+expect(unfenced_store.value.fencing_generation == 6
+	and unfenced_store.value.maintenance_fence_job_id == "maintenance-job-regression-r1"
+	and unfenced_store.value.maintenance_tombstone == true
+	and unfenced_store.value.maintenance_tombstone_source_generation == 5,
+	"unfenced record was not fenced and tombstoned with sequential generation advances")
 
 local rejected_calls = 0
 local rejected_config = Binder.bind(manifest(), runtime(), function()
