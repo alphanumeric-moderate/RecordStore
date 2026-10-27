@@ -7305,8 +7305,9 @@ local function normalize_user_ids(user_ids: { number }): ({ number }?, string?)
 		if index > length then
 			return nil, "user_ids must be a dense array of positive integers"
 		end
-		if type(user_id) ~= "number" or not math.isfinite(user_id) or user_id < 1 or math.floor(user_id) ~= user_id then
-			return nil, ("user_ids[%d] must be a positive integer"):format(index)
+		if type(user_id) ~= "number" or not math.isfinite(user_id) or user_id < 1
+			or user_id > 9007199254740991 or math.floor(user_id) ~= user_id then
+			return nil, ("user_ids[%d] must be a positive safe integer"):format(index)
 		end
 		if not seen[user_id] then
 			seen[user_id] = true

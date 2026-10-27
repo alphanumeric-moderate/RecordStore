@@ -82,6 +82,14 @@ local function test_durable_round_trip_preserves_metadata_and_user_ids()
 	assert(update_result == "success", tostring(update_message))
 	local ids_result, ids_message = record:SetUserIds({ 123456, 654321 })
 	assert(ids_result == "success", tostring(ids_message))
+	local updates_before_invalid_ids = fake.control:metrics().update_calls
+	local invalid_ids_result, invalid_ids_message = record:SetUserIds({ 9007199254740992 })
+	assert(invalid_ids_result == "validation", tostring(invalid_ids_message))
+	assert(fake.control:metrics().update_calls == updates_before_invalid_ids,
+		"unsafe UserIds triggered a durable DataStore write")
+	local retained_user_ids = record:GetUserIds()
+	assert(#retained_user_ids == 2 and retained_user_ids[1] == 123456 and retained_user_ids[2] == 654321,
+		"rejected unsafe UserIds mutated the canonical record metadata")
 	local metadata_result, metadata_message = record:SetMetadata({
 		origin = "production-adapter-regression",
 		counter = 7,
