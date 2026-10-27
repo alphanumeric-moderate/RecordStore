@@ -77,8 +77,16 @@ function Adapter.bind(config: Config)
 			name, scope, key, id, queue_store, max_bytes, deadline
 		)
 		if status ~= "success" or snapshot == nil then return false, fail_result(status, message) end
-		return snapshot.MigrationId == migration_id,
-			if snapshot.MigrationId == migration_id then nil else "freeze marker identity mismatch"
+		local frozen_at = snapshot.FrozenAt
+		local source_version = snapshot.SourceImplementationVersion
+		if snapshot.MigrationId ~= migration_id
+			or type(frozen_at) ~= "number" or not math.isfinite(frozen_at) or frozen_at < 0
+			or type(source_version) ~= "number" or not math.isfinite(source_version)
+			or math.floor(source_version) ~= source_version or source_version < 2
+		then
+			return false, "durable freeze marker identity or metadata is malformed"
+		end
+		return true, nil
 	end
 	local function verify_complete(migration_id: string, active_count: number, dead_letter_count: number): (boolean, string?)
 		if migration_id ~= config.migration_id then return false, "migration ID mismatch" end
