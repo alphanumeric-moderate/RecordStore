@@ -80,6 +80,7 @@ local function fixture(options)
 		activation_calls = 0,
 		v2_enabled = false,
 		fail_import_once = settings.fail_import_once == true,
+		lose_import_response_once = settings.lose_import_response_once == true,
 		lose_page_checkpoint_response = settings.lose_page_checkpoint_response == true,
 		complete_verified = settings.complete_verified ~= false,
 	}
@@ -112,6 +113,10 @@ local function fixture(options)
 			snapshot.LastError = item.last_error or item.LastError or "Imported from legacy V3 dead-letter queue"
 		end
 		state.deliveries[id] = snapshot
+		if state.lose_import_response_once then
+			state.lose_import_response_once = false
+			return { code = "unknown" }
+		end
 		return { code = if expected_state == "ready" then "accepted" else "dead_lettered" }
 	end
 
@@ -250,6 +255,20 @@ do
 	local snapshot, read_result = runner.mailbox:GetDeliveryAsync("active-a")
 	expect(read_result.code == "success" and snapshot.State == "ready",
 		"retry failed to produce a durable destination delivery")
+end
+
+do
+	local runner, state = fixture({ lose_import_response_once = true })
+	local lost = runner:Step(1)
+	expect(lost.code == "unknown" and state.checkpoint ~= nil
+		and state.checkpoint.revision == 1 and state.checkpoint.cursor == nil
+		and state.checkpoint.active_count == 0 and state.deliveries["active-a"] ~= nil,
+		"lost successful import response advanced the checkpoint or lost the committed destination")
+	local retry = runner:Step(1)
+	expect(retry.code == "progress" and retry.checkpoint.revision == 2
+		and retry.checkpoint.cursor == "1" and retry.checkpoint.active_count == 1
+		and state.imports == 2,
+		"duplicate retry did not read back and reconcile the previously committed import")
 end
 
 do
