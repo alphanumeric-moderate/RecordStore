@@ -1,4 +1,4 @@
-name: CodSpeed
+name: CodSpeed CPU Simulation
 
 on:
   push:
@@ -18,8 +18,8 @@ env:
 
 jobs:
   benchmarks:
-    name: Run benchmarks
-    runs-on: codspeed-macro
+    name: Run simulation benchmarks
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -83,5 +83,5 @@ jobs:
         uses: CodSpeedHQ/action@v5
         with:
           # Match PR #56: collect simulation metrics and macro-runner wall time.
-          mode: simulation,walltime
+          mode: simulation
           # Benchmarks are defined in codspeed.yml
