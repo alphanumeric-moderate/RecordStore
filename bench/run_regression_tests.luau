@@ -99,6 +99,8 @@ assert(not pcall(function() InfiniteMath.formatScientific(1, 10, "12") end))
 assert(not pcall(function() InfiniteMath.formatScientific(1, 1.25, 12) end))
 assert(not pcall(function() InfiniteMath.format(1, { decimals = 7 }) end))
 
+Shim.run_script("bench/run_services_regression.luau")
+Shim.run_script("bench/run_outbox_adapter_unit_regression.luau")
 Shim.run_script("tests/RecordStore_OpenCorrupt_CompatibilityRegression.server.luau")
 Shim.run_script("tests/RecordStore_EventQueueRegression.server.luau")
 Shim.run_script("tests/RecordStore_NonFiniteNumbersRegression.server.luau")

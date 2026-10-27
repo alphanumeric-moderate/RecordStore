@@ -278,4 +278,131 @@ do
 		"deferred mapped receipt did not exercise its unresolved grant path")
 end
 
-print("[PurchaseEntitlement] durable authority, receipt reconciliation, lifetime uniqueness, response loss, activation gating, and handler routing regressions passed")
+-- Unit-test the receipt decision boundary independently of durable authorities.
+-- A new/unknown status must never acknowledge a purchase accidentally.
+do
+	local granted = Enum.ProductPurchaseDecision.PurchaseGranted
+	local deferred = Enum.ProductPurchaseDecision.NotProcessedYet
+	local receipt = table.freeze({ PurchaseId = "decision-boundary", PlayerId = 4111, ProductId = 501 })
+	local terminal_statuses = {
+		"grant_committed", "duplicate_grant_reconciled", "purchase_already_committed",
+		"lifetime_entitlement_already_owned", "entitlement_already_committed",
+	}
+	local decisions = {}
+	for _, status in ipairs(terminal_statuses) do
+		table.insert(decisions, { name = status, result = { action = "acknowledge", status = status }, expected = granted })
+		table.insert(decisions, { name = "defer/" .. status, result = { action = "defer", status = status }, expected = deferred })
+	end
+	for _, row in {
+		{ action = "acknowledge", status = "unknown" },
+		{ action = "acknowledge", status = "conflict" },
+		{ action = "acknowledge", status = "future_terminal_status" },
+		{ action = "acknowledge" },
+		{ status = "grant_committed" },
+		{},
+	} do
+		table.insert(decisions, { name = "unconfirmed/" .. tostring(row.status), result = row, expected = deferred })
+	end
+	for _, malformed in { false, "grant_committed", granted } do
+		table.insert(decisions, { name = "malformed/" .. type(malformed), result = malformed, expected = deferred })
+	end
+	table.insert(decisions, { name = "missing result", expected = deferred })
+	for _, case in ipairs(decisions) do
+		local process_calls, fallback_calls = 0, 0
+		local coordinator = {}
+		function coordinator:HandlesProduct(product_id)
+			expect(self == coordinator and product_id == receipt.ProductId, "routing lost coordinator/product identity")
+			return true
+		end
+		function coordinator:Process(observed)
+			expect(self == coordinator and observed == receipt, "processing did not receive the original receipt")
+			process_calls += 1
+			return case.result
+		end
+		local handler = ReceiptHandler.new(coordinator, function()
+			fallback_calls += 1
+			return granted
+		end)
+		expect(handler(receipt) == case.expected, "wrong receipt decision for " .. case.name)
+		expect(process_calls == 1 and fallback_calls == 0, "mapped receipt escaped to fallback for " .. case.name)
+	end
+
+	-- Only an explicit false routes to fallback; truthy/nonboolean results and
+	-- exceptions leave the receipt retryable without invoking either grant path.
+	for _, route in {
+		{ name = "nil" }, { name = "truthy string", value = "true" },
+		{ name = "zero", value = 0 }, { name = "table", value = {} },
+		{ name = "exception", raises = true },
+	} do
+		local calls = 0
+		local handler = ReceiptHandler.new({
+			HandlesProduct = function()
+				if route.raises then error("injected routing failure") end
+				return route.value
+			end,
+			Process = function() calls += 1; return { action = "acknowledge", status = "grant_committed" } end,
+		}, function() calls += 1; return granted end)
+		expect(handler(receipt) == deferred and calls == 0, "ambiguous product routing was accepted: " .. route.name)
+	end
+	local unexpected_fallback_calls = 0
+	local throwing_processor = ReceiptHandler.new({
+		HandlesProduct = function() return true end,
+		Process = function() error("injected coordinator failure") end,
+	}, function() unexpected_fallback_calls += 1; return granted end)
+	expect(throwing_processor(receipt) == deferred and unexpected_fallback_calls == 0,
+		"coordinator exception escaped, acknowledged the receipt or reached fallback")
+
+	for _, fallback_case in {
+		{ name = "granted enum", value = granted, expected = granted },
+		{ name = "deferred enum", value = deferred, expected = deferred },
+		{ name = "lookalike string", value = "PurchaseGranted", expected = deferred },
+		{ name = "truthy boolean", value = true, expected = deferred },
+		{ name = "table", value = { action = "acknowledge", status = "grant_committed" }, expected = deferred },
+		{ name = "nil", expected = deferred },
+		{ name = "exception", raises = true, expected = deferred },
+	} do
+		local fallback_calls = 0
+		local handler = ReceiptHandler.new({
+			HandlesProduct = function() return false end,
+			Process = function() error("unmapped receipt reached the coordinator") end,
+		}, function(observed)
+			expect(observed == receipt, "fallback did not receive the original receipt")
+			fallback_calls += 1
+			if fallback_case.raises then error("injected fallback failure") end
+			return fallback_case.value
+		end)
+		expect(handler(receipt) == fallback_case.expected and fallback_calls == 1,
+			"fallback decision did not fail closed: " .. fallback_case.name)
+	end
+
+	local routed_product, route_calls, grant_calls = nil, 0, 0
+	local malformed_handler = ReceiptHandler.new({
+		HandlesProduct = function(_self, product_id)
+			routed_product = product_id
+			route_calls += 1
+			return nil
+		end,
+		Process = function() grant_calls += 1; return { action = "acknowledge", status = "grant_committed" } end,
+	}, function() grant_calls += 1; return granted end)
+	for _, malformed in { false, 42, "receipt", {} } do
+		local before_calls = route_calls
+		expect(malformed_handler(malformed) == deferred and routed_product == nil
+			and route_calls == before_calls + 1 and grant_calls == 0,
+			"malformed receipt acquired a product identity or reached a grant path")
+	end
+	expect(malformed_handler(nil) == deferred and routed_product == nil and grant_calls == 0,
+		"nil receipt did not defer without granting")
+
+	for _, invalid in { false, {}, { HandlesProduct = true, Process = function() end },
+		{ HandlesProduct = function() end, Process = false } } do
+		expect(not pcall(ReceiptHandler.new, invalid, function() end), "invalid coordinator was accepted")
+	end
+	expect(not pcall(ReceiptHandler.new, nil, function() end), "nil coordinator was accepted")
+	local valid_coordinator = { HandlesProduct = function() end, Process = function() end }
+	for _, invalid in { false, "fallback", {} } do
+		expect(not pcall(ReceiptHandler.new, valid_coordinator, invalid), "nonfunction fallback was accepted")
+	end
+	expect(not pcall(ReceiptHandler.new, valid_coordinator, nil), "missing fallback was accepted")
+end
+
+print("[PurchaseEntitlement] durable authority, receipt reconciliation, lifetime uniqueness, response loss, activation and fail-closed handler regressions passed")
