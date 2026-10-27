@@ -1121,6 +1121,10 @@ do
 	assert(after.write_id ~= base_write_id, "renewal reacquisition must use a distinct stable operation ID")
 	assert(after.revision == base_revision and (after.data :: { [string]: any }).coins == 10,
 		"renewal reacquisition must preserve the durable profile without replaying an unknown renewal")
+	assert(type(after.sidecars) == "table"
+		and type((after.sidecars :: { [string]: any }).transaction_receipts) == "table"
+		and ((after.sidecars :: { [string]: any }).transaction_receipts :: { [string]: any })[sidecar_operation_id] ~= nil,
+		"expired-lease reacquisition dropped the durable transaction receipt")
 	assert(((after.session :: { [string]: any }).lease_until) > fake_now,
 		"renewal reacquisition must confirm a new live lease")
 	assert(record:Close() == "closed", "reacquired renewal fixture should close")
