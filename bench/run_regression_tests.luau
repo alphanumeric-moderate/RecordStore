@@ -7,6 +7,8 @@ local Shim = require("./RobloxShim")
 
 for _, path in {
 	"src/PlayerDataInitializer/RecordStore.luau",
+	"src/PlayerDataInitializer/RecordStoreServices.luau",
+	"src/PlayerDataInitializer/RecordStoreMaintenanceDataStoreAdapter.luau",
 	"bench/run_scheduler_bugfix_regression.luau",
 	"src/PlayerDataInitializer/PurchaseReceiptProcessor.luau",
 	"src/PlayerDataInitializer/PurchaseDataStoreAuthority.luau",

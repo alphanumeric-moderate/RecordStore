@@ -118,10 +118,18 @@ local loaded_maintenance_atomic_tombstone: any = nil
 local loaded_maintenance_manifest_binding: any = nil
 local loaded_mailbox_v2_migration_runner: any = nil
 local loaded_mailbox_v2_migration_adapter: any = nil
+local loaded_recordstore_services: any = nil
+local loaded_recordstore_v2_acceleration: any = nil
+local loaded_maintenance_runner: any = nil
+local loaded_maintenance_datastore_adapter: any = nil
 
 local RecordStoreInstance = table.freeze({ Name = "RecordStore", ClassName = "ModuleScript" })
-local PurchaseReceiptProcessorInstance = table.freeze({ Name = "PurchaseReceiptProcessor", ClassName = "ModuleScript" })
+local RecordStoreServicesInstance = table.freeze({ Name = "RecordStoreServices", ClassName = "ModuleScript" })
 local RecordStoreV2Instance = table.freeze({ Name = "RecordStoreV2", ClassName = "ModuleScript" })
+local RecordStoreV2AccelerationInstance = table.freeze({ Name = "RecordStoreV2Acceleration", ClassName = "ModuleScript" })
+local RecordStoreMaintenanceRunnerInstance = table.freeze({ Name = "RecordStoreMaintenanceRunner", ClassName = "ModuleScript" })
+local RecordStoreMaintenanceDataStoreAdapterInstance = table.freeze({ Name = "RecordStoreMaintenanceDataStoreAdapter", ClassName = "ModuleScript" })
+local PurchaseReceiptProcessorInstance = table.freeze({ Name = "PurchaseReceiptProcessor", ClassName = "ModuleScript" })
 local OutboxMailboxAdapterInstance = table.freeze({ Name = "RecordStoreOutboxMailboxAdapter", ClassName = "ModuleScript" })
 local OutboxConsumerAdapterInstance = table.freeze({ Name = "RecordStoreOutboxConsumerAdapter", ClassName = "ModuleScript" })
 local PlayerDataErasureInstance = table.freeze({ Name = "PlayerDataErasure", ClassName = "ModuleScript" })
@@ -141,6 +149,10 @@ local RecordStoreMailboxV2MigrationInstance = table.freeze({ Name = "RecordStore
 local RecordStoreMailboxV2MigrationAdapterInstance = table.freeze({ Name = "RecordStoreMailboxV2MigrationAdapter", ClassName = "ModuleScript" })
 local PlayerDataInitializer = {
 	RecordStore = RecordStoreInstance,
+	RecordStoreServices = RecordStoreServicesInstance,
+	RecordStoreV2Acceleration = RecordStoreV2AccelerationInstance,
+	RecordStoreMaintenanceRunner = RecordStoreMaintenanceRunnerInstance,
+	RecordStoreMaintenanceDataStoreAdapter = RecordStoreMaintenanceDataStoreAdapterInstance,
 	PurchaseReceiptProcessor = PurchaseReceiptProcessorInstance,
 	RecordStoreOutboxMailboxAdapter = OutboxMailboxAdapterInstance,
 	RecordStoreOutboxConsumerAdapter = OutboxConsumerAdapterInstance,
@@ -217,6 +229,28 @@ local function load_recordstore_v2(): any
 	})
 	loaded_recordstore_v2 = chunk()
 	return loaded_recordstore_v2
+end
+
+local function load_recordstore_services(): any
+	if loaded_recordstore_services ~= nil then return loaded_recordstore_services end
+	local module_environment = table.clone(Shim.environment)
+	module_environment.script = { Parent = PlayerDataInitializer }
+	local chunk = luau.load(fs.readFile("src/PlayerDataInitializer/RecordStoreServices.luau"), {
+		debugName = "RecordStoreServices", environment = module_environment,
+	})
+	loaded_recordstore_services = chunk()
+	return loaded_recordstore_services
+end
+
+local function load_recordstore_v2_acceleration(): any
+	if loaded_recordstore_v2_acceleration ~= nil then return loaded_recordstore_v2_acceleration end
+	local module_environment = table.clone(Shim.environment)
+	module_environment.script = { Parent = PlayerDataInitializer }
+	local chunk = luau.load(fs.readFile("src/PlayerDataInitializer/RecordStoreV2Acceleration.luau"), {
+		debugName = "RecordStoreV2Acceleration", environment = module_environment,
+	})
+	loaded_recordstore_v2_acceleration = chunk()
+	return loaded_recordstore_v2_acceleration
 end
 
 local function load_outbox_mailbox_adapter(): any
@@ -361,6 +395,28 @@ local function load_maintenance_atomic_tombstone(): any
 	return loaded_maintenance_atomic_tombstone
 end
 
+local function load_maintenance_runner(): any
+	if loaded_maintenance_runner ~= nil then return loaded_maintenance_runner end
+	local module_environment = table.clone(Shim.environment)
+	module_environment.script = { Parent = PlayerDataInitializer }
+	local chunk = luau.load(fs.readFile("src/PlayerDataInitializer/RecordStoreMaintenanceRunner.luau"), {
+		debugName = "RecordStoreMaintenanceRunner", environment = module_environment,
+	})
+	loaded_maintenance_runner = chunk()
+	return loaded_maintenance_runner
+end
+
+local function load_maintenance_datastore_adapter(): any
+	if loaded_maintenance_datastore_adapter ~= nil then return loaded_maintenance_datastore_adapter end
+	local module_environment = table.clone(Shim.environment)
+	module_environment.script = { Parent = PlayerDataInitializer }
+	local chunk = luau.load(fs.readFile("src/PlayerDataInitializer/RecordStoreMaintenanceDataStoreAdapter.luau"), {
+		debugName = "RecordStoreMaintenanceDataStoreAdapter", environment = module_environment,
+	})
+	loaded_maintenance_datastore_adapter = chunk()
+	return loaded_maintenance_datastore_adapter
+end
+
 local function load_maintenance_roblox_adapter(): any
 	if loaded_maintenance_roblox_adapter ~= nil then return loaded_maintenance_roblox_adapter end
 	local module_environment = table.clone(Shim.environment)
@@ -458,9 +514,11 @@ local game = {
 }
 
 local function shim_require(target: any)
-	if target == RecordStoreInstance then
-		return load_record_store()
-	end
+	if target == RecordStoreInstance then return load_record_store() end
+	if target == RecordStoreServicesInstance then return load_recordstore_services() end
+	if target == RecordStoreV2AccelerationInstance then return load_recordstore_v2_acceleration() end
+	if target == RecordStoreMaintenanceRunnerInstance then return load_maintenance_runner() end
+	if target == RecordStoreMaintenanceDataStoreAdapterInstance then return load_maintenance_datastore_adapter() end
 	if target == PurchaseReceiptProcessorInstance then
 		return load_receipt_processor()
 	end

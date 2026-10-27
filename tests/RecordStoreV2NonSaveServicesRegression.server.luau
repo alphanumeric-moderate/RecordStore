@@ -11,6 +11,44 @@ local function expect(value, message)
 	assert(value, message)
 end
 
+local service_bundle = RecordStore.Services.new()
+expect(service_bundle.Core == RecordStore, "service registry is bound to a different RecordStore core")
+expect(service_bundle.V2.Version == 2, "service registry did not initialize the V2 API against the core")
+for _, name in {
+	"RecordStoreV2",
+	"RecordStoreV2Acceleration",
+	"RecordStoreMailboxV2Migration",
+	"RecordStoreMailboxV2MigrationAdapter",
+	"PurchaseDataStoreAuthority",
+	"PurchaseAuthorityMigrationRunner",
+	"PurchaseInventoryManifest",
+	"PurchaseReceiptProcessor",
+	"PurchaseEntitlementDataStoreAuthority",
+	"PurchaseEntitlementReceiptCoordinator",
+	"PurchaseEntitlementReceiptHandler",
+	"RecordStoreMaintenanceRunner",
+	"RecordStoreMaintenanceRobloxAdapter",
+	"RecordStoreMaintenanceDataStoreAdapter",
+	"RecordStoreMaintenanceAtomicTombstone",
+	"RecordStoreMaintenanceManifestBinding",
+	"RecordStoreApplicationInventory",
+	"PlayerDataErasure",
+	"PlayerDataErasureManifestBinding",
+	"RecordStoreOutboxConsumerAdapter",
+	"RecordStoreOutboxMailboxAdapter",
+	"RecordStoreSHA256",
+} do
+	expect(type(service_bundle.Modules[name]) == "table", "service registry omitted " .. name)
+end
+expect(service_bundle.Purchases.Authority == service_bundle.Modules.PurchaseDataStoreAuthority,
+	"purchase namespace does not reuse the canonical module instance")
+expect(service_bundle.Maintenance.DataStoreAdapter == service_bundle.Modules.RecordStoreMaintenanceDataStoreAdapter,
+	"maintenance namespace does not reuse the canonical module instance")
+expect(service_bundle.Erasure.ManifestBinding == service_bundle.Modules.PlayerDataErasureManifestBinding,
+	"erasure namespace does not reuse the canonical module instance")
+expect(service_bundle.Outbox.MailboxAdapter == service_bundle.Modules.RecordStoreOutboxMailboxAdapter,
+	"outbox namespace does not reuse the canonical module instance")
+
 local function clone(value, depth)
 	depth = depth or 0
 	assert(depth <= 64, "test store value exceeds depth bound")

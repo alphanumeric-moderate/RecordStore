@@ -20387,6 +20387,12 @@ end)()
 RecordStore.MailboxV2 = MailboxV2
 RecordStore.is_retryable_result = is_retryable_result
 RecordStore.get_diagnostic_code = get_diagnostic_code
+RecordStore.Services = table.freeze({
+	new = function(options: { [string]: any }?): any
+		local services_module = require(script.Parent:WaitForChild("RecordStoreServices"))
+		return services_module.new(RecordStore, options)
+	end,
+})
 
 game:BindToClose(RecordStore.shutdown)
 
