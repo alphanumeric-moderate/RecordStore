@@ -204,9 +204,18 @@ do
 			)
 		))
 	local second = runner:Step(1)
-	expect(second.code == "progress" and second.checkpoint.phase == "dead_letters"
-		and second.checkpoint.cursor == nil and second.checkpoint.active_count == 2,
-		"terminal active page did not advance to the dead-letter phase")
+	local second_checkpoint = second.checkpoint
+	expect(second.code == "progress" and second_checkpoint ~= nil
+		and second_checkpoint.phase == "dead_letters"
+		and second_checkpoint.cursor == nil and second_checkpoint.active_count == 2,
+		("terminal active page did not advance to the dead-letter phase: code=%s message=%s checkpoint=%s"):format(
+			tostring(second.code), tostring(second.message),
+			if second_checkpoint == nil then "nil" else ("revision=%s phase=%s cursor=%s active=%s dead=%s"):format(
+				tostring(second_checkpoint.revision), tostring(second_checkpoint.phase),
+				tostring(second_checkpoint.cursor), tostring(second_checkpoint.active_count),
+				tostring(second_checkpoint.dead_letter_count)
+			)
+		))
 	local third = runner:Step(1)
 	expect(third.code == "ready_to_activate" and third.checkpoint.dead_letter_count == 1,
 		"terminal dead-letter page did not enter the activation gate")
