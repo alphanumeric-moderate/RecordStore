@@ -1081,16 +1081,29 @@ do
 	local open_result, open_message = record:Open({ coins = 10, label = "initial" })
 	assert(open_result == "created" or open_result == "loaded", open_message)
 	local sidecar_operation_id = "preserve-sidecar-through-expired-lease-recovery"
-	local sidecar_request = { purpose = "lease-recovery-sidecar-preservation" }
-	local _, sidecar_status, sidecar_message = record:TransactAsync(
-		sidecar_operation_id,
-		function(data)
-			return data, { result = "committed-before-recovery" }
-		end,
-		{ request = sidecar_request, receipt_retention_seconds = 3600 }
-	)
-	assert(sidecar_status == "committed", tostring(sidecar_message))
 	local before = RecordStore.Mock.get_record_raw(
+		"RecordStore_UnknownSaveRecoveryRegression", "global", "expired-renewal-reacquisition"
+	) :: { [string]: any }
+	before.implementation_version = 3
+	before.sidecars = {
+		version = 1,
+		inbox_receipts = {},
+		transaction_receipts = {
+			[sidecar_operation_id] = {
+				request_identity = "lease-recovery-sidecar-preservation",
+				result_present = false,
+				committed_revision = before.revision,
+				created_at = before.updated_at,
+				expires_at = before.updated_at + 3600,
+			},
+		},
+		outbox_events = {},
+	}
+	local seeded, seed_message = RecordStore.Mock.seed_record_raw(
+		"RecordStore_UnknownSaveRecoveryRegression", "global", "expired-renewal-reacquisition", before
+	)
+	assert(seeded == "success", tostring(seed_message))
+	before = RecordStore.Mock.get_record_raw(
 		"RecordStore_UnknownSaveRecoveryRegression", "global", "expired-renewal-reacquisition"
 	) :: { [string]: any }
 	assert(type(before.sidecars) == "table"
