@@ -241,8 +241,11 @@ function Runner.new(config: Config)
 		next_checkpoint.revision += 1
 		next_checkpoint.updated_at_ms = self.now_ms()
 		for key, value in pairs(patch) do
-			(next_checkpoint :: any)[key] = value
+			if key ~= "cursor" then
+				(next_checkpoint :: any)[key] = value
+			end
 		end
+		next_checkpoint.cursor = patch.cursor
 		if not finite(next_checkpoint.updated_at_ms) or next_checkpoint.updated_at_ms < 0 then
 			return nil, "clock returned an invalid timestamp"
 		end
