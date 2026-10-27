@@ -1,0 +1,39 @@
+name: CodSpeed WallTime
+
+on:
+  push:
+    branches:
+      - "main"
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  LUNE_VERSION: "0.11.0"
+
+jobs:
+  benchmarks:
+    name: Run WallTime benchmarks
+    runs-on: codspeed-macro
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Lune
+        timeout-minutes: 2
+        run: |
+          curl -fsSL -o lune.zip "https://github.com/lune-org/lune/releases/download/v${LUNE_VERSION}/lune-${LUNE_VERSION}-linux-x86_64.zip"
+          mkdir -p "$HOME/.local/bin"
+          unzip -o lune.zip -d "$HOME/.local/bin"
+          chmod +x "$HOME/.local/bin/lune"
+          rm lune.zip
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Run WallTime benchmarks
+        timeout-minutes: 16
+        uses: CodSpeedHQ/action@v5
+        with:
+          mode: walltime
