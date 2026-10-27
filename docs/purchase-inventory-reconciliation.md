@@ -20,6 +20,12 @@ Do not advance the checkpoint when a batch is partial, its result is unknown, co
 
 Do not enable `permanent_purchase_ledger_migration_complete` or `external_purchase_authority_migration_complete` based on a successful call alone. These are operator attestations, not automatic proof. Keep them disabled until the entire historical PurchaseId source has been reconciled and the live fulfillment path is accepted.
 
+## Lifetime entitlement authority
+
+The source tree now includes `PurchaseEntitlementDataStoreAuthority`, `PurchaseEntitlementReceiptCoordinator`, and `PurchaseEntitlementReceiptHandler`. This is separate from the global PurchaseId authority: the entitlement authority supports reservation, commit, historical backfill, status reconciliation, and generation-fenced erasure/retention for configured entitlement IDs. The coordinator orders the durable PurchaseId claim, entitlement reservation, application-supplied idempotent profile grant, entitlement commit and terminal PurchaseId commit. Unknown or conflicting states defer rather than being acknowledged as completed.
+
+This does not make historical migration automatic. The game must decide which products are genuinely lifetime-unique, provide a stable ProductId-to-entitlement mapping and idempotent profile-grant callback, provide an activation verifier, and reconcile/backfill historical purchases before enabling live grants. Entitlement IDs and their erasure locators must also be included in the reviewed application inventory. The mocks verify local protocol branches only; the real receipt callback, cross-server races and shutdown/response-loss behavior still require a Roblox test experience.
+
 ## Live acceptance still required
 
 Validate cross-server `ClaimAsync`/commit behavior, response loss, duplicate callbacks, mismatched PlayerId/ProductId, server shutdown between claim/grant/commit, historical imports racing with live receipts, and the exact MarketplaceService fulfillment path in a real Roblox test experience. Determine which products have cross-profile or lifetime entitlement requirements that need a separate permanent entitlement model, and whether the game needs receipt adapters beyond developer products.

@@ -1,6 +1,6 @@
 # Production maintenance and compaction adapter integration
 
-`RecordStoreMaintenanceRobloxAdapter` connects Roblox DataStore key enumeration, uncached record inspection, and durable job checkpoints to the bounded `RecordStoreMaintenanceRunner`. It is an adapter framework, not a configured production cleanup job: this repository does not know the application's real store inventory, dependency graph, deletion policy, or fencing protocol.
+`RecordStoreMaintenanceRobloxAdapter` connects Roblox DataStore key enumeration, uncached record inspection, and durable job checkpoints to the bounded `RecordStoreMaintenanceRunner`. The source tree also now includes `RecordStoreMaintenanceManifestBinding` for reviewed multi-family catalogs and `RecordStoreMaintenanceAtomicTombstone` for same-key generation/job-fence mutation. These are reusable production primitives, not a configured production cleanup job: this repository does not know the application's actual store inventory, dependency graph, deletion policy, authorization, or deployment-specific fencing protocol.
 
 ## Instantiate the platform adapter
 
@@ -17,6 +17,12 @@ The adapter exposes `next_page`, `inspect`, `delete_if_generation`, `load_checkp
 Do **not** implement this callback as: read a separate job fence, check it, then issue an unconditional delete. The fence could be revoked between those operations. `assert_fence` in the runner is a useful preflight but cannot close a cross-key time-of-check/time-of-use race. Roblox DataStoreService does not provide a transaction spanning arbitrary keys; if the application's fence and the target record are in different keys, the adapter must use a protocol that makes revocation and deletion mutually exclusive, or it must refuse execute mode. No generic implementation can safely guess that protocol.
 
 Unresolved inspect, delete, or checkpoint outcomes stop progress and retain the last confirmed cursor/counters. Checkpoints use uncached reads and revision-checked `UpdateAsync` transforms; the runner accepts a lost checkpoint response only after read-back matches the exact proposed checkpoint. A stale generation is skipped, never deleted.
+
+## Available manifest-bound atomic tombstone helper
+
+`RecordStoreMaintenanceAtomicTombstone.new(config)` exposes `FenceIfGeneration`, `FenceAndDeleteIfGeneration`, and `DeleteIfGeneration`. Its `UpdateAsync` mutation checks the configured target generation and durable job-fence fields on the protected key, applies non-yielding eligibility/dependency policy, advances the generation, and reconciles uncertain write responses with uncached read-back. A manifest-binding helper can produce the per-family runner callbacks from an approved catalog and explicit application policies.
+
+This closes the generic helper gap; it does **not** complete a particular game's maintenance job. The application's fence must be serialized with target mutation on the same key or by another proven mutually exclusive protocol. A job-fence field that can be revoked independently in a different DataStore key is not made atomic by this helper. Keep execute mode disabled if revocation and deletion are not mutually exclusive, and do not claim actual data cleanup until the configured callbacks and disposable real-key acceptance have been reviewed.
 
 ## Application integration checklist
 
