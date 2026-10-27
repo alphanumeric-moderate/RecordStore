@@ -650,7 +650,7 @@ RecordStore.Mock.reset()
 
 RecordStore.Mock.reset()
 do
-	local invalid_ages = { 0, -1, math.huge, 86401 }
+	local invalid_ages = { 0, -1, math.huge, -math.huge, 0 / 0, 86401 }
 	for index, invalid_age in ipairs(invalid_ages) do
 		local accepted, message = pcall(function()
 			return RecordStore.Mock.new(
@@ -705,7 +705,10 @@ do
 	assert(status.mutation_admission == "read_only",
 		"read_only_on_risk must reject further mutations after the dirty-age cutoff")
 	assert(status.risk_active == true, "dirty-age risk must be exposed in durability status")
+	local revision_before_rejection = record:GetRevision()
+	local rejected_reducer_calls = 0
 	local blocked_result, blocked_message = record:Update(function(data)
+		rejected_reducer_calls += 1
 		(data :: { [string]: RecordStore.JsonValue }).coins = 12
 		return data
 	end)
@@ -713,6 +716,10 @@ do
 		"RecordStore must reject new mutations while the dirty-age cutoff is exceeded")
 	assert(string.find(tostring(blocked_message), "max_dirty_age_seconds", 1, true) ~= nil,
 		"rejected mutation must explain the dirty-age cutoff")
+	assert(rejected_reducer_calls == 0 and record:GetRevision() == revision_before_rejection,
+		"admission rejection must not execute the reducer or advance the confirmed revision")
+	assert((record:Get() :: { [string]: RecordStore.JsonValue }).coins == 11,
+		"admission rejection must preserve the previously accepted unsaved mutation")
 
 	local save_result, save_message = record:Save("drain-dirty-age-cutoff")
 	assert(save_result == "saved", save_message)
@@ -722,6 +729,21 @@ do
 		"successful drain save must clear the dirty-age SLO violation")
 	assert(status.mutation_admission == "allowed",
 		"mutation admission must recover after persistence is confirmed")
+	local resumed_result, resumed_message = record:Update(function(data)
+		(data :: { [string]: RecordStore.JsonValue }).coins = 13
+		return data
+	end)
+	assert(resumed_result == "success", resumed_message)
+	local resumed_status = record:GetDurabilityStatus()
+	assert(resumed_status.dirty_age_basis == "tracked_dirty_generation"
+		and resumed_status.dirty_watermark > resumed_status.durable_watermark,
+		"the next admitted mutation must begin a new tracked dirty generation")
+	assert(record:Save("save-after-admission-recovery") == "saved",
+		"the next admitted mutation must remain saveable after risk recovery")
+	local durable = RecordStore.Mock.get_record_raw(
+		"RecordStore_UnknownSaveRecoveryRegression", "global", "dirty-age-cutoff-rejects-mutation"
+	) :: { [string]: any }
+	assert(durable.data.coins == 13, "risk recovery must persist the next admitted mutation")
 	assert(record:Close() == "closed", "dirty-age cutoff fixture should close")
 end
 

@@ -324,5 +324,95 @@ do -- Reject inconsistent page completion metadata before advancing durable prog
 		"compactor accepted a non-boolean completion flag")
 end
 
-print("[OfflineMaintenanceRunner] dry-run, resume, checkpoint response-loss, fencing, execute-mode generation checks, and invalid-page rejection passed.")
+-- Corrupt checkpoints must fail before enumeration, inspection or deletion.
+for _, mutation in {
+	{ field = "version", value = 2 }, { field = "job_id", value = "other-job" },
+	{ field = "revision", value = 0 }, { field = "revision", value = 1.5 },
+	{ field = "revision", value = math.huge }, { field = "processed", value = -1 },
+	{ field = "processed", value = 0 / 0 }, { field = "removed", value = -1 },
+	{ field = "cursor", value = "" }, { field = "cursor", value = string.rep("c", 513) },
+	{ field = "cursor", value = false }, { field = "cursor" },
+} do
+	local checkpoint = { version = 1, job_id = "checkpoint-validation", revision = 1,
+		processed = 1, removed = 0, status = "incomplete", cursor = "row:1" }
+	checkpoint[mutation.field] = mutation.value
+	local config = common_config("checkpoint-validation", "dry_run")
+	config.load_checkpoint = function() return checkpoint end
+	local work_calls = 0
+	config.next_page = function() work_calls += 1; return {}, nil, true end
+	config.inspect = function() work_calls += 1 end
+	config.delete_if_generation = function() work_calls += 1 end
+	expect(not pcall(Runner.new, V2.Maintenance, config) and work_calls == 0,
+		"malformed checkpoint reached maintenance work: " .. mutation.field .. "/" .. tostring(mutation.value))
+end
+
+do -- Invalid run bounds must not call adapters, even after a runner is constructed.
+	local config = common_config("run-bounds", "dry_run")
+	local work_calls = 0
+	config.load_checkpoint = function() return nil end
+	config.next_page = function() work_calls += 1; return {}, nil, true end
+	config.persist_checkpoint = function() work_calls += 1; return true end
+	local runner = Runner.new(V2.Maintenance, config)
+	for _, bad in { 0, -1, 1.5, math.huge, 0 / 0, "1", false } do
+		expect(runner:Step(bad, 1).code == "invalid" and runner:Step(1, bad).code == "invalid"
+			and runner:Run(bad, 1, 1).code == "invalid" and runner:Run(1, bad, 1).code == "invalid"
+			and runner:Run(1, 1, bad).code == "invalid", "invalid bound was accepted")
+	end
+	expect(runner:Step(257, 1).code == "invalid" and runner:Step(1, 1001).code == "invalid"
+		and runner:Run(65, 1, 1).code == "invalid" and runner:Run(1, 257, 1).code == "invalid"
+		and runner:Run(1, 1, 1001).code == "invalid" and work_calls == 0,
+		"out-of-range bounds performed maintenance work")
+	for _, bounds in { { 1, 1, 1 }, { 64, 256, 1000 } } do
+		local bounded = Runner.new(V2.Maintenance, config)
+		expect(bounded:Run(table.unpack(bounds)).code == "completed", "inclusive maintenance bound was rejected")
+		local before = work_calls
+		expect(bounded:Step(1, 1).code == "completed" and bounded:Run().code == "completed"
+			and work_calls == before, "completed runner repeated enumeration or checkpoint writes")
+	end
+end
+
+do -- A competing valid checkpoint is not proof that this runner's CAS succeeded.
+	local config = common_config("checkpoint-competitor", "dry_run")
+	local external_checkpoint = nil
+	config.load_checkpoint = function() return copy(external_checkpoint) end
+	config.next_page = function() return { { key = "eligible", generation = 1, eligible = true } }, nil, true end
+	config.persist_checkpoint = function(proposed, expected_revision)
+		expect(expected_revision == 0, "first CAS did not use the initial revision")
+		external_checkpoint = copy(proposed)
+		external_checkpoint.revision += 1
+		external_checkpoint.processed += 1
+		return false, "competing runner committed"
+	end
+	local runner = Runner.new(V2.Maintenance, config)
+	local result = runner:Step(1, 100)
+	local stats = runner:Stats()
+	expect(result.code == "unknown" and runner:GetCheckpoint() == nil
+		and stats.cursor == nil and stats.processed == 0 and stats.removed == 0
+		and stats.checkpoint_revision == 0 and external_checkpoint.revision == 2
+		and external_checkpoint.processed == 2, "failed CAS adopted a competitor's checkpoint or retained unconfirmed progress")
+	local resumed = Runner.new(V2.Maintenance, config)
+	expect(resumed:Step(1, 100).code == "completed" and resumed:Stats().checkpoint_revision == 2,
+		"fresh runner failed to honor the winning durable checkpoint")
+end
+
+-- Authorization is explicit true, checked before any page is read; a blocked
+-- runner can resume when the application restores authorization and its fence.
+for _, denial in { false, "allowed", 1, {} } do
+	local config = common_config("authorization-retry", "execute")
+	local authorized, work_calls = denial, 0
+	local checkpoint = nil
+	config.load_checkpoint = function() return copy(checkpoint) end
+	config.next_page = function() work_calls += 1; return {}, nil, true end
+	config.persist_checkpoint = function(proposed) checkpoint = copy(proposed); return true end
+	config.authorize = function() return authorized end
+	config.assert_fence = function() return true end
+	local runner = Runner.new(V2.Maintenance, config)
+	expect(runner:Step(1, 100).code == "blocked" and work_calls == 0 and checkpoint == nil,
+		"authorization denial/ambiguous result allowed enumeration")
+	authorized = true
+	expect(runner:Step(1, 100).code == "completed" and work_calls == 1 and checkpoint.revision == 1,
+		"restored authorization could not resume blocked work")
+end
+
+print("[OfflineMaintenanceRunner] checkpoint validation, bounds, CAS conflicts, authorization, dry-run and recovery regressions passed.")
 Shim.close()

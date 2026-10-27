@@ -405,4 +405,96 @@ do
 	expect(not pcall(ReceiptHandler.new, valid_coordinator, nil), "missing fallback was accepted")
 end
 
-print("[PurchaseEntitlement] durable authority, receipt reconciliation, lifetime uniqueness, response loss, activation and fail-closed handler regressions passed")
+-- Validate receipt identity before activation, authority calls, or profile grants.
+for _, mutation in {
+	{ field = "PurchaseId", value = "" }, { field = "PurchaseId", value = string.rep("p", 248) },
+	{ field = "PurchaseId", value = "purchase\000hidden" }, { field = "PlayerId", value = 0 },
+	{ field = "PlayerId", value = 1.5 }, { field = "PlayerId", value = math.huge },
+	{ field = "PlayerId", value = 9007199254740992 }, { field = "PlayerId", value = 0 / 0 },
+	{ field = "ProductId", value = -1 }, { field = "ProductId", value = 9007199254740992 },
+	{ field = "ProductId", value = "501" }, { field = "ProductId" },
+} do
+	local purchases, store, gate_calls = make_purchase_authority(), make_store(), 0
+	local instance, _, calls = make_coordinator(purchases, store, {}, function() gate_calls += 1; return true end)
+	local candidate = { PurchaseId = "invalid-receipt", PlayerId = 4201, ProductId = 501 }
+	candidate[mutation.field] = mutation.value
+	local result = instance:Process(candidate)
+	expect(result.action == "defer" and result.status == "invalid_receipt" and table.isfrozen(result)
+		and gate_calls == 0 and next(purchases.rows) == nil and next(store.rows) == nil and next(calls) == nil,
+		"invalid receipt caused activation or mutation: " .. mutation.field .. "/" .. tostring(mutation.value))
+end
+
+do -- Lifetime uniqueness is per player and entitlement, with inclusive ID bounds.
+	local purchases, store = make_purchase_authority(), make_store()
+	local instance, _, calls = make_coordinator(purchases, store, {})
+	for _, candidate in {
+		{ PurchaseId = string.rep("p", 247), PlayerId = 9007199254740991, ProductId = 501 },
+		{ PurchaseId = "other-entitlement", PlayerId = 9007199254740991, ProductId = 502 },
+		{ PurchaseId = "other-player", PlayerId = 1, ProductId = 501 },
+	} do
+		local result = instance:Process(candidate)
+		expect(result.action == "acknowledge" and result.status == "grant_committed"
+			and calls[candidate.PurchaseId] == 1, "independent player/entitlement or boundary identity conflicted")
+	end
+	local count = 0
+	for _ in pairs(store.rows) do count += 1 end
+	expect(count == 3, "independent lifetime entitlements shared a durable row")
+end
+
+do -- An unresolved receipt reserves its entitlement against competing PurchaseIds.
+	local purchases, store = make_purchase_authority(), make_store()
+	local results = { ["pending-owner"] = "unknown" }
+	local instance, _, calls = make_coordinator(purchases, store, results)
+	local owner = { PurchaseId = "pending-owner", PlayerId = 4202, ProductId = 501 }
+	local competitor = { PurchaseId = "pending-competitor", PlayerId = 4202, ProductId = 501 }
+	expect(instance:Process(owner).status == "profile_grant_unconfirmed", "fixture failed to retain pending grant")
+	local blocked = instance:Process(competitor)
+	expect(blocked.action == "defer" and blocked.status == "entitlement_pending"
+		and calls[competitor.PurchaseId] == nil and purchases.rows[competitor.PurchaseId].Status == "claimed",
+		"competing receipt bypassed another unresolved entitlement claim")
+	results[owner.PurchaseId] = "duplicate"
+	local recovered = instance:Process(owner)
+	expect(recovered.action == "acknowledge" and recovered.status == "duplicate_grant_reconciled"
+		and calls[owner.PurchaseId] == 2 and purchases.rows[owner.PurchaseId].Outcome == "duplicate",
+		"retry did not reconcile the original stable profile operation")
+	local duplicate = instance:Process(competitor)
+	expect(duplicate.action == "acknowledge" and duplicate.status == "lifetime_entitlement_already_owned"
+		and purchases.rows[competitor.PurchaseId].Outcome == "duplicate" and calls[competitor.PurchaseId] == nil,
+		"competing receipt was not safely committed as a duplicate after owner recovery")
+end
+
+do -- Crash window: entitlement is owned, but the PurchaseId commit is unresolved.
+	local purchases, store = make_purchase_authority(), make_store()
+	local commit = purchases.CommitAsync
+	purchases.CommitAsync = function() return nil, "purchase commit unavailable" end
+	local instance, _, calls = make_coordinator(purchases, store, {})
+	local candidate = { PurchaseId = "owned-before-purchase-commit", PlayerId = 4203, ProductId = 502 }
+	local first = instance:Process(candidate)
+	expect(first.action == "defer" and first.status == "purchase_commit_unknown"
+		and find_owned(store, "FOUNDERS_LIFETIME", candidate.PlayerId)
+		and calls[candidate.PurchaseId] == 1 and purchases.rows[candidate.PurchaseId].Status == "claimed",
+		"unconfirmed PurchaseId commit was acknowledged or lost the owned entitlement")
+	purchases.CommitAsync = commit
+	-- Construct a fresh coordinator to ensure recovery needs no process-local state.
+	local restarted, _, restarted_calls = make_coordinator(purchases, store, {})
+	local retry = restarted:Process(candidate)
+	expect(retry.action == "acknowledge" and retry.status == "entitlement_already_committed"
+		and restarted_calls[candidate.PurchaseId] == nil and purchases.rows[candidate.PurchaseId].Status == "committed",
+		"restart after entitlement commit repeated the profile grant")
+end
+
+do -- A thrown grant keeps its reservation retryable with the same operation ID.
+	local purchases, store = make_purchase_authority(), make_store()
+	local results = { ["throwing-grant"] = function() error("injected profile failure") end }
+	local instance, _, calls = make_coordinator(purchases, store, results)
+	local candidate = { PurchaseId = "throwing-grant", PlayerId = 4204, ProductId = 501 }
+	expect(instance:Process(candidate).status == "profile_grant_unknown"
+		and purchases.rows[candidate.PurchaseId].Status == "claimed"
+		and not find_owned(store, "VIP_LIFETIME", candidate.PlayerId),
+		"grant exception produced a terminal purchase/entitlement")
+	results[candidate.PurchaseId] = "granted"
+	expect(instance:Process(candidate).status == "grant_committed" and calls[candidate.PurchaseId] == 2,
+		"grant exception prevented a later retry of the original receipt")
+end
+
+print("[PurchaseEntitlement] identity bounds, independent owners, reservation contention, restart recovery and receipt regressions passed")

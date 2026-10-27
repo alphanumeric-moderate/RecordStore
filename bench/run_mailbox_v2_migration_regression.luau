@@ -345,4 +345,147 @@ do
 		"adapter accepted a non-finite freeze timestamp")
 end
 
-print("[MailboxV2Migration] page migration, frozen-writer gate, unknown import retry, checkpoint response-loss recovery, freeze loss, completion gate, and adapter metadata regressions passed")
+-- Reject malformed pagination before importing any record or advancing a cursor.
+for _, case in {
+	{ name = "sparse page", items = { [2] = active_item("sparse", 1, 100) }, complete = true },
+	{ name = "keyed page", items = { extra = active_item("keyed", 1, 100) }, complete = true },
+	{ name = "oversized page", items = { active_item("a", 1, 100), active_item("b", 2, 101) }, complete = true },
+	{ name = "missing completion", items = {} },
+	{ name = "nonboolean completion", items = {}, complete = "true" },
+	{ name = "terminal cursor", items = {}, complete = true, cursor = "1" },
+	{ name = "missing continuation", items = {}, complete = false },
+	{ name = "empty continuation", items = {}, complete = false, cursor = "" },
+	{ name = "oversized continuation", items = {}, complete = false, cursor = string.rep("c", 1025) },
+} do
+	local runner, state = fixture()
+	runner.read_active_page = function() return case.items, case.cursor, case.complete end
+	local result = runner:Step(1)
+	expect(result.code == "blocked" and state.imports == 0
+		and state.checkpoint.revision == 1 and state.checkpoint.active_count == 0
+		and state.checkpoint.cursor == nil, "malformed source page advanced migration: " .. case.name)
+end
+
+do -- A cursor at the documented limit is valid, but it must advance on retry.
+	local runner, state = fixture()
+	local cursor = string.rep("c", 1024)
+	runner.read_active_page = function() return {}, cursor, false end
+	expect(runner:Step(1).code == "progress" and state.checkpoint.cursor == cursor,
+		"migration rejected a cursor at the exact byte limit")
+	local revision = state.checkpoint.revision
+	expect(runner:Step(1).code == "blocked" and state.checkpoint.revision == revision and state.imports == 0,
+		"migration accepted a nonadvancing continuation cursor")
+end
+
+-- A duplicate ID must still prove the entire imported record. In particular,
+-- dead-letter metadata must survive migration, and extra payload fields conflict.
+for _, phase in { "active", "dead_letters" } do
+	local mutations = {
+		{ field = "Id", value = "wrong-id" }, { field = "Type", value = "wrong-type" },
+		{ field = "State", value = "claimed" }, { field = "Attempts", value = 99 },
+		{ field = "TotalAttempts", value = 99 }, { field = "ReplayCount", value = 99 },
+		{ field = "CreatedAt", value = 1 }, { field = "SenderJobId", value = "wrong-server" },
+		{ field = "Data", value = { amount = 1, unexpected = true } },
+	}
+	if phase == "dead_letters" then
+		table.insert(mutations, { field = "DeadLetteredAt", value = 1 })
+		table.insert(mutations, { field = "LastError", value = "different-error" })
+	end
+	for _, mutation in ipairs(mutations) do
+		local runner, state = fixture({ active = if phase == "active" then { active_item("one", 1, 100) } else {} })
+		if phase == "dead_letters" then
+			expect(runner:Step(1).code == "progress", "empty active phase did not advance")
+		end
+		if phase == "active" then
+			runner.mailbox:ImportLegacyAsync(state.active_source[1], runner.migration_id)
+		else
+			runner.mailbox:ImportLegacyDeadLetterAsync(state.dead_source[1], runner.migration_id)
+		end
+		state.imports = 0
+		local before = copy(state.checkpoint)
+		local read = runner.mailbox.GetDeliveryAsync
+		function runner.mailbox:GetDeliveryAsync(id)
+			local snapshot, result = read(self, id)
+			snapshot[mutation.field] = copy(mutation.value)
+			return snapshot, result
+		end
+		local result = runner:Step(1)
+		expect(result.code == "blocked" and state.imports == 1
+			and state.checkpoint.revision == (if before then before.revision else 1)
+			and state.checkpoint.cursor == nil and state.checkpoint.active_count == 0
+			and state.checkpoint.dead_letter_count == 0 and state.activation_calls == 0,
+			"mismatching imported receipt advanced " .. phase .. ": " .. mutation.field)
+	end
+end
+
+do
+	local runner, state = fixture({ active = {}, dead = {} })
+	expect(runner:Activate().code == "unknown" and state.activation_calls == 0,
+		"migration activated without a checkpoint")
+	expect(runner:Step(1).code == "progress" and runner:Activate().code == "blocked",
+		"migration activated before scanning dead letters")
+	expect(runner:Step(1).code == "ready_to_activate" and runner:Activate().code == "complete",
+		"empty inventories could not complete migration")
+	local revision, saves = state.checkpoint.revision, state.save_calls
+	expect(runner:Activate().code == "complete" and runner:Step(1).code == "complete"
+		and state.activation_calls == 1 and state.checkpoint.revision == revision and state.save_calls == saves,
+		"replaying completed migration repeated activation or durable writes")
+end
+
+do -- The concrete bridge must preserve source locators and gate completion proof.
+	local calls, verification_calls = {}, 0
+	local status = "success"
+	local snapshot = { MigrationId = "bridge", FrozenAt = 0, SourceImplementationVersion = 2,
+		ActiveCount = 3, DeadLetterCount = 2 }
+	local store = {
+		begin_mailbox_v2_migration_async = function(...) calls.freeze = table.pack(...); return status, "source unavailable" end,
+		get_mailbox_v2_migration_status_async = function(...) calls.status = table.pack(...); return copy(snapshot), status, "source unavailable" end,
+		get_mailbox_v2_migration_source_page_async = function(...)
+			calls.page = table.pack(...)
+			return { { id = "source-row" } }, "next", false, status, "source unavailable"
+		end,
+	}
+	local adapter = Adapter.bind({
+		record_store = store, store_name = "Profiles", scope = "", profile_key = "Player_1",
+		migration_id = "bridge", mailbox = {}, queue_store_name = "LegacyQueue",
+		max_queue_bytes = 1000, operation_deadline = 7,
+		legacy_writers_drained = function() return true end, load_checkpoint = function() return nil end,
+		save_checkpoint = function() return true end, activate_v2 = function() return true end,
+		verify_complete = function(id, active, dead)
+			verification_calls += 1
+			expect(id == "bridge" and active == 3 and dead == 2, "completion proof lost count/identity")
+			return true
+		end,
+	})
+	for _, method in { "freeze_legacy", "verify_source_frozen", "verify_complete", "read_active_page", "read_dead_letter_page" } do
+		local result = table.pack(adapter[method]("other-migration", nil, 1))
+		expect(not result[1] and type(result[result.n]) == "string" and next(calls) == nil and verification_calls == 0,
+			"wrong migration ID reached the source: " .. method)
+	end
+	expect(adapter.freeze_legacy("bridge") == true and calls.freeze.n == 7
+		and calls.freeze[1] == "Profiles" and calls.freeze[2] == "" and calls.freeze[3] == "Player_1"
+		and calls.freeze[4] == "bridge" and calls.freeze[5] == "LegacyQueue"
+		and calls.freeze[6] == 1000 and calls.freeze[7] == 7, "freeze lost source locator/options")
+	for _, kind in { "active", "dead_letter" } do
+		local read = if kind == "active" then adapter.read_active_page else adapter.read_dead_letter_page
+		local items, cursor, complete, message = read("bridge", "previous", 4)
+		expect(items[1].id == "source-row" and cursor == "next" and complete == false and message == nil
+			and calls.page.n == 10 and calls.page[5] == kind and calls.page[6] == "previous"
+			and calls.page[7] == 4 and calls.page[8] == "LegacyQueue" and calls.page[9] == 1000
+			and calls.page[10] == 7, "page bridge lost pagination or queue options")
+	end
+	expect(adapter.verify_complete("bridge", 2, 2) == false and verification_calls == 0,
+		"mismatched active count reached application completion proof")
+	expect(adapter.verify_complete("bridge", 3, 1) == false and verification_calls == 0,
+		"mismatched dead-letter count reached application completion proof")
+	expect(adapter.verify_complete("bridge", 3, 2) == true and verification_calls == 1,
+		"matching source counts did not reach completion proof")
+	status = "unknown"
+	local items, cursor, complete, message = adapter.read_active_page("bridge", nil, 1)
+	expect(items == nil and cursor == nil and complete == false and string.find(message, "unknown", 1, true),
+		"uncertain source read exposed unverified items")
+	expect(adapter.freeze_legacy("bridge") == false and adapter.verify_source_frozen("bridge") == false
+		and adapter.verify_complete("bridge", 3, 2) == false and verification_calls == 1,
+		"uncertain source state passed a migration gate")
+end
+
+print("[MailboxV2Migration] pagination, import identity, replay, source bridge and migration recovery regressions passed")
