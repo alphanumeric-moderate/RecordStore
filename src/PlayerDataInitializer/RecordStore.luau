@@ -15892,7 +15892,7 @@ local function reconcile_unknown_internal(state: InternalState): (ResultCode, st
 			local durable_metadata = if backend_info ~= nil then clone_metadata(backend_info.Metadata)
 				else clone_metadata(state.metadata)
 			local next_envelope: Envelope = {
-				implementation_version = IMPLEMENTATION_VERSION,
+				implementation_version = envelope.implementation_version,
 				schema_version = envelope.schema_version,
 				revision = envelope.revision,
 				fencing_generation = recovery_generation,
