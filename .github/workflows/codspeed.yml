@@ -133,6 +133,6 @@ jobs:
         timeout-minutes: 16
         uses: CodSpeedHQ/action@v5
         with:
-          # Use Macro Runners and wall time for comparable elapsed-time measurements.
-          mode: walltime
+          # Collect CPU-simulation metrics and comparable macro-runner wall time.
+          mode: simulation,walltime
           # Benchmarks are defined in codspeed.yml
