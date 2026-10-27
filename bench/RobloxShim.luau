@@ -116,6 +116,8 @@ local loaded_recordstore_sha256: any = nil
 local loaded_maintenance_roblox_adapter: any = nil
 local loaded_maintenance_atomic_tombstone: any = nil
 local loaded_maintenance_manifest_binding: any = nil
+local loaded_mailbox_v2_migration_runner: any = nil
+local loaded_mailbox_v2_migration_adapter: any = nil
 
 local RecordStoreInstance = table.freeze({ Name = "RecordStore", ClassName = "ModuleScript" })
 local PurchaseReceiptProcessorInstance = table.freeze({ Name = "PurchaseReceiptProcessor", ClassName = "ModuleScript" })
@@ -135,6 +137,8 @@ local RecordStoreSHA256Instance = table.freeze({ Name = "RecordStoreSHA256", Cla
 local RecordStoreMaintenanceRobloxAdapterInstance = table.freeze({ Name = "RecordStoreMaintenanceRobloxAdapter", ClassName = "ModuleScript" })
 local RecordStoreMaintenanceAtomicTombstoneInstance = table.freeze({ Name = "RecordStoreMaintenanceAtomicTombstone", ClassName = "ModuleScript" })
 local RecordStoreMaintenanceManifestBindingInstance = table.freeze({ Name = "RecordStoreMaintenanceManifestBinding", ClassName = "ModuleScript" })
+local RecordStoreMailboxV2MigrationInstance = table.freeze({ Name = "RecordStoreMailboxV2Migration", ClassName = "ModuleScript" })
+local RecordStoreMailboxV2MigrationAdapterInstance = table.freeze({ Name = "RecordStoreMailboxV2MigrationAdapter", ClassName = "ModuleScript" })
 local PlayerDataInitializer = {
 	RecordStore = RecordStoreInstance,
 	PurchaseReceiptProcessor = PurchaseReceiptProcessorInstance,
@@ -154,6 +158,8 @@ local PlayerDataInitializer = {
 	RecordStoreMaintenanceRobloxAdapter = RecordStoreMaintenanceRobloxAdapterInstance,
 	RecordStoreMaintenanceAtomicTombstone = RecordStoreMaintenanceAtomicTombstoneInstance,
 	RecordStoreMaintenanceManifestBinding = RecordStoreMaintenanceManifestBindingInstance,
+	RecordStoreMailboxV2Migration = RecordStoreMailboxV2MigrationInstance,
+	RecordStoreMailboxV2MigrationAdapter = RecordStoreMailboxV2MigrationAdapterInstance,
 }
 function PlayerDataInitializer:WaitForChild(name: string): any
 	local child = self[name]
@@ -265,6 +271,28 @@ local function load_purchase_authority_migration_runner(): any
 	})
 	loaded_purchase_authority_migration_runner = chunk()
 	return loaded_purchase_authority_migration_runner
+end
+
+local function load_mailbox_v2_migration_runner(): any
+	if loaded_mailbox_v2_migration_runner ~= nil then return loaded_mailbox_v2_migration_runner end
+	local module_environment = table.clone(Shim.environment)
+	module_environment.script = { Parent = PlayerDataInitializer }
+	local chunk = luau.load(fs.readFile("src/PlayerDataInitializer/RecordStoreMailboxV2Migration.luau"), {
+		debugName = "RecordStoreMailboxV2Migration", environment = module_environment,
+	})
+	loaded_mailbox_v2_migration_runner = chunk()
+	return loaded_mailbox_v2_migration_runner
+end
+
+local function load_mailbox_v2_migration_adapter(): any
+	if loaded_mailbox_v2_migration_adapter ~= nil then return loaded_mailbox_v2_migration_adapter end
+	local module_environment = table.clone(Shim.environment)
+	module_environment.script = { Parent = PlayerDataInitializer }
+	local chunk = luau.load(fs.readFile("src/PlayerDataInitializer/RecordStoreMailboxV2MigrationAdapter.luau"), {
+		debugName = "RecordStoreMailboxV2MigrationAdapter", environment = module_environment,
+	})
+	loaded_mailbox_v2_migration_adapter = chunk()
+	return loaded_mailbox_v2_migration_adapter
 end
 
 local function load_purchase_inventory_manifest(): any
@@ -444,6 +472,8 @@ local function shim_require(target: any)
 	if target == PlayerDataErasureManifestBindingInstance then return load_erasure_manifest_binding() end
 	if target == PurchaseDataStoreAuthorityInstance then return load_purchase_datastore_authority() end
 	if target == PurchaseAuthorityMigrationRunnerInstance then return load_purchase_authority_migration_runner() end
+	if target == RecordStoreMailboxV2MigrationInstance then return load_mailbox_v2_migration_runner() end
+	if target == RecordStoreMailboxV2MigrationAdapterInstance then return load_mailbox_v2_migration_adapter() end
 	if target == RecordStoreSHA256Instance then return load_recordstore_sha256() end
 	if target == PurchaseInventoryManifestInstance then return load_purchase_inventory_manifest() end
 	if target == PurchaseEntitlementAuthorityInstance then return load_purchase_entitlement_authority() end
