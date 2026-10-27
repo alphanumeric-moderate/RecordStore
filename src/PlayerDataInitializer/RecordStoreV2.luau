@@ -1327,6 +1327,7 @@ local function new_doctor(record_store)
 			return { code = "disabled", message = "restore requires an explicit application authorization callback" }
 		end
 		if not finite(options.subject_user_id) or options.subject_user_id < 1
+			or options.subject_user_id > 9007199254740991
 			or math.floor(options.subject_user_id) ~= options.subject_user_id
 			or type(options.is_erased) ~= "function"
 		then
@@ -2661,7 +2662,10 @@ local function new_receipt_processor(config)
 		return function(receipt)
 			if type(receipt) ~= "table" then return retry end
 			local id, user_id, product_id = receipt.PurchaseId, receipt.PlayerId, receipt.ProductId
-			if not valid_text(id, 256) or not finite(user_id) or user_id < 1 or math.floor(user_id) ~= user_id or not finite(product_id) or product_id < 1 or math.floor(product_id) ~= product_id then return retry end
+			if not valid_text(id, 256)
+				or not finite(user_id) or user_id < 1 or user_id > 9007199254740991 or math.floor(user_id) ~= user_id
+				or not finite(product_id) or product_id < 1 or product_id > 9007199254740991 or math.floor(product_id) ~= product_id
+			then return retry end
 			local product = products[product_id] or products[tostring(product_id)]
 			local grant = type(product) == "table" and (product.grant or default_grant) or nil
 			if type(grant) ~= "function" then return retry end

@@ -2766,8 +2766,13 @@ do
 		then
 			return nil, "owner requires store_name, scope and profile_key of 1 to 50 characters"
 		end
-		if value.user_id ~= nil and (not is_finite(value.user_id) or (value.user_id :: number) < 1 or (value.user_id :: number) ~= math.floor(value.user_id :: number)) then
-			return nil, "user_id must be a positive integer when supplied"
+		if value.user_id ~= nil and (
+			not is_finite(value.user_id)
+			or (value.user_id :: number) < 1
+			or (value.user_id :: number) > 9007199254740991
+			or (value.user_id :: number) ~= math.floor(value.user_id :: number)
+		) then
+			return nil, "user_id must be a positive safe integer when supplied"
 		end
 		return {
 			store_name = value.store_name :: string,
@@ -13221,8 +13226,9 @@ local function add_user_id(self: Record, user_id: number): (ResultCode, string?)
 	if state == nil then
 		return "invalid", "record does not exist"
 	end
-	if type(user_id) ~= "number" or not math.isfinite(user_id) or user_id < 1 or math.floor(user_id) ~= user_id then
-		return "validation", "user_id must be a positive integer"
+	if type(user_id) ~= "number" or not math.isfinite(user_id) or user_id < 1
+		or user_id > 9007199254740991 or math.floor(user_id) ~= user_id then
+		return "validation", "user_id must be a positive safe integer"
 	end
 	local ids = clone_user_ids(state.user_ids)
 	ids[#ids + 1] = user_id
@@ -13234,8 +13240,9 @@ local function remove_user_id(self: Record, user_id: number): (ResultCode, strin
 	if state == nil then
 		return "invalid", "record does not exist"
 	end
-	if type(user_id) ~= "number" or not math.isfinite(user_id) or user_id < 1 or math.floor(user_id) ~= user_id then
-		return "validation", "user_id must be a positive integer"
+	if type(user_id) ~= "number" or not math.isfinite(user_id) or user_id < 1
+		or user_id > 9007199254740991 or math.floor(user_id) ~= user_id then
+		return "validation", "user_id must be a positive safe integer"
 	end
 	local ids: { number } = {}
 	for _, existing in ipairs(state.user_ids) do
@@ -17456,8 +17463,8 @@ RecordStore._internals.transact = (function()
 			if not payload_ok then return nil, "outbox payload is invalid: " .. tostring(payload_error) end
 			if event.target_user_id ~= nil and (type(event.target_user_id) ~= "number"
 				or not math.isfinite(event.target_user_id) or math.floor(event.target_user_id) ~= event.target_user_id
-				or event.target_user_id < 1) then
-				return nil, "outbox target_user_id must be a positive integer"
+				or event.target_user_id < 1 or event.target_user_id > 9007199254740991) then
+				return nil, "outbox target_user_id must be a positive safe integer"
 			end
 			if event.correlation_id ~= nil and (type(event.correlation_id) ~= "string" or #event.correlation_id > 256) then
 				return nil, "outbox correlation_id must be a string of at most 256 bytes"

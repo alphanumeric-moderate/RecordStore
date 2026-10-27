@@ -222,6 +222,69 @@ expect(invalid_outbox_key.code == "invalid"
 	and outbox_contract_record:GetRevision() == outbox_revision_before_invalid
 	and outbox_contract_record:Get().Balance == 9,
 	"oversized V2 outbox id was not rejected before transaction mutation")
+local outbox_revision_before_unsafe_user = outbox_contract_record:GetRevision()
+local unsafe_outbox_user = V2.Transactions.CommitWithOutbox(
+	outbox_contract_record, "v2-outbox-unsafe-user-id", { reason = "unsafe user", amount = 1 },
+	function(current, request)
+		local updated = clone(current)
+		updated.Balance += request.amount
+		return updated
+	end,
+	{ {
+		type = "balance.changed", payload_version = 1, payload = { amount = 1 },
+		target_store = "V2OutboxTransactionContract", target_scope = "global", target_key = "destination",
+		target_user_id = 9007199254740992,
+	} }
+)
+expect(unsafe_outbox_user.code == "invalid"
+	and outbox_contract_record:GetRevision() == outbox_revision_before_unsafe_user
+	and outbox_contract_record:Get().Balance == 9,
+	"unsafe V2 outbox destination UserId was not rejected before transaction mutation")
+
+local legacy_receipt_record = RecordStore.Mock.new("V2LegacyReceiptSafeInteger", "global", "123", {
+	schema_version = 1, transactional_operations_enabled = true,
+})
+local legacy_receipt_open, legacy_receipt_open_error = legacy_receipt_record:Open({ Balance = 0 })
+expect(legacy_receipt_open == "created" or legacy_receipt_open == "loaded",
+	"embedded legacy receipt fixture failed to open: " .. tostring(legacy_receipt_open_error))
+local legacy_grant_calls = 0
+local legacy_receipt_processor = V2.ReceiptProcessor.new({
+	products = {
+		[1001] = {
+			grant = function(current)
+				legacy_grant_calls += 1
+				local updated = clone(current)
+				updated.Balance += 10
+				return updated
+			end,
+		},
+	},
+	get_record = function(user_id)
+		if user_id == 123 then return legacy_receipt_record end
+		return nil, "profile not found"
+	end,
+})
+local legacy_receipt_handler = legacy_receipt_processor:CreateHandler()
+local legacy_revision_before_invalid = legacy_receipt_record:GetRevision()
+local legacy_unsafe_player = legacy_receipt_handler({
+	PurchaseId = "v2-legacy-unsafe-player-id",
+	PlayerId = 9007199254740992,
+	ProductId = 1001,
+})
+expect(legacy_unsafe_player == Enum.ProductPurchaseDecision.NotProcessedYet,
+	"embedded legacy receipt handler accepted an unsafe PlayerId")
+local legacy_unsafe_product = legacy_receipt_handler({
+	PurchaseId = "v2-legacy-unsafe-product-id",
+	PlayerId = 123,
+	ProductId = 9007199254740992,
+})
+expect(legacy_unsafe_product == Enum.ProductPurchaseDecision.NotProcessedYet,
+	"embedded legacy receipt handler accepted an unsafe ProductId")
+expect(legacy_receipt_record:GetRevision() == legacy_revision_before_invalid
+	and legacy_receipt_record:Get().Balance == 0 and legacy_grant_calls == 0,
+	"embedded legacy receipt validation mutated the profile or invoked a grant")
+expect(legacy_receipt_record:Close() == "closed",
+	"embedded legacy receipt fixture failed to close")
 expect(outbox_contract_record:Close() == "closed", "outbox transaction contract Record did not close")
 expect(inbox_contract_record:Close() == "closed", "inbox contract Record did not close")
 expect(transaction_contract_record:Close() == "closed", "transaction contract Record did not close")
