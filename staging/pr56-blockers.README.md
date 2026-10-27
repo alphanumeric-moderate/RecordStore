@@ -1,33 +1,46 @@
-# PR #56 blocker candidates
+# PR #56 blocker-candidate comparison
 
-These modules are intentionally staged outside `src/PlayerDataInitializer`. They are not required by RecordStore or PlayerDataCore, and PR #57 is stacked on PR #56 rather than modifying its branch. Keep each candidate isolated until its regression tests, strict Luau analysis, source review and application contract review pass.
+## Current relationship to PR #56
 
-## Candidate modules
+These files began as isolated candidate modules outside src/PlayerDataInitializer. Since this staging branch was created, PR #56 has advanced and now contains production-path counterparts for the main blocker candidates. This README is a comparison guide, **not** a statement that the candidate modules are still missing from PR #56.
 
-- `RecordStoreApplicationInventory.luau`: validates a bounded RTBF inventory manifest. It checks exact store/scope locators, safe key templates, external-inventory evidence references, reciprocal family/writer coverage, and generation-aware same-mutation fence declarations. `validate` proves structure only. `verify_for_activation` also requires live Roblox acceptance evidence plus an independent verifier. Field attestations cannot prove that a manifest is exhaustive by themselves.
+Current PR #56 code-bearing snapshot checked for the documentation refresh: `63d30bde9c8ff7b5ce99b0f47fcf88e9cf502a31`. That snapshot passed the 23 explicitly named Lune regression steps plus Luau Type Check, Bencher Continuous Benchmarks, and RecordStore Update Latency. The Lune core runner also runs additional mock-backed fixtures. None of these checks is live Roblox service acceptance.
 
-- `RecordStoreMaintenanceAtomicTombstone.luau`: applies a same-key UpdateAsync tombstone only when the current row generation and row-local durable maintenance job fence match, policy and dependency callbacks return true without yielding, and the tombstone advances generation while identifying the same job and observed generation. Ambiguous commits are reconciled through uncached readback. Its policy callbacks must be pure and must only use dependency facts that are safe to recheck from the current record. Cross-key dependencies cannot be made atomic by this helper. Every writer and recreation path must honor the durable tombstone/fence.
+## Staging-to-production comparison observed
 
-- `PurchaseInventoryManifest.luau`: validates a source revision, immutable snapshot ID, stable ordered PurchaseId/PlayerId/ProductId inventory, row count, rolling digest, archived/deleted account coverage, legacy receipt paths, source end-of-inventory proof, conflict reconciliation and reviewer evidence. Import-source verification and post-migration activation verification are separate. The rolling digest is not cryptographic; an independent source export/verifier remains mandatory.
+| Staged file | Current PR #56 production-path counterpart | Comparison |
+|---|---|---|
+| `RecordStoreApplicationInventory.luau` | `src/PlayerDataInitializer/RecordStoreApplicationInventory.luau` | Exact content match at the checked snapshots. |
+| `RecordStoreMaintenanceAtomicTombstone.luau` | `src/PlayerDataInitializer/RecordStoreMaintenanceAtomicTombstone.luau` | Exact content match at the checked snapshots. |
+| `PurchaseEntitlementReceiptCoordinator.luau` | `src/PlayerDataInitializer/PurchaseEntitlementReceiptCoordinator.luau` | Exact content match at the checked snapshots. |
+| `PlayerDataErasureManifestBinding.luau` | `src/PlayerDataInitializer/PlayerDataErasureManifestBinding.luau` | Different revisions; the production-path file is longer. Compare behavior before porting anything. |
+| `RecordStoreMaintenanceManifestBinding.luau` | `src/PlayerDataInitializer/RecordStoreMaintenanceManifestBinding.luau` | Different revisions; production binds the atomic tombstone helper. |
+| `PurchaseInventoryManifest.luau` | `src/PlayerDataInitializer/PurchaseInventoryManifest.luau` | Different revisions; production has additional migration/checkpoint logic. |
+| `PurchaseEntitlementDataStoreAuthority.luau` | `src/PlayerDataInitializer/PurchaseEntitlementDataStoreAuthority.luau` | Different revisions; production includes its SHA-256 dependency and more code. |
+| `PurchaseEntitlementReceiptHandler.luau` | `src/PlayerDataInitializer/PurchaseEntitlementReceiptHandler.luau` | A production-path counterpart exists in PR #56. |
 
-- `PurchaseEntitlementDataStoreAuthority.luau`: optional non-expiring per-player lifetime-entitlement authority for product types that really require uniqueness. It is separate from the globally keyed PurchaseId authority. It exposes reserve/commit/backfill/status operations, uncached status reads, request-budget/shared-governor hooks, identity collision checks and ambiguous-write reconciliation.
+PR #56 also contains `RecordStoreSHA256`, the migration-runner changes, and dedicated Lune stages for the current production-path purchase, maintenance and RTBF modules.
 
+## What this staging PR is still useful for
 
+Use it to inspect test scenarios, candidate implementation history, and differences that are **actually missing** from the current PR #56 branch. For every alleged gap:
 
-- `PlayerDataErasureManifestBinding.luau`: binds an independently accepted RTBF manifest to the existing `PlayerDataErasure.new` configuration. It derives the profile store/scope/prefix and attestation fields from the reviewed profile family, requires a concrete callback set for every additional family, and freezes the normalized family bindings before the independent verifier sees them. It rejects external-inventory families and unsupported retain-only actions because the current erasure coordinator requires exact, renderable templates. A future coordinator would need an explicit versioned contract for dynamic key inventories before those can be activated.
+1. Compare the current PR #56 implementation and callers with the staged version.
+2. Reproduce the gap with a focused regression that fails against PR #56.
+3. Port only the missing behavior and its test into PR #56, then rerun strict analysis and regressions.
+4. Do not copy a staged file over a more complete production-path version just because the module name matches.
 
-- `PurchaseEntitlementReceiptCoordinator.luau`: coordinates global PurchaseId claiming, lifetime-entitlement reservation, an idempotent profile grant, entitlement commit and terminal purchase commit. It defers on unknown outcomes and competing pending entitlements, and only acknowledges after durable terminal status is confirmed. The application must map only true lifetime-unique products and supply a stable, idempotent profile-grant adapter.
+The staged regression runner remains useful as a reference, but its result is not a substitute for running the current PR #56 workflow on the exact final head. No application inventory or deployed writer list should be fabricated from these generic modules.
 
-## Check order before integration
+## Explicit outstanding release gates
 
-1. Run the dedicated Lune regression runner and isolated strict Luau analysis on the exact candidate head. Review every new finding and test negative paths as well as happy paths.
-2. Independently review the candidate diff. Passing fake-store tests proves only the simulated contract, not Roblox DataStore production semantics.
-3. Obtain the actual game's reviewed purchase inventory, source manifest and verifier. This repository does not contain the complete historical PurchaseId export.
-4. Independently inventory every user-associated DataStore/scope/key family, all direct writers and recreation paths, and exact RTBF templates. This repository does not contain the complete game source tree, so it cannot generate that inventory honestly.
-5. Configure application-owned maintenance eligibility/dependency rules. Verify that the atomic generation and job fence are enforced in the protected mutation, not only by a preflight check.
-6. Run live Roblox multi-server, response-loss, shutdown, rollout/rollback, purchase fulfillment, retention and no-recreation acceptance tests.
-7. Integrate components into RecordStore one at a time only after their relevant tests and review pass. Leave unrelated candidate modules staged until independently checked.
+- Independently review the current PR #56 code and all changed callers.
+- Supply and reconcile the actual game's historical PurchaseId/entitlement source and independent verifier.
+- Inventory every deployed user-associated DataStore/scope/key family and direct writer/recreation path for RTBF.
+- Configure real maintenance family catalogs, eligibility/dependency callbacks, authorization and durable fences.
+- Accept multi-server, response-loss, crash/shutdown, receipt fulfillment, mixed-version/V3 rollout/rollback, storage retention and RTBF no-recreation against a real Roblox test experience.
+- Collect comparable CodSpeed evidence. Previous reports warn about wall-time outside Macro Runners, runner-type mismatch and syscall-dominated workloads.
 
-## Explicit non-claims
+## Stack state
 
-This staging branch does not certify complete purchase migration or RTBF coverage, does not claim the live Roblox acceptance gates are passed, and does not assert that a review/coverage boolean is proof of deployed completeness. No application inventory data was fabricated.
+At the last metadata check, PR #57's base SHA remained `3eba6a193e156fb27c5dd64fb3b1fbc59088d245`, while PR #56's head had advanced to the documentation refresh commit `ebaa3b66cada38e7cdfb9b6d1e3259ce182e6020`. GitHub reported PR #57 as not mergeable. Refresh the stacked base and inspect the resulting diff before relying on PR #57 to represent outstanding work; do not merge the staging directory wholesale.
