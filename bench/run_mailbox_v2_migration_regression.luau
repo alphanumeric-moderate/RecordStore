@@ -1,13 +1,8 @@
 --!nocheck
-local fs = require("@lune/fs")
-local luau = require("@lune/luau")
-
-local Runner = luau.load(fs.readFile("src/PlayerDataInitializer/RecordStoreMailboxV2Migration.luau"), {
-	debugName = "RecordStoreMailboxV2Migration",
-})()
-local Adapter = luau.load(fs.readFile("src/PlayerDataInitializer/RecordStoreMailboxV2MigrationAdapter.luau"), {
-	debugName = "RecordStoreMailboxV2MigrationAdapter",
-})()
+local Shim = require("./RobloxShim")
+local initializer = Shim.environment.game:GetService("ServerScriptService"):WaitForChild("PlayerDataInitializer")
+local Runner = Shim.environment.require(initializer:WaitForChild("RecordStoreMailboxV2Migration"))
+local Adapter = Shim.environment.require(initializer:WaitForChild("RecordStoreMailboxV2MigrationAdapter"))
 
 local function expect(value, message)
 	assert(value, message)
