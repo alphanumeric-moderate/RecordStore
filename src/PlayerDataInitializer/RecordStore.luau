@@ -15899,6 +15899,7 @@ local function reconcile_unknown_internal(state: InternalState): (ResultCode, st
 				created_at = envelope.created_at,
 				updated_at = transform_time,
 				data = envelope.data,
+				sidecars = prepared_envelope_cache._sidecar_protocol.clone(envelope.sidecars),
 				user_ids = user_ids,
 				tombstone = nil,
 				session = {
