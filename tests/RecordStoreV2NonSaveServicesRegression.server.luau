@@ -1,9 +1,9 @@
 --!nocheck
 local Shim = require("./RobloxShim")
 local RecordStore = Shim.load()
-local V2Module = require(
-	game:GetService("ServerScriptService"):WaitForChild("PlayerDataInitializer"):WaitForChild("RecordStoreV2")
-)
+local initializer = game:GetService("ServerScriptService"):WaitForChild("PlayerDataInitializer")
+local V2Module = require(initializer:WaitForChild("RecordStoreV2"))
+local ServicesModule = require(initializer:WaitForChild("RecordStoreServices"))
 local V2 = V2Module.new(RecordStore, RecordStore.MailboxV2)
 local V2Mock = V2Module.new(RecordStore.Mock, RecordStore.MailboxV2)
 
@@ -11,7 +11,7 @@ local function expect(value, message)
 	assert(value, message)
 end
 
-local service_bundle = RecordStore.Services.new()
+local service_bundle = ServicesModule.new(RecordStore)
 expect(service_bundle.Core == RecordStore, "service registry is bound to a different RecordStore core")
 expect(service_bundle.V2.Version == 2, "service registry did not initialize the V2 API against the core")
 for _, name in {

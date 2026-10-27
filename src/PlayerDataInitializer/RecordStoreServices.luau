@@ -1,7 +1,7 @@
 --!strict
 local Services = {}
 
-local CoreModule = require(script.Parent.RecordStore)
+-- This registry remains separate from RecordStore to keep the require graph acyclic.
 local V2Factory = require(script.Parent.RecordStoreV2)
 local Acceleration = require(script.Parent.RecordStoreV2Acceleration)
 local MailboxMigration = require(script.Parent.RecordStoreMailboxV2Migration)
@@ -25,12 +25,12 @@ local OutboxConsumerAdapter = require(script.Parent.RecordStoreOutboxConsumerAda
 local OutboxMailboxAdapter = require(script.Parent.RecordStoreOutboxMailboxAdapter)
 local SHA256 = require(script.Parent.RecordStoreSHA256)
 
-function Services.new(record_store: any?, raw_options: any?): any
+function Services.new(record_store: any, raw_options: any?): any
 	if raw_options ~= nil and type(raw_options) ~= "table" then
 		error("RecordStore service options must be a table", 2)
 	end
 
-	local core = record_store or CoreModule
+	local core = record_store
 	if type(core) ~= "table" or type(core.new) ~= "function" or type(core.MailboxV2) ~= "table" then
 		error("RecordStore service bundle requires the core RecordStore and embedded Mailbox V2", 2)
 	end

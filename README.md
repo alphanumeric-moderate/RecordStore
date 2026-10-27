@@ -589,15 +589,13 @@ These operations can read and update the source outbox while the source `Record`
 
 ### Unified service entry point
 
-The optional service modules are exposed through `RecordStore.Services.new(options?)`. This explicitly loads the service modules and constructs a V2 facade bound to the same core `RecordStore` and embedded Mailbox V2. The modules remain separate ModuleScripts to preserve boundaries and avoid forcing optional services to load when the core module is required.
+The optional service modules are exposed through `RecordStoreServices.new(record_store, options?)`. Keep the core and registry as separate ModuleScripts: this avoids require cycles because several adapters depend on core RecordStore types. Constructing the bundle explicitly loads the optional modules and creates a V2 facade bound to the supplied core and its embedded Mailbox V2.
 
 ```lua
-local RecordStore = require(
-	game:GetService("ServerScriptService")
-		:WaitForChild("PlayerDataInitializer")
-		:WaitForChild("RecordStore")
-)
-local services = RecordStore.Services.new()
+local initializer = game:GetService("ServerScriptService"):WaitForChild("PlayerDataInitializer")
+local RecordStore = require(initializer:WaitForChild("RecordStore"))
+local RecordStoreServices = require(initializer:WaitForChild("RecordStoreServices"))
+local services = RecordStoreServices.new(RecordStore)
 local v2 = services.V2
 
 local PurchaseAuthority = services.Purchases.Authority
@@ -606,7 +604,7 @@ local ErasureBinding = services.Erasure.ManifestBinding
 local OutboxConsumer = services.Outbox.ConsumerAdapter
 ```
 
-The returned bundle contains `Core`, `V2`, `Acceleration`, `Modules`, `MailboxMigration`, `Purchases`, `Maintenance`, `Erasure`, and `Outbox`. `Modules` exposes every optional service ModuleScript by its source-module name; the grouped fields point to those same module instances. `options.v2` is passed to the V2 constructor, and the acceleration module is registered there by default.
+The returned bundle contains `Core`, `V2`, `Acceleration`, `Modules`, `MailboxMigration`, `Purchases`, `Maintenance`, `Erasure`, and `Outbox`. `Modules` exposes every optional service ModuleScript by its source-module name; the grouped fields point to those same module instances. `options.v2` is passed to the V2 constructor, and the acceleration module is registered there by default. The registry does not require the core, so it can safely expose adapters whose type contracts refer back to RecordStore.
 
 Creating the bundle does **not** start wake-up acceleration, assign `MarketplaceService.ProcessReceipt`, import historical purchases, run maintenance, or execute erasure. Those operations remain explicit and require application-owned configuration, authorization, inventory evidence, and live-platform acceptance. Construct the bundle once per application service graph; create separately configured bundles only when their distinct V2 policy state is intentional.
 
