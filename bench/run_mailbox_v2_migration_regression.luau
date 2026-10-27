@@ -189,9 +189,18 @@ end
 do
 	local runner, state = fixture()
 	local first = runner:Step(1)
-	expect(first.code == "progress" and first.checkpoint.revision == 2
-		and first.checkpoint.cursor == "1" and first.checkpoint.active_count == 1,
-		"first active page did not produce a durable checkpoint")
+	local first_checkpoint = first.checkpoint
+	expect(first.code == "progress" and first_checkpoint ~= nil
+		and first_checkpoint.revision == 2
+		and first_checkpoint.cursor == "1" and first_checkpoint.active_count == 1,
+		("first active page did not produce a durable checkpoint: code=%s message=%s checkpoint=%s"):format(
+			tostring(first.code), tostring(first.message),
+			if first_checkpoint == nil then "nil" else ("revision=%s phase=%s cursor=%s active=%s dead=%s"):format(
+				tostring(first_checkpoint.revision), tostring(first_checkpoint.phase),
+				tostring(first_checkpoint.cursor), tostring(first_checkpoint.active_count),
+				tostring(first_checkpoint.dead_letter_count)
+			)
+		))
 	local second = runner:Step(1)
 	expect(second.code == "progress" and second.checkpoint.phase == "dead_letters"
 		and second.checkpoint.cursor == nil and second.checkpoint.active_count == 2,
