@@ -55,6 +55,15 @@ local function new_mailbox(options, store)
 	return MailboxV2.new(store, owner, options), store
 end
 
+do
+	local unsafe_owner = table.clone(owner)
+	unsafe_owner.user_id = 9007199254740992
+	local accepted = pcall(function()
+		MailboxV2.new(MailboxV2.MockStore(), unsafe_owner, {})
+	end)
+	assert(not accepted, "embedded Mailbox V2 accepted an owner UserId beyond the safe-integer range")
+end
+
 local function enqueue(mailbox, message_type, idempotency_key, ordering_key, priority, available_at)
 	local result = mailbox:EnqueueAsync(message_type, { id = idempotency_key }, {
 		idempotency_key = idempotency_key,

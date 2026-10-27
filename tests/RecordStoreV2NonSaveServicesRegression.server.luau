@@ -121,6 +121,25 @@ local transaction_contract_record = RecordStore.Mock.new("V2TransactionContract"
 local transaction_contract_open, transaction_contract_message = transaction_contract_record:Open({ Balance = 0 })
 expect(transaction_contract_open == "created" or transaction_contract_open == "loaded",
 	"transaction contract Record open failed: " .. tostring(transaction_contract_message))
+local restore_revision_before_unsafe_user = transaction_contract_record:GetRevision()
+local unsafe_restore = V2.ProfileDoctor.Restore(
+	transaction_contract_record,
+	{ Balance = 999 },
+	restore_revision_before_unsafe_user,
+	"restore-unsafe-user-id-001",
+	"operator-001",
+	"safe integer boundary regression",
+	{
+		authorize = function() return true end,
+		subject_user_id = 9007199254740992,
+		is_erased = function() return false end,
+	}
+)
+expect(unsafe_restore.code == "invalid"
+	and transaction_contract_record:GetRevision() == restore_revision_before_unsafe_user
+	and transaction_contract_record:Get().Balance == 0,
+	"Profile Doctor restore accepted an unsafe subject UserId or changed profile data")
+
 local transaction_reducer_calls = 0
 local transaction_contract_request = { amount = 7, reason = "test" }
 local transaction_contract = V2.Transactions.Run(
