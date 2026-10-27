@@ -1075,13 +1075,28 @@ do
 			retry_attempts = 1,
 			max_dirty_age_seconds = 600,
 			lease_recovery_enabled = true,
+			transactional_operations_enabled = true,
 		}
 	)
 	local open_result, open_message = record:Open({ coins = 10, label = "initial" })
 	assert(open_result == "created" or open_result == "loaded", open_message)
+	local sidecar_operation_id = "preserve-sidecar-through-expired-lease-recovery"
+	local sidecar_request = { purpose = "lease-recovery-sidecar-preservation" }
+	local _, sidecar_status, sidecar_message = record:TransactAsync(
+		sidecar_operation_id,
+		function(data)
+			return data, { result = "committed-before-recovery" }
+		end,
+		{ request = sidecar_request, receipt_retention_seconds = 3600 }
+	)
+	assert(sidecar_status == "committed", tostring(sidecar_message))
 	local before = RecordStore.Mock.get_record_raw(
 		"RecordStore_UnknownSaveRecoveryRegression", "global", "expired-renewal-reacquisition"
 	) :: { [string]: any }
+	assert(type(before.sidecars) == "table"
+		and type((before.sidecars :: { [string]: any }).transaction_receipts) == "table"
+		and ((before.sidecars :: { [string]: any }).transaction_receipts :: { [string]: any })[sidecar_operation_id] ~= nil,
+		"fixture must contain a durable transaction receipt before lease recovery")
 	local base_revision = before.revision
 	local base_generation = before.fencing_generation
 	local base_write_id = before.write_id
