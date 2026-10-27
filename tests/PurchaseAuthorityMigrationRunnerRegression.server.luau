@@ -1,5 +1,4 @@
 --!nocheck
--- Deferred until every PR #56 implementation slice is added.
 local Shim = require("./RobloxShim")
 local RunnerModule = require(
 	game:GetService("ServerScriptService"):WaitForChild("PlayerDataInitializer"):WaitForChild("PurchaseAuthorityMigrationRunner")
@@ -543,3 +542,64 @@ do
 		"runner restarted source processing after rejecting a version-3 checkpoint")
 end
 
+-- A concurrent runner that advances the checkpoint wins over this runner's stale compare-and-set.
+do
+	local calls = { count = 0 }
+	local backing = make_checkpoint_store()
+	local source = make_source({
+		["<initial>"] = page({ purchase("concurrent-001"), purchase("concurrent-002", 1002) }, "page-2", false),
+		["page-2"] = page({ purchase("concurrent-003") }, "page-3", false),
+		["page-3"] = page({ purchase("concurrent-004") }, nil, true),
+	}, "snapshot-concurrent-checkpoint", calls)
+	local job_id = "historical-import-concurrent-checkpoint"
+	local checkpoint_key = "purchase-migration:" .. job_id
+	local competing_digest, digest_error = RunnerModule.ComputeInventoryDigest({
+		purchase("concurrent-001"),
+		purchase("concurrent-002", 1002),
+		purchase("concurrent-003"),
+	})
+	expect(competing_digest ~= nil, digest_error or "could not compute concurrent checkpoint digest")
+	local competing_checkpoint = {
+		version = 4,
+		digest_algorithm = "sha256-chain-v1",
+		job_id = job_id,
+		source_revision = source.source_revision,
+		revision = 2,
+		cursor = "page-3",
+		done = false,
+		inventory_manifest_id = "manifest:" .. source.source_revision,
+		expected_purchase_count = source.inventory_count,
+		expected_inventory_digest = source.inventory_digest,
+		inventory_digest = competing_digest,
+		inventory_verified = false,
+		pages_processed = 2,
+		purchases_processed = 3,
+		backfilled_count = 3,
+		duplicate_count = 0,
+		last_purchase_id = "concurrent-003",
+		last_player_id = 123,
+		last_product_id = 1001,
+	}
+	local original_update = backing.UpdateAsync
+	local inject_competitor = true
+	backing.UpdateAsync = function(self, key, transform)
+		if inject_competitor and key == checkpoint_key then
+			inject_competitor = false
+			self.values[key] = clone(competing_checkpoint)
+		end
+		return original_update(self, key, transform)
+	end
+
+	local processor = make_processor()
+	local runner = new_runner(job_id, source, processor, backing)
+	local result = runner:RunBatchAsync(1)
+	expect(result.code == "incomplete" and result.cursor == "page-3"
+		and result.pages_processed == 2 and result.purchases_processed == 3,
+		"stale runner did not observe the newer committed checkpoint")
+	local durable = backing.values[checkpoint_key]
+	expect(durable ~= nil and durable.revision == 2 and durable.cursor == "page-3"
+		and durable.purchases_processed == 3 and durable.inventory_digest == competing_digest,
+		"stale compare-and-set overwrote or regressed the competing runner's checkpoint")
+	expect(processor.calls == 1,
+		"stale runner read or imported another page after losing its checkpoint compare-and-set")
+end
