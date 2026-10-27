@@ -48,7 +48,9 @@ end
 
 local function page(records, cursor, limit)
 	local start = if cursor == nil then 0 else tonumber(cursor)
-	if start == nil or start < 0 or math.floor(start) ~= start or tostring(start) ~= cursor then
+	if cursor ~= nil and (
+		start == nil or start < 0 or math.floor(start) ~= start or tostring(start) ~= cursor
+	) then
 		return nil, nil, false, "invalid source cursor"
 	end
 	local items = {}
