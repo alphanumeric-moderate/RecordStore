@@ -19,7 +19,7 @@ env:
 jobs:
   benchmarks:
     name: Run benchmarks
-    runs-on: ubuntu-24.04
+    runs-on: codspeed-macro
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -133,5 +133,6 @@ jobs:
         timeout-minutes: 16
         uses: CodSpeedHQ/action@v5
         with:
-          mode: simulation,walltime
+          # Use Macro Runners and wall time for comparable elapsed-time measurements.
+          mode: walltime
           # Benchmarks are defined in codspeed.yml
