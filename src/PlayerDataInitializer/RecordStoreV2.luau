@@ -3333,7 +3333,7 @@ local function new_projections(store, options)
 			for _, user_id in ipairs(event.subject_user_ids or {}) do
 				if not finite(user_id) or user_id < 1 or user_id > 9007199254740991
 					or math.floor(user_id) ~= user_id then
-					return { code = "invalid", message = "subject_user_ids must contain positive integer UserIds"
+					return { code = "invalid", message = "subject_user_ids must contain positive integer UserIds" }
 				end
 				local erased, error_value = io_call(options.is_erased, user_id)
 				if erased == true then return { code = "erased" } elseif erased == nil then return { code = "unknown", message = error_value or "erasure state unresolved" } end
