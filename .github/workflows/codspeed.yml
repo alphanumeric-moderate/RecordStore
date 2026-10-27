@@ -38,6 +38,6 @@ jobs:
         timeout-minutes: 16
         uses: CodSpeedHQ/action@v5
         with:
-          # CPU simulation is hardware-normalized; WallTime runs in a separate Macro Runner workflow.
+          # Use hosted-runner CPU simulation. This personal account cannot run Macro Runners; do not accept exec-harness WallTime results.
           mode: simulation
           # Benchmarks are defined in codspeed.yml
