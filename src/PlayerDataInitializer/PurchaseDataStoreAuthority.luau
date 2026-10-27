@@ -70,6 +70,7 @@ type Authority = {
 local VERSION = 1
 local HASH_MODULUS = 4294967296
 local MAX_PURCHASE_ID_BYTES = 247
+local MAX_SAFE_INTEGER = 9007199254740991
 local MAX_STORE_NAME_BYTES = 50
 local MAX_SCOPE_BYTES = 50
 local MAX_KEY_PREFIX_BYTES = 18
@@ -80,14 +81,12 @@ end
 
 local function positive_integer(value: unknown): boolean
 	return type(value) == "number" and math.isfinite(value)
-		and value >= 1 and math.floor(value) == value
+		and value >= 1 and value <= MAX_SAFE_INTEGER and math.floor(value) == value
 end
 
 local function finite_timestamp(value: unknown): boolean
 	return type(value) == "number" and math.isfinite(value) and value >= 0
 end
-
-local MAX_SAFE_INTEGER = 9007199254740991
 
 local function valid_generation(value: unknown): boolean
 	return type(value) == "number" and math.isfinite(value)

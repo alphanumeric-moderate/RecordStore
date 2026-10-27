@@ -76,6 +76,23 @@ end
 
 RecordStore.Mock.reset()
 
+do
+	local unsafe_user_id = 9007199254740992
+	local unsafe_key = "Player_" .. tostring(unsafe_user_id)
+	local status, status_code = RecordStore.Mock.get_erasure_status_async(
+		"PlayerData_Test1", "global", unsafe_key, unsafe_user_id, 10
+	)
+	expect(status == nil and status_code == "invalid",
+		"RecordStore erasure status accepted a UserId beyond the safe-integer range")
+	local erased, erase_code = RecordStore.Mock.erase_user_data_async(
+		"PlayerData_Test1", "global", unsafe_key, unsafe_user_id, "erase-unsafe-user-id", 0, 10
+	)
+	expect(erased == nil and erase_code == "invalid",
+		"RecordStore erasure mutation accepted a UserId beyond the safe-integer range")
+end
+
+RecordStore.Mock.reset()
+
 -- Same-profile fencing validates the exact inventoried generation and never
 -- exposes the prior profile payload through the latest version afterward.
 do
@@ -370,7 +387,13 @@ do
 		end,
 	})
 
-	local plan = erasure:PlanAsync(user_id, "erase-coordinator-203")
+	local unsafe_plan = erasure:PlanAsync(9007199254740992, "erase-unsafe-user-id-203")
+expect(unsafe_plan.code == "invalid",
+	"PlayerDataErasure coordinator planned an unsafe UserId")
+local unsafe_status = erasure:GetStatus(9007199254740992)
+expect(unsafe_status.code == "invalid",
+	"RecordStoreV2 erasure status accepted an unsafe UserId")
+local plan = erasure:PlanAsync(user_id, "erase-coordinator-203")
 	expect(plan.code == "success" and plan.rtbf_coverage_verified == true,
 		"verified PlayerDataCore plan failed: " .. tostring(plan.message))
 	expect(#plan.entries == 1 and plan.entries[1].item.key == key,

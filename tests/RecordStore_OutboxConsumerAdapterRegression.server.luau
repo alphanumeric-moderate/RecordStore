@@ -114,6 +114,19 @@ expect(forged_process.code == "retry_scheduled" or forged_process.code == "unkno
 expect(destination:Get().Balance == 35 and destination:Get().GrantCount == 1,
 	"forged destination locator mutated the active profile")
 
+local unsafe_user_event = make_event("outbox-event-unsafe-user", "destination", 800, 1)
+unsafe_user_event.destination_user_id = 9007199254740992
+local unsafe_user_enqueue = mailbox:EnqueueAsync("CreditBalance", unsafe_user_event, {
+	idempotency_key = "transport-unsafe-user",
+})
+expect(unsafe_user_enqueue.code == "accepted",
+	"unsafe-UserId consumer fixture was not enqueued: " .. tostring(unsafe_user_enqueue.error))
+local unsafe_user_process = processor:ProcessNextAsync(destination)
+expect(unsafe_user_process.code == "retry_scheduled" or unsafe_user_process.code == "unknown",
+	"outbox consumer acknowledged an unsafe destination UserId")
+expect(destination:Get().Balance == 35 and destination:Get().GrantCount == 1,
+	"unsafe destination UserId mutated profile data")
+
 -- Version changes are explicit; an unsupported version is not interpreted by
 -- the v1 reducer and never advances the destination Inbox receipt.
 local unsupported = make_event("outbox-event-version-002", "destination", 700, 2)

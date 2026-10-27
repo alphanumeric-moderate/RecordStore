@@ -97,7 +97,7 @@ end
 
 local function positive_integer(value: unknown): boolean
 	return type(value) == "number" and math.isfinite(value)
-		and value > 0 and math.floor(value) == value
+		and value > 0 and value <= 9007199254740991 and math.floor(value) == value
 end
 
 local function positive_version(value: unknown): boolean

@@ -11640,7 +11640,8 @@ end
 
 local function valid_erasure_user_id(value: unknown): boolean
 	return finite_erasure_number(value)
-		and math.floor(value :: number) == (value :: number) and (value :: number) >= 1
+		and math.floor(value :: number) == (value :: number)
+		and (value :: number) >= 1 and (value :: number) <= 9007199254740991
 end
 
 local function valid_quarantine_text(value: unknown, maximum: number): boolean
@@ -13597,7 +13598,9 @@ local function mailbox_bound_for_state(state: InternalState): (EmbeddedMailbox?,
 	end
 	if #state.user_ids > 0 and owner.user_id == nil then return nil, "fenced", "bound mailbox lost the UserId required by this Record" end
 	if owner.user_id ~= nil then
-		if type(owner.user_id) ~= "number" or not math.isfinite(owner.user_id) or math.floor(owner.user_id) ~= owner.user_id then
+		if type(owner.user_id) ~= "number" or not math.isfinite(owner.user_id)
+			or owner.user_id < 1 or owner.user_id > 9007199254740991
+			or math.floor(owner.user_id) ~= owner.user_id then
 			return nil, "fenced", "bound V2 mailbox UserId is invalid"
 		end
 		local found = false
@@ -14013,7 +14016,8 @@ local function bind_mailbox_v2_async(self: Record, mailbox: unknown): (ResultCod
 		return "invalid", "V2 mailbox owner must include a UserId for a UserId-associated Record"
 	end
 	if owner.user_id ~= nil then
-		if type(owner.user_id) ~= "number" or not math.isfinite(owner.user_id) or owner.user_id < 1
+		if type(owner.user_id) ~= "number" or not math.isfinite(owner.user_id)
+			or owner.user_id < 1 or owner.user_id > 9007199254740991
 			or math.floor(owner.user_id) ~= owner.user_id
 		then return "invalid", "V2 mailbox owner UserId must be a positive integer" end
 		local found = false

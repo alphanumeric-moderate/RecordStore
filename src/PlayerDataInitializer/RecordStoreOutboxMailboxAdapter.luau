@@ -72,7 +72,8 @@ local function emit(config: NormalizedConfig, category: string, event_id: string
 end
 
 local function positive_integer(value: unknown): boolean
-	return type(value) == "number" and math.isfinite(value) and value > 0 and math.floor(value) == value
+	return type(value) == "number" and math.isfinite(value)
+		and value > 0 and value <= 9007199254740991 and math.floor(value) == value
 end
 
 local function validate_destination(record: RecordStore.Record, event: RecordStore.OutboxEvent): (boolean, string?)

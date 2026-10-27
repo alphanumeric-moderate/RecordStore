@@ -45,10 +45,11 @@ type Options = {
 local DEFAULT_PROFILE_STORE = "PlayerData_Test1"
 local DEFAULT_PROFILE_SCOPE = "global"
 local DEFAULT_KEY_PREFIX = "Player_"
+local MAX_SAFE_INTEGER = 9007199254740991
 
 local function valid_user_id(value: unknown): boolean
 	return type(value) == "number" and math.isfinite(value)
-		and math.floor(value) == value and value >= 1
+		and math.floor(value) == value and value >= 1 and value <= MAX_SAFE_INTEGER
 end
 
 local function valid_text(value: unknown, maximum: number): boolean

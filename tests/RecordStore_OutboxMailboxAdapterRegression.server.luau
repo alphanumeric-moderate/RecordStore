@@ -126,6 +126,13 @@ local missing_payload = table.clone(event)
 missing_payload.Payload = nil
 expect(not adapter.Dispatch(missing_payload), "outbox adapter accepted an event with no payload")
 
+local unsafe_destination_user = table.clone(event)
+unsafe_destination_user.DestinationUserId = 9007199254740992
+expect(not adapter.Dispatch(unsafe_destination_user),
+	"outbox mailbox adapter accepted a destination UserId beyond the safe-integer range")
+expect(diagnostics[#diagnostics].category == "invalid_event",
+	"unsafe destination UserId was not rejected at the outbox adapter boundary")
+
 destination:Close()
 Mock.reset()
 Shim.close()

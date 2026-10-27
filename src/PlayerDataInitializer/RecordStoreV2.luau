@@ -2797,11 +2797,13 @@ local function new_erasure(store, families, options)
 	end
 	local coordinator = { store = store, families = families }
 	local function valid_user_id(user_id)
-		return finite(user_id) and user_id >= 1 and math.floor(user_id) == user_id
+		return finite(user_id) and user_id >= 1 and user_id <= 9007199254740991
+			and math.floor(user_id) == user_id
 	end
 	local function manifest_key(user_id) return "rv2erase-u" .. tostring(user_id) end
 	function coordinator:RenderTemplates(user_id)
-		if not finite(user_id) or user_id < 1 or math.floor(user_id) ~= user_id then return nil, "invalid UserId" end
+		if not finite(user_id) or user_id < 1 or user_id > 9007199254740991
+			or math.floor(user_id) ~= user_id then return nil, "invalid UserId" end
 		local result = {}
 		for _, entry in ipairs(all_templates) do table.insert(result, { family = entry.family, template = render_template(entry.template, user_id) }) end
 		return result, nil
@@ -2899,7 +2901,8 @@ local function new_erasure(store, families, options)
 		return true, nil, nil
 	end
 	function coordinator:PlanAsync(user_id, erasure_id)
-		if not finite(user_id) or user_id < 1 or math.floor(user_id) ~= user_id or not valid_text(erasure_id, 96) then return { code = "invalid" } end
+		if not finite(user_id) or user_id < 1 or user_id > 9007199254740991
+			or math.floor(user_id) ~= user_id or not valid_text(erasure_id, 96) then return { code = "invalid" } end
 		local entries, coverage, rendered = {}, {}, self:RenderTemplates(user_id)
 		for _, family in ipairs(self.families) do
 			if type(family.inventory) ~= "function" then
@@ -3328,8 +3331,9 @@ local function new_projections(store, options)
 				return { code = "invalid", message = "subject_user_ids must be an array" }
 			end
 			for _, user_id in ipairs(event.subject_user_ids or {}) do
-				if not finite(user_id) or user_id < 1 or math.floor(user_id) ~= user_id then
-					return { code = "invalid", message = "subject_user_ids must contain positive integer UserIds" }
+				if not finite(user_id) or user_id < 1 or user_id > 9007199254740991
+					or math.floor(user_id) ~= user_id then
+					return { code = "invalid", message = "subject_user_ids must contain positive integer UserIds"
 				end
 				local erased, error_value = io_call(options.is_erased, user_id)
 				if erased == true then return { code = "erased" } elseif erased == nil then return { code = "unknown", message = error_value or "erasure state unresolved" } end

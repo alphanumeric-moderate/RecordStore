@@ -59,6 +59,19 @@ local authority = PurchaseAuthorityModule.new({
 	now_unix = function() return now end,
 })
 
+local writes_before_invalid_identity = backing.update_calls
+local unsafe_player, unsafe_player_error = authority:ClaimAsync(
+	"purchase-unsafe-player-id", 9007199254740992, 1001
+)
+expect(unsafe_player == nil and unsafe_player_error ~= nil,
+	"global purchase authority accepted a PlayerId beyond the safe-integer range")
+local unsafe_product, unsafe_product_error = authority:ClaimAsync(
+	"purchase-unsafe-product-id", 123, 9007199254740992
+)
+expect(unsafe_product == nil and unsafe_product_error ~= nil,
+	"global purchase authority accepted a ProductId beyond the safe-integer range")
+expect(backing.update_calls == writes_before_invalid_identity,
+	"invalid numeric receipt identities reached the durable purchase authority")
 local claimed, claim_error = authority:ClaimAsync("purchase-global-001", 123, 1001)
 expect(claimed ~= nil and claimed.Status == "claimed",
 	"first global purchase claim failed: " .. tostring(claim_error))

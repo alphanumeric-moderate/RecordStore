@@ -119,6 +119,19 @@ local malformed_result = handler({
 expect(malformed_result == Enum.ProductPurchaseDecision.NotProcessedYet, "malformed purchase ID was acknowledged")
 expect(record:Get().coins == 25, "rejected receipt changed profile data")
 
+local unsafe_player_receipt = table.clone(purchase)
+unsafe_player_receipt.PurchaseId = "purchase-unsafe-player-id"
+unsafe_player_receipt.PlayerId = 9007199254740992
+expect(handler(unsafe_player_receipt) == Enum.ProductPurchaseDecision.NotProcessedYet,
+	"receipt processor accepted a PlayerId beyond the safe-integer range")
+local unsafe_product_receipt = table.clone(purchase)
+unsafe_product_receipt.PurchaseId = "purchase-unsafe-product-id"
+unsafe_product_receipt.ProductId = 9007199254740992
+expect(handler(unsafe_product_receipt) == Enum.ProductPurchaseDecision.NotProcessedYet,
+	"receipt processor accepted a ProductId beyond the safe-integer range")
+expect(record:Get().coins == 25 and grant_calls == 1,
+	"unsafe receipt identifiers mutated profile data or invoked a grant")
+
 local marker_result = handler({
 	PurchaseId = "purchase-marker-is-user-data",
 	PlayerId = 123,

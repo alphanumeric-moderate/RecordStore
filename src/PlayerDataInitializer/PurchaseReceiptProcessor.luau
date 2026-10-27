@@ -231,10 +231,13 @@ local function emit_diagnostic(
 	warn("[PurchaseReceiptProcessor] " .. category .. detail)
 end
 
+local MAX_SAFE_INTEGER = 9007199254740991
+
 local function is_positive_integer(value: unknown): boolean
 	return type(value) == "number"
 		and math.isfinite(value)
 		and value > 0
+		and value <= MAX_SAFE_INTEGER
 		and math.floor(value) == value
 end
 
