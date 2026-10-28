@@ -1,8 +1,8 @@
 --!strict
 --!optimize 2
--- PlayerDataCore-specific adapter for RecordStoreV2's durable erasure coordinator.
--- This covers the deterministic PlayerDataCore profile key only. Applications must add
--- every other user-associated key family before claiming exhaustive RTBF coverage.
+--[[ PlayerDataCore-specific adapter for RecordStoreV2's durable erasure coordinator
+ This covers the deterministic PlayerDataCore profile key only. applications must add
+ every other user-associated key family before claiming exhaustive RTBF coverage ]]
 
 local Players = game:GetService("Players")
 local RecordStore = require(script.Parent.RecordStore)
@@ -147,8 +147,6 @@ local function new(manifest_store: any, options: Options?): any
 		if type(config.dependencies_clear) == "function" then
 			return config.dependencies_clear(item, user_id)
 		end
-		-- PlayerDataCore's configured profile fields are scalar values and contain no
-		-- external object references. Additional key families need their own checks.
 		return true, nil
 	end
 
@@ -161,8 +159,7 @@ local function new(manifest_store: any, options: Options?): any
 				key = key_prefix .. "{user_id}",
 			},
 		},
-		-- A family flag alone cannot certify RTBF: an independently reconciled application
-		-- inventory must also attest that direct writers and recreation paths are fenced.
+	
 		templates_verified = config.profile_family_verified == true
 			and config.writer_inventory_verified == true
 			and valid_text(config.application_inventory_manifest_id, 128),
