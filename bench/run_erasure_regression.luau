@@ -339,8 +339,12 @@ do
 		application_inventory_manifest_id = "test-inventory-playerdata-v1",
 		verify_templates = function() return true end,
 	})
-	expect(bounded_erasure:PlanAsync(user_id, "erase-at-scan-bound").code == "success",
+	local bounded_plan = bounded_erasure:PlanAsync(user_id, "erase-at-scan-bound")
+	expect(bounded_plan.code == "success" and bounded_plan.rtbf_coverage_verified == true,
 		"reaching the historical scan bound blocked erasure planning")
+	expect(#bounded_plan.entries == 1 and bounded_plan.entries[1].item.name == "PlayerData_Test1"
+		and bounded_plan.entries[1].item.scope == "global" and bounded_plan.entries[1].item.key == key,
+		"verified erasure plan at the historical scan bound omitted the exact profile entry")
 	local plan = erasure:PlanAsync(user_id, "erase-retention-plan-205")
 	expect(plan.code == "success" and plan.rtbf_coverage_verified == true,
 		"verified historical inventory was rejected by the retention-based erase plan: " .. tostring(plan.message))

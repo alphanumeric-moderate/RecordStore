@@ -375,23 +375,28 @@ do
 			"fallback decision did not fail closed: " .. fallback_case.name)
 	end
 
-	local routed_product, route_calls, grant_calls = nil, 0, 0
-	local malformed_handler = ReceiptHandler.new({
-		HandlesProduct = function(_self, product_id)
-			routed_product = product_id
-			route_calls += 1
-			return nil
-		end,
-		Process = function() grant_calls += 1; return { action = "acknowledge", status = "grant_committed" } end,
-	}, function() grant_calls += 1; return granted end)
-	for _, malformed in { false, 42, "receipt", {} } do
-		local before_calls = route_calls
-		expect(malformed_handler(malformed) == deferred and routed_product == nil
-			and route_calls == before_calls + 1 and grant_calls == 0,
-			"malformed receipt acquired a product identity or reached a grant path")
+	for _, fallback_decision in { granted, deferred } do
+		local malformed_auth, malformed_store = make_purchase_authority(), make_store()
+		local malformed_coordinator, _, malformed_grants = make_coordinator(malformed_auth, malformed_store, {})
+		local fallback_calls, fallback_receipt = 0, nil
+		local malformed_handler = ReceiptHandler.new(malformed_coordinator, function(observed)
+			fallback_calls += 1
+			fallback_receipt = observed
+			return fallback_decision
+		end)
+		for _, malformed in { false, 42, "receipt", {} } do
+			local before_calls = fallback_calls
+			expect(malformed_handler(malformed) == fallback_decision
+				and fallback_receipt == malformed and fallback_calls == before_calls + 1,
+				"unhandled malformed receipt did not preserve the caller's fallback decision")
+		end
+		local before_calls = fallback_calls
+		expect(malformed_handler(nil) == fallback_decision
+			and fallback_receipt == nil and fallback_calls == before_calls + 1,
+			"nil receipt did not preserve the caller's fallback decision")
+		expect(next(malformed_auth.rows) == nil and next(malformed_store.rows) == nil
+			and next(malformed_grants) == nil, "malformed receipt reached an entitlement grant path")
 	end
-	expect(malformed_handler(nil) == deferred and routed_product == nil and grant_calls == 0,
-		"nil receipt did not defer without granting")
 
 	for _, invalid in { false, {}, { HandlesProduct = true, Process = function() end },
 		{ HandlesProduct = function() end, Process = false } } do
