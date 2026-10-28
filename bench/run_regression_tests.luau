@@ -7,6 +7,34 @@ local Shim = require("./RobloxShim")
 
 for _, path in {
 	"src/PlayerDataInitializer/RecordStore.luau",
+	"src/PlayerDataInitializer/RecordStoreServices.luau",
+	"src/PlayerDataInitializer/RecordStoreMaintenanceDataStoreAdapter.luau",
+	"bench/run_scheduler_bugfix_regression.luau",
+	"src/PlayerDataInitializer/PurchaseReceiptProcessor.luau",
+	"src/PlayerDataInitializer/PurchaseDataStoreAuthority.luau",
+	"src/PlayerDataInitializer/PurchaseAuthorityMigrationRunner.luau",
+	"tests/PurchaseDataStoreAuthorityRegression.server.luau",
+	"tests/PurchaseAuthorityMigrationRunnerRegression.server.luau",
+	"tests/RecordStore_QuarantineFenceRegression.server.luau",
+	"src/PlayerDataInitializer/RecordStoreOutboxMailboxAdapter.luau",
+	"src/PlayerDataInitializer/RecordStoreOutboxConsumerAdapter.luau",
+	"tests/RecordStore_OutboxConsumerAdapterRegression.server.luau",
+	"src/PlayerDataInitializer/RecordStoreV2.luau",
+	"src/PlayerDataInitializer/RecordStoreV2Acceleration.luau",
+	"src/PlayerDataInitializer/RecordStoreMailboxV2Migration.luau",
+	"src/PlayerDataInitializer/RecordStoreMailboxV2MigrationAdapter.luau",
+	"bench/run_mailbox_v2_migration_regression.luau",
+	"src/PlayerDataInitializer/PlayerDataErasure.luau",
+	"src/PlayerDataInitializer/RecordStoreMaintenanceRunner.luau",
+	"src/PlayerDataInitializer/RecordStoreMaintenanceRobloxAdapter.luau",
+	"tests/RecordStoreMaintenanceRobloxAdapterRegression.server.luau",
+	"bench/DeterministicCrashSimulator.luau",
+	"bench/run_erasure_regression.luau",
+	"bench/run_crash_simulator_regression.luau",
+	"bench/run_acceleration_regression.luau",
+	"bench/run_offline_maintenance_runner_regression.luau",
+	"tests/RecordStoreV2NonSaveServicesRegression.server.luau",
+	"tests/RecordStore_OutboxMailboxAdapterRegression.server.luau",
 	"src/PlayerDataInitializer/PlayerDataCore.luau",
 	"src/PlayerDataInitializer/IntegerInfinityValue.luau",
 	"src/InfiniteMath/init.luau",
@@ -22,6 +50,7 @@ for _, path in {
 	"tests/InfiniteMathValueRegression.server.luau",
 	"tests/InfiniteMathFormattingRegression.server.luau",
 	"tests/RecordStore_EventQueueRegression.server.luau",
+	"tests/PurchaseReceiptProcessorRegression.server.luau",
 	"bench/playerdata_set_harness.luau",
 	"bench/playerdata_set_paths.bench.luau",
 	"bench/playerdata_startup_common.luau",
@@ -70,9 +99,25 @@ assert(not pcall(function() InfiniteMath.formatScientific(1, 10, "12") end))
 assert(not pcall(function() InfiniteMath.formatScientific(1, 1.25, 12) end))
 assert(not pcall(function() InfiniteMath.format(1, { decimals = 7 }) end))
 
+Shim.run_script("bench/run_services_regression.luau")
+Shim.run_script("bench/run_outbox_adapter_unit_regression.luau")
 Shim.run_script("tests/RecordStore_OpenCorrupt_CompatibilityRegression.server.luau")
 Shim.run_script("tests/RecordStore_EventQueueRegression.server.luau")
 Shim.run_script("tests/RecordStore_NonFiniteNumbersRegression.server.luau")
 Shim.run_script("tests/RecordStore_LegacyPayloadRegression.server.luau")
 Shim.run_script("tests/RecordStore_UnknownSaveRecoveryRegression.server.luau")
+Shim.run_script("tests/PurchaseReceiptProcessorRegression.server.luau")
+Shim.run_script("tests/PurchaseDataStoreAuthorityRegression.server.luau")
+Shim.run_script("tests/PurchaseAuthorityMigrationRunnerRegression.server.luau")
+Shim.run_script("tests/RecordStore_QuarantineFenceRegression.server.luau")
+Shim.run_script("tests/RecordStore_OutboxMailboxAdapterRegression.server.luau")
+Shim.run_script("tests/RecordStore_OutboxConsumerAdapterRegression.server.luau")
+Shim.run_script("tests/RecordStoreV2NonSaveServicesRegression.server.luau")
+Shim.run_script("bench/run_mailbox_v2_migration_regression.luau")
+Shim.run_script("bench/run_scheduler_bugfix_regression.luau")
+Shim.run_script("tests/RecordStore_NonSaveRoadmapRegression.server.luau")
+Shim.run_script("bench/run_erasure_regression.luau")
+Shim.run_script("bench/run_crash_simulator_regression.luau")
+Shim.run_script("bench/run_acceleration_regression.luau")
+Shim.run_script("tests/RecordStoreMaintenanceRobloxAdapterRegression.server.luau")
 Shim.close()

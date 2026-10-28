@@ -1,0 +1,129 @@
+name: Luau Regression Tests
+
+on:
+  push:
+    branches:
+      - "main"
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  LUNE_VERSION: "0.11.0"
+
+jobs:
+  regression:
+    name: Run Luau regressions
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - name: Install Lune
+        timeout-minutes: 2
+        run: |
+          curl -fsSL -o lune.zip "https://github.com/lune-org/lune/releases/download/v${LUNE_VERSION}/lune-${LUNE_VERSION}-linux-x86_64.zip"
+          mkdir -p "$HOME/.local/bin"
+          unzip -o lune.zip -d "$HOME/.local/bin"
+          chmod +x "$HOME/.local/bin/lune"
+          rm lune.zip
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Regression - RecordStore core
+        timeout-minutes: 2
+        run: timeout --signal=TERM --kill-after=5s 60s lune run bench/run_regression_tests.luau
+
+      - name: Regression - InfiniteMath range
+        timeout-minutes: 2
+        run: timeout --signal=TERM --kill-after=5s 60s lune run bench/run_infinimath_regression_tests.luau
+
+      - name: Regression - InfiniteMathValue persistence
+        timeout-minutes: 2
+        run: timeout --signal=TERM --kill-after=5s 60s lune run bench/run_infinimathvalue_regression_tests.luau
+
+      - name: Regression - PlayerData.Set
+        timeout-minutes: 2
+        run: timeout --signal=TERM --kill-after=5s 60s lune run bench/run_playerdata_set_regression_tests.luau
+
+      - name: Regression - PlayerData ResetOnJoin
+        timeout-minutes: 2
+        run: timeout --signal=TERM --kill-after=5s 60s lune run bench/run_playerdata_reset_on_join_regression.luau
+
+      - name: Regression - Advanced scheduler
+        timeout-minutes: 2
+        run: timeout --signal=TERM --kill-after=5s 60s lune run bench/run_advanced_scheduler_regression.luau
+
+      - name: Regression - scheduler admission safety
+        timeout-minutes: 2
+        run: timeout --signal=TERM --kill-after=5s 60s lune run bench/run_scheduler_security_regression.luau
+
+      - name: Regression - scheduler bug fixes
+        timeout-minutes: 2
+        run: timeout --signal=TERM --kill-after=5s 60s lune run bench/run_scheduler_bugfix_regression.luau
+
+      - name: Regression - scheduler critical vulnerabilities
+        timeout-minutes: 2
+        run: timeout --signal=TERM --kill-after=5s 60s lune run bench/run_scheduler_critical_vulnerability_regression.luau
+
+      - name: Regression - scheduler hot-path performance
+        timeout-minutes: 2
+        run: timeout --signal=TERM --kill-after=5s 60s lune run bench/run_scheduler_hot_path_regression.luau
+
+      - name: Regression - V2 mailbox ordering and security
+        timeout-minutes: 2
+        run: timeout --signal=TERM --kill-after=5s 60s lune run bench/run_mailbox_v2_ordering_regression.luau
+
+      - name: Regression - V3-to-V2 migration protocol
+        timeout-minutes: 2
+        run: timeout --signal=TERM --kill-after=5s 60s lune run bench/run_mailbox_v2_migration_regression.luau
+
+      - name: Regression - independent maintenance runner
+        timeout-minutes: 2
+        run: timeout --signal=TERM --kill-after=5s 60s lune run bench/run_offline_maintenance_runner_regression.luau
+
+      - name: Regression - production DataStore adapter safety
+        timeout-minutes: 4
+        run: timeout --signal=TERM --kill-after=5s 240s lune run bench/run_production_adapter_safety_regression.luau
+
+      - name: Regression - real DataStore maintenance adapter contract
+        timeout-minutes: 2
+        run: timeout --signal=TERM --kill-after=5s 60s lune run bench/run_maintenance_roblox_adapter_regression.luau
+
+      - name: Regression - multi-family maintenance adapter catalog
+        timeout-minutes: 2
+        run: timeout --signal=TERM --kill-after=5s 60s lune run bench/run_maintenance_datastore_adapter_regression.luau
+
+      - name: Regression - SHA-256 known-answer vectors
+        timeout-minutes: 2
+        run: timeout --signal=TERM --kill-after=5s 60s lune run bench/run_sha256_regression.luau
+
+      - name: Regression - purchase authority erasure
+        timeout-minutes: 2
+        run: timeout --signal=TERM --kill-after=5s 60s lune run bench/run_purchase_authority_erasure_regression.luau
+
+      - name: Regression - purchase inventory manifest
+        timeout-minutes: 2
+        run: timeout --signal=TERM --kill-after=5s 60s lune run bench/run_purchase_inventory_manifest_regression.luau
+
+      - name: Regression - lifetime purchase entitlements
+        timeout-minutes: 2
+        run: timeout --signal=TERM --kill-after=5s 60s lune run bench/run_purchase_entitlement_regression.luau
+      - name: Regression - lifetime entitlement erasure fences
+        timeout-minutes: 2
+        run: timeout --signal=TERM --kill-after=5s 60s lune run bench/run_entitlement_authority_erasure_regression.luau
+
+      - name: Regression - atomic maintenance tombstone
+        timeout-minutes: 2
+        run: timeout --signal=TERM --kill-after=5s 60s lune run bench/run_maintenance_atomic_tombstone_regression.luau
+
+      - name: Regression - maintenance manifest binding
+        timeout-minutes: 2
+        run: timeout --signal=TERM --kill-after=5s 60s lune run bench/run_maintenance_manifest_binding_regression.luau
+
+      - name: Regression - RTBF manifest binding
+        timeout-minutes: 2
+        run: timeout --signal=TERM --kill-after=5s 60s lune run bench/run_rtbf_manifest_binding_regression.luau

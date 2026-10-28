@@ -1,0 +1,418 @@
+--!nocheck
+local fs = require("@lune/fs")
+local luau = require("@lune/luau")
+local Shim = require("./RobloxShim")
+local RecordStore = Shim.load()
+local V2Module = luau.load(fs.readFile("src/PlayerDataInitializer/RecordStoreV2.luau"), {
+	debugName = "RecordStoreV2",
+})()
+local V2 = V2Module.new(RecordStore, RecordStore.MailboxV2)
+local Runner = luau.load(fs.readFile("src/PlayerDataInitializer/RecordStoreMaintenanceRunner.luau"), {
+	debugName = "RecordStoreMaintenanceRunner",
+})()
+
+local function expect(value, message)
+	assert(value, message)
+end
+
+local durable_checkpoint = nil
+local rows = {
+	{ key = "expired-a", generation = 4, eligible = true },
+	{ key = "active-b", generation = 5, eligible = false },
+	{ key = "expired-c", generation = 6, eligible = true },
+}
+local delete_calls = {}
+local checkpoint_response_lost = false
+
+local function copy(value)
+	if type(value) ~= "table" then return value end
+	local out = {}
+	for key, item in pairs(value) do out[key] = copy(item) end
+	return out
+end
+
+local function common_config(job_id, mode)
+	return {
+		job_id = job_id,
+		mode = mode,
+		next_page = function(cursor, maximum)
+			local start = 0
+			if cursor ~= nil then start = tonumber(string.match(cursor, "^row:(%d+)$")) or 0 end
+			local page = {}
+			for i = start + 1, math.min(#rows, start + maximum) do table.insert(page, copy(rows[i])) end
+			local finish = start + #page
+			return page, if finish >= #rows then nil else "row:" .. tostring(finish), finish >= #rows
+		end,
+		inspect = function(item)
+			local row = item
+			return { status = "success", eligible = row.eligible, dependencies_clear = true, generation = row.generation }
+		end,
+		delete_if_generation = function(item, generation)
+			delete_calls[#delete_calls + 1] = { key = item.key, generation = generation }
+			for i, row in ipairs(rows) do
+				if row.key == item.key then
+					if row.generation ~= generation then return "skipped" end
+					table.remove(rows, i)
+					return "deleted"
+				end
+			end
+			return "already_absent"
+		end,
+		load_checkpoint = function() return copy(durable_checkpoint) end,
+		persist_checkpoint = function(checkpoint, expected_revision)
+			local observed_revision = if durable_checkpoint == nil then 0 else durable_checkpoint.revision
+			if observed_revision ~= expected_revision then return false, "checkpoint revision conflict" end
+			durable_checkpoint = copy(checkpoint)
+			if checkpoint_response_lost then
+				checkpoint_response_lost = false
+				return false, "injected response loss after checkpoint commit"
+			end
+			return true
+		end,
+	}
+end
+
+-- Dry-run persists bounded progress but never calls the destructive adapter.
+local dry = Runner.new(V2.Maintenance, common_config("dry-run-1", "dry_run"))
+local dry_result = dry:Run(1, 1, 500)
+expect(dry_result.code == "yielded" and dry_result.cursor == "row:1",
+	"dry-run failed to yield after its bounded first page")
+expect(#delete_calls == 0 and dry_result.would_delete == 1,
+	"dry-run invoked the destructive adapter or failed to count eligible rows")
+expect(durable_checkpoint ~= nil and durable_checkpoint.job_id == "dry-run-1"
+	and durable_checkpoint.revision == 1 and durable_checkpoint.cursor == "row:1",
+	"dry-run did not persist an identity-bound checkpoint")
+
+local exposed_checkpoint = dry:GetCheckpoint()
+expect(exposed_checkpoint ~= nil and exposed_checkpoint.cursor == "row:1",
+	"runner did not return its last durable checkpoint")
+exposed_checkpoint.cursor = "row:999"
+expect(dry:GetCheckpoint().cursor == "row:1",
+	"mutating a returned checkpoint snapshot changed runner state")
+local resumed_dry = Runner.new(V2.Maintenance, common_config("dry-run-1", "dry_run"))
+local dry_complete = resumed_dry:Run(8, 1, 500)
+expect(dry_complete.code == "completed" and #delete_calls == 0,
+	"dry-run did not resume from its durable checkpoint without deleting data")
+
+-- Reject malformed durable state rather than allowing a forged completed checkpoint
+-- to skip remaining inventory.
+do
+	local saved_checkpoint = durable_checkpoint
+	durable_checkpoint = {
+		version = 1, job_id = "forged-complete", revision = 1, cursor = "row:1",
+		processed = 1, removed = 0, status = "completed",
+	}
+	expect(not pcall(function()
+		Runner.new(V2.Maintenance, common_config("forged-complete", "dry_run"))
+	end), "runner accepted a completed checkpoint with an unfinished cursor")
+	durable_checkpoint = {
+		version = 1, job_id = "forged-counts", revision = 2, cursor = nil,
+		processed = 1, removed = 2, status = "completed",
+	}
+	expect(not pcall(function()
+		Runner.new(V2.Maintenance, common_config("forged-counts", "dry_run"))
+	end), "runner accepted a checkpoint whose removed count exceeds processed work")
+	durable_checkpoint = {
+		version = 1, job_id = "forged-status", revision = 3, cursor = "row:1",
+		processed = 1, removed = 0, status = "future_status",
+	}
+	expect(not pcall(function()
+		Runner.new(V2.Maintenance, common_config("forged-status", "dry_run"))
+	end), "runner accepted an unknown checkpoint status")
+	durable_checkpoint = saved_checkpoint
+end
+
+-- Execute mode cannot be constructed without both authorization and a durable writer fence.
+expect(not pcall(function()
+	Runner.new(V2.Maintenance, common_config("unguarded", "execute"))
+end), "execute runner accepted missing authorization/fence callbacks")
+
+-- A committed checkpoint with a lost response is accepted only after exact read-back.
+durable_checkpoint = nil
+checkpoint_response_lost = true
+local loss_runner = Runner.new(V2.Maintenance, common_config("checkpoint-response-loss", "dry_run"))
+local loss_result = loss_runner:Step(1, 500)
+expect(loss_result.code == "incomplete" and loss_result.checkpoint_revision == 1,
+	"runner did not reconcile a durable checkpoint whose response was lost")
+expect(durable_checkpoint ~= nil and durable_checkpoint.cursor == "row:1",
+	"checkpoint response-loss fixture did not persist the first page")
+
+-- The run-level fence passes, then disappears immediately before deletion.
+durable_checkpoint = nil
+rows = { { key = "delete-me", generation = 10, eligible = true } }
+local fence_checks = 0
+local execute_config = common_config("execute-fenced", "execute")
+execute_config.authorize = function() return true end
+execute_config.assert_fence = function()
+	fence_checks += 1
+	return fence_checks == 1
+end
+local execute_runner = Runner.new(V2.Maintenance, execute_config)
+local blocked = execute_runner:Step(1, 500)
+expect(blocked.code == "unknown",
+	"lost writer fence did not stop execution with an unresolved result")
+expect(#delete_calls == 0,
+	"runner deleted data after its writer fence was lost before the destructive operation")
+
+do -- Slow storage reads must not starve single-key maintenance progress.
+	local late_rows = {
+		{ key = "late-a", generation = 1, eligible = true },
+		{ key = "late-b", generation = 2, eligible = true },
+	}
+	local late_checkpoint = nil
+	local late_page_calls = 0
+	local late_config = {
+		job_id = "slow-page-read",
+		mode = "dry_run",
+		next_page = function(cursor, maximum)
+			late_page_calls += 1
+			local deadline = os.clock() + 0.015
+			while os.clock() < deadline do end
+			local page = {}
+			for _, row in ipairs(late_rows) do
+				if cursor == nil or row.key > cursor then
+					table.insert(page, copy(row))
+					if #page >= maximum then break end
+				end
+			end
+			local last_key = if #page > 0 then page[#page].key else cursor
+			local more = false
+			if last_key ~= nil then
+				for _, row in ipairs(late_rows) do
+					if row.key > last_key then more = true; break end
+				end
+			else
+				more = #late_rows > 0
+			end
+			return page, if more then last_key else nil, not more
+		end,
+		inspect = function(item)
+			return { status = "success", eligible = item.eligible, dependencies_clear = true, generation = item.generation }
+		end,
+		delete_if_generation = function() error("dry-run must never delete") end,
+		load_checkpoint = function() return copy(late_checkpoint) end,
+		persist_checkpoint = function(checkpoint, expected_revision)
+			local revision = if late_checkpoint == nil then 0 else late_checkpoint.revision
+			if revision ~= expected_revision then return false, "checkpoint revision conflict" end
+			late_checkpoint = copy(checkpoint)
+			return true
+		end,
+	}
+	local slow_runner = Runner.new(V2.Maintenance, late_config)
+	local first_yield = slow_runner:Run(8, 1, 1)
+	expect(first_yield.code == "yielded" and late_checkpoint ~= nil
+		and late_checkpoint.cursor == "late-a" and late_checkpoint.processed == 1,
+		"slow single-key page read starved progress instead of checkpointing and yielding")
+	local resumed_runner = Runner.new(V2.Maintenance, late_config)
+	local resumed_result = resumed_runner:Run(8, 1, 500)
+	expect(resumed_result.code == "completed" and late_checkpoint.status == "completed"
+		and late_checkpoint.processed == 2 and late_page_calls == 2,
+		"maintenance did not resume after a slow page read without replaying completed work")
+end
+
+do -- Validate generation-aware deletes in execute mode across resumable per-key checkpoints.
+	local execute_rows = {
+		{ key = "a-expired", generation = 1, eligible = true },
+		{ key = "b-active", generation = 2, eligible = false },
+		{ key = "c-race", generation = 3, eligible = true },
+		{ key = "d-expired", generation = 4, eligible = true },
+	}
+	local execute_checkpoint = nil
+	local delete_outcomes = {}
+	local changed_race_generation = false
+	local function execute_next_page(cursor, maximum)
+		local page = {}
+		for _, row in ipairs(execute_rows) do
+			if cursor == nil or row.key > cursor then
+				table.insert(page, copy(row))
+				if #page >= maximum then break end
+			end
+		end
+		local last_key = if #page > 0 then page[#page].key else cursor
+		local more = false
+		if last_key ~= nil then
+			for _, row in ipairs(execute_rows) do
+				if row.key > last_key then more = true; break end
+			end
+		else
+			more = #execute_rows > 0
+		end
+		return page, if more then last_key else nil, not more
+	end
+	local live_config = {
+		job_id = "execute-success",
+		mode = "execute",
+		next_page = execute_next_page,
+		inspect = function(item)
+			return {
+				status = "success",
+				eligible = item.eligible,
+				dependencies_clear = true,
+				generation = item.generation,
+			}
+		end,
+		delete_if_generation = function(item, generation)
+			for index, row in ipairs(execute_rows) do
+				if row.key == item.key then
+					if row.key == "c-race" and not changed_race_generation then
+						row.generation += 1
+						changed_race_generation = true
+					end
+					if row.generation ~= generation then
+						table.insert(delete_outcomes, { key = item.key, outcome = "skipped" })
+						return "skipped"
+					end
+					table.remove(execute_rows, index)
+					table.insert(delete_outcomes, { key = item.key, outcome = "deleted" })
+					return "deleted"
+				end
+			end
+			return "already_absent"
+		end,
+		load_checkpoint = function() return copy(execute_checkpoint) end,
+		persist_checkpoint = function(checkpoint, expected_revision)
+			local current_revision = if execute_checkpoint == nil then 0 else execute_checkpoint.revision
+			if current_revision ~= expected_revision then return false, "checkpoint revision conflict" end
+			execute_checkpoint = copy(checkpoint)
+			return true
+		end,
+		authorize = function() return true end,
+		assert_fence = function() return true end,
+	}
+	local live_runner = Runner.new(V2.Maintenance, live_config)
+	local live_result = live_runner:Run(8, 1, 500)
+	local stats = live_runner:Stats()
+	expect(live_result.code == "completed" and stats.status == "completed",
+		"execute-mode runner failed to complete a bounded generation-aware scan")
+	expect(stats.processed == 4 and stats.removed == 2 and #delete_outcomes == 3,
+		"execute-mode counters did not reflect processed, deleted, and skipped rows")
+	expect(delete_outcomes[1].key == "a-expired" and delete_outcomes[1].outcome == "deleted"
+		and delete_outcomes[2].key == "c-race" and delete_outcomes[2].outcome == "skipped"
+		and delete_outcomes[3].key == "d-expired" and delete_outcomes[3].outcome == "deleted",
+		"execute mode did not preserve generation-change protection")
+	expect(#execute_rows == 2 and execute_rows[1].key == "b-active"
+		and execute_rows[2].key == "c-race" and execute_rows[2].generation == 4,
+		"execute mode deleted an ineligible row or a generation that changed after inspection")
+	expect(execute_checkpoint ~= nil and execute_checkpoint.status == "completed"
+		and execute_checkpoint.revision == 4 and execute_checkpoint.processed == 4
+		and execute_checkpoint.removed == 2,
+		"execute mode did not persist durable progress after each key")
+end
+
+do -- Reject inconsistent page completion metadata before advancing durable progress.
+	local function bad_page_compactor(completion_value, cursor_value)
+		local checkpoint_calls = 0
+		local candidate = V2.Maintenance.NewCompactor({
+			next_page = function() return {}, cursor_value, completion_value end,
+			inspect = function() return { status = "success", eligible = false, dependencies_clear = true } end,
+			delete_if_generation = function() return "skipped" end,
+			persist_progress = function() checkpoint_calls += 1; return true end,
+		})
+		local result = candidate:RunStep(1, 100)
+		return result, candidate:Stats(), checkpoint_calls
+	end
+
+	local complete_with_cursor, complete_stats, complete_checkpoints =
+		bad_page_compactor(true, "cursor-after-completion")
+	expect(complete_with_cursor.code == "invalid" and complete_stats.cursor == nil
+		and complete_stats.processed == 0 and complete_checkpoints == 0,
+		"compactor accepted a terminal page with a cursor and could skip future inventory")
+	local non_boolean_completion, non_boolean_stats, non_boolean_checkpoints =
+		bad_page_compactor("complete", nil)
+	expect(non_boolean_completion.code == "invalid" and non_boolean_stats.cursor == nil
+		and non_boolean_stats.processed == 0 and non_boolean_checkpoints == 0,
+		"compactor accepted a non-boolean completion flag")
+end
+
+-- Corrupt checkpoints must fail before enumeration, inspection or deletion.
+for _, mutation in {
+	{ field = "version", value = 2 }, { field = "job_id", value = "other-job" },
+	{ field = "revision", value = 0 }, { field = "revision", value = 1.5 },
+	{ field = "revision", value = math.huge }, { field = "processed", value = -1 },
+	{ field = "processed", value = 0 / 0 }, { field = "removed", value = -1 },
+	{ field = "cursor", value = "" }, { field = "cursor", value = string.rep("c", 513) },
+	{ field = "cursor", value = false }, { field = "cursor" },
+} do
+	local checkpoint = { version = 1, job_id = "checkpoint-validation", revision = 1,
+		processed = 1, removed = 0, status = "incomplete", cursor = "row:1" }
+	checkpoint[mutation.field] = mutation.value
+	local config = common_config("checkpoint-validation", "dry_run")
+	config.load_checkpoint = function() return checkpoint end
+	local work_calls = 0
+	config.next_page = function() work_calls += 1; return {}, nil, true end
+	config.inspect = function() work_calls += 1 end
+	config.delete_if_generation = function() work_calls += 1 end
+	expect(not pcall(Runner.new, V2.Maintenance, config) and work_calls == 0,
+		"malformed checkpoint reached maintenance work: " .. mutation.field .. "/" .. tostring(mutation.value))
+end
+
+do -- Invalid run bounds must not call adapters, even after a runner is constructed.
+	local config = common_config("run-bounds", "dry_run")
+	local work_calls = 0
+	config.load_checkpoint = function() return nil end
+	config.next_page = function() work_calls += 1; return {}, nil, true end
+	config.persist_checkpoint = function() work_calls += 1; return true end
+	local runner = Runner.new(V2.Maintenance, config)
+	for _, bad in { 0, -1, 1.5, math.huge, 0 / 0, "1", false } do
+		expect(runner:Step(bad, 1).code == "invalid" and runner:Step(1, bad).code == "invalid"
+			and runner:Run(bad, 1, 1).code == "invalid" and runner:Run(1, bad, 1).code == "invalid"
+			and runner:Run(1, 1, bad).code == "invalid", "invalid bound was accepted")
+	end
+	expect(runner:Step(257, 1).code == "invalid" and runner:Step(1, 1001).code == "invalid"
+		and runner:Run(65, 1, 1).code == "invalid" and runner:Run(1, 257, 1).code == "invalid"
+		and runner:Run(1, 1, 1001).code == "invalid" and work_calls == 0,
+		"out-of-range bounds performed maintenance work")
+	for _, bounds in { { 1, 1, 1 }, { 64, 256, 1000 } } do
+		local bounded = Runner.new(V2.Maintenance, config)
+		expect(bounded:Run(table.unpack(bounds)).code == "completed", "inclusive maintenance bound was rejected")
+		local before = work_calls
+		expect(bounded:Step(1, 1).code == "completed" and bounded:Run().code == "completed"
+			and work_calls == before, "completed runner repeated enumeration or checkpoint writes")
+	end
+end
+
+do -- A competing valid checkpoint is not proof that this runner's CAS succeeded.
+	local config = common_config("checkpoint-competitor", "dry_run")
+	local external_checkpoint = nil
+	config.load_checkpoint = function() return copy(external_checkpoint) end
+	config.next_page = function() return { { key = "eligible", generation = 1, eligible = true } }, nil, true end
+	config.persist_checkpoint = function(proposed, expected_revision)
+		expect(expected_revision == 0, "first CAS did not use the initial revision")
+		external_checkpoint = copy(proposed)
+		external_checkpoint.revision += 1
+		external_checkpoint.processed += 1
+		return false, "competing runner committed"
+	end
+	local runner = Runner.new(V2.Maintenance, config)
+	local result = runner:Step(1, 100)
+	local stats = runner:Stats()
+	expect(result.code == "unknown" and runner:GetCheckpoint() == nil
+		and stats.cursor == nil and stats.processed == 0 and stats.removed == 0
+		and stats.checkpoint_revision == 0 and external_checkpoint.revision == 2
+		and external_checkpoint.processed == 2, "failed CAS adopted a competitor's checkpoint or retained unconfirmed progress")
+	local resumed = Runner.new(V2.Maintenance, config)
+	expect(resumed:Step(1, 100).code == "completed" and resumed:Stats().checkpoint_revision == 2,
+		"fresh runner failed to honor the winning durable checkpoint")
+end
+
+-- Authorization is explicit true, checked before any page is read; a blocked
+-- runner can resume when the application restores authorization and its fence.
+for _, denial in { false, "allowed", 1, {} } do
+	local config = common_config("authorization-retry", "execute")
+	local authorized, work_calls = denial, 0
+	local checkpoint = nil
+	config.load_checkpoint = function() return copy(checkpoint) end
+	config.next_page = function() work_calls += 1; return {}, nil, true end
+	config.persist_checkpoint = function(proposed) checkpoint = copy(proposed); return true end
+	config.authorize = function() return authorized end
+	config.assert_fence = function() return true end
+	local runner = Runner.new(V2.Maintenance, config)
+	expect(runner:Step(1, 100).code == "blocked" and work_calls == 0 and checkpoint == nil,
+		"authorization denial/ambiguous result allowed enumeration")
+	authorized = true
+	expect(runner:Step(1, 100).code == "completed" and work_calls == 1 and checkpoint.revision == 1,
+		"restored authorization could not resume blocked work")
+end
+
+print("[OfflineMaintenanceRunner] checkpoint validation, bounds, CAS conflicts, authorization, dry-run and recovery regressions passed.")
+Shim.close()

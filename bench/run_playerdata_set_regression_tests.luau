@@ -156,4 +156,88 @@ assert(stored.kills == 12500124, "kills was not persisted")
 assert(stored.equipped == leave_pending_equipped, "leave-time equipped value was not persisted")
 assert(stored.admin == true, "non-leaderstat admin value was not persisted")
 
+-- An aged buffer must recover after a non-busy failure without admitting new mutations.
+local deferred_flushes = {}
+local pressure = create_harness(true, nil, {
+	DurabilityMode = "read_only_on_risk",
+	MaxDirtyAgeSeconds = 0.01,
+	task = {
+		spawn = task.spawn,
+		wait = task.wait,
+		defer = function(callback) table.insert(deferred_flushes, callback) end,
+	},
+})
+local pressure_record = pressure.record
+local pressure_key = "PlayerData_Test1|global|Player_" .. tostring(pressure.player.UserId)
+local pressure_update = pressure_record.Update
+pressure_record.GetDurabilityStatus = function()
+	return { mutation_admission = "allow", dirty = false }
+end
+pressure_record.Update = function() return "capacity", "injected backend outage" end
+local pressure_baseline = pressure.saved_records[pressure_key].kills
+assert(pressure.controller.Set(pressure.player, "kills", pressure_baseline + 1))
+assert(#deferred_flushes == 1, "accepted value should schedule one flush")
+table.remove(deferred_flushes, 1)()
+assert(#deferred_flushes == 0, "a failed flush must not retry itself indefinitely")
+task.wait(0.02)
+local rejected, rejection = pressure.controller.Set(pressure.player, "kills", pressure_baseline + 2)
+assert(not rejected and string.find(rejection, "pending PlayerData changes", 1, true),
+	"an aged buffer must reject new mutations even while requesting recovery")
+assert(#deferred_flushes == 1, "aged mutation rejection must retry the stranded buffer")
+table.remove(deferred_flushes, 1)()
+assert(#deferred_flushes == 0, "a failed recovery flush must stop without another request")
+assert(pressure.saved_records[pressure_key].kills == pressure_baseline,
+	"failed recovery must not fabricate a persisted change")
+
+local pressure_kills = pressure.player:FindFirstChild("PlayerDataValues"):FindFirstChild("kills")
+pressure_kills.Value = pressure_baseline + 3
+assert(pressure_kills.Value == pressure_baseline + 1,
+	"an aged Value.Changed mutation must be restored while requesting recovery")
+assert(#deferred_flushes == 1, "Value.Changed rejection must request recovery")
+pressure_record.Update = function()
+	assert(not pressure.controller.Set(pressure.player, "kills", pressure_baseline + 4),
+		"a recovery request during a running flush must still reject mutations")
+	return "capacity", "injected in-flight backend failure"
+end
+table.remove(deferred_flushes, 1)()
+assert(#deferred_flushes == 1, "a recovery request during a running flush must retain one follow-up")
+pressure_record.Update = pressure_update
+table.remove(deferred_flushes, 1)()
+assert(#deferred_flushes == 0 and pressure.saved_records[pressure_key].kills == pressure_baseline + 1,
+	"recovery must flush only the earlier accepted value without a reconciliation event")
+assert(pressure.controller.Set(pressure.player, "kills", pressure_baseline + 5),
+	"mutation admission must resume after the pending buffer drains")
+table.remove(deferred_flushes, 1)()
+assert(pressure.saved_records[pressure_key].kills == pressure_baseline + 5,
+	"newly admitted mutations must persist after recovery")
+-- A transient busy Save must retry the accepted dirty snapshot within this flush.
+assert(pressure.controller.Set(pressure.player, "kills", pressure_baseline + 6))
+local save_calls, drain_saved = 0, false
+pressure_record.GetDurabilityStatus = function()
+	return { mutation_admission = if drain_saved then "allow" else "read_only", dirty = not drain_saved }
+end
+pressure_record.Save = function()
+	save_calls += 1
+	if save_calls <= 2 then return "busy", "injected transient write gate" end
+	drain_saved = true
+	return "saved"
+end
+table.remove(deferred_flushes, 1)()
+assert(save_calls == 3 and pressure.saved_records[pressure_key].kills == pressure_baseline + 6,
+	"busy drain Save must retry and flush accepted values without another event")
+assert(#deferred_flushes == 0, "busy drain retry unnecessarily scheduled another flush")
+
+assert(pressure.controller.Set(pressure.player, "kills", pressure_baseline + 7))
+drain_saved = false
+save_calls = 0
+pressure_record.Save = function()
+	save_calls += 1
+	return "capacity", "injected non-busy drain failure"
+end
+table.remove(deferred_flushes, 1)()
+assert(save_calls == 1 and pressure.saved_records[pressure_key].kills == pressure_baseline + 6,
+	"non-busy Save failure must stop while preserving accepted values")
+drain_saved = true
+assert(pressure.controller:Shutdown(), "pressure controller failed to shut down")
+
 print("[PlayerData.Set] Lune integration regression passed")

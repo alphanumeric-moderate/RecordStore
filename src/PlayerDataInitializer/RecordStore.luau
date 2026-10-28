@@ -5,6 +5,15 @@ local HttpService = game:GetService("HttpService")
 local MessagingService = game:GetService("MessagingService")
 local RecordStore = {}
 
+-- Durable same-key fences are deliberately newer than this writer. Older RecordStore
+-- releases fail closed rather than treating a quarantined/enclosed key as writable.
+local QUARANTINE_FENCE_IMPLEMENTATION_VERSION = 2147483646
+local QUARANTINE_FENCE_FIELD = "__recordstore_quarantine_fence_v1"
+local ERASURE_FENCE_IMPLEMENTATION_VERSION = 2147483647
+local ERASURE_FENCE_FIELD = "__recordstore_erasure_fence"
+local MAX_ERASURE_HISTORY_SCAN = 1024
+local erasure_internal: { [string]: any } = {}
+
 
 -- BEGIN EMBEDDED SCHEDULER MODULE
 type EmbeddedSchedulerDynamicRecord = { [string]: any }
@@ -2724,7 +2733,19 @@ do
 	end
 
 	local function ok(code: string, message_id: string?, message: EmbeddedMailboxDict?, error_message: string?): EmbeddedMailboxResult
+		local message_dict = as_dict(message)
+		if message_dict ~= nil then
+			local public_id = if type(message_dict.Id) == "string" then message_dict.Id else message_dict.public_id
+			if type(public_id) == "string" then message_id = public_id end
+		end
 		return { code = code, message_id = message_id, message = message, error = error_message }
+	end
+
+	local function storage_error_code(error_message: string): string
+		if string.find(error_message, "unsupported schema version", 1, true) ~= nil then
+			return "unsupported_schema"
+		end
+		return "unknown"
 	end
 
 	local function clone_owner(owner: EmbeddedMailboxOwner): EmbeddedMailboxOwner
@@ -2745,8 +2766,13 @@ do
 		then
 			return nil, "owner requires store_name, scope and profile_key of 1 to 50 characters"
 		end
-		if value.user_id ~= nil and (not is_finite(value.user_id) or (value.user_id :: number) < 1 or (value.user_id :: number) ~= math.floor(value.user_id :: number)) then
-			return nil, "user_id must be a positive integer when supplied"
+		if value.user_id ~= nil and (
+			not is_finite(value.user_id)
+			or (value.user_id :: number) < 1
+			or (value.user_id :: number) > 9007199254740991
+			or (value.user_id :: number) ~= math.floor(value.user_id :: number)
+		) then
+			return nil, "user_id must be a positive safe integer when supplied"
 		end
 		return {
 			store_name = value.store_name :: string,
@@ -3024,6 +3050,18 @@ do
 		return result_route_key(self, "m2g-", "generated:" .. guid), nil
 	end
 
+	function MailboxV2._legacy_route_key(self: EmbeddedMailbox, legacy_id: string): string
+		return result_route_key(self, "m2l-", "legacy-v3:" .. legacy_id)
+	end
+
+	function MailboxV2._route_from_public_id(self: EmbeddedMailbox, message_id: string): string
+		local prefix = string.sub(message_id, 1, 4)
+		if prefix == "m2i-" or prefix == "m2g-" or prefix == "m2l-" then
+			return message_id
+		end
+		return self:_legacy_route_key(message_id)
+	end
+
 	function MailboxV2._manifest_key(self: EmbeddedMailbox, kind: string): string
 		local manifest_prefix = prefix_for_kind(kind)
 		return result_route_key(self, manifest_prefix, "manifest:" .. kind)
@@ -3057,8 +3095,17 @@ do
 		local current, read_error = self:_get(key)
 		if read_error == nil and current ~= nil then
 			local manifest = as_dict(current)
-			if manifest == nil or manifest.version ~= VERSION or manifest.kind ~= kind or not same_owner(manifest.owner, self.owner) or type(manifest.slots) ~= "table" then
-				return nil, "manifest is corrupt, future-versioned or belongs to another owner"
+			if manifest == nil then
+				return nil, "manifest is malformed"
+			end
+			if not same_owner(manifest.owner, self.owner) then
+				return nil, "manifest belongs to another owner"
+			end
+			if manifest.version ~= VERSION then
+				return nil, "unsupported schema version: manifest version is unsupported"
+			end
+			if manifest.kind ~= kind or type(manifest.slots) ~= "table" then
+				return nil, "manifest is malformed"
 			end
 			return manifest, nil
 		end
@@ -3067,14 +3114,35 @@ do
 			if raw == nil then
 				return initial
 			end
-			return raw
+			-- A racing writer already created this key. Cancel rather than
+			-- re-persisting an envelope that might belong to a newer schema.
+			return nil
 		end)
 		if write_error ~= nil then
 			return nil, "manifest initialization outcome is unknown: " .. write_error
 		end
 		local manifest = as_dict(written)
-		if manifest == nil or manifest.version ~= VERSION or manifest.kind ~= kind or not same_owner(manifest.owner, self.owner) then
-			return nil, "manifest initialization could not be verified"
+		if manifest == nil then
+			local latest_value, latest_error = self:_get_fresh(key)
+			if latest_error ~= nil then
+				return nil, "manifest initialization outcome is unknown: " .. latest_error
+			end
+			if latest_value ~= nil and as_dict(latest_value) == nil then
+				return nil, "manifest is malformed"
+			end
+			manifest = as_dict(latest_value)
+		end
+		if manifest == nil then
+			return nil, "manifest initialization was cancelled and no manifest is visible"
+		end
+		if not same_owner(manifest.owner, self.owner) then
+			return nil, "manifest belongs to another owner"
+		end
+		if manifest.version ~= VERSION then
+			return nil, "unsupported schema version: manifest version is unsupported"
+		end
+		if manifest.kind ~= kind or type(manifest.slots) ~= "table" then
+			return nil, "manifest is malformed"
 		end
 		return manifest, nil
 	end
@@ -3084,6 +3152,7 @@ do
 		local updated, update_error = self:_update(key, function(raw)
 			local manifest = as_dict(raw)
 			if manifest == nil or manifest.version ~= VERSION or not same_owner(manifest.owner, self.owner) then
+				if manifest ~= nil and manifest.version ~= VERSION then return nil end
 				return raw
 			end
 			local next_manifest = clone_dict(manifest)
@@ -3122,15 +3191,36 @@ do
 			if raw == nil then
 				return segment_template
 			end
+			local existing = as_dict(raw)
+			if existing == nil or existing.version ~= VERSION then
+				return nil
+			end
+			if existing.kind ~= kind or existing.slot ~= locator.slot
+				or existing.generation ~= locator.generation or not same_owner(existing.owner, self.owner)
+			then
+				return nil
+			end
 			return raw
 		end)
 		if segment_error ~= nil then
 			return nil, "segment allocation outcome is unknown: " .. segment_error
 		end
 		local segment_dict = as_dict(segment)
-		if segment_dict == nil or segment_dict.version ~= VERSION or segment_dict.kind ~= kind
-			or segment_dict.slot ~= locator.slot or segment_dict.generation ~= locator.generation
-			or not same_owner(segment_dict.owner, self.owner)
+		if segment_dict == nil then
+			local latest_value, latest_error = self:_get_fresh(locator.key)
+			if latest_error ~= nil then
+				return nil, "segment allocation outcome is unknown: " .. latest_error
+			end
+			if latest_value ~= nil and as_dict(latest_value) == nil then
+				return nil, "segment allocation collided with malformed data"
+			end
+			segment_dict = as_dict(latest_value)
+		end
+		if segment_dict ~= nil and segment_dict.version ~= VERSION then
+			return nil, "unsupported schema version: segment version is unsupported"
+		end
+		if segment_dict == nil or segment_dict.kind ~= kind or segment_dict.slot ~= locator.slot
+			or segment_dict.generation ~= locator.generation or not same_owner(segment_dict.owner, self.owner)
 		then
 			return nil, "segment allocation collided with a different owner or generation"
 		end
@@ -3146,7 +3236,7 @@ do
 	end
 
 	function MailboxV2._reclaim_slot(self: EmbeddedMailbox, kind: string): boolean
-		local manifest, manifest_error = self:_get_manifest(kind)
+		local manifest, _manifest_error = self:_get_manifest(kind)
 		if manifest == nil then
 			return false
 		end
@@ -3155,9 +3245,9 @@ do
 		local function release_draining_slot(slot_number: number, generation: number): boolean
 			local updated, update_error = self:_update(self:_manifest_key(kind), function(raw)
 				local current = as_dict(raw)
-				if current == nil or current.version ~= VERSION or not same_owner(current.owner, self.owner) then
-					return raw
-				end
+				if current == nil then return raw end
+				if current.version ~= VERSION then return nil end
+				if not same_owner(current.owner, self.owner) then return nil end
 				local next_manifest = clone_dict(current)
 				local slot = locate_slot(next_manifest, slot_number)
 				if slot == nil or slot.generation ~= generation or slot.state ~= "draining" then
@@ -3178,6 +3268,11 @@ do
 		end
 
 		local function rows_are_safe(segment: EmbeddedMailboxDict, locator: EmbeddedMailboxLocator): boolean
+			if segment.version ~= VERSION or segment.kind ~= kind or segment.slot ~= locator.slot
+				or segment.generation ~= locator.generation or not same_owner(segment.owner, self.owner)
+			then
+				return false
+			end
 			local entries = segment.entries
 			if type(entries) ~= "table" then
 				return false
@@ -3187,23 +3282,24 @@ do
 				if row == nil then
 					return false
 				end
-				local record_value, record_error = self:_get(tostring(row.route))
+				local record_value, record_error = self:_get_fresh(tostring(row.route))
 				local record = as_dict(record_value)
 				if record_error ~= nil or record == nil or not same_owner(record.owner, self.owner) then
 					return false
 				end
 				if kind == "active" then
 					local active_locator = as_dict(record.locator)
-					local row_is_stale = record.placement_generation ~= row.placement_generation
-						or active_locator == nil
-						or active_locator.slot ~= locator.slot
-						or active_locator.generation ~= locator.generation
-					if not row_is_stale
-						and record.state ~= "acknowledged"
-						and record.state ~= "dead_lettered"
-						and record.state ~= "discarded"
-						and record.state ~= "expired"
-					then
+					local same_generation = record.placement_generation == row.placement_generation
+					local same_location = active_locator == nil
+						or (active_locator.slot == locator.slot and active_locator.generation == locator.generation)
+					local terminal = record.state == "acknowledged" or record.state == "dead_lettered"
+						or record.state == "discarded" or record.state == "expired"
+					if same_generation and same_location and not terminal then
+						-- A matching generation without a published locator can be a
+						-- partially prepared placement. Do not reclaim it as stale.
+						return false
+					end
+					if record.state == "replaying" and same_generation then
 						return false
 					end
 				elseif record.state == "replaying"
@@ -3236,15 +3332,21 @@ do
 					end
 					return false
 				end
-				if segment == nil
-					or segment.generation ~= generation
+				if segment ~= nil and segment.generation == generation and same_owner(segment.owner, self.owner)
+					and segment.version ~= VERSION
+				then
+					return false
+				end
+				if segment == nil or segment.generation ~= generation
 					or not same_owner(segment.owner, self.owner)
+					or segment.version ~= VERSION or segment.kind ~= kind
+					or segment.slot ~= slot_number
 					or (segment.state ~= "sealed" and segment.state ~= "retired")
 				then
 					continue
 				end
 
-				local safe = segment.state == "retired" or rows_are_safe(segment, locator)
+				local safe = rows_are_safe(segment, locator)
 				if not safe then
 					continue
 				end
@@ -3255,13 +3357,19 @@ do
 				end
 
 				if segment.state == "sealed" then
+					local expected_entries = canonical(segment.entries)
 					local retired, retire_error = self:_update(locator.key, function(raw)
 						local current = as_dict(raw)
-						if current == nil or current.generation ~= generation or current.state ~= "sealed"
+						if current == nil then return nil end
+						if current.version ~= VERSION then return nil end
+						if current.kind ~= kind or current.slot ~= slot_number
+							or current.generation ~= generation or current.state ~= "sealed"
 							or not same_owner(current.owner, self.owner)
 						then
-							return raw
+							return nil
 						end
+						-- A new append after the safety scan invalidates this retirement.
+						if canonical(current.entries) ~= expected_entries then return nil end
 						local next_segment = clone_dict(current)
 						next_segment.state = "retired"
 						return next_segment
@@ -3313,7 +3421,14 @@ do
 					}
 					local segment_value, segment_error = self:_get(locator.key)
 					local segment = as_dict(segment_value)
-					if segment_error == nil and segment ~= nil and segment.state == "open"
+					if segment ~= nil and segment.generation == locator.generation and same_owner(segment.owner, self.owner)
+						and segment.version ~= VERSION
+					then
+						return nil, "unsupported schema version: index segment version is unsupported"
+					end
+					if segment_error == nil and segment ~= nil and segment.version == VERSION
+						and segment.kind == kind and segment.slot == locator.slot
+						and type(segment.entries) == "table" and segment.state == "open"
 						and segment.generation == locator.generation and same_owner(segment.owner, self.owner)
 					then
 						return locator, nil
@@ -3340,10 +3455,11 @@ do
 			local allocated, allocate_error = self:_update(self:_manifest_key(kind), function(raw)
 				local current = as_dict(raw)
 				if current == nil then
-					return self:_fresh_manifest(kind)
+					if raw == nil then return self:_fresh_manifest(kind) end
+					return nil
 				end
 				if current.version ~= VERSION or not same_owner(current.owner, self.owner) then
-					return raw
+					return nil
 				end
 				local next_manifest = clone_dict(current)
 				local next_slots = next_manifest.slots :: { unknown }
@@ -3364,6 +3480,22 @@ do
 				return nil, "slot allocation outcome is unknown: " .. allocate_error
 			end
 			local next_manifest = as_dict(allocated)
+			if next_manifest == nil then
+				local latest_value, latest_error = self:_get_fresh(self:_manifest_key(kind))
+				if latest_error ~= nil then
+					return nil, "slot allocation outcome is unresolved: " .. latest_error
+				end
+				if latest_value ~= nil and as_dict(latest_value) == nil then
+					return nil, "manifest is malformed"
+				end
+				next_manifest = as_dict(latest_value)
+			end
+			if next_manifest ~= nil and next_manifest.version ~= VERSION then
+				return nil, "unsupported schema version: manifest version is unsupported"
+			end
+			if next_manifest ~= nil and not same_owner(next_manifest.owner, self.owner) then
+				return nil, "manifest belongs to another owner"
+			end
 			local selected_slot: number? = nil
 			local selected_generation: number? = nil
 			if next_manifest ~= nil and type(next_manifest.slots) == "table" then
@@ -3398,9 +3530,8 @@ do
 			if current == nil then
 				return raw
 			end
-			if current.version ~= VERSION or not same_owner(current.owner, self.owner) then
-				return raw
-			end
+			if current.version ~= VERSION then return nil end
+			if not same_owner(current.owner, self.owner) then return nil end
 			local entries = as_dict(current.entries)
 			if entries == nil then
 				return raw
@@ -3427,6 +3558,19 @@ do
 			return nil, "preparation update outcome is unknown: " .. update_error
 		end
 		local registry = as_dict(updated)
+		if registry == nil then
+			local latest_value, latest_error = self:_get_fresh(key)
+			if latest_error ~= nil then
+				return nil, "preparation update outcome is unknown: " .. latest_error
+			end
+			registry = as_dict(latest_value)
+		end
+		if registry ~= nil and registry.version ~= VERSION then
+			return nil, "unsupported schema version: preparation registry version is unsupported"
+		end
+		if registry ~= nil and not same_owner(registry.owner, self.owner) then
+			return nil, "preparation registry belongs to another owner"
+		end
 		local entry = if registry ~= nil then as_dict(as_dict(registry.entries) and (as_dict(registry.entries) :: EmbeddedMailboxDict)[route]) else nil
 		return entry, nil
 	end
@@ -3440,8 +3584,11 @@ do
 		if registry == nil then
 			return nil, nil
 		end
-		if registry.version ~= VERSION or not same_owner(registry.owner, self.owner) then
-			return nil, "preparation registry is corrupt or belongs to another owner"
+		if registry.version ~= VERSION then
+			return nil, "unsupported schema version: preparation registry version is unsupported"
+		end
+		if not same_owner(registry.owner, self.owner) then
+			return nil, "preparation registry belongs to another owner"
 		end
 		local entries = as_dict(registry.entries)
 		return if entries ~= nil then as_dict(entries[route]) else nil, nil
@@ -3460,7 +3607,7 @@ do
 			token = token,
 			request_text = request_text,
 			request = clone_json(request),
-			sender_job_id = self.sender_job_id,
+			sender_job_id = if type(request.legacy_sender_job_id) == "string" then request.legacy_sender_job_id else self.sender_job_id,
 			phase = "reserved",
 			created_at = self:_now(),
 			placement_generation = 1,
@@ -3468,6 +3615,7 @@ do
 		local updated, update_error = self:_update(key, function(raw)
 			local current = as_dict(raw)
 			if current == nil then
+				if raw ~= nil then return nil end
 				current = ({
 					version = VERSION,
 					owner = clone_owner(self.owner),
@@ -3477,7 +3625,7 @@ do
 			end
 			assert(current ~= nil)
 			if current.version ~= VERSION or current.shard ~= shard or not same_owner(current.owner, self.owner) then
-				return raw
+				return nil
 			end
 			local entries = as_dict(current.entries)
 			if entries == nil then
@@ -3510,6 +3658,22 @@ do
 			return nil, "unknown: preparation reservation write may have committed"
 		end
 		local registry = as_dict(updated)
+		if registry == nil then
+			local latest_value, latest_error = self:_get_fresh(key)
+			if latest_error ~= nil then
+				return nil, "unknown: preparation reservation state is unresolved: " .. latest_error
+			end
+			if latest_value ~= nil and as_dict(latest_value) == nil then
+				return nil, "corrupt: preparation registry is malformed"
+			end
+			registry = as_dict(latest_value)
+		end
+		if registry ~= nil and registry.version ~= VERSION then
+			return nil, "unsupported schema version: preparation registry version is unsupported"
+		end
+		if registry ~= nil and (registry.shard ~= shard or not same_owner(registry.owner, self.owner)) then
+			return nil, "conflict: preparation registry owner or shard identity mismatch"
+		end
 		local entries = if registry ~= nil then as_dict(registry.entries) else nil
 		local existing = if entries ~= nil then as_dict(entries[route]) else nil
 		if existing ~= nil then
@@ -3525,7 +3689,10 @@ do
 		local updated, update_error = self:_update(route, function(raw)
 			local current = as_dict(raw)
 			if current ~= nil and not same_owner(current.owner, self.owner) then
-				return raw
+				return nil
+			end
+			if current ~= nil and current.version ~= VERSION then
+				return nil
 			end
 			return transform(current)
 		end)
@@ -3533,15 +3700,41 @@ do
 			return nil, update_error
 		end
 		local record = as_dict(updated)
+		if updated == nil then
+			-- UpdateAsync returning nil means the write was cancelled. Read back
+			-- authoritatively to distinguish a missing record from an incompatible
+			-- version that must never be re-persisted by an older writer.
+			local latest_value, latest_error = self:_get_fresh(route)
+			if latest_error ~= nil then
+				return nil, "canonical update was cancelled but read-back is unresolved: " .. latest_error
+			end
+			if latest_value == nil then
+				return nil, nil
+			end
+			local latest = as_dict(latest_value)
+			if latest == nil then
+				return nil, "canonical record is malformed after a cancelled update"
+			end
+			if not same_owner(latest.owner, self.owner) then
+				return nil, "canonical route collision: owner identity mismatch"
+			end
+			if latest.version ~= VERSION then
+				return nil, "unsupported schema version: canonical message version is not supported"
+			end
+			return latest, nil
+		end
 		if record ~= nil and not same_owner(record.owner, self.owner) then
 			return nil, "canonical route collision: owner identity mismatch"
+		end
+		if record ~= nil and record.version ~= VERSION then
+			return nil, "unsupported schema version: canonical message version is not supported"
 		end
 		return record, nil
 	end
 
 	function MailboxV2._record_snapshot(self: EmbeddedMailbox, record: EmbeddedMailboxDict): EmbeddedMailboxDict
 		return {
-			Id = record.route,
+			Id = if type(record.public_id) == "string" then record.public_id else record.route,
 			Type = record.message_type,
 			Data = clone_json(record.payload),
 			SenderJobId = if type(record.sender_job_id) == "string" then record.sender_job_id else "",
@@ -3567,6 +3760,9 @@ do
 	end
 
 	local function valid_scheduling_record(record: EmbeddedMailboxDict, route: string): (boolean, string?)
+		if record.version ~= VERSION then
+			return false, "canonical message version is unsupported"
+		end
 		if type(record.route) ~= "string" or record.route ~= route then
 			return false, "canonical route does not match its index entry"
 		end
@@ -3660,6 +3856,7 @@ do
 		local updated, update_error = self:_update(ordering_route, function(raw)
 			local current = as_dict(raw)
 			if current == nil then
+				if raw ~= nil then return nil end
 				current = ({
 					version = VERSION,
 					owner = clone_owner(self.owner),
@@ -3672,7 +3869,7 @@ do
 			if current.version ~= VERSION or not same_owner(current.owner, self.owner)
 				or current.ordering_key ~= ordering_key
 			then
-				return raw
+				return nil
 			end
 			local routes = as_dict(current.routes)
 			if routes == nil or not valid_ordering_routes(routes, current.next_sequence) then return raw end
@@ -3695,6 +3892,11 @@ do
 		if update_error ~= nil or updated == nil then
 			local latest_value, read_error = self:_get_fresh(ordering_route)
 			local latest = as_dict(latest_value)
+			if read_error == nil and latest ~= nil and same_owner(latest.owner, self.owner)
+				and latest.version ~= VERSION
+			then
+				return nil, "unsupported schema version: ordering index version is unsupported"
+			end
 			local routes = if latest ~= nil then as_dict(latest.routes) else nil
 			local sequence = if routes ~= nil then routes[route] else nil
 			if read_error == nil and latest ~= nil and latest.version == VERSION
@@ -3707,9 +3909,12 @@ do
 			return nil, "ordering sequence reservation is unresolved: " .. tostring(update_error or read_error or "no durable sequence")
 		end
 		local record = as_dict(updated)
+		if record ~= nil and record.version ~= VERSION then
+			return nil, "unsupported schema version: ordering index version is unsupported"
+		end
 		local routes = if record ~= nil then as_dict(record.routes) else nil
 		local sequence = if routes ~= nil then routes[route] else nil
-		if record == nil or record.version ~= VERSION or not same_owner(record.owner, self.owner)
+		if record == nil or not same_owner(record.owner, self.owner)
 			or record.ordering_key ~= ordering_key or routes == nil
 			or not valid_ordering_routes(routes, record.next_sequence) or not is_finite(sequence)
 		then
@@ -3729,10 +3934,10 @@ do
 		local released_at = self:_now()
 		local updated, update_error = self:_update(ordering_route, function(raw)
 			local current = as_dict(raw)
-			if current == nil or not same_owner(current.owner, self.owner)
-				or current.ordering_key ~= ordering_key
-			then
-				return raw
+			if current == nil then return raw end
+			if current.version ~= VERSION then return nil end
+			if not same_owner(current.owner, self.owner) or current.ordering_key ~= ordering_key then
+				return nil
 			end
 			local routes = as_dict(current.routes)
 			local route_sequence = if routes ~= nil then routes[route] else nil
@@ -3770,7 +3975,8 @@ do
 		local record = as_dict(updated)
 		local routes = if record ~= nil then as_dict(record.routes) else nil
 		local latest_sequence = if routes ~= nil then routes[route] else nil
-		return record ~= nil and same_owner(record.owner, self.owner)
+		return record ~= nil and record.version == VERSION and same_owner(record.owner, self.owner)
+			and record.ordering_key == ordering_key and routes ~= nil
 			and (latest_sequence == nil or (expected_sequence ~= nil and latest_sequence ~= expected_sequence))
 	end
 
@@ -3785,6 +3991,7 @@ do
 		local updated, update_error = self:_update(ordering_route, function(raw)
 			local current = as_dict(raw)
 			if current == nil then
+				if raw ~= nil then return nil end
 				current = ({
 					version = VERSION,
 					owner = clone_owner(self.owner),
@@ -3798,7 +4005,7 @@ do
 			if current.version ~= VERSION or not same_owner(current.owner, self.owner)
 				or current.ordering_key ~= ordering_key
 			then
-				return raw
+				return nil
 			end
 			local routes = as_dict(current.routes)
 			local replay_operations = if current.replay_operations == nil then {} else as_dict(current.replay_operations)
@@ -3832,10 +4039,20 @@ do
 			next_record.updated_at = reserved_at
 			return next_record
 		end)
-		if update_error ~= nil or updated == nil then
-			return nil, "replay ordering reservation is unresolved: " .. tostring(update_error or "no durable ordering state")
+		if update_error ~= nil then
+			return nil, "replay ordering reservation is unresolved: " .. update_error
 		end
 		local record = as_dict(updated)
+		if record == nil then
+			local latest_value, latest_error = self:_get_fresh(ordering_route)
+			if latest_error ~= nil then
+				return nil, "replay ordering reservation is unresolved: " .. latest_error
+			end
+			record = as_dict(latest_value)
+		end
+		if record ~= nil and record.version ~= VERSION then
+			return nil, "unsupported schema version: ordering index version is unsupported"
+		end
 		local routes = if record ~= nil then as_dict(record.routes) else nil
 		local replay_operations = if record ~= nil then as_dict(record.replay_operations) else nil
 		local replay_entry = if replay_operations ~= nil then as_dict(replay_operations[route]) else nil
@@ -3988,12 +4205,14 @@ do
 		local maximum = if kind == "active" then self.options.segment_max_messages :: number else self.options.dlq_segment_max_messages :: number
 		local updated, update_error = self:_update(locator.key, function(raw)
 			local segment = as_dict(raw)
-			if segment == nil or segment.version ~= VERSION or segment.kind ~= kind
-				or segment.slot ~= locator.slot or segment.generation ~= locator.generation
-				or not same_owner(segment.owner, self.owner)
+			if segment == nil then return nil end
+			if segment.version ~= VERSION then return nil end
+			if segment.kind ~= kind or segment.slot ~= locator.slot
+				or segment.generation ~= locator.generation or not same_owner(segment.owner, self.owner)
 			then
 				return raw
 			end
+			if segment.state == "retired" then return nil end
 			if has_row(segment, tostring(row.route), row.placement_generation :: number) then
 				return raw
 			end
@@ -4015,9 +4234,21 @@ do
 			return "unknown", update_error
 		end
 		local segment = as_dict(updated)
-		if segment == nil or segment.version ~= VERSION or segment.generation ~= locator.generation or not same_owner(segment.owner, self.owner) then
+		if segment ~= nil and segment.version ~= VERSION then
+			return "unknown", "unsupported schema version: index segment version is unsupported"
+		end
+		if segment == nil then
+			local latest_value, latest_error = self:_get_fresh(locator.key)
+			if latest_error ~= nil then return "unknown", "segment update could not be verified: " .. latest_error end
+			segment = as_dict(latest_value)
+		end
+		if segment ~= nil and segment.version ~= VERSION then
+			return "unknown", "unsupported schema version: index segment version is unsupported"
+		end
+		if segment == nil or segment.generation ~= locator.generation or not same_owner(segment.owner, self.owner) then
 			return "unknown", "segment update could not be verified"
 		end
+		if segment.state == "retired" then return "full", nil end
 		if has_row(segment, tostring(row.route), row.placement_generation :: number) then
 			if segment.state == "sealed" then
 				self:_set_slot_state(kind, locator, "open", "sealed")
@@ -4173,7 +4404,12 @@ do
 					version = VERSION,
 					owner = clone_owner(self.owner),
 					route = route,
+					public_id = if type(request.public_id) == "string" then request.public_id else nil,
 					request_text = request_text,
+					migration_target = request.migration_target,
+					legacy_migration_id = request.legacy_migration_id,
+					legacy_last_replay_token = request.legacy_last_replay_token,
+					legacy_terminal_lock_token = request.legacy_terminal_lock_token,
 					message_type = request.message_type,
 					payload = clone_json(request.payload),
 					sender_job_id = if type(entry.sender_job_id) == "string" then entry.sender_job_id else "",
@@ -4182,11 +4418,12 @@ do
 					ordering_sequence = ordering_sequence,
 					available_at = if is_finite(request.available_at) then request.available_at else entry.created_at,
 					expires_at = request.expires_at,
-					created_at = entry.created_at,
+					created_at = if is_finite(request.legacy_created_at) then request.legacy_created_at else entry.created_at,
 					updated_at = preparing_now,
-					attempts = 0,
-					total_attempts = 0,
-					replay_count = 0,
+					attempts = if is_finite(request.legacy_attempts) then request.legacy_attempts else 0,
+					total_attempts = if is_finite(request.legacy_total_attempts) then request.legacy_total_attempts else 0,
+					replay_count = if is_finite(request.legacy_replay_count) then request.legacy_replay_count else 0,
+					last_error = if type(request.legacy_last_error) == "string" then request.legacy_last_error else nil,
 					state = "preparing",
 					reservation_token = token,
 					placement_generation = placement,
@@ -4423,8 +4660,14 @@ do
 		end
 		local existing = as_dict(existing_value)
 		if existing ~= nil then
-			if not same_owner(existing.owner, self.owner) or existing.request_text ~= request_text then
-				return ok("conflict", route, nil, "idempotency route is already bound to a different request or owner")
+			if not same_owner(existing.owner, self.owner) then
+				return ok("conflict", route, nil, "idempotency route is already bound to a different owner")
+			end
+			if existing.version ~= VERSION then
+				return ok("unsupported_schema", route, nil, "canonical producer receipt version is unsupported")
+			end
+			if existing.request_text ~= request_text then
+				return ok("conflict", route, nil, "idempotency route is already bound to a different request")
 			end
 			if existing.state == "preparing" then
 				local entry = self:_get_registry_entry(route)
@@ -4448,28 +4691,314 @@ do
 		return publish_after_enqueue(self, self:_resume_reservation(route, entry))
 	end
 
+	local function make_legacy_import_request(
+		self: EmbeddedMailbox,
+		raw_legacy: unknown,
+		migration_id: string,
+		target: string
+	): (EmbeddedMailboxDict?, string?, string?)
+		local legacy = as_dict(raw_legacy)
+		if legacy == nil then return nil, nil, "legacy queue item must be a table" end
+		if not valid_text(migration_id, 96) then return nil, nil, "migration_id must be 1 to 96 bytes" end
+		if target ~= "active" and target ~= "dead_letter" then return nil, nil, "unsupported legacy migration target" end
+		local legacy_id_value: unknown = if type(legacy.id) == "string" then legacy.id else legacy.Id
+		local message_type_value: unknown = if type(legacy.type) == "string" then legacy.type else legacy.Type
+		local payload = if legacy.data ~= nil then legacy.data else legacy.Data
+		if not valid_text(legacy_id_value, MAX_KEY_LENGTH) then
+			return nil, nil, "legacy message ID must be 1 to " .. tostring(MAX_KEY_LENGTH) .. " bytes"
+		end
+		local legacy_id = legacy_id_value :: string
+		local id_prefix = string.sub(legacy_id, 1, 4)
+		if id_prefix == "m2i-" or id_prefix == "m2g-" or id_prefix == "m2l-" then
+			return nil, nil, "legacy message ID collides with a reserved V2 ID namespace"
+		end
+		if not valid_text(message_type_value, 100) then return nil, nil, "legacy message type must be 1 to 100 bytes" end
+		local message_type = message_type_value :: string
+
+		local locked_until = legacy.locked_until
+		if locked_until ~= nil and (type(locked_until) ~= "number" or not is_finite(locked_until)
+			or locked_until < 0 or locked_until > 9_007_199_254_740)
+		then
+			return nil, nil, "legacy locked_until must be a finite Unix timestamp in seconds"
+		end
+		if target == "active" and type(locked_until) == "number"
+			and is_finite(locked_until) and locked_until > self:_now() / 1000
+		then
+			return nil, nil, "legacy message still has an unexpired processing lease; wait for expiry and reconcile the old handler before migration"
+		end
+
+		local attempts_raw = if type(legacy.attempts) == "number" and is_finite(legacy.attempts) then legacy.attempts else legacy.Attempts
+		local total_attempts_raw = if type(legacy.total_attempts) == "number" and is_finite(legacy.total_attempts) then legacy.total_attempts else legacy.TotalAttempts
+		local replay_count_raw = if type(legacy.replay_count) == "number" and is_finite(legacy.replay_count) then legacy.replay_count else legacy.ReplayCount
+		local attempts = if type(attempts_raw) == "number" and is_finite(attempts_raw) then attempts_raw else 0
+		local total_attempts = if type(total_attempts_raw) == "number" and is_finite(total_attempts_raw) then total_attempts_raw else attempts
+		local replay_count = if type(replay_count_raw) == "number" and is_finite(replay_count_raw) then replay_count_raw else 0
+		if attempts < 0 or math.floor(attempts) ~= attempts
+			or total_attempts < attempts or math.floor(total_attempts) ~= total_attempts
+			or replay_count < 0 or math.floor(replay_count) ~= replay_count
+			or total_attempts > 9_007_199_254_740_991
+		then
+			return nil, nil, "legacy retry counters are malformed"
+		end
+
+		local created_seconds_raw = legacy.created_at
+		local created_seconds_candidate: unknown = if type(created_seconds_raw) == "number" and is_finite(created_seconds_raw)
+			then created_seconds_raw else legacy.CreatedAt
+		if type(created_seconds_candidate) ~= "number" or not is_finite(created_seconds_candidate)
+			or created_seconds_candidate < 0 or created_seconds_candidate > 9_007_199_254_740
+		then
+			return nil, nil, "legacy created_at must be a finite Unix timestamp in seconds"
+		end
+		local created_seconds = created_seconds_candidate :: number
+		local created_at_ms = math.floor(created_seconds * 1000)
+		local sender_job_id = if type(legacy.sender_job_id) == "string" then legacy.sender_job_id
+			else if type(legacy.SenderJobId) == "string" then legacy.SenderJobId else ""
+		if #sender_job_id > 128 then return nil, nil, "legacy sender_job_id exceeds 128 bytes" end
+		local last_replay_token = legacy.last_replay_token
+		if last_replay_token ~= nil and (type(last_replay_token) ~= "string" or #last_replay_token > 256) then
+			return nil, nil, "legacy last_replay_token is malformed"
+		end
+		local last_error = if type(legacy.last_error) == "string" then legacy.last_error else legacy.LastError
+		if last_error ~= nil and (type(last_error) ~= "string" or #last_error > 1024) then
+			return nil, nil, "legacy last_error is malformed"
+		end
+		local terminal_lock_token = legacy.terminal_lock_token
+		if terminal_lock_token ~= nil and (type(terminal_lock_token) ~= "string" or #terminal_lock_token > 256) then
+			return nil, nil, "legacy terminal_lock_token is malformed"
+		end
+		local dead_lettered_at_ms = created_at_ms
+		local dead_lettered_at_raw = legacy.dead_lettered_at
+		local raw_dead_lettered_at: unknown = if type(dead_lettered_at_raw) == "number" and is_finite(dead_lettered_at_raw)
+			then dead_lettered_at_raw else legacy.DeadLetteredAt
+		if raw_dead_lettered_at ~= nil then
+			if type(raw_dead_lettered_at) ~= "number" or not is_finite(raw_dead_lettered_at)
+				or raw_dead_lettered_at < 0 or raw_dead_lettered_at > 9_007_199_254_740
+			then
+				return nil, nil, "legacy dead_lettered_at must be a finite Unix timestamp in seconds"
+			end
+			dead_lettered_at_ms = math.floor(raw_dead_lettered_at * 1000)
+		end
+		if target == "active" and self.options.strict_ordering_enabled ~= true then
+			return nil, nil, "legacy FIFO preservation requires strict_ordering_enabled=true"
+		end
+		local ordering_key = if target == "active" then "legacy-v3:" .. migration_id else nil
+		if ordering_key ~= nil and #ordering_key > MAX_ORDERING_KEY_LENGTH then
+			return nil, nil, "migration_id produces an oversized legacy ordering key"
+		end
+		local payload_size, payload_error = self:_encode_size(payload)
+		if payload_size == nil or payload_size > (self.options.max_payload_bytes :: number) then
+			return nil, nil, payload_error or "legacy payload exceeds the configured encoded-size cap"
+		end
+		local copy_ok, payload_copy = pcall(clone_json, payload)
+		if not copy_ok then return nil, nil, "legacy payload is not cloneable as JSON-compatible data" end
+		local request: EmbeddedMailboxDict = {
+			owner = clone_owner(self.owner),
+			idempotency_key = "legacy-v3:" .. migration_id .. ":" .. legacy_id,
+			migration_target = target,
+			legacy_migration_id = migration_id,
+			legacy_sender_job_id = sender_job_id,
+			public_id = legacy_id,
+			message_type = message_type,
+			payload = payload_copy,
+			priority = "normal",
+			ordering_key = ordering_key,
+			available_at = created_at_ms,
+			expires_at = nil,
+			legacy_created_at = created_at_ms,
+			legacy_updated_at = created_at_ms,
+			legacy_attempts = attempts,
+			legacy_total_attempts = total_attempts,
+			legacy_replay_count = replay_count,
+			legacy_last_replay_token = last_replay_token,
+			legacy_last_error = last_error,
+			legacy_terminal_lock_token = terminal_lock_token,
+			legacy_dead_lettered_at = dead_lettered_at_ms,
+		}
+		local request_text_ok, request_text = pcall(canonical, request)
+		if not request_text_ok or type(request_text) ~= "string" then
+			return nil, nil, "legacy queue item is not canonicalizable"
+		end
+		local request_size, size_error = self:_encode_size(request)
+		if request_size == nil or request_size > (self.options.max_request_bytes :: number) then
+			return nil, nil, size_error or "legacy request exceeds the configured encoded-size cap"
+		end
+		if #request_text > (self.options.preparation_max_entry_bytes :: number) then
+			return nil, nil, "legacy request is too large for the bounded preparation registry"
+		end
+		return request, request_text, nil
+	end
+
+	local function legacy_import_status(self: EmbeddedMailbox, route: string, request_text: string, legacy_id: string): EmbeddedMailboxResult?
+		local raw, read_error = self:_get_fresh(route)
+		if read_error ~= nil then
+			return ok("unknown", legacy_id, nil, "legacy import verification read failed: " .. read_error)
+		end
+		local current = as_dict(raw)
+		if raw ~= nil and current == nil then return ok("corrupt", legacy_id, nil, "legacy import target is malformed") end
+		if current == nil then return nil end
+		if current.version ~= VERSION then
+			return ok("unsupported_schema", legacy_id, nil, "legacy import target has an unsupported schema")
+		end
+		if not same_owner(current.owner, self.owner) then
+			return ok("conflict", legacy_id, nil, "legacy ID route belongs to another mailbox owner")
+		end
+		if current.public_id ~= legacy_id or current.request_text ~= request_text
+			or (current.migration_target ~= "active" and current.migration_target ~= "dead_letter")
+		then
+			return ok("conflict", legacy_id, self:_record_snapshot(current), "legacy ID is already bound to different content")
+		end
+		return ok("duplicate", legacy_id, self:_record_snapshot(current), nil)
+	end
+
+	function MailboxV2.ImportLegacyAsync(
+		self: EmbeddedMailbox,
+		legacy_message: unknown,
+		migration_id: string
+	): EmbeddedMailboxResult
+		local activation = self:_check_activation("migration")
+		if activation ~= nil then return activation end
+		local request, request_text, request_error = make_legacy_import_request(self, legacy_message, migration_id, "active")
+		if request == nil or request_text == nil then return ok("invalid", nil, nil, request_error) end
+		local legacy_id = request.public_id :: string
+		local route = self:_legacy_route_key(legacy_id)
+		local existing_status = legacy_import_status(self, route, request_text, legacy_id)
+		if existing_status ~= nil then
+			if existing_status.code ~= "duplicate" then return existing_status end
+			local existing = as_dict(existing_status.message)
+			if existing ~= nil and existing.State ~= "preparing" then return existing_status end
+			local entry, entry_error = self:_get_registry_entry(route)
+			if entry_error ~= nil then return ok("unknown", legacy_id, existing_status.message, entry_error) end
+			if entry == nil then return ok("unknown", legacy_id, existing_status.message, "preparing legacy import has no reservation") end
+			local resumed = self:_resume_reservation(route, entry)
+			resumed.message_id = legacy_id
+			return publish_after_enqueue(self, resumed)
+		end
+		local token, token_error = self:_guid()
+		if token == nil then return ok("invalid", legacy_id, nil, token_error) end
+		local entry, reserve_error = self:_reserve(route, request_text, request, token)
+		if entry == nil then
+			local code = if string.find(reserve_error or "", "capacity", 1, true) then "capacity"
+				elseif string.find(reserve_error or "", "conflict", 1, true) then "conflict"
+				elseif string.find(reserve_error or "", "unsupported schema", 1, true) then "unsupported_schema"
+				else "unknown"
+			return ok(code, legacy_id, nil, reserve_error)
+		end
+		local result = self:_resume_reservation(route, entry)
+		result.message_id = legacy_id
+		return publish_after_enqueue(self, result)
+	end
+
+	function MailboxV2.ImportLegacyDeadLetterAsync(
+		self: EmbeddedMailbox,
+		legacy_message: unknown,
+		migration_id: string
+	): EmbeddedMailboxResult
+		local activation = self:_check_activation("migration")
+		if activation ~= nil then return activation end
+		local request, request_text, request_error = make_legacy_import_request(self, legacy_message, migration_id, "dead_letter")
+		if request == nil or request_text == nil then return ok("invalid", nil, nil, request_error) end
+		local legacy_id = request.public_id :: string
+		local route = self:_legacy_route_key(legacy_id)
+		local existing_status = legacy_import_status(self, route, request_text, legacy_id)
+		if existing_status ~= nil then
+			if existing_status.code ~= "duplicate" then return existing_status end
+			local existing = as_dict(existing_status.message)
+			if existing ~= nil and existing.State == "dead_lettered" then return existing_status end
+			local existing_record, existing_error = self:_get_fresh(route)
+			local record = as_dict(existing_record)
+			if existing_error ~= nil or record == nil then
+				return ok("unknown", legacy_id, nil, existing_error or "dead-letter import record is unavailable")
+			end
+			if record.state ~= "dead_lettering" then
+				return ok("conflict", legacy_id, self:_record_snapshot(record), "legacy dead-letter import has an incompatible state")
+			end
+			local completed = self:_finish_dead_letter(route)
+			completed.message_id = legacy_id
+			return completed
+		end
+
+		local token, token_error = self:_guid()
+		if token == nil then return ok("invalid", legacy_id, nil, token_error) end
+		local now = self:_now()
+		local candidate: EmbeddedMailboxDict = {
+			version = VERSION,
+			owner = clone_owner(self.owner),
+			route = route,
+			public_id = legacy_id,
+			request_text = request_text,
+			migration_target = "dead_letter",
+			legacy_migration_id = migration_id,
+			legacy_last_replay_token = request.legacy_last_replay_token,
+			legacy_terminal_lock_token = request.legacy_terminal_lock_token,
+			message_type = request.message_type,
+			payload = clone_json(request.payload),
+			sender_job_id = if type(request.legacy_sender_job_id) == "string" then request.legacy_sender_job_id else "",
+			priority = "normal",
+			available_at = request.available_at,
+			expires_at = nil,
+			created_at = request.legacy_created_at,
+			updated_at = now,
+			attempts = request.legacy_attempts,
+			total_attempts = request.legacy_total_attempts,
+			replay_count = request.legacy_replay_count,
+			last_error = if type(request.legacy_last_error) == "string" then request.legacy_last_error else "Imported from legacy V3 dead-letter queue",
+			dead_letter_reason = if type(request.legacy_last_error) == "string" then request.legacy_last_error else "Imported from legacy V3 dead-letter queue",
+			legacy_dead_lettered_at = request.legacy_dead_lettered_at,
+			dead_letter_token = token,
+			dlq_placement_generation = 1,
+			state = "dead_lettering",
+			effect_outcome = "not_started",
+		}
+		local imported, import_error = self:_update_message(route, function(current)
+			if current ~= nil then return current end
+			return candidate
+		end)
+		if import_error ~= nil or imported == nil then
+			return ok("unknown", legacy_id, imported, import_error or "legacy dead-letter import outcome is unknown")
+		end
+		if imported.request_text ~= request_text or imported.public_id ~= legacy_id or imported.migration_target ~= "dead_letter" then
+			return ok("conflict", legacy_id, self:_record_snapshot(imported), "legacy dead-letter route is already bound to different content")
+		end
+		if imported.state == "dead_lettered" then
+			return ok("duplicate", legacy_id, self:_record_snapshot(imported), nil)
+		end
+		if imported.state ~= "dead_lettering" then
+			return ok("conflict", legacy_id, self:_record_snapshot(imported), "legacy dead-letter target has an incompatible state")
+		end
+		local completed = self:_finish_dead_letter(route)
+		completed.message_id = legacy_id
+		return completed
+	end
+
 	function MailboxV2.GetDeliveryAsync(self: EmbeddedMailbox, message_id: string): (EmbeddedMailboxDict?, EmbeddedMailboxResult)
 		if type(message_id) ~= "string" or #message_id == 0 or #message_id > MAX_KEY_LENGTH then
-			return nil, ok("invalid", message_id, nil, "message_id must be a valid v2 key")
+			return nil, ok("invalid", message_id, nil, "message_id must be a valid V2 or legacy message ID")
 		end
-		local raw, read_error = self:_get(message_id)
+		local route = self:_route_from_public_id(message_id)
+		-- Public delivery reads are used to confirm durable outbox receipts and
+		-- migration imports, so they must bypass Roblox's short-lived GetAsync cache.
+		local raw, read_error = self:_get_fresh(route)
 		if read_error ~= nil then
 			return nil, ok("unknown", message_id, nil, read_error)
 		end
 		local record = as_dict(raw)
 		if record ~= nil then
 			if not same_owner(record.owner, self.owner) then
-				return nil, ok("conflict", message_id, nil, "message key belongs to another owner")
+				return nil, ok("conflict", message_id, nil, "message route belongs to another owner")
+			end
+			if record.version ~= VERSION then
+				return nil, ok("unsupported_schema", message_id, nil, "canonical message version is unsupported")
 			end
 			return self:_record_snapshot(record), ok("success", message_id, nil, nil)
 		end
-		local entry, entry_error = self:_get_registry_entry(message_id)
+		local entry, entry_error = self:_get_registry_entry(route)
 		if entry_error ~= nil then
 			return nil, ok("unknown", message_id, nil, entry_error)
 		end
 		if entry ~= nil then
+			local request = as_dict(entry.request)
 			local snapshot = ({
-				Id = message_id,
+				Id = if request ~= nil and type(request.public_id) == "string" then request.public_id else message_id,
 				State = "preparing",
 				Phase = entry.phase,
 				CreatedAt = entry.created_at,
@@ -4479,7 +5008,6 @@ do
 		end
 		return nil, ok("not_found", message_id, nil, "no canonical message or active preparation is present")
 	end
-
 	function MailboxV2._rows(self: EmbeddedMailbox, kind: string): ({ EmbeddedMailboxDict }, string?)
 		local manifest, manifest_error = self:_get_manifest(kind)
 		if manifest == nil then
@@ -4499,9 +5027,13 @@ do
 				if read_error ~= nil then
 					return result, read_error
 				end
-				if segment ~= nil and segment.generation == locator.generation and same_owner(segment.owner, self.owner)
-					and type(segment.entries) == "table"
-				then
+				if segment ~= nil and segment.generation == locator.generation and same_owner(segment.owner, self.owner) then
+					if segment.version ~= VERSION then
+						return result, "unsupported schema version: index segment version is unsupported"
+					end
+					if segment.kind ~= kind or segment.slot ~= locator.slot or type(segment.entries) ~= "table" then
+						return result, "index segment metadata or entries are malformed"
+					end
 					for _, raw_row in segment.entries :: { unknown } do
 						local row = as_dict(raw_row)
 						if row ~= nil then
@@ -4519,7 +5051,7 @@ do
 	function MailboxV2.GetQueueAsync(self: EmbeddedMailbox): ({ EmbeddedMailboxDict }, EmbeddedMailboxResult)
 		local rows, rows_error = self:_rows("active")
 		if rows_error ~= nil then
-			return {}, ok("unknown", nil, nil, rows_error)
+			return {}, ok(storage_error_code(rows_error), nil, nil, rows_error)
 		end
 		local result: { EmbeddedMailboxDict } = {}
 		local seen: { [string]: boolean } = {}
@@ -4532,6 +5064,11 @@ do
 			local record = as_dict(record_value)
 			if record_value ~= nil and record == nil then
 				return {}, ok("corrupt", nil, nil, "queue index points to a malformed canonical record")
+			end
+			if record ~= nil and same_owner(record.owner, self.owner)
+				and record.state == "ready" and record.version ~= VERSION
+			then
+				return {}, ok("unsupported_schema", route, nil, "canonical message version is unsupported")
 			end
 			local locator = as_dict(row.locator)
 			local record_locator = if record ~= nil then as_dict(record.locator) else nil
@@ -4604,7 +5141,8 @@ do
 			return next_record
 		end)
 		if finish_error ~= nil then
-			return ok("unknown", route, nil, finish_error)
+			local code = if string.find(finish_error, "unsupported schema version", 1, true) then "unsupported_schema" else "unknown"
+			return ok(code, route, nil, finish_error)
 		end
 		if finished == nil then
 			return ok("unknown", route, nil, "acknowledgement completion could not be verified")
@@ -4623,6 +5161,9 @@ do
 		local record = as_dict(record_value)
 		if read_error ~= nil or record == nil then
 			return ok("unknown", route, nil, read_error or "dead-letter source record is missing")
+		end
+		if record.version ~= VERSION then
+			return ok("unsupported_schema", route, nil, "canonical message version is unsupported")
 		end
 		if record.state == "dead_lettered" then
 			return ok("duplicate", route, self:_record_snapshot(record), nil)
@@ -4659,7 +5200,8 @@ do
 			end
 			local next_record = clone_dict(raw)
 			next_record.state = "dead_lettered"
-			next_record.dead_lettered_at = dead_lettered_at
+			next_record.dead_lettered_at = if is_finite(next_record.legacy_dead_lettered_at)
+				then next_record.legacy_dead_lettered_at else dead_lettered_at
 			next_record.updated_at = dead_lettered_at
 			next_record.capacity_blocked = false
 			next_record.dlq_locator = { slot = locator.slot, generation = locator.generation }
@@ -4757,6 +5299,9 @@ do
 			return next_record
 		end)
 		if claim_error ~= nil then
+			if string.find(claim_error, "unsupported schema version", 1, true) then
+				return nil, ok("unsupported_schema", route, nil, claim_error)
+			end
 			return nil, ok("unknown", route, nil, "claim outcome is unknown: " .. claim_error)
 		end
 		if claimed == nil then
@@ -4765,7 +5310,8 @@ do
 		if claimed.state == "ready" or claimed.state == "claimed" then
 			local valid, validation_error = valid_scheduling_record(claimed, route)
 			if not valid then
-				return nil, ok("corrupt", route, nil, validation_error or "canonical scheduling metadata is malformed")
+				local code = if validation_error == "canonical message version is unsupported" then "unsupported_schema" else "corrupt"
+				return nil, ok(code, route, nil, validation_error or "canonical scheduling metadata is malformed")
 			end
 		end
 		if claimed.state == "acknowledging" then
@@ -4799,10 +5345,11 @@ do
 			return ok("invalid", message_id, nil, "claim_token must be 1 to 256 bytes")
 		end
 
+		local route = self:_route_from_public_id(message_id)
 		local now = self:_now()
 		local renewal_id, generation_error = self:_guid()
 		if renewal_id == nil then return ok("invalid", message_id, nil, generation_error) end
-		local renewed, update_error = self:_update_message(message_id, function(current)
+		local renewed, update_error = self:_update_message(route, function(current)
 			if current == nil or current.state ~= "claimed" or current.claim_token ~= claim_token then
 				return current
 			end
@@ -4830,7 +5377,7 @@ do
 		end)
 
 		if update_error ~= nil or renewed == nil then
-			local latest_value, read_error = self:_get(message_id)
+			local latest_value, read_error = self:_get(route)
 			local latest = as_dict(latest_value)
 			if read_error ~= nil then
 				return ok("unknown", message_id, nil, "claim renewal outcome is unknown; verification read failed: " .. read_error)
@@ -5157,7 +5704,7 @@ do
 		end
 		local rows, rows_error = self:_rows("active")
 		if rows_error ~= nil then
-			return ok("unknown", nil, nil, rows_error)
+			return ok(storage_error_code(rows_error), nil, nil, rows_error)
 		end
 		for _, row in rows do
 			local route = tostring(row.route)
@@ -5277,7 +5824,7 @@ do
 	function MailboxV2.GetDeadLettersAsync(self: EmbeddedMailbox, cursor: string?, page_size: number?): ({ EmbeddedMailboxDict }, string?, EmbeddedMailboxResult)
 		local rows, rows_error = self:_rows("dlq")
 		if rows_error ~= nil then
-			return {}, nil, ok("unknown", nil, nil, rows_error)
+			return {}, nil, ok(storage_error_code(rows_error), nil, nil, rows_error)
 		end
 		local messages: { EmbeddedMailboxDict } = {}
 		local seen: { [string]: boolean } = {}
@@ -5293,6 +5840,9 @@ do
 					return {}, nil, ok("corrupt", nil, nil, "dead-letter index points to a malformed canonical record")
 				end
 				if record ~= nil and same_owner(record.owner, self.owner) and record.state == "dead_lettered" then
+					if record.version ~= VERSION then
+						return {}, nil, ok("unsupported_schema", route, nil, "canonical message version is unsupported")
+					end
 					seen[route] = true
 					table.insert(messages, self:_record_snapshot(record))
 				end
@@ -5323,11 +5873,12 @@ do
 	function MailboxV2.ReplayDeadLetterAsync(self: EmbeddedMailbox, message_id: string, operation_id: string): EmbeddedMailboxResult
 		local activation = self:_check_activation("replay")
 		if activation ~= nil then return activation end
+		local route = self:_route_from_public_id(message_id)
 		local replay_now = self:_now()
 		if type(operation_id) ~= "string" or operation_id == "" or #operation_id > 256 then
 			return ok("invalid", message_id, nil, "replay operation_id must be 1 to 256 bytes")
 		end
-		local record, read_error = self:_update_message(message_id, function(current)
+		local record, read_error = self:_update_message(route, function(current)
 			if current == nil or current.state ~= "dead_lettered" then
 				return current
 			end
@@ -5359,13 +5910,13 @@ do
 		if record.state ~= "replaying" or record.replay_operation_id ~= operation_id then
 			return ok("conflict", message_id, self:_record_snapshot(record), "message is not available for replay")
 		end
-		local sequenced_record, ordering_error = self:_ensure_replay_ordering_sequence(message_id, operation_id, record)
+		local sequenced_record, ordering_error = self:_ensure_replay_ordering_sequence(route, operation_id, record)
 		if sequenced_record == nil then
 			return ok("unknown", message_id, self:_record_snapshot(record), ordering_error or "replay ordering is unresolved")
 		end
 		record = sequenced_record
 		local locator, append_error = self:_append_index("active", {
-			route = message_id,
+			route = route,
 			placement_generation = record.pending_replay_generation,
 			reservation_token = operation_id,
 		})
@@ -5395,8 +5946,9 @@ do
 	function MailboxV2.DiscardDeadLetterAsync(self: EmbeddedMailbox, message_id: string, expected_replay_count: number): EmbeddedMailboxResult
 		local activation = self:_check_activation("discard")
 		if activation ~= nil then return activation end
+		local route = self:_route_from_public_id(message_id)
 		local discarded_at = self:_now()
-		local discarded, discard_error = self:_update_message(message_id, function(current)
+		local discarded, discard_error = self:_update_message(route, function(current)
 			if current == nil or current.state ~= "dead_lettered" or current.replay_count ~= expected_replay_count then
 				return current
 			end
@@ -5500,9 +6052,66 @@ do
 		return ok(if reclaimed_active or reclaimed_dlq then "success" else "empty", nil, nil, nil)
 	end
 
+	function MailboxV2.MaintenanceAsync(self: EmbeddedMailbox): (EmbeddedMailboxDict, EmbeddedMailboxResult)
+		local activation = self:_check_activation("maintenance")
+		if activation ~= nil then return {}, activation end
+
+		local report: EmbeddedMailboxDict = {
+			owner = clone_owner(self.owner),
+			observed_at = self:_now(),
+			complete = false,
+			consistency = "bounded_non_linearizable",
+		}
+		local function finish(result: EmbeddedMailboxResult): (EmbeddedMailboxDict, EmbeddedMailboxResult)
+			return report, result
+		end
+
+		local recover_ok, recovery = pcall(function()
+			return self:RecoverAsync()
+		end)
+		if not recover_ok or type(recovery) ~= "table" then
+			return finish(ok("unknown", nil, nil,
+				"mailbox recovery raised: " .. tostring(recovery)))
+		end
+		report.recovery = recovery
+		if recovery.code ~= "success" then
+			return finish(recovery)
+		end
+
+		local reclaim_ok, reclaimed = pcall(function()
+			return self:ReclaimAsync()
+		end)
+		if not reclaim_ok or type(reclaimed) ~= "table" then
+			return finish(ok("unknown", nil, nil,
+				"mailbox reclamation raised: " .. tostring(reclaimed)))
+		end
+		report.reclaim = reclaimed
+		if reclaimed.code ~= "success" and reclaimed.code ~= "empty" then
+			return finish(reclaimed)
+		end
+
+		local stats_ok, stats, stats_result = pcall(function()
+			return self:GetStatsAsync()
+		end)
+		if not stats_ok or type(stats) ~= "table" or type(stats_result) ~= "table" then
+			return finish(ok("unknown", nil, nil,
+				"mailbox status snapshot raised: " .. tostring(stats)))
+		end
+		report.stats = stats
+		report.consistency = stats.consistency or "bounded_non_linearizable"
+		if stats_result.code ~= "success" then
+			return finish(stats_result)
+		end
+
+		report.complete = true
+		report.completed_at = self:_now()
+		return finish(ok("success", nil, nil, nil))
+	end
+
 	type MockStoreState = {
 		values: { [string]: unknown },
 		update_calls: number,
+		committed_update_calls: number,
 		get_calls: number,
 		remove_calls: number,
 		fail_next_mode: string?,
@@ -5521,6 +6130,7 @@ do
 		local state: MockStoreState = {
 			values = {},
 			update_calls = 0,
+			committed_update_calls = 0,
 			get_calls = 0,
 			remove_calls = 0,
 			fail_next_mode = nil,
@@ -5566,6 +6176,7 @@ do
 			proposed = transform(clone_json(old_value), nil)
 		end
 		if proposed ~= nil then
+			self.committed_update_calls += 1
 			self.values[key] = clone_json(proposed)
 		end
 		local result = clone_json(self.values[key])
@@ -5682,6 +6293,7 @@ export type ResultCode =
 | "duplicate"
 | "capacity"
 | "disabled"
+| "unsupported"
 
 local RESULT_CODE_SET: { [string]: boolean } = {
 	success = true, created = true, loaded = true, saved = true, closed = true,
@@ -5690,7 +6302,7 @@ local RESULT_CODE_SET: { [string]: boolean } = {
 	conflict = true, validation = true, migration = true, future_schema = true,
 	corrupt = true, tombstoned = true, legacy = true, budget = true,
 	retry_exhausted = true, invalid = true, not_found = true, duplicate = true,
-	capacity = true, disabled = true,
+	capacity = true, disabled = true, unsupported = true,
 }
 
 local function normalize_result_code(value: unknown): ResultCode?
@@ -5840,6 +6452,140 @@ export type Snapshot = {
 	BackendUpdatedAt: number?,
 }
 
+export type SessionStatus = {
+	StoreName: string,
+	Scope: string,
+	ProfileKey: string,
+	Observation: "not_found" | "tombstoned" | "no_session" | "active_lease_observed" | "expired_lease_observed",
+	ObservedAt: number,
+	Generation: number?,
+	Revision: number?,
+	OwnerJobId: string?,
+	OwnerPlaceId: number?,
+	AcquiredAt: number?,
+	LeaseUntil: number?,
+	LeaseRemainingSeconds: number?,
+	LeaseAppearsAvailable: boolean,
+	IsAuthoritativeOwnershipDecision: false,
+}
+
+type SessionStatusResolver = (
+	name: string,
+	scope: string,
+	key: string,
+	operation_deadline: number?,
+	mock: boolean
+) -> (SessionStatus?, ResultCode, string?)
+
+export type ProfileDoctorClassification =
+	"missing" | "legacy" | "future_schema" | "corrupt" | "unreadable"
+	| "tombstoned" | "active_session" | "expired_session" | "no_session"
+
+export type ProfileDoctorOptions = {
+	operation_deadline: number?,
+	legacy_decoder: LegacyDecoder?,
+	max_nodes: number?,
+	max_depth: number?,
+	max_changes: number?,
+}
+
+export type ProfileInspection = {
+	StoreName: string,
+	Scope: string,
+	ProfileKey: string,
+	ObservedAt: number,
+	Consistency: "point_in_time_non_authoritative",
+	Classification: ProfileDoctorClassification,
+	ReadResult: ResultCode,
+	SchemaVersion: number?,
+	Revision: number?,
+	Generation: number?,
+	CreatedAt: number?,
+	UpdatedAt: number?,
+	Tombstoned: boolean?,
+	SessionActive: boolean?,
+	LeaseUntil: number?,
+	OwnerJobId: string?,
+	OwnerPlaceId: number?,
+	BackendVersion: string?,
+	DataNodeCount: number?,
+	DataDepth: number?,
+	DataEncodedBytes: number?,
+	DataSizeAvailable: boolean,
+	DataSummaryTruncated: boolean,
+}
+
+export type ProfileDiffChange = {
+	Path: string,
+	Kind: "added" | "removed" | "changed",
+	BeforeType: string?,
+	AfterType: string?,
+}
+
+export type ProfileVersionDiff = {
+	StoreName: string,
+	Scope: string,
+	ProfileKey: string,
+	BeforeVersion: string,
+	AfterVersion: string,
+	BeforeRevision: number,
+	AfterRevision: number,
+	BeforeSchemaVersion: number,
+	AfterSchemaVersion: number,
+	ObservedAt: number,
+	Consistency: "bounded_historical_diff",
+	VisitedNodes: number,
+	Truncated: boolean,
+	Changes: { ProfileDiffChange },
+}
+
+export type MigrationRegistration = {
+	id: string,
+	from_version: number,
+	to_version: number,
+	implementation_revision: string,
+	compatible_schema_min: number,
+	compatible_schema_max: number,
+	transform: Migration,
+	validator: Validator?,
+}
+
+export type MigrationPreviewOptions = {
+	operation_deadline: number?,
+	legacy_decoder: LegacyDecoder?,
+	max_nodes: number?,
+	max_depth: number?,
+	max_changes: number?,
+}
+
+export type MigrationPreviewStep = {
+	Id: string,
+	FromVersion: number,
+	ToVersion: number,
+	ImplementationRevision: string,
+}
+
+export type MigrationPreview = {
+	StoreName: string,
+	Scope: string,
+	ProfileKey: string,
+	ObservedAt: number,
+	Consistency: "read_only_non_authoritative_preview",
+	SourceSchemaVersion: number,
+	TargetSchemaVersion: number,
+	SourceRevision: number,
+	SourceGeneration: number,
+	SessionActive: boolean,
+	Steps: { MigrationPreviewStep },
+	Changes: { ProfileDiffChange },
+	VisitedNodes: number,
+	Truncated: boolean,
+	TargetDataNodeCount: number,
+	TargetDataDepth: number,
+	TargetDataEncodedBytes: number?,
+	TargetDataSizeAvailable: boolean,
+}
+
 export type HistoryEntry = {
 	Version: string,
 	CreatedTime: number,
@@ -5892,6 +6638,64 @@ export type MockQueueClaim = {
 	LockedUntil: number,
 }
 
+export type TransactionStatus =
+	"committed" | "duplicate" | "conflict" | "capacity" | "fenced" | "retryable"
+	| "unknown" | "disabled" | "invalid" | "validation" | "corrupt"
+
+export type TransactionReceiptStatusCode =
+	"committed" | "not_found" | "expired" | "conflict" | "unknown"
+	| "disabled" | "invalid" | "corrupt" | "legacy" | "future_schema" | "unsupported"
+
+export type TransactionReceiptStatus = {
+	code: TransactionReceiptStatusCode,
+	message: string?,
+	result: JsonValue?,
+	result_present: boolean?,
+	committed_revision: number?,
+	created_at: number?,
+	expires_at: number?,
+}
+
+export type TransactionOptions = {
+	request: JsonValue?,
+	receipt_retention_seconds: number?,
+}
+
+export type OutboxEventSpec = {
+	target_store: string,
+	target_scope: string,
+	target_key: string,
+	type: string,
+	payload_version: number,
+	data: JsonValue,
+	target_user_id: number?,
+	correlation_id: string?,
+	causation_id: string?,
+}
+
+export type OutboxEvent = {
+	EventId: string,
+	EventType: string,
+	PayloadVersion: number,
+	Payload: JsonValue,
+	DestinationStoreName: string,
+	DestinationScope: string,
+	DestinationProfileKey: string,
+	DestinationUserId: number?,
+	CorrelationId: string?,
+	CausationId: string?,
+	CreatedAt: number,
+	Attempts: number,
+	State: "pending" | "delivered" | "unknown" | "blocked",
+	LastError: string?,
+	DeliveredAt: number?,
+	DestinationReceiptId: string?,
+}
+
+export type OutboxDispatcher = (event: OutboxEvent) -> (boolean, string?)
+
+export type TransactionReducer = (JsonValue?, JsonValue?) -> (JsonValue?, JsonValue?)
+
 export type Options = {
 	schema_version: number,
 	migrations: { [number]: Migration }?,
@@ -5900,6 +6704,9 @@ export type Options = {
 	user_ids: { number }?,
 	metadata: Metadata?,
 	autosave_interval: number?,
+	max_dirty_age_seconds: number?,
+	durability_mode: "balanced" | "durability_first" | "read_only_on_risk"?,
+	lease_recovery_enabled: boolean?,
 	lease_duration: number?,
 	lease_renewal: number?,
 	retry_attempts: number?,
@@ -5912,6 +6719,7 @@ export type Options = {
 	takeover_wait: number?,
 	message_topic_prefix: string?,
 	durable_queue_enabled: boolean?,
+	transactional_operations_enabled: boolean?,
 	queue_store_name: string?,
 	queue_poll_interval: number?,
 	queue_lease_duration: number?,
@@ -5939,6 +6747,47 @@ type SessionEnvelope = {
 	lease_until: number,
 }
 
+type OperationReceipt = {
+	request_identity: string,
+	result: JsonValue?,
+	result_present: boolean,
+	committed_revision: number,
+	created_at: number,
+	expires_at: number,
+}
+
+type OutboxEventRecord = {
+	id: string,
+	event_type: string,
+	payload_version: number,
+	request_identity: string,
+	payload: JsonValue,
+	destination_store_name: string,
+	destination_scope: string,
+	destination_profile_key: string,
+	destination_user_id: number?,
+	correlation_id: string?,
+	causation_id: string?,
+	created_at: number,
+	attempts: number,
+	state: "pending" | "delivered" | "unknown" | "blocked",
+	last_error: string?,
+	delivered_at: number?,
+	destination_receipt_id: string?,
+}
+
+type OutboxEntry = {
+	stored: OutboxEventRecord,
+	public: OutboxEvent,
+}
+
+type EnvelopeSidecars = {
+	version: number,
+	inbox_receipts: { [string]: OperationReceipt },
+	transaction_receipts: { [string]: OperationReceipt },
+	outbox_events: { [string]: OutboxEventRecord },
+}
+
 type Envelope = {
 	implementation_version: number,
 	schema_version: number,
@@ -5950,6 +6799,7 @@ type Envelope = {
 	user_ids: { number }?,
 	tombstone: Tombstone?,
 	session: SessionEnvelope?,
+	sidecars: EnvelopeSidecars?,
 	write_id: string,
 }
 
@@ -6043,12 +6893,17 @@ type QueueEnvelope = {
 type PendingDurableOperation = {
 	kind: "save" | "renew" | "release",
 	snapshot: JsonValue?,
+	user_ids: { number }?,
+	metadata: Metadata?,
 	captured_change_sequence: number,
 	expected_revision: number,
 	target_revision: number,
 	operation_id: string,
 	session_token: string,
 	fencing_generation: number,
+	base_write_id: string?,
+	recovery_write_id: string?,
+	recovery_session_token: string?,
 	reason: string,
 	started_at: number,
 	attempts: number,
@@ -6125,9 +6980,14 @@ type InternalState = {
 	saved_change_sequence: number,
 	durable_lease_until: number,
 	pending_operation: PendingDurableOperation?,
+	pending_transaction: { operation_id: string, kind: string, request_identity: string }?,
 	next_reconciliation: number,
 	last_reconciliation_category: string?,
+	durability_risk_active: boolean?,
+	durability_risk_reason: string?,
 	dirty_since_local: number?,
+	dirty_age_is_lower_bound: boolean?,
+	next_durability_observation_local: number?,
 	last_successful_write_local: number?,
 }
 
@@ -6167,6 +7027,13 @@ export type Record = {
 	Update: (self: Record, callback: (JsonValue?) -> JsonValue?) -> (ResultCode, string?),
 	Reconcile: (self: Record, template: JsonValue) -> (ResultCode, string?),
 	Save: (self: Record, reason: string?) -> (ResultCode, string?),
+	TransactAsync: (self: Record, operation_id: string, reducer: TransactionReducer, options: TransactionOptions) -> (JsonValue?, TransactionStatus, string?),
+	GetTransactionStatusAsync: (self: Record, operation_id: string, request: JsonValue) -> TransactionReceiptStatus,
+	ApplyInboxAsync: (self: Record, message_id: string, message_type: string, payload: JsonValue, reducer: TransactionReducer, options: TransactionOptions?) -> (JsonValue?, TransactionStatus, string?),
+	CommitWithOutboxAsync: (self: Record, commit_key: string, command_type: string, command_payload: JsonValue, outbox_events: { OutboxEventSpec }, reducer: TransactionReducer, options: TransactionOptions?) -> (JsonValue?, TransactionStatus, string?),
+	GetOutboxAsync: (self: Record, max_events: number?) -> ({ OutboxEvent }, ResultCode, string?),
+	DispatchOutboxAsync: (self: Record, dispatcher: OutboxDispatcher, max_events: number?) -> (number, ResultCode, string?),
+	PruneOutboxAsync: (self: Record, delivered_before_unix: number, max_events: number?) -> (number, ResultCode, string?),
 	MessageAsync: (self: Record, message_type: string, data: JsonValue?) -> (ResultCode, string?),
 	GetIdentity: (self: Record) -> { [string]: unknown },
 	GetMailboxOwner: (self: Record) -> { [string]: unknown },
@@ -6186,6 +7053,9 @@ export type Record = {
 
 local IMPLEMENTATION_VERSION = 2
 local QUEUE_IMPLEMENTATION_VERSION = 3
+local MAILBOX_V2_FREEZE_VERSION = QUEUE_IMPLEMENTATION_VERSION + 1
+local MAILBOX_V2_FREEZE_MARKER = "RecordStore.MailboxV2Freeze.v1"
+local LEGACY_QUEUE_RETIRED_MARKER = "RecordStore.LegacyQueueRetired.v1"
 local DEFAULT_AUTOSAVE_INTERVAL = 300
 local DEFAULT_LEASE_DURATION = 180
 local DEFAULT_LEASE_RENEWAL = 60
@@ -6224,7 +7094,7 @@ local MAX_METADATA_KEY_LENGTH = 50
 local MAX_METADATA_VALUE_LENGTH = 250
 local MAX_MESSAGE_TYPE_LENGTH = 100
 local MESSAGE_SUBSCRIBE_RETRY = 10
-local QUEUE_OWNERSHIP_SAFETY_WINDOW = 5
+local _QUEUE_OWNERSHIP_SAFETY_WINDOW = 5
 
 local server_id = game.JobId
 if server_id == "" then
@@ -6440,8 +7310,9 @@ local function normalize_user_ids(user_ids: { number }): ({ number }?, string?)
 		if index > length then
 			return nil, "user_ids must be a dense array of positive integers"
 		end
-		if type(user_id) ~= "number" or not math.isfinite(user_id) or user_id < 1 or math.floor(user_id) ~= user_id then
-			return nil, ("user_ids[%d] must be a positive integer"):format(index)
+		if type(user_id) ~= "number" or not math.isfinite(user_id) or user_id < 1
+			or user_id > 9007199254740991 or math.floor(user_id) ~= user_id then
+			return nil, ("user_ids[%d] must be a positive safe integer"):format(index)
 		end
 		if not seen[user_id] then
 			seen[user_id] = true
@@ -6930,9 +7801,225 @@ end
 
 local prepared_envelope_cache: any = setmetatable({}, { __mode = "k" })
 
+prepared_envelope_cache._sidecar_protocol = (function()
+	local MAX_READABLE_IMPLEMENTATION_VERSION = 3
+	local TRANSACTION_IMPLEMENTATION_VERSION = 3
+	local MAX_INBOX_RECEIPTS = 256
+	local MAX_TRANSACTION_RECEIPTS = 256
+	local MAX_OUTBOX_EVENTS = 128
+	local MAX_ENVELOPE_SIDECAR_BYTES = 48_000
+
+	local function empty(): EnvelopeSidecars
+		return {
+			version = 1,
+			inbox_receipts = {},
+			transaction_receipts = {},
+			outbox_events = {},
+		}
+	end
+
+	local function clone(sidecars: EnvelopeSidecars?): EnvelopeSidecars?
+		if sidecars == nil then return nil end
+		local copied = copy_value(sidecars :: JsonValue)
+		if type(copied) ~= "table" then return nil end
+		return copied :: EnvelopeSidecars
+	end
+
+	local function validate(value: unknown): (boolean, string?)
+		if type(value) ~= "table" then return false, "sidecars must be a table" end
+		local sidecars = value :: { [string]: unknown }
+		if sidecars.version ~= 1 then return false, "unsupported sidecar protocol version" end
+		local inbox = sidecars.inbox_receipts
+		local transactions = sidecars.transaction_receipts
+		local outbox = sidecars.outbox_events
+		if type(inbox) ~= "table" or type(transactions) ~= "table" or type(outbox) ~= "table" then
+			return false, "sidecar collections must be tables"
+		end
+		local inbox_receipts = inbox :: { [string]: unknown }
+		local transaction_receipts = transactions :: { [string]: unknown }
+		local outbox_events = outbox :: { [string]: unknown }
+		local inbox_count = 0
+		for id, raw_receipt in inbox_receipts do
+			inbox_count += 1
+			if inbox_count > MAX_INBOX_RECEIPTS then return false, "inbox receipt capacity exceeded" end
+			if type(id) ~= "string" or id == "" or #id > 256 or type(raw_receipt) ~= "table" then
+				return false, "inbox receipt identity is invalid"
+			end
+			local receipt = raw_receipt :: { [string]: unknown }
+			if type(receipt.request_identity) ~= "string" or receipt.request_identity == ""
+				or #receipt.request_identity > 16_384
+				or type(receipt.result_present) ~= "boolean"
+				or (receipt.result_present and receipt.result == nil)
+				or (not receipt.result_present and receipt.result ~= nil)
+				or type(receipt.committed_revision) ~= "number"
+				or not math.isfinite(receipt.committed_revision)
+				or math.floor(receipt.committed_revision) ~= receipt.committed_revision
+				or receipt.committed_revision < 0
+				or type(receipt.created_at) ~= "number" or not math.isfinite(receipt.created_at)
+				or type(receipt.expires_at) ~= "number" or not math.isfinite(receipt.expires_at)
+				or receipt.expires_at <= receipt.created_at
+			then
+				return false, "inbox receipt metadata is invalid"
+			end
+		end
+		local transaction_count = 0
+		for id, raw_receipt in transaction_receipts do
+			transaction_count += 1
+			if transaction_count > MAX_TRANSACTION_RECEIPTS then return false, "transaction receipt capacity exceeded" end
+			if type(id) ~= "string" or id == "" or #id > 256 or type(raw_receipt) ~= "table" then
+				return false, "transaction receipt identity is invalid"
+			end
+			local receipt = raw_receipt :: { [string]: unknown }
+			if type(receipt.request_identity) ~= "string" or receipt.request_identity == ""
+				or #receipt.request_identity > 16_384
+				or type(receipt.result_present) ~= "boolean"
+				or (receipt.result_present and receipt.result == nil)
+				or (not receipt.result_present and receipt.result ~= nil)
+				or type(receipt.committed_revision) ~= "number"
+				or not math.isfinite(receipt.committed_revision)
+				or math.floor(receipt.committed_revision) ~= receipt.committed_revision
+				or receipt.committed_revision < 0
+				or type(receipt.created_at) ~= "number" or not math.isfinite(receipt.created_at)
+				or type(receipt.expires_at) ~= "number" or not math.isfinite(receipt.expires_at)
+				or receipt.expires_at <= receipt.created_at
+			then
+				return false, "transaction receipt metadata is invalid"
+			end
+		end
+		local outbox_count = 0
+		for id, raw_event in outbox_events do
+			outbox_count += 1
+			if outbox_count > MAX_OUTBOX_EVENTS then return false, "outbox capacity exceeded" end
+			if type(id) ~= "string" or id == "" or #id > 256 or type(raw_event) ~= "table" then
+				return false, "outbox event identity is invalid"
+			end
+			local event = raw_event :: { [string]: unknown }
+			if event.id ~= id or type(event.event_type) ~= "string" or event.event_type == "" or #event.event_type > 100
+				or type(event.payload_version) ~= "number" or not math.isfinite(event.payload_version)
+				or math.floor(event.payload_version) ~= event.payload_version or event.payload_version < 1
+				or type(event.request_identity) ~= "string" or event.request_identity == "" or #event.request_identity > 16_384
+				or type(event.destination_store_name) ~= "string" or event.destination_store_name == "" or #event.destination_store_name > 50
+				or type(event.destination_scope) ~= "string" or #event.destination_scope > 50
+				or type(event.destination_profile_key) ~= "string" or event.destination_profile_key == "" or #event.destination_profile_key > 50
+				or type(event.created_at) ~= "number" or not math.isfinite(event.created_at)
+				or type(event.attempts) ~= "number" or not math.isfinite(event.attempts)
+				or math.floor(event.attempts) ~= event.attempts or event.attempts < 0
+				or (event.state ~= "pending" and event.state ~= "delivered" and event.state ~= "unknown" and event.state ~= "blocked")
+				or (type(event.payload) ~= "table" and type(event.payload) ~= "string"
+					and type(event.payload) ~= "number" and type(event.payload) ~= "boolean")
+				or (event.destination_receipt_id ~= nil
+					and (type(event.destination_receipt_id) ~= "string"
+						or event.destination_receipt_id == "" or #event.destination_receipt_id > 256))
+				or (event.delivered_at ~= nil
+					and (type(event.delivered_at) ~= "number" or not math.isfinite(event.delivered_at)))
+				or (event.state == "delivered"
+					and (type(event.delivered_at) ~= "number" or not math.isfinite(event.delivered_at)
+						or type(event.destination_receipt_id) ~= "string"
+						or event.destination_receipt_id == "" or #event.destination_receipt_id > 256))
+				or (event.state ~= "delivered"
+					and (event.delivered_at ~= nil or event.destination_receipt_id ~= nil))
+			then
+				return false, "outbox event metadata is invalid"
+			end
+		end
+		local encoded_ok, encoded = pcall(function()
+			return HttpService:JSONEncode(sidecars)
+		end)
+		if not encoded_ok or type(encoded) ~= "string" then
+			return false, "sidecars cannot be encoded as JSON"
+		end
+		if #encoded > MAX_ENVELOPE_SIDECAR_BYTES then
+			return false, "sidecars exceed the configured encoded-size limit"
+		end
+		return true, nil
+	end
+
+	local function canonicalize(root: unknown): (string?, string?)
+		local active: { [any]: boolean } = {}
+		local nodes = 0
+		local function visit(value: unknown, depth: number): (string?, string?)
+			nodes += 1
+			if nodes > 8192 then return nil, "canonical request exceeds the node limit" end
+			if depth > 64 then return nil, "canonical request exceeds the depth limit" end
+			local kind = type(value)
+			if value == nil then return "z", nil end
+			if kind == "boolean" then return if value then "b1" else "b0", nil end
+			if kind == "string" then
+				local text = value :: string
+				return "s" .. tostring(#text) .. ":" .. text, nil
+			end
+			if kind == "number" then
+				local number_value = value :: number
+				if not math.isfinite(number_value) then
+					return nil, "canonical request contains a non-finite number"
+				end
+				local encoded = string.format("%.17g", number_value)
+				return "d" .. tostring(#encoded) .. ":" .. encoded, nil
+			end
+			if kind ~= "table" then return nil, "canonical request contains unsupported type " .. kind end
+			local current = value :: { [any]: unknown }
+			if active[current] then return nil, "canonical request contains a cyclic table" end
+			active[current] = true
+			local keys: { string | number } = {}
+			for key in pairs(current) do
+				if type(key) == "string" then
+					keys[#keys + 1] = key
+				elseif type(key) == "number" and math.isfinite(key) and math.floor(key) == key then
+					keys[#keys + 1] = key
+				else
+					active[current] = nil
+					return nil, "canonical request contains an unsupported table key"
+				end
+			end
+			table.sort(keys, function(left, right)
+				if type(left) ~= type(right) then return type(left) < type(right) end
+				if type(left) == "number" then return (left :: number) < (right :: number) end
+				return (left :: string) < (right :: string)
+			end)
+			local parts = { "t", tostring(#keys), ":" }
+			for _, key in ipairs(keys) do
+				local encoded_key, key_error = visit(key, depth + 1)
+				if encoded_key == nil then active[current] = nil; return nil, key_error end
+				local encoded_value, value_error = visit(current[key], depth + 1)
+				if encoded_value == nil then active[current] = nil; return nil, value_error end
+				parts[#parts + 1] = tostring(#encoded_key) .. ":" .. encoded_key
+				parts[#parts + 1] = tostring(#encoded_value) .. ":" .. encoded_value
+			end
+			active[current] = nil
+			return table.concat(parts), nil
+		end
+		return visit(root, 0)
+	end
+
+	local function stable_event_id(identity: string, ordinal: number): string
+		local seeds = { 17, 131, 911, 3571 }
+		local digests: { string } = {}
+		for index, seed in ipairs(seeds) do
+			local hash = seed
+			for position = 1, #identity do
+				hash = (hash * 131 + string.byte(identity, position) + index * 17) % 2147483647
+			end
+			digests[index] = string.format("%08x", hash)
+		end
+		return "outbox:" .. table.concat(digests) .. ":" .. tostring(ordinal)
+	end
+
+	return {
+		max_readable_version = MAX_READABLE_IMPLEMENTATION_VERSION,
+		transaction_version = TRANSACTION_IMPLEMENTATION_VERSION,
+		empty = empty,
+		clone = clone,
+		validate = validate,
+		canonicalize = canonicalize,
+		stable_event_id = stable_event_id,
+	}
+end)()
+
+
+
 local function encode_envelope_for_storage(envelope: Envelope): JsonValue
 	local stored: { [string]: JsonValue } = {
-		implementation_version = envelope.implementation_version,
+		implementation_version = if envelope.sidecars ~= nil then prepared_envelope_cache._sidecar_protocol.transaction_version else envelope.implementation_version,
 		schema_version = envelope.schema_version,
 		revision = envelope.revision,
 		fencing_generation = envelope.fencing_generation,
@@ -6956,6 +8043,9 @@ local function encode_envelope_for_storage(envelope: Envelope): JsonValue
 	if envelope.session ~= nil then
 		stored.session = copy_value(envelope.session) :: JsonValue
 	end
+	if envelope.sidecars ~= nil then
+		stored.sidecars = copy_value(envelope.sidecars) :: JsonValue
+	end
 	return stored
 end
 
@@ -6963,7 +8053,10 @@ local function encode_backend_update_value(value: unknown): unknown
 	if type(value) ~= "table" then
 		return value
 	end
-	local candidate = value :: { [string]: unknown }
+	local candidate = value :: { [any]: unknown }
+	if candidate[prepared_envelope_cache] == true then
+		return candidate.raw_value
+	end
 	if candidate.implementation_version ~= nil
 		and candidate.schema_version ~= nil
 		and candidate.revision ~= nil
@@ -7153,6 +8246,78 @@ local function observe(state: InternalState, event: string, result: ResultCode, 
 	end
 	local thread = coroutine.create(function()
 		observer(event, state.key, result, message)
+	end)
+	local resumed = coroutine.resume(thread)
+	if not resumed or coroutine.status(thread) ~= "dead" then
+		coroutine.close(thread)
+		state.observer_errors += 1
+	end
+end
+
+local scheduler_activation = {
+	requested = false,
+	revision = 1,
+	percent = 100,
+	salt = "recordstore-scheduler-v1",
+	cohort_bucket = 0,
+}
+local function scheduler_rollout_bucket(salt: string): number
+	local identity = tostring(game.PlaceId) .. ":" .. tostring(server_id) .. ":" .. salt
+	local hash = 0
+	for index = 1, #identity do
+		hash = (hash * 131 + string.byte(identity, index)) % 2147483647
+	end
+	return hash % 100
+end
+scheduler_activation.cohort_bucket = scheduler_rollout_bucket(scheduler_activation.salt)
+
+scheduler_activation.refresh_durability_risk = function(state: InternalState)
+	if (state.state == "active" or state.state == "saving")
+		and not state.public_data_detached
+	then
+		local now = now_local()
+		local next_observation = state.next_durability_observation_local
+		if next_observation == nil or now >= next_observation then
+			local max_age = state.options.max_dirty_age_seconds
+				or (state.options.autosave_interval or DEFAULT_AUTOSAVE_INTERVAL) * 2
+			state.next_durability_observation_local = now
+				+ math.max(0.05, math.min(1, max_age * 0.25))
+			track_external_data_mutation(state)
+		end
+	end
+	local reason: string? = nil
+	if state.state == "unknown" then
+		reason = "write_or_lease_outcome_unknown"
+	else
+		local dirty = state.change_sequence ~= state.saved_change_sequence
+		local dirty_since = state.dirty_since_local
+		local max_age = state.options.max_dirty_age_seconds
+			or (state.options.autosave_interval or DEFAULT_AUTOSAVE_INTERVAL) * 2
+		if dirty and dirty_since ~= nil and now_local() - dirty_since >= max_age then
+			reason = "maximum_dirty_age_exceeded"
+		end
+	end
+	local active = reason ~= nil
+	local was_active = state.durability_risk_active == true
+	if active == was_active then
+		if active then
+			state.durability_risk_reason = reason
+		end
+		return
+	end
+	local previous_reason = state.durability_risk_reason
+	state.durability_risk_active = active
+	state.durability_risk_reason = reason
+
+	local observer = state.options.on_event
+	if observer == nil then
+		return
+	end
+	local event_name = if active then "durability_risk" else "durability_recovered"
+	local result: ResultCode = if active then "unknown" else "success"
+	local message = if active then reason else "durability risk cleared: " .. tostring(previous_reason or "resolved")
+	local thread = coroutine.create(function()
+		observer(event_name, state.key, result, message)
 	end)
 	local resumed = coroutine.resume(thread)
 	if not resumed or coroutine.status(thread) ~= "dead" then
@@ -7539,6 +8704,15 @@ local function backend_update(backend: Backend, transform: UpdateTransform, dead
 			mock_update_failure_count -= 1
 			return nil, nil, mock_update_failure_code, mock_update_failure_message
 		end
+		local mock_state = mock_database :: any
+		local before_update_hook = mock_state[RecordStore]
+		mock_state[RecordStore] = nil
+		if before_update_hook ~= nil then
+			local hook_ok = pcall(before_update_hook)
+			if not hook_ok then
+				return nil, nil, "unknown", "mock before-update hook failed"
+			end
+		end
 		local store = get_mock_store(backend.name, backend.scope)
 		local entry = store[backend.key]
 		local raw = if entry ~= nil then copy_value(entry.Value) else nil
@@ -7632,12 +8806,19 @@ local function get_string_field(value: unknown, key: string): unknown
 	if type(value) ~= "table" then return nil end
 	return rawget(value :: any, key)
 end
+
+
 local function parse_envelope(raw: unknown): (Envelope?, string?, boolean)
 	if raw == nil then
 		return nil, nil, true
 	end
 	if type(raw) ~= "table" then
 		return nil, "legacy payload", false
+	end
+	if get_string_field(raw, QUARANTINE_FENCE_FIELD) ~= nil
+		or get_string_field(raw, "implementation_version") == QUARANTINE_FENCE_IMPLEMENTATION_VERSION
+	then
+		return nil, "future implementation version", false
 	end
 	local stored_implementation_version = get_string_field(raw, "implementation_version")
 	local stored_fencing_generation = get_string_field(raw, "fencing_generation")
@@ -7748,6 +8929,7 @@ local function parse_envelope(raw: unknown): (Envelope?, string?, boolean)
 	local raw_user_ids = get_string_field(raw, "user_ids")
 	local raw_tombstone = get_string_field(raw, "tombstone")
 	local raw_session = get_string_field(raw, "session")
+	local raw_sidecars = get_string_field(raw, "sidecars")
 	if implementation_version == nil then
 		local legacy_marker = get_string_field(raw, "__recordStore")
 		if legacy_marker == "RecordStore" then
@@ -7794,6 +8976,7 @@ local function parse_envelope(raw: unknown): (Envelope?, string?, boolean)
 						generation = 1,
 					},
 					session = nil,
+					sidecars = nil,
 					write_id = legacy_commit_id,
 				}, nil, true
 			end
@@ -7813,6 +8996,7 @@ local function parse_envelope(raw: unknown): (Envelope?, string?, boolean)
 				user_ids = nil,
 				tombstone = nil,
 				session = nil,
+				sidecars = nil,
 				write_id = legacy_commit_id,
 			}, nil, true
 		end
@@ -7825,8 +9009,21 @@ local function parse_envelope(raw: unknown): (Envelope?, string?, boolean)
 	if type(implementation_version) ~= "number" or not math.isfinite(implementation_version) or math.floor(implementation_version) ~= implementation_version then
 		return nil, "invalid implementation version", false
 	end
-	if implementation_version > IMPLEMENTATION_VERSION then
+	if implementation_version > prepared_envelope_cache._sidecar_protocol.max_readable_version then
 		return nil, "future implementation version", false
+	end
+	local parsed_sidecars: EnvelopeSidecars? = nil
+	if implementation_version >= prepared_envelope_cache._sidecar_protocol.transaction_version then
+		if raw_sidecars == nil then
+			return nil, "version 3 envelope is missing transaction sidecars", false
+		end
+		local sidecars_valid, sidecars_error = prepared_envelope_cache._sidecar_protocol.validate(raw_sidecars)
+		if not sidecars_valid then
+			return nil, "invalid transaction sidecars: " .. (sidecars_error or "unknown error"), false
+		end
+		parsed_sidecars = prepared_envelope_cache._sidecar_protocol.clone(raw_sidecars :: EnvelopeSidecars)
+	elseif raw_sidecars ~= nil then
+		return nil, "version 2 envelope unexpectedly contains transaction sidecars", false
 	end
 	if implementation_version >= 2 and raw_non_finite_numbers == nil then
 		return nil, "version 2 envelope is missing non-finite number metadata", false
@@ -7977,7 +9174,7 @@ local function parse_envelope(raw: unknown): (Envelope?, string?, boolean)
 	end
 
 	return {
-		implementation_version = IMPLEMENTATION_VERSION,
+		implementation_version = implementation_version,
 		schema_version = schema_version,
 		revision = revision,
 		fencing_generation = fencing_generation,
@@ -7987,6 +9184,7 @@ local function parse_envelope(raw: unknown): (Envelope?, string?, boolean)
 		user_ids = ids,
 		tombstone = tombstone,
 		session = session,
+		sidecars = parsed_sidecars,
 		write_id = write_id,
 	}, nil, true
 end
@@ -8111,6 +9309,18 @@ end
 
 local function validate_envelope(envelope: Envelope): (boolean, string?)
 	prepared_envelope_cache[envelope] = nil
+	if envelope.implementation_version > prepared_envelope_cache._sidecar_protocol.max_readable_version then
+		return false, "envelope implementation version is not readable"
+	end
+	if envelope.sidecars ~= nil then
+		if envelope.implementation_version < prepared_envelope_cache._sidecar_protocol.transaction_version then
+			return false, "transaction sidecars require implementation version 3"
+		end
+		local sidecars_valid, sidecars_error = prepared_envelope_cache._sidecar_protocol.validate(envelope.sidecars)
+		if not sidecars_valid then return false, sidecars_error end
+	elseif envelope.implementation_version >= prepared_envelope_cache._sidecar_protocol.transaction_version then
+		return false, "version 3 envelope is missing transaction sidecars"
+	end
 	local prepared = encode_envelope_for_storage(envelope)
 	local valid, message = validate_serialized_size(prepared)
 	if valid then
@@ -8138,6 +9348,7 @@ local function decode_legacy_read(raw: unknown, decoder: LegacyDecoder?): (Envel
 		user_ids = nil,
 		tombstone = nil,
 		session = nil,
+		sidecars = nil,
 		write_id = "legacy",
 	}, nil
 end
@@ -8267,6 +9478,27 @@ local function parse_queue_envelope(
 		return nil, "durable queue is corrupt", false
 	end
 	local implementation_version = get_string_field(raw, "implementation_version")
+	if type(implementation_version) == "number" and implementation_version > QUEUE_IMPLEMENTATION_VERSION then
+		local owner = get_string_field(raw, "owner")
+		if type(owner) ~= "table" then
+			return nil, "durable queue uses an unsupported future implementation version", false
+		end
+		local owner_name = get_string_field(owner, "name")
+		local owner_scope = get_string_field(owner, "scope")
+		local owner_key = get_string_field(owner, "key")
+		if type(owner_name) ~= "string" or type(owner_scope) ~= "string" or type(owner_key) ~= "string" then
+			return nil, "durable queue uses an unsupported future implementation version", false
+		end
+		if owner_name ~= expected_owner.name or owner_scope ~= expected_owner.scope or owner_key ~= expected_owner.key then
+			return nil, "durable queue belongs to a different record identity", true
+		end
+		if implementation_version == MAILBOX_V2_FREEZE_VERSION
+			and get_string_field(raw, "migration_marker") == MAILBOX_V2_FREEZE_MARKER
+		then
+			return nil, "durable queue is frozen for Mailbox V2 migration; legacy queue writes are disabled", false
+		end
+		return nil, "durable queue uses an unsupported future implementation version", false
+	end
 	if type(implementation_version) ~= "number" or (implementation_version ~= 2 and implementation_version ~= QUEUE_IMPLEMENTATION_VERSION) then
 		return nil, "durable queue is corrupt", false
 	end
@@ -8378,7 +9610,12 @@ local function read_queue_after_update(
 	end
 	local queue, parse_message, owner_mismatch = parse_queue_envelope(value, owner)
 	if queue == nil then
-		return nil, if owner_mismatch then "conflict" else "corrupt", parse_message or "durable queue is corrupt"
+		local detail = parse_message or "durable queue is corrupt"
+		local code: ResultCode = if owner_mismatch then "conflict"
+			elseif string.find(detail, "unsupported future implementation version", 1, true) ~= nil then "future_schema"
+			elseif string.find(detail, "frozen for Mailbox V2 migration", 1, true) ~= nil then "migration"
+			else "corrupt"
+		return nil, code, detail
 	end
 	return queue, nil, nil
 end
@@ -8413,6 +9650,42 @@ local function dead_letter_to_public(item: DeadLetterItem): DeadLetterMessage
 	}
 end
 
+local function legacy_queue_retirement_status(
+	raw: unknown,
+	expected_owner: QueueOwner
+): (boolean, ResultCode?, string?)
+	if type(raw) ~= "table" then return false, nil, nil end
+	local marker = raw :: { [string]: unknown }
+	if get_string_field(marker, "migration_marker") ~= LEGACY_QUEUE_RETIRED_MARKER then
+		return false, nil, nil
+	end
+	local version = get_string_field(marker, "implementation_version")
+	if version ~= MAILBOX_V2_FREEZE_VERSION then
+		return false, "future_schema", "legacy queue retirement marker uses an unsupported future version"
+	end
+	local owner = get_string_field(marker, "owner")
+	if type(owner) ~= "table" then
+		return false, "corrupt", "legacy queue retirement marker lacks an owner"
+	end
+	local owner_name = get_string_field(owner, "name")
+	local owner_scope = get_string_field(owner, "scope")
+	local owner_key = get_string_field(owner, "key")
+	if type(owner_name) ~= "string" or type(owner_scope) ~= "string" or type(owner_key) ~= "string" then
+		return false, "corrupt", "legacy queue retirement owner is malformed"
+	end
+	if owner_name ~= expected_owner.name or owner_scope ~= expected_owner.scope or owner_key ~= expected_owner.key then
+		return false, "conflict", "legacy queue retirement marker belongs to a different record identity"
+	end
+	local retired_at_raw = marker.retired_at
+	local source_version = marker.source_implementation_version
+	if type(retired_at_raw) ~= "number" or not math.isfinite(retired_at_raw)
+		or retired_at_raw < 0 or source_version ~= 1
+	then
+		return false, "corrupt", "legacy queue retirement metadata is malformed"
+	end
+	return true, nil, nil
+end
+
 local function ensure_legacy_queue_clear(
 	name: string,
 	scope: string,
@@ -8425,27 +9698,63 @@ local function ensure_legacy_queue_clear(
 	if state ~= nil and state.queue_legacy_checked then
 		return nil, nil
 	end
+	local owner = make_queue_owner(name, scope, key)
 	local legacy_backend = make_backend(
 		queue_store_name,
 		scope,
 		make_queue_key_legacy(name, scope, key),
 		mock
 	)
-	local raw, _, read_code, read_message = backend_get(legacy_backend, false, deadline, state)
-	if read_code ~= nil then
-		return normalize_result_code(read_code) or "unknown", read_message
+	local retired_at = queue_now_unix(mock)
+	if not math.isfinite(retired_at) or retired_at < 0 then
+		return "invalid", "legacy queue retirement clock returned an invalid timestamp"
 	end
-	local messages, parse_message = parse_legacy_queue_envelope(raw)
+
+	-- Seal the old q: key only while its current value is absent or a valid,
+	-- empty V1 envelope. Old V1 writers using UpdateAsync will subsequently see
+	-- a future-version marker and must fail closed rather than recreate the queue.
+	local _, _, update_code, update_message = backend_update(legacy_backend, function(current_raw)
+		local already_retired, _, _ = legacy_queue_retirement_status(current_raw, owner)
+		if already_retired then return nil end
+		local messages = parse_legacy_queue_envelope(current_raw)
+		if messages == nil or #messages > 0 then return nil end
+		return {
+			implementation_version = MAILBOX_V2_FREEZE_VERSION,
+			migration_marker = LEGACY_QUEUE_RETIRED_MARKER,
+			owner = owner,
+			source_implementation_version = 1,
+			retired_at = retired_at,
+		}
+	end, deadline, state)
+
+	-- A response can be lost after the marker commits. Verify the durable
+	-- state with an uncached read; the transform never mutates control state.
+	local fresh, _, read_code, read_message = backend_get(legacy_backend, false, deadline, nil)
+	if read_code ~= nil then
+		return "unknown", "could not verify legacy queue retirement marker: " .. (read_message or read_code)
+	end
+	local retired, retired_code, retired_message = legacy_queue_retirement_status(fresh, owner)
+	if retired then
+		if state ~= nil then state.queue_legacy_checked = true end
+		return nil, nil
+	end
+	if retired_code ~= nil then return retired_code :: ResultCode, retired_message end
+
+	local messages, parse_message = parse_legacy_queue_envelope(fresh)
 	if messages == nil then
+		local version = if type(fresh) == "table" then get_string_field(fresh, "implementation_version") else nil
+		if type(version) == "number" and version > 1 then
+			return "future_schema", "legacy q: key contains an unsupported future-version value; it was left untouched"
+		end
 		return "corrupt", parse_message or "legacy durable queue is corrupt; it was left untouched"
 	end
 	if #messages > 0 then
 		return "migration", "nonempty legacy durable queue has no verifiable owner; it was left untouched and requires manual recovery"
 	end
-	if state ~= nil then
-		state.queue_legacy_checked = true
+	if update_code ~= nil then
+		return normalize_result_code(update_code) or "unknown", update_message or "legacy queue retirement write was not confirmed"
 	end
-	return nil, nil
+	return "unknown", "empty legacy queue could not be durably retired; queue writes remain blocked"
 end
 
 local function queue_backend_for_state(state: InternalState): Backend?
@@ -8484,6 +9793,370 @@ local function queue_size_error(queue: QueueEnvelope, max_bytes: number): string
 	end
 	return nil
 end
+
+-- Mailbox V2 migration source bridge. The source queue remains in the same
+-- q2 key and is frozen by a future-version marker written atomically with
+-- UpdateAsync. Every source read below bypasses the read cache.
+type MailboxV2MigrationStatus = {
+	MigrationId: string,
+	FrozenAt: number,
+	SourceImplementationVersion: number,
+	ActiveCount: number,
+	DeadLetterCount: number,
+}
+
+type MailboxV2MigrationContext = {
+	backend: Backend,
+	owner: QueueOwner,
+	migration_id: string,
+	deadline: number,
+	max_bytes: number,
+}
+
+local function mailbox_v2_migration_context(
+	name: string,
+	scope: string,
+	key: string,
+	migration_id: string,
+	queue_store_name: string?,
+	max_queue_bytes: number?,
+	operation_deadline: number?,
+	mock: boolean
+): (MailboxV2MigrationContext?, ResultCode?, string?)
+	local valid_identity, identity_error = validate_store_identity(name, scope, key)
+	if not valid_identity then return nil, "invalid", identity_error end
+	if type(migration_id) ~= "string" or migration_id == "" or #migration_id > 96 then
+		return nil, "invalid", "migration_id must be 1 to 96 bytes"
+	end
+	local selected_store = queue_store_name or DEFAULT_QUEUE_STORE_NAME
+	if type(selected_store) ~= "string" or selected_store == "" or #selected_store > 50 then
+		return nil, "invalid", "queue_store_name must be 1 to 50 characters"
+	end
+	local max_bytes = max_queue_bytes or DEFAULT_QUEUE_MAX_BYTES
+	if type(max_bytes) ~= "number" or not math.isfinite(max_bytes) or math.floor(max_bytes) ~= max_bytes
+		or max_bytes < 1 or max_bytes > MAX_DATASTORE_BYTES
+	then
+		return nil, "invalid", "max_queue_bytes must be an integer from 1 to the DataStore value limit"
+	end
+	local deadline, deadline_error = resolve_operation_deadline(operation_deadline)
+	if deadline == nil then return nil, "invalid", deadline_error end
+	return {
+		backend = make_backend(selected_store, scope, make_queue_key_v2(name, scope, key), mock),
+		owner = make_queue_owner(name, scope, key),
+		migration_id = migration_id,
+		deadline = deadline,
+		max_bytes = max_bytes,
+	}, nil, nil
+end
+
+local function has_reserved_mailbox_v2_ids(queue: QueueEnvelope): boolean
+	for _, item in ipairs(queue.messages) do
+		local prefix = string.sub(item.id, 1, 4)
+		if prefix == "m2i-" or prefix == "m2g-" or prefix == "m2l-" then return true end
+	end
+	for _, item in ipairs(queue.dead_letters) do
+		local prefix = string.sub(item.id, 1, 4)
+		if prefix == "m2i-" or prefix == "m2g-" or prefix == "m2l-" then return true end
+	end
+	return false
+end
+
+local function inspect_mailbox_v2_freeze_marker(
+	raw: unknown,
+	owner: QueueOwner,
+	migration_id: string
+): (QueueEnvelope?, MailboxV2MigrationStatus?, ResultCode?, string?)
+	if type(raw) ~= "table" then
+		return nil, nil, "migration", "legacy durable queue is not frozen for Mailbox V2"
+	end
+	local marker = raw :: { [string]: unknown }
+	local version = get_string_field(marker, "implementation_version")
+	if version ~= MAILBOX_V2_FREEZE_VERSION
+		or get_string_field(marker, "migration_marker") ~= MAILBOX_V2_FREEZE_MARKER
+	then
+		if type(version) == "number" and version > QUEUE_IMPLEMENTATION_VERSION then
+			return nil, nil, "future_schema", "queue has an unsupported future migration marker version"
+		end
+		return nil, nil, "migration", "legacy durable queue has not been frozen for Mailbox V2"
+	end
+	local marker_owner = get_string_field(marker, "owner")
+	if type(marker_owner) ~= "table" then
+		return nil, nil, "corrupt", "Mailbox V2 freeze marker has no owner"
+	end
+	local owner_name = get_string_field(marker_owner, "name")
+	local owner_scope = get_string_field(marker_owner, "scope")
+	local owner_key = get_string_field(marker_owner, "key")
+	if type(owner_name) ~= "string" or type(owner_scope) ~= "string" or type(owner_key) ~= "string" then
+		return nil, nil, "corrupt", "Mailbox V2 freeze owner is malformed"
+	end
+	if owner_name ~= owner.name or owner_scope ~= owner.scope or owner_key ~= owner.key then
+		return nil, nil, "conflict", "frozen queue belongs to a different record identity"
+	end
+	local stored_migration_id = get_string_field(marker, "migration_id")
+	if type(stored_migration_id) ~= "string" or stored_migration_id == "" or #stored_migration_id > 96 then
+		return nil, nil, "corrupt", "Mailbox V2 freeze marker has an invalid migration ID"
+	end
+	if stored_migration_id ~= migration_id then
+		return nil, nil, "conflict", "legacy queue is frozen by a different migration ID"
+	end
+	local frozen_at_raw = marker.frozen_at
+	local source_version_raw = marker.source_implementation_version
+	if type(frozen_at_raw) ~= "number" or not math.isfinite(frozen_at_raw) or frozen_at_raw < 0
+		or type(source_version_raw) ~= "number"
+		or (source_version_raw ~= 2 and source_version_raw ~= QUEUE_IMPLEMENTATION_VERSION)
+	then
+		return nil, nil, "corrupt", "Mailbox V2 freeze metadata is malformed"
+	end
+	local frozen_at = frozen_at_raw
+	local source_version = source_version_raw
+
+	local source = table.clone(marker)
+	source.implementation_version = source_version
+	source.migration_marker = nil
+	source.migration_id = nil
+	source.source_implementation_version = nil
+	source.frozen_at = nil
+	local queue, parse_error, owner_mismatch = parse_queue_envelope(source, owner)
+	if queue == nil then
+		return nil, nil, if owner_mismatch then "conflict" else "corrupt", parse_error or "frozen source queue is invalid"
+	end
+	local status: MailboxV2MigrationStatus = {
+		MigrationId = stored_migration_id,
+		FrozenAt = frozen_at,
+		SourceImplementationVersion = source_version,
+		ActiveCount = #queue.messages,
+		DeadLetterCount = #queue.dead_letters,
+	}
+	return queue, status, nil, nil
+end
+
+local function build_mailbox_v2_freeze_candidate(
+	raw: unknown,
+	owner: QueueOwner,
+	migration_id: string,
+	frozen_at: number,
+	max_bytes: number
+): (unknown?, ResultCode?, string?)
+	if type(raw) == "table" then
+		local marker = raw :: { [string]: unknown }
+		if get_string_field(marker, "implementation_version") == MAILBOX_V2_FREEZE_VERSION
+			and get_string_field(marker, "migration_marker") == MAILBOX_V2_FREEZE_MARKER
+		then
+			local _, _, existing_code, existing_message = inspect_mailbox_v2_freeze_marker(marker, owner, migration_id)
+			if existing_code == nil then return nil, nil, nil end
+			return nil, normalize_result_code(existing_code) or "migration", existing_message
+		end
+	end
+
+	local queue, parse_error, owner_mismatch = parse_queue_envelope(raw, owner)
+	if queue == nil then
+		if owner_mismatch then return nil, "conflict", parse_error end
+		if string.find(parse_error or "", "unsupported future implementation version", 1, true) ~= nil then
+			return nil, "future_schema", parse_error
+		end
+		return nil, "corrupt", parse_error or "legacy queue failed validation; no freeze marker was written"
+	end
+	if has_reserved_mailbox_v2_ids(queue) then
+		return nil, "conflict", "legacy queue contains an ID in a reserved Mailbox V2 namespace; source was not frozen"
+	end
+	if type(raw) == "table" then
+		local original = raw :: { [string]: unknown }
+		if original.migration_marker ~= nil or original.migration_id ~= nil
+			or original.source_implementation_version ~= nil or original.frozen_at ~= nil
+		then
+			return nil, "conflict", "legacy queue uses a reserved migration-marker field; source was not changed"
+		end
+	end
+
+	local source: { [string]: unknown }
+	local source_version: number
+	if type(raw) == "table" then
+		source = table.clone(raw :: { [string]: unknown })
+		source_version = (raw :: { [string]: unknown }).implementation_version :: number
+	else
+		source = {
+			owner = owner,
+			messages = {},
+			dead_letters = {},
+		}
+		source_version = QUEUE_IMPLEMENTATION_VERSION
+	end
+	source.implementation_version = MAILBOX_V2_FREEZE_VERSION
+	source.migration_marker = MAILBOX_V2_FREEZE_MARKER
+	source.migration_id = migration_id
+	source.source_implementation_version = source_version
+	source.frozen_at = frozen_at
+	local candidate = (source :: unknown) :: QueueEnvelope
+	local size_error = queue_size_error(candidate, max_bytes)
+	if size_error ~= nil then return nil, "capacity", size_error end
+	return source, nil, nil
+end
+
+local function begin_mailbox_v2_migration_internal(
+	name: string,
+	scope: string,
+	key: string,
+	migration_id: string,
+	queue_store_name: string?,
+	max_queue_bytes: number?,
+	operation_deadline: number?,
+	mock: boolean
+): (ResultCode, string?)
+	local context, context_error, context_message = mailbox_v2_migration_context(
+		name, scope, key, migration_id, queue_store_name, max_queue_bytes, operation_deadline, mock
+	)
+	if context == nil then return normalize_result_code(context_error) or "invalid", context_message end
+	local frozen_at = queue_now_unix(mock)
+	if not math.isfinite(frozen_at) or frozen_at < 0 then
+		return "invalid", "queue clock returned an invalid Unix timestamp"
+	end
+
+	local _, _, update_code, update_message = backend_update(context.backend, function(current_raw)
+		local candidate = build_mailbox_v2_freeze_candidate(
+			current_raw, context.owner, context.migration_id, frozen_at, context.max_bytes
+		)
+		return candidate
+	end, context.deadline, nil)
+
+	-- The durable state, not UpdateAsync's possibly ambiguous response, decides.
+	local fresh, _, read_code, read_message = backend_get(context.backend, false, context.deadline, nil)
+	if read_code ~= nil then
+		return "unknown", "could not verify Mailbox V2 freeze marker: " .. (read_message or read_code)
+	end
+	local _, status, inspect_code, inspect_message =
+		inspect_mailbox_v2_freeze_marker(fresh, context.owner, context.migration_id)
+	if status ~= nil then return "success", nil end
+	if inspect_code == "conflict" then return "conflict", inspect_message end
+
+	local _, candidate_code, candidate_message = build_mailbox_v2_freeze_candidate(
+		fresh, context.owner, context.migration_id, frozen_at, context.max_bytes
+	)
+	if candidate_code ~= nil then return normalize_result_code(candidate_code) or "migration", candidate_message end
+	if update_code ~= nil then return normalize_result_code(update_code) or "unknown", update_message or inspect_message end
+	return "unknown", "freeze update returned without a durable freeze marker"
+end
+
+local function get_mailbox_v2_migration_status_internal(
+	name: string,
+	scope: string,
+	key: string,
+	migration_id: string,
+	queue_store_name: string?,
+	max_queue_bytes: number?,
+	operation_deadline: number?,
+	mock: boolean
+): (MailboxV2MigrationStatus?, ResultCode, string?)
+	local context, context_error, context_message = mailbox_v2_migration_context(
+		name, scope, key, migration_id, queue_store_name, max_queue_bytes, operation_deadline, mock
+	)
+	if context == nil then return nil, normalize_result_code(context_error) or "invalid", context_message end
+	local raw, _, code, message = backend_get(context.backend, false, context.deadline, nil)
+	if code ~= nil then return nil, normalize_result_code(code) or "unknown", message end
+	local _, status, marker_code, marker_message =
+		inspect_mailbox_v2_freeze_marker(raw, context.owner, context.migration_id)
+	if status == nil then return nil, normalize_result_code(marker_code) or "migration", marker_message end
+	return status, "success", nil
+end
+
+local function get_mailbox_v2_migration_source_page_internal(
+	name: string,
+	scope: string,
+	key: string,
+	migration_id: string,
+	kind: string,
+	cursor: string?,
+	limit: number,
+	queue_store_name: string?,
+	max_queue_bytes: number?,
+	operation_deadline: number?,
+	mock: boolean
+): ({ [number]: { [string]: unknown } }?, string?, boolean, ResultCode, string?)
+	if kind ~= "active" and kind ~= "dead_letter" then
+		return nil, nil, false, "invalid", "kind must be active or dead_letter"
+	end
+	if type(limit) ~= "number" or not math.isfinite(limit) or math.floor(limit) ~= limit or limit < 1 or limit > 100 then
+		return nil, nil, false, "invalid", "page limit must be an integer from 1 to 100"
+	end
+	local offset = 0
+	if cursor ~= nil then
+		local parsed = if type(cursor) == "string" then tonumber(cursor) else nil
+		if type(parsed) ~= "number" or not math.isfinite(parsed) or math.floor(parsed) ~= parsed or parsed < 0
+			or tostring(parsed) ~= cursor
+		then
+			return nil, nil, false, "invalid", "migration cursor must be a canonical non-negative integer string"
+		end
+		offset = parsed
+	end
+	local context, context_error, context_message = mailbox_v2_migration_context(
+		name, scope, key, migration_id, queue_store_name, max_queue_bytes, operation_deadline, mock
+	)
+	if context == nil then return nil, nil, false, normalize_result_code(context_error) or "invalid", context_message end
+	local raw, _, code, message = backend_get(context.backend, false, context.deadline, nil)
+	if code ~= nil then return nil, nil, false, normalize_result_code(code) or "unknown", message end
+	local queue, _, marker_code, marker_message =
+		inspect_mailbox_v2_freeze_marker(raw, context.owner, context.migration_id)
+	if queue == nil then return nil, nil, false, normalize_result_code(marker_code) or "migration", marker_message end
+	local source: { any } = if kind == "active" then queue.messages else queue.dead_letters
+	if offset > #source then return nil, nil, false, "conflict", "migration cursor exceeds the frozen source length" end
+	local amount = math.min(limit, #source - offset)
+	local page: { [number]: { [string]: unknown } } = {}
+	for index = 1, amount do
+		local item = source[offset + index]
+		local legacy_item: { [string]: unknown } = {
+			id = item.id,
+			type = item.type,
+			data = copy_value(item.data),
+			attempts = item.attempts,
+			total_attempts = item.total_attempts,
+			replay_count = item.replay_count,
+			last_replay_token = item.last_replay_token,
+			sender_job_id = item.sender_job_id,
+			created_at = item.created_at,
+			locked_until = item.locked_until,
+		}
+		if kind == "dead_letter" then
+			local dead_letter = item :: DeadLetterItem
+			legacy_item.dead_lettered_at = dead_letter.dead_lettered_at
+			legacy_item.last_error = dead_letter.last_error
+			legacy_item.terminal_lock_token = dead_letter.terminal_lock_token
+		end
+		page[index] = legacy_item
+	end
+	local next_offset = offset + amount
+	local complete = next_offset >= #source
+	return page, if complete then nil else tostring(next_offset), complete, "success", nil
+end
+
+local function mailbox_v2_migration_api(mock: boolean)
+	return {
+		begin_mailbox_v2_migration_async = function(
+			name: string, scope: string, key: string, migration_id: string,
+			queue_store_name: string?, max_queue_bytes: number?, operation_deadline: number?
+		): (ResultCode, string?)
+			return begin_mailbox_v2_migration_internal(
+				name, scope, key, migration_id, queue_store_name, max_queue_bytes, operation_deadline, mock
+			)
+		end,
+		get_mailbox_v2_migration_status_async = function(
+			name: string, scope: string, key: string, migration_id: string,
+			queue_store_name: string?, max_queue_bytes: number?, operation_deadline: number?
+		): (MailboxV2MigrationStatus?, ResultCode, string?)
+			return get_mailbox_v2_migration_status_internal(
+				name, scope, key, migration_id, queue_store_name, max_queue_bytes, operation_deadline, mock
+			)
+		end,
+		get_mailbox_v2_migration_source_page_async = function(
+			name: string, scope: string, key: string, migration_id: string, kind: string,
+			cursor: string?, limit: number, queue_store_name: string?, max_queue_bytes: number?, operation_deadline: number?
+		): ({ [number]: { [string]: unknown } }?, string?, boolean, ResultCode, string?)
+			return get_mailbox_v2_migration_source_page_internal(
+				name, scope, key, migration_id, kind, cursor, limit,
+				queue_store_name, max_queue_bytes, operation_deadline, mock
+			)
+		end,
+	}
+end
+
 
 local function normalize_queue_error(message: string): string
 	local printable = string.gsub(message, "[^ -~]", "?")
@@ -9461,9 +11134,10 @@ local function save_internal(state: InternalState, reason: string?, operation_de
 				return nil, nil, nil
 			end
 			local next_envelope: Envelope = {
-				implementation_version = IMPLEMENTATION_VERSION,
+				implementation_version = envelope.implementation_version,
 				schema_version = state.options.schema_version,
 				revision = target_revision,
+				sidecars = prepared_envelope_cache._sidecar_protocol.clone(envelope.sidecars),
 				fencing_generation = generation,
 				created_at = envelope.created_at,
 				updated_at = transform_time,
@@ -9539,11 +11213,14 @@ local function save_internal(state: InternalState, reason: string?, operation_de
 		state.pending_operation = {
 			kind = "save",
 			snapshot = copy_value(snapshot),
+			user_ids = clone_user_ids(state.user_ids),
+			metadata = clone_metadata(state.metadata),
 			captured_change_sequence = captured_change_sequence,
 			expected_revision = expected_revision,
 			target_revision = target_revision,
 			operation_id = write_id,
 			session_token = session_token,
+			base_write_id = if state.last_saved ~= nil then state.last_saved.WriteId else nil,
 			fencing_generation = generation,
 			reason = reason or "manual",
 			started_at = now_local(),
@@ -9551,6 +11228,7 @@ local function save_internal(state: InternalState, reason: string?, operation_de
 		}
 		state.next_reconciliation = now_local() + 0.25
 		state.last_reconciliation_category = "save_outcome_unknown"
+		scheduler_activation.refresh_durability_risk(state)
 		observe(state, "save", "unknown", last_error or "save outcome is unresolved")
 		return "unknown", last_error or "save outcome is unresolved"
 	end
@@ -9568,6 +11246,7 @@ local function save_internal(state: InternalState, reason: string?, operation_de
 	if not local_changed_during_save then
 		update_local_from_envelope(state, confirmed, confirmed_info)
 		state.dirty_since_local = nil
+		state.dirty_age_is_lower_bound = false
 	else
 		if state.dirty_since_local == nil then
 			state.dirty_since_local = now_local()
@@ -9582,6 +11261,7 @@ local function save_internal(state: InternalState, reason: string?, operation_de
 	state.last_successful_write_local = now_local()
 	state.busy = false
 	state.state = "active"
+	scheduler_activation.refresh_durability_risk(state)
 	state.next_autosave = now_local() + (state.options.autosave_interval or DEFAULT_AUTOSAVE_INTERVAL)
 	if state.save_requested then
 		state.next_autosave = now_local()
@@ -9901,6 +11581,1107 @@ end
 
 
 
+
+export type ErasureStatus = {
+	UserId: number,
+	Exists: boolean,
+	Erased: boolean,
+	Generation: number,
+	Revision: number,
+	ErasureId: string?,
+	ErasedAt: number?,
+	SourceGeneration: number?,
+	SourceRevision: number?,
+	Version: string?,
+	UpdatedTime: number?,
+}
+
+export type ErasurePurgeProgress = {
+	UserId: number,
+	ErasureId: string,
+	Removed: number,
+	Complete: boolean,
+	CurrentVersion: string?,
+	RetentionUntil: number?,
+}
+
+export type QuarantineFenceStatus = {
+	Exists: boolean,
+	Quarantined: boolean,
+	Phase: string?,
+	QuarantineId: string?,
+	StoreName: string?,
+	Scope: string?,
+	ProfileKey: string?,
+	SourceGeneration: number?,
+	SourceRevision: number?,
+	OperatorId: string?,
+	Reason: string?,
+	CreatedAt: number?,
+	UpdatedAt: number?,
+	ResolutionId: string?,
+	ResolutionOperatorId: string?,
+	ResolutionReason: string?,
+	ResolutionAt: number?,
+	Version: string?,
+	CurrentGeneration: number?,
+	CurrentRevision: number?,
+	CurrentWriteId: string?,
+}
+
+type ErasureFenceMarker = {
+	version: number,
+	user_id: number,
+	erasure_id: string,
+	erased_at: number,
+	source_generation: number,
+	source_revision: number,
+	fence_generation: number,
+}
+
+do
+local function finite_erasure_number(value: unknown): boolean
+	return type(value) == "number" and math.isfinite(value)
+end
+
+local function valid_erasure_user_id(value: unknown): boolean
+	return finite_erasure_number(value)
+		and math.floor(value :: number) == (value :: number)
+		and (value :: number) >= 1 and (value :: number) <= 9007199254740991
+end
+
+local function valid_quarantine_text(value: unknown, maximum: number): boolean
+	return type(value) == "string" and value ~= "" and #value <= maximum
+end
+
+local function result_code_or_unknown(value: unknown): ResultCode
+	return normalize_result_code(value) or "unknown"
+end
+
+local function user_ids_include(user_ids: { number }?, user_id: number): boolean
+	if user_ids == nil or #user_ids == 0 then return true end
+	for _, existing_user_id in ipairs(user_ids) do
+		if existing_user_id == user_id then return true end
+	end
+	return false
+end
+
+local function parse_erasure_fence(raw: unknown): (ErasureFenceMarker?, boolean, string?)
+	if type(raw) ~= "table" then return nil, false, nil end
+	local raw_marker = get_string_field(raw, ERASURE_FENCE_FIELD)
+	if raw_marker == nil then return nil, false, nil end
+	if get_string_field(raw, "implementation_version") ~= ERASURE_FENCE_IMPLEMENTATION_VERSION then
+		return nil, true, "erasure fence implementation marker is invalid"
+	end
+	if type(raw_marker) ~= "table" then return nil, true, "erasure fence payload is malformed" end
+	local version = get_string_field(raw_marker, "version")
+	local user_id = get_string_field(raw_marker, "user_id")
+	local erasure_id = get_string_field(raw_marker, "erasure_id")
+	local erased_at = get_string_field(raw_marker, "erased_at")
+	local source_generation = get_string_field(raw_marker, "source_generation")
+	local source_revision = get_string_field(raw_marker, "source_revision")
+	local fence_generation = get_string_field(raw_marker, "fence_generation")
+	if version ~= 1
+		or not valid_erasure_user_id(user_id)
+		or type(erasure_id) ~= "string" or erasure_id == "" or #erasure_id > 96
+		or not finite_erasure_number(erased_at)
+		or not finite_erasure_number(source_generation)
+		or (source_generation :: number) < 0
+		or math.floor(source_generation :: number) ~= (source_generation :: number)
+		or not finite_erasure_number(source_revision)
+		or (source_revision :: number) < 0
+		or math.floor(source_revision :: number) ~= (source_revision :: number)
+		or not finite_erasure_number(fence_generation)
+		or math.floor(fence_generation :: number) ~= (fence_generation :: number)
+		or (fence_generation :: number) ~= math.max(1, (source_generation :: number) + 1)
+	then
+		return nil, true, "erasure fence fields failed validation"
+	end
+	return {
+		version = version :: number,
+		user_id = user_id :: number,
+		erasure_id = erasure_id :: string,
+		erased_at = erased_at :: number,
+		source_generation = source_generation :: number,
+		source_revision = source_revision :: number,
+		fence_generation = fence_generation :: number,
+	}, true, nil
+end
+
+type QuarantineFenceMarker = {
+	version: number,
+	store_name: string,
+	scope: string,
+	profile_key: string,
+	quarantine_id: string,
+	source_implementation_version: number,
+	source_generation: number,
+	source_revision: number,
+	fence_generation: number,
+	operator_id: string,
+	reason: string,
+	created_at: number,
+	updated_at: number,
+	phase: string,
+	resolution_id: string?,
+	resolution_operator_id: string?,
+	resolution_reason: string?,
+	resolution_at: number?,
+}
+
+local function parse_quarantine_fence(raw: unknown): (QuarantineFenceMarker?, boolean, string?)
+	if type(raw) ~= "table" then return nil, false, nil end
+	local raw_marker = get_string_field(raw, QUARANTINE_FENCE_FIELD)
+	local stored_version = get_string_field(raw, "implementation_version")
+	if raw_marker == nil and stored_version ~= QUARANTINE_FENCE_IMPLEMENTATION_VERSION then
+		return nil, false, nil
+	end
+	if stored_version ~= QUARANTINE_FENCE_IMPLEMENTATION_VERSION then
+		return nil, true, "quarantine fence implementation marker is invalid"
+	end
+	if type(raw_marker) ~= "table" then return nil, true, "quarantine fence payload is malformed" end
+	local fields = raw_marker :: { [string]: unknown }
+	local version = fields.version
+	local store_name = fields.store_name
+	local scope = fields.scope
+	local profile_key = fields.profile_key
+	local quarantine_id = fields.quarantine_id
+	local source_implementation_version = fields.source_implementation_version
+	local source_generation = fields.source_generation
+	local source_revision = fields.source_revision
+	local fence_generation = fields.fence_generation
+	local operator_id = fields.operator_id
+	local reason = fields.reason
+	local created_at = fields.created_at
+	local updated_at = fields.updated_at
+	local phase = fields.phase
+	local resolution_id = fields.resolution_id
+	local resolution_operator_id = fields.resolution_operator_id
+	local resolution_reason = fields.resolution_reason
+	local resolution_at = fields.resolution_at
+	if version ~= 1
+		or not valid_quarantine_text(store_name, 50)
+		or type(scope) ~= "string" or #scope > 50
+		or not valid_quarantine_text(profile_key, 50)
+		or not valid_quarantine_text(quarantine_id, 96)
+		or not finite_erasure_number(source_implementation_version)
+		or (source_implementation_version :: number) < 1
+		or math.floor(source_implementation_version :: number) ~= (source_implementation_version :: number)
+		or (source_implementation_version :: number) > prepared_envelope_cache._sidecar_protocol.max_readable_version
+		or not finite_erasure_number(source_generation)
+		or (source_generation :: number) < 0
+		or math.floor(source_generation :: number) ~= (source_generation :: number)
+		or not finite_erasure_number(source_revision)
+		or (source_revision :: number) < 0
+		or math.floor(source_revision :: number) ~= (source_revision :: number)
+		or not finite_erasure_number(fence_generation)
+		or math.floor(fence_generation :: number) ~= (fence_generation :: number)
+		or (fence_generation :: number) ~= math.max(1, (source_generation :: number) + 1)
+		or not valid_quarantine_text(operator_id, 96)
+		or not valid_quarantine_text(reason, 512)
+		or not finite_erasure_number(created_at)
+		or not finite_erasure_number(updated_at)
+		or (updated_at :: number) < (created_at :: number)
+		or (phase ~= "quarantined" and phase ~= "release_pending")
+	then
+		return nil, true, "quarantine fence fields failed validation"
+	end
+	if phase == "release_pending" then
+		if not valid_quarantine_text(resolution_id, 96)
+			or not valid_quarantine_text(resolution_operator_id, 96)
+			or not valid_quarantine_text(resolution_reason, 512)
+			or not finite_erasure_number(resolution_at)
+		then
+			return nil, true, "quarantine release-pending fields failed validation"
+		end
+	elseif resolution_id ~= nil or resolution_operator_id ~= nil
+		or resolution_reason ~= nil or resolution_at ~= nil
+	then
+		return nil, true, "quarantined fence unexpectedly contains release-pending fields"
+	end
+	local raw_revision = get_string_field(raw, "revision")
+	local raw_generation = get_string_field(raw, "fencing_generation")
+	if raw_revision ~= (source_revision :: number) + 1 or raw_generation ~= fence_generation then
+		return nil, true, "quarantine fence envelope revision/generation does not match its marker"
+	end
+	return {
+		version = 1,
+		store_name = store_name :: string,
+		scope = scope :: string,
+		profile_key = profile_key :: string,
+		quarantine_id = quarantine_id :: string,
+		source_implementation_version = source_implementation_version :: number,
+		source_generation = source_generation :: number,
+		source_revision = source_revision :: number,
+		fence_generation = fence_generation :: number,
+		operator_id = operator_id :: string,
+		reason = reason :: string,
+		created_at = created_at :: number,
+		updated_at = updated_at :: number,
+		phase = phase :: string,
+		resolution_id = resolution_id :: string?,
+		resolution_operator_id = resolution_operator_id :: string?,
+		resolution_reason = resolution_reason :: string?,
+		resolution_at = resolution_at :: number?,
+	}, true, nil
+end
+
+local function quarantine_status_from_marker(
+	marker: QuarantineFenceMarker,
+	info: BackendInfo?,
+	raw: unknown
+): QuarantineFenceStatus
+	local fields: { [string]: unknown } = if type(raw) == "table" then raw :: any else {}
+	return {
+		Exists = true,
+		Quarantined = true,
+		Phase = marker.phase,
+		QuarantineId = marker.quarantine_id,
+		StoreName = marker.store_name,
+		Scope = marker.scope,
+		ProfileKey = marker.profile_key,
+		SourceGeneration = marker.source_generation,
+		SourceRevision = marker.source_revision,
+		OperatorId = marker.operator_id,
+		Reason = marker.reason,
+		CreatedAt = marker.created_at,
+		UpdatedAt = marker.updated_at,
+		ResolutionId = marker.resolution_id,
+		ResolutionOperatorId = marker.resolution_operator_id,
+		ResolutionReason = marker.resolution_reason,
+		ResolutionAt = marker.resolution_at,
+		Version = if info ~= nil then info.Version else nil,
+		CurrentGeneration = if type(fields.fencing_generation) == "number" then fields.fencing_generation else marker.fence_generation,
+		CurrentRevision = if type(fields.revision) == "number" then fields.revision else marker.source_revision + 1,
+		CurrentWriteId = if type(fields.write_id) == "string" then fields.write_id else nil,
+	}
+end
+
+local function get_quarantine_fence_status_internal(
+	name: string,
+	scope: string,
+	key: string,
+	operation_deadline: number?,
+	mock: boolean
+): (QuarantineFenceStatus?, ResultCode, string?)
+	local valid_identity, identity_message = validate_store_identity(name, scope, key)
+	if not valid_identity then return nil, "invalid", identity_message end
+	local deadline, deadline_error = resolve_operation_deadline(operation_deadline)
+	if deadline == nil then return nil, "invalid", deadline_error end
+	local backend = make_backend(name, scope, key, mock)
+	local raw, info, read_code, read_message = backend_get(backend, false, deadline, nil)
+	if read_code ~= nil then return nil, normalize_result_code(read_code) or "unknown", read_message end
+	if raw == nil then
+		return {
+			Exists = false, Quarantined = false, Phase = nil, QuarantineId = nil,
+			StoreName = name, Scope = scope, ProfileKey = key,
+			SourceGeneration = nil, SourceRevision = nil, OperatorId = nil, Reason = nil,
+			CreatedAt = nil, UpdatedAt = nil, ResolutionId = nil, ResolutionOperatorId = nil,
+			ResolutionReason = nil, ResolutionAt = nil, Version = nil,
+			CurrentGeneration = nil, CurrentRevision = nil, CurrentWriteId = nil,
+		}, "not_found", nil
+	end
+	local erased, erasure_present, erasure_error = parse_erasure_fence(raw)
+	if erasure_present then
+		if erased == nil then return nil, "corrupt", erasure_error or "erasure fence is corrupt" end
+		return nil, "fenced", "profile is permanently erased and cannot be quarantined"
+	end
+	local marker, marker_present, marker_error = parse_quarantine_fence(raw)
+	if marker_present then
+		if marker == nil then return nil, "corrupt", marker_error or "quarantine fence is corrupt" end
+		if marker.store_name ~= name or marker.scope ~= scope or marker.profile_key ~= key then
+			return nil, "conflict", "quarantine marker belongs to a different durable key identity"
+		end
+		return quarantine_status_from_marker(marker, info, raw), "success", nil
+	end
+	local envelope, parse_error, current_format = parse_envelope(raw)
+	if not current_format then
+		local result: ResultCode = if parse_error == "legacy payload" then "legacy"
+			elseif parse_error == "future implementation version" then "future_schema" else "corrupt"
+		return nil, result, parse_error or "profile envelope is not readable"
+	end
+	if envelope == nil then return nil, "corrupt", parse_error or "profile envelope is missing" end
+	return {
+		Exists = true,
+		Quarantined = false,
+		Phase = "not_quarantined",
+		QuarantineId = nil,
+		StoreName = name,
+		Scope = scope,
+		ProfileKey = key,
+		SourceGeneration = envelope.fencing_generation,
+		SourceRevision = envelope.revision,
+		OperatorId = nil,
+		Reason = nil,
+		CreatedAt = nil,
+		UpdatedAt = nil,
+		ResolutionId = nil,
+		ResolutionOperatorId = nil,
+		ResolutionReason = nil,
+		ResolutionAt = nil,
+		Version = if info ~= nil then info.Version else nil,
+		CurrentGeneration = envelope.fencing_generation,
+		CurrentRevision = envelope.revision,
+		CurrentWriteId = envelope.write_id,
+	}, "success", nil
+end
+
+local function preserve_update_metadata(info: BackendInfo?): ({ number }, Metadata)
+	if info == nil then return {}, {} end
+	return clone_user_ids(info.UserIds), clone_metadata(info.Metadata)
+end
+
+local function quarantine_profile_writes_internal(
+	name: string,
+	scope: string,
+	key: string,
+	quarantine_id: string,
+	operator_id: string,
+	reason: string,
+	expected_generation: number,
+	expected_revision: number,
+	operation_deadline: number?,
+	mock: boolean
+): (QuarantineFenceStatus?, ResultCode, string?)
+	local valid_identity, identity_message = validate_store_identity(name, scope, key)
+	if not valid_identity then return nil, "invalid", identity_message end
+	if not valid_quarantine_text(quarantine_id, 96) or not valid_quarantine_text(operator_id, 96)
+		or not valid_quarantine_text(reason, 512)
+	then
+		return nil, "invalid", "quarantine ID, operator ID and reason must be bounded non-empty strings"
+	end
+	if not finite_erasure_number(expected_generation) or expected_generation < 0
+		or math.floor(expected_generation) ~= expected_generation
+		or not finite_erasure_number(expected_revision) or expected_revision < 0
+		or math.floor(expected_revision) ~= expected_revision
+	then
+		return nil, "invalid", "expected generation and revision must be non-negative integers"
+	end
+	local deadline, deadline_error = resolve_operation_deadline(operation_deadline)
+	if deadline == nil then return nil, "invalid", deadline_error end
+	local backend = make_backend(name, scope, key, mock)
+	local now = session_now_unix(mock)
+	local fence_write_id = HttpService:GenerateGUID(false)
+	local _, _, update_code, update_message = backend_update(backend, function(raw, info)
+		if raw == nil then return nil, nil, nil end
+		local erasure, erasure_present = parse_erasure_fence(raw)
+		if erasure_present or erasure ~= nil then return nil, nil, nil end
+		local _, present = parse_quarantine_fence(raw)
+		if present then return nil, nil, nil end
+		local envelope, _, current_format = parse_envelope(raw)
+		if not current_format or envelope == nil
+			or envelope.fencing_generation ~= expected_generation
+			or envelope.revision ~= expected_revision
+		then
+			return nil, nil, nil
+		end
+		local next_raw = copy_value(raw)
+		if type(next_raw) ~= "table" then return nil, nil, nil end
+		local mutable: any = next_raw
+		local next_generation = math.max(1, envelope.fencing_generation + 1)
+		local marker: { [string]: unknown } = {
+			version = 1,
+			store_name = name,
+			scope = scope,
+			profile_key = key,
+			quarantine_id = quarantine_id,
+			source_implementation_version = envelope.implementation_version,
+			source_generation = envelope.fencing_generation,
+			source_revision = envelope.revision,
+			fence_generation = next_generation,
+			operator_id = operator_id,
+			reason = reason,
+			created_at = now,
+			updated_at = now,
+			phase = "quarantined",
+		}
+		mutable.implementation_version = QUARANTINE_FENCE_IMPLEMENTATION_VERSION
+		mutable.fencing_generation = next_generation
+		mutable.revision = envelope.revision + 1
+		mutable.updated_at = now
+		mutable.write_id = fence_write_id
+		mutable.session = nil
+		mutable[QUARANTINE_FENCE_FIELD] = marker
+		local size_ok = validate_serialized_size(mutable)
+		if not size_ok then return nil, nil, nil end
+		local user_ids, metadata = preserve_update_metadata(info)
+		return mutable, user_ids, metadata
+	end, deadline, nil)
+	local observed, status_code, status_message = get_quarantine_fence_status_internal(
+		name, scope, key, deadline - now_local(), mock
+	)
+	if status_code == "success" and observed ~= nil and observed.Quarantined then
+		if observed.QuarantineId ~= quarantine_id then
+			return nil, "conflict", "another quarantine already fences this profile"
+		end
+		if observed.Phase ~= "quarantined" then
+			return nil, "conflict", "this quarantine has already entered release resolution"
+		end
+		if observed.SourceGeneration ~= expected_generation or observed.SourceRevision ~= expected_revision then
+			return nil, "conflict", "existing quarantine fence was installed from a different source revision"
+		end
+		return observed, "success", nil
+	end
+	if status_code == "success" and observed ~= nil and not observed.Quarantined then
+		if observed.CurrentGeneration ~= expected_generation or observed.CurrentRevision ~= expected_revision then
+			return nil, "conflict", "profile changed before the same-key quarantine fence was installed"
+		end
+		return nil, if update_code ~= nil then normalize_result_code(update_code) or "unknown" else "unknown",
+			update_message or "same-key quarantine fence was not observed after the update"
+	end
+	if status_code == "fenced" then return nil, "fenced", status_message end
+	if status_code == "conflict" then return nil, "conflict", status_message end
+	if status_code == "corrupt" or status_code == "future_schema" or status_code == "legacy" then
+		return nil, status_code, status_message
+	end
+	return nil, result_code_or_unknown(if update_code ~= nil then update_code else status_code),
+		status_message or update_message or "quarantine fence outcome could not be reconciled"
+end
+
+local function mark_quarantine_release_pending_internal(
+	name: string,
+	scope: string,
+	key: string,
+	quarantine_id: string,
+	resolution_id: string,
+	operator_id: string,
+	reason: string,
+	expected_revision: number?,
+	operation_deadline: number?,
+	mock: boolean
+): (QuarantineFenceStatus?, ResultCode, string?)
+	local valid_identity, identity_message = validate_store_identity(name, scope, key)
+	if not valid_identity then return nil, "invalid", identity_message end
+	if not valid_quarantine_text(quarantine_id, 96) or not valid_quarantine_text(resolution_id, 96)
+		or not valid_quarantine_text(operator_id, 96) or not valid_quarantine_text(reason, 512)
+	then return nil, "invalid", "quarantine resolution identity and audit fields are invalid" end
+	if expected_revision ~= nil and (
+		not finite_erasure_number(expected_revision) or expected_revision < 0
+		or math.floor(expected_revision) ~= expected_revision
+	) then return nil, "invalid", "expected_revision must be a non-negative integer" end
+	local deadline, deadline_error = resolve_operation_deadline(operation_deadline)
+	if deadline == nil then return nil, "invalid", deadline_error end
+	local backend = make_backend(name, scope, key, mock)
+	local now = session_now_unix(mock)
+	local release_pending_write_id = "qrel-pending:" .. resolution_id
+	local _, _, update_code, update_message = backend_update(backend, function(raw, info)
+		local marker, present = parse_quarantine_fence(raw)
+		if not present or marker == nil or marker.quarantine_id ~= quarantine_id then return nil, nil, nil end
+		if expected_revision ~= nil and marker.source_revision ~= expected_revision then return nil, nil, nil end
+		if marker.phase == "release_pending" then
+			if marker.resolution_id ~= resolution_id then return nil, nil, nil end
+			return nil, nil, nil
+		end
+		local next_raw = copy_value(raw)
+		if type(next_raw) ~= "table" then return nil, nil, nil end
+		local mutable: any = next_raw
+		local next_marker: any = table.clone(marker)
+		next_marker.phase = "release_pending"
+		next_marker.resolution_id = resolution_id
+		next_marker.resolution_operator_id = operator_id
+		next_marker.resolution_reason = reason
+		next_marker.resolution_at = now
+		next_marker.updated_at = now
+		mutable[QUARANTINE_FENCE_FIELD] = next_marker
+		mutable.updated_at = now
+		mutable.write_id = release_pending_write_id
+		local size_ok = validate_serialized_size(mutable)
+		if not size_ok then return nil, nil, nil end
+		local user_ids, metadata = preserve_update_metadata(info)
+		return mutable, user_ids, metadata
+	end, deadline, nil)
+	local observed, status_code, status_message = get_quarantine_fence_status_internal(
+		name, scope, key, deadline - now_local(), mock
+	)
+	if status_code == "success" and observed ~= nil and observed.Quarantined
+		and observed.QuarantineId == quarantine_id and observed.Phase == "release_pending"
+		and observed.ResolutionId == resolution_id
+	then
+		return observed, "success", nil
+	end
+	if status_code == "success" and observed ~= nil and observed.Quarantined
+		and (observed.QuarantineId ~= quarantine_id or observed.ResolutionId ~= resolution_id)
+	then return nil, "conflict", "quarantine release request conflicts with the durable fence" end
+	return nil, result_code_or_unknown(if update_code ~= nil then update_code else status_code),
+		status_message or update_message or "release-pending fence transition could not be confirmed"
+end
+
+local function release_quarantine_fence_internal(
+	name: string,
+	scope: string,
+	key: string,
+	quarantine_id: string,
+	resolution_id: string,
+	operation_deadline: number?,
+	mock: boolean
+): (QuarantineFenceStatus?, ResultCode, string?)
+	local valid_identity, identity_message = validate_store_identity(name, scope, key)
+	if not valid_identity then return nil, "invalid", identity_message end
+	if not valid_quarantine_text(quarantine_id, 96) or not valid_quarantine_text(resolution_id, 96) then
+		return nil, "invalid", "quarantine ID and resolution ID are invalid"
+	end
+	local deadline, deadline_error = resolve_operation_deadline(operation_deadline)
+	if deadline == nil then return nil, "invalid", deadline_error end
+	local backend = make_backend(name, scope, key, mock)
+	local now = session_now_unix(mock)
+	local release_write_id = "qrel:" .. resolution_id
+	local _, _, update_code, update_message = backend_update(backend, function(raw, info)
+		local marker, present = parse_quarantine_fence(raw)
+		if not present or marker == nil or marker.quarantine_id ~= quarantine_id
+			or marker.phase ~= "release_pending" or marker.resolution_id ~= resolution_id
+		then return nil, nil, nil end
+		local next_raw = copy_value(raw)
+		if type(next_raw) ~= "table" then return nil, nil, nil end
+		local mutable: any = next_raw
+		mutable.implementation_version = marker.source_implementation_version
+		mutable.revision = (get_string_field(raw, "revision") :: number) + 1
+		mutable.fencing_generation = marker.fence_generation + 1
+		mutable.updated_at = now
+		mutable.write_id = release_write_id
+		mutable.session = nil
+		mutable[QUARANTINE_FENCE_FIELD] = nil
+		local restored_envelope, _, is_current = parse_envelope(mutable)
+		if not is_current or restored_envelope == nil then return nil, nil, nil end
+		local size_ok = validate_serialized_size(mutable)
+		if not size_ok then return nil, nil, nil end
+		local user_ids, metadata = preserve_update_metadata(info)
+		return mutable, user_ids, metadata
+	end, deadline, nil)
+	local observed, status_code, status_message = get_quarantine_fence_status_internal(
+		name, scope, key, deadline - now_local(), mock
+	)
+	if status_code == "success" and observed ~= nil and not observed.Quarantined then
+		if observed.CurrentWriteId == release_write_id then return observed, "success", nil end
+		return nil, "conflict", "quarantine fence is absent but the release write identity could not be confirmed"
+	end
+	if status_code == "success" and observed ~= nil and observed.Quarantined then
+		if observed.QuarantineId ~= quarantine_id
+			or observed.Phase ~= "release_pending" or observed.ResolutionId ~= resolution_id
+		then return nil, "conflict", "durable quarantine fence changed before release" end
+		return nil, normalize_result_code(update_code) or "unknown",
+			update_message or "quarantine fence remains durable after the release attempt"
+	end
+	return nil, result_code_or_unknown(if update_code ~= nil then update_code else status_code),
+		status_message or update_message or "quarantine release outcome could not be reconciled"
+end
+
+local function get_erasure_status_internal(
+	name: string,
+	scope: string,
+	key: string,
+	user_id: number,
+	operation_deadline: number?,
+	mock: boolean
+): (ErasureStatus?, ResultCode, string?)
+	local valid_identity, identity_message = validate_store_identity(name, scope, key)
+	if not valid_identity then return nil, "invalid", identity_message end
+	if not valid_erasure_user_id(user_id) then return nil, "invalid", "user_id must be a positive integer" end
+	local deadline, deadline_error = resolve_operation_deadline(operation_deadline)
+	if deadline == nil then return nil, "invalid", deadline_error end
+	local backend = make_backend(name, scope, key, mock)
+	local raw, info, read_code, read_message = backend_get(backend, false, deadline, nil)
+	if read_code ~= nil then return nil, normalize_result_code(read_code) or "unknown", read_message end
+	if raw == nil then
+		return {
+			UserId = user_id,
+			Exists = false,
+			Erased = false,
+			Generation = 0,
+			Revision = 0,
+			Version = nil,
+		}, "not_found", nil
+	end
+	local quarantine_marker, quarantine_present, quarantine_error = parse_quarantine_fence(raw)
+	if quarantine_present then
+		if quarantine_marker == nil then return nil, "corrupt", quarantine_error or "quarantine fence is corrupt" end
+		if quarantine_marker.store_name ~= name or quarantine_marker.scope ~= scope or quarantine_marker.profile_key ~= key then
+			return nil, "conflict", "quarantine fence identity does not match the requested key"
+		end
+		if info ~= nil and not user_ids_include(info.UserIds, user_id) then
+			return nil, "conflict", "quarantined profile UserIds do not contain the requested UserId"
+		end
+		return {
+			UserId = user_id,
+			Exists = true,
+			Erased = false,
+			Generation = quarantine_marker.source_generation,
+			Revision = quarantine_marker.source_revision,
+			Version = if info ~= nil then info.Version else nil,
+			UpdatedTime = if info ~= nil then info.UpdatedTime else nil,
+		}, "success", nil
+	end
+	local marker, marker_present, marker_error = parse_erasure_fence(raw)
+	if marker_present then
+		if marker == nil then return nil, "corrupt", marker_error or "erasure fence is corrupt" end
+		if marker.user_id ~= user_id then
+			return nil, "conflict", "erasure fence UserId does not match the requested identity"
+		end
+		return {
+			UserId = user_id,
+			Exists = true,
+			Erased = true,
+			Generation = marker.fence_generation,
+			Revision = marker.source_revision,
+			ErasureId = marker.erasure_id,
+			ErasedAt = marker.erased_at,
+			SourceGeneration = marker.source_generation,
+			SourceRevision = marker.source_revision,
+			Version = if info ~= nil then info.Version else nil,
+			UpdatedTime = if info ~= nil then info.UpdatedTime else nil,
+		}, "success", nil
+	end
+	local envelope, parse_error, current_format = parse_envelope(raw)
+	if not current_format then
+		local result: ResultCode = if parse_error == "legacy payload" then "legacy"
+			elseif parse_error == "future implementation version" then "future_schema" else "corrupt"
+		return nil, result, parse_error or "stored envelope is invalid"
+	end
+	if envelope == nil then return nil, "corrupt", parse_error or "stored envelope is missing" end
+	local user_ids = if info ~= nil then info.UserIds
+		elseif envelope.user_ids ~= nil then envelope.user_ids else {}
+	if not user_ids_include(user_ids, user_id) then
+		return nil, "conflict", "stored profile UserIds do not contain the requested UserId"
+	end
+	return {
+		UserId = user_id,
+		Exists = true,
+		Erased = false,
+		Generation = envelope.fencing_generation,
+		Revision = envelope.revision,
+		Version = if info ~= nil then info.Version else nil,
+		UpdatedTime = if info ~= nil then info.UpdatedTime else nil,
+	}, "success", nil
+end
+
+local function erase_user_data_internal(
+	name: string,
+	scope: string,
+	key: string,
+	user_id: number,
+	erasure_id: string,
+	expected_generation: number?,
+	operation_deadline: number?,
+	mock: boolean
+): (ErasureStatus?, ResultCode, string?)
+	local valid_identity, identity_message = validate_store_identity(name, scope, key)
+	if not valid_identity then return nil, "invalid", identity_message end
+	if not valid_erasure_user_id(user_id) then return nil, "invalid", "user_id must be a positive integer" end
+	if type(erasure_id) ~= "string" or erasure_id == "" or #erasure_id > 96 then
+		return nil, "invalid", "erasure_id must be 1 to 96 bytes"
+	end
+	if expected_generation ~= nil and (
+		not finite_erasure_number(expected_generation) or expected_generation < 0
+		or math.floor(expected_generation) ~= expected_generation
+	) then
+		return nil, "invalid", "expected_generation must be a non-negative integer"
+	end
+	local deadline, deadline_error = resolve_operation_deadline(operation_deadline)
+	if deadline == nil then return nil, "invalid", deadline_error end
+	local backend = make_backend(name, scope, key, mock)
+	local decision: ResultCode? = nil
+	local decision_message: string? = nil
+	local result, _, update_code, update_message = backend_update(backend, function(raw, info)
+		decision = nil
+		decision_message = nil
+		local existing_marker, marker_present, marker_error = parse_erasure_fence(raw)
+		if marker_present then
+			if existing_marker == nil then
+				decision = "corrupt"
+				decision_message = marker_error or "existing erasure fence is corrupt"
+				return nil, nil, nil
+			end
+			if existing_marker.user_id ~= user_id then
+				decision = "conflict"
+				decision_message = "existing erasure fence belongs to another UserId"
+				return nil, nil, nil
+			end
+			if existing_marker.erasure_id ~= erasure_id then
+				decision = "conflict"
+				decision_message = "profile is already permanently fenced by a different erasure"
+				return nil, nil, nil
+			end
+			if expected_generation ~= nil and existing_marker.source_generation ~= expected_generation then
+				decision = "conflict"
+				decision_message = "erasure fence was installed for a different source generation"
+				return nil, nil, nil
+			end
+			decision = "success"
+			return nil, nil, nil
+		end
+		local source_generation = 0
+		local source_revision = 0
+		if raw ~= nil then
+			local quarantine_marker, quarantine_present, quarantine_error = parse_quarantine_fence(raw)
+			if quarantine_present then
+				if quarantine_marker == nil then
+					decision = "corrupt"
+					decision_message = quarantine_error or "quarantine fence is corrupt"
+					return nil, nil, nil
+				end
+				if quarantine_marker.store_name ~= name or quarantine_marker.scope ~= scope
+					or quarantine_marker.profile_key ~= key
+				then
+					decision = "conflict"
+					decision_message = "quarantine fence identity does not match the requested erasure key"
+					return nil, nil, nil
+				end
+				local stored_user_ids = if info ~= nil then info.UserIds
+					else clone_user_ids(get_string_field(raw, "user_ids") :: { number }?)
+				if not user_ids_include(stored_user_ids, user_id) then
+					decision = "conflict"
+					decision_message = "quarantined profile UserIds do not contain the requested UserId"
+					return nil, nil, nil
+				end
+				source_generation = quarantine_marker.source_generation
+				source_revision = quarantine_marker.source_revision
+			else
+				local envelope, parse_error, current_format = parse_envelope(raw)
+				if not current_format then
+					decision = if parse_error == "legacy payload" then "legacy"
+						elseif parse_error == "future implementation version" then "future_schema" else "corrupt"
+					decision_message = parse_error or "stored envelope is invalid"
+					return nil, nil, nil
+				end
+				if envelope == nil then
+					decision = "corrupt"
+					decision_message = parse_error or "stored envelope is missing"
+					return nil, nil, nil
+				end
+				local stored_user_ids = if info ~= nil then info.UserIds
+					elseif envelope.user_ids ~= nil then envelope.user_ids else {}
+				if not user_ids_include(stored_user_ids, user_id) then
+					decision = "conflict"
+					decision_message = "stored profile UserIds do not contain the requested UserId"
+					return nil, nil, nil
+				end
+				source_generation = envelope.fencing_generation
+				source_revision = envelope.revision
+			end
+		end
+		if expected_generation ~= nil and source_generation ~= expected_generation then
+			decision = "conflict"
+			decision_message = "profile generation changed since the erasure inventory was captured"
+			return nil, nil, nil
+		end
+		local erased_at = session_now_unix(mock)
+		local marker_value = {
+			implementation_version = ERASURE_FENCE_IMPLEMENTATION_VERSION,
+			[ERASURE_FENCE_FIELD] = {
+				version = 1,
+				user_id = user_id,
+				erasure_id = erasure_id,
+				erased_at = erased_at,
+				source_generation = source_generation,
+				source_revision = source_revision,
+				fence_generation = math.max(1, source_generation + 1),
+			},
+		}
+		local size_ok, size_error = validate_serialized_size(marker_value)
+		if not size_ok then
+			decision = "validation"
+			decision_message = size_error or "erasure fence exceeds storage limits"
+			return nil, nil, nil
+		end
+		decision = "success"
+		return marker_value, {}, {}
+	end, deadline, nil)
+	if update_code ~= nil and update_code ~= "unknown" then
+		return nil, normalize_result_code(update_code) or "unknown", update_message
+	end
+	if update_code == "unknown" then
+		local observed, status_code, status_message = get_erasure_status_internal(
+			name, scope, key, user_id, deadline - now_local(), mock
+		)
+		if status_code == "success" and observed ~= nil and observed.Erased and observed.ErasureId == erasure_id then
+			if expected_generation ~= nil and observed.SourceGeneration ~= expected_generation then
+				return nil, "conflict", "ambiguous erasure committed for a different source generation"
+			end
+			return observed, "success", nil
+		end
+		if status_code == "conflict" then return nil, "conflict", status_message end
+		return nil, "unknown", status_message or update_message or "erasure write outcome remains unknown"
+	end
+	local observed_marker, marker_present, marker_error = parse_erasure_fence(result)
+	if marker_present then
+		if observed_marker == nil then return nil, "corrupt", marker_error or "committed erasure fence is corrupt" end
+		if observed_marker.user_id ~= user_id or observed_marker.erasure_id ~= erasure_id then
+			return nil, "conflict", "committed erasure fence identity does not match the request"
+		end
+	end
+	if decision ~= nil and decision ~= "success" then
+		return nil, decision, decision_message or update_message
+	end
+	local status, status_code, status_message = get_erasure_status_internal(
+		name, scope, key, user_id, deadline - now_local(), mock
+	)
+	if status_code ~= "success" or status == nil or not status.Erased or status.ErasureId ~= erasure_id then
+		return nil, result_code_or_unknown(if status_code == "not_found" then "unknown" else status_code),
+			status_message or "erasure fence was not confirmed by an uncached read"
+	end
+	if expected_generation ~= nil and status.SourceGeneration ~= expected_generation then
+		return nil, "conflict", "confirmed erasure fence source generation does not match the requested generation"
+	end
+	return status, "success", nil
+end
+
+local function purge_erased_versions_internal(
+	name: string,
+	scope: string,
+	key: string,
+	user_id: number,
+	erasure_id: string,
+	max_versions: number?,
+	operation_deadline: number?,
+	mock: boolean
+): (ErasurePurgeProgress?, ResultCode, string?)
+	local valid_identity, identity_message = validate_store_identity(name, scope, key)
+	if not valid_identity then return nil, "invalid", identity_message end
+	if not valid_erasure_user_id(user_id) then return nil, "invalid", "user_id must be a positive integer" end
+	if type(erasure_id) ~= "string" or erasure_id == "" or #erasure_id > 96 then
+		return nil, "invalid", "erasure_id must be 1 to 96 bytes"
+	end
+	local limit = if max_versions == nil then 16 else max_versions
+	if not finite_erasure_number(limit) or math.floor(limit) ~= limit or limit < 1 or limit > 64 then
+		return nil, "invalid", "max_versions must be an integer from 1 to 64"
+	end
+	local deadline, deadline_error = resolve_operation_deadline(operation_deadline)
+	if deadline == nil then return nil, "invalid", deadline_error end
+	local status, status_code, status_message = get_erasure_status_internal(
+		name, scope, key, user_id, deadline - now_local(), mock
+	)
+	if status_code ~= "success" or status == nil then
+		return nil, result_code_or_unknown(status_code), status_message or "could not confirm the durable erasure fence"
+	end
+	if not status.Erased or status.ErasureId ~= erasure_id then
+		return nil, "fenced", "historical version purge requires the exact durable erasure fence"
+	end
+	local current_version = status.Version
+	if type(current_version) ~= "string" or current_version == "" then
+		return nil, "unknown", "erasure marker version was not returned by the storage adapter"
+	end
+	local entries, list_code, list_message = list_versions_internal(
+		name, scope, key, Enum.SortDirection.Descending, nil, nil, MAX_ERASURE_HISTORY_SCAN, deadline - now_local(), mock
+	)
+	if list_code ~= "success" or entries == nil then
+		return nil, result_code_or_unknown(list_code), list_message or "historical version inventory could not be read"
+	end
+	local current_found = false
+	local historical_version_found = false
+	for _, entry in ipairs(entries) do
+		if entry.Version == current_version then current_found = true
+		else historical_version_found = true end
+	end
+	if not current_found then
+		return nil, "conflict", "the durable erasure fence version is missing from version history"
+	end
+	local fence_updated_ms = status.UpdatedTime
+	if not finite_erasure_number(fence_updated_ms) or (fence_updated_ms :: number) < 0 then
+		return nil, "unknown", "the durable erasure fence has no verified platform update timestamp"
+	end
+	-- Superseded backups expire 30 days after the write that superseded them.
+	-- Use the fence's UpdatedTime, not the version's CreatedTime: writes inside
+	-- one UTC hour can update an existing version without creating a new version.
+	local retention_until = math.ceil((fence_updated_ms :: number) / 1000) + 30 * 24 * 60 * 60
+	if not mock and historical_version_found then
+		if session_now_unix(false) < retention_until then
+			return {
+				UserId = user_id,
+				ErasureId = erasure_id,
+				Removed = 0,
+				Complete = false,
+				CurrentVersion = current_version,
+				RetentionUntil = retention_until,
+			}, "success", nil
+		end
+		return {
+			UserId = user_id,
+			ErasureId = erasure_id,
+			Removed = 0,
+			Complete = false,
+			CurrentVersion = current_version,
+			RetentionUntil = retention_until,
+		}, "success", nil
+	end
+	local removed = 0
+	for _, entry in ipairs(entries) do
+		if removed >= limit then break end
+		if entry.Version ~= current_version then
+			if mock then
+				local mock_entry = get_mock_store(name, scope)[key]
+				if mock_entry == nil then return nil, "unknown", "mock profile disappeared during historical purge" end
+				if mock_entry.Version == entry.Version then
+					return nil, "conflict", "historical purge refused to remove the current fence version"
+				end
+				if mock_entry.Versions[entry.Version] ~= nil then
+					mock_entry.Versions[entry.Version] = nil
+					for index = #mock_entry.VersionOrder, 1, -1 do
+						if mock_entry.VersionOrder[index] == entry.Version then
+							table.remove(mock_entry.VersionOrder, index)
+							break
+						end
+					end
+				end
+			else
+				return nil, "unsupported",
+					"live historical-version deletion is not attempted because Roblox deprecates RemoveVersionAsync; wait for documented retention expiry"
+			end
+			removed += 1
+			local refreshed, refreshed_code, refreshed_message = get_erasure_status_internal(
+				name, scope, key, user_id, deadline - now_local(), mock
+			)
+			if refreshed_code ~= "success" or refreshed == nil or not refreshed.Erased or refreshed.ErasureId ~= erasure_id then
+				return nil, "conflict", refreshed_message or "erasure fence changed during historical purge"
+			end
+			current_version = refreshed.Version or current_version
+		end
+		if now_local() >= deadline then
+			return nil, "budget", "historical version purge deadline expired"
+		end
+	end
+	local remaining_entries, remaining_code, remaining_message = list_versions_internal(
+		name, scope, key, Enum.SortDirection.Descending, nil, nil, MAX_ERASURE_HISTORY_SCAN, deadline - now_local(), mock
+	)
+	if remaining_code ~= "success" or remaining_entries == nil then
+		return nil, result_code_or_unknown(remaining_code), remaining_message or "could not verify historical version removal"
+	end
+	local latest_status, latest_code, latest_message = get_erasure_status_internal(
+		name, scope, key, user_id, deadline - now_local(), mock
+	)
+	if latest_code ~= "success" or latest_status == nil or not latest_status.Erased
+		or latest_status.ErasureId ~= erasure_id
+	then
+		return nil, "conflict", latest_message or "erasure fence changed before purge completion was confirmed"
+	end
+	current_version = latest_status.Version or current_version
+	local latest_version_present = false
+	for _, entry in ipairs(remaining_entries) do
+		if entry.Version == current_version then latest_version_present = true; break end
+	end
+	if not latest_version_present then
+		return nil, "conflict", "durable erasure fence version is absent from the bounded post-purge history scan"
+	end
+	local complete = #remaining_entries < MAX_ERASURE_HISTORY_SCAN
+	if complete then
+		for _, entry in ipairs(remaining_entries) do
+			if entry.Version ~= current_version then
+				complete = false
+				break
+			end
+		end
+	end
+	return {
+		UserId = user_id,
+		ErasureId = erasure_id,
+		Removed = removed,
+		Complete = complete,
+		CurrentVersion = current_version,
+		RetentionUntil = if complete then nil else retention_until,
+	}, "success", nil
+end
+
+function RecordStore.get_quarantine_fence_status_async(
+	name: string,
+	scope: string,
+	key: string,
+	operation_deadline: number?
+): (QuarantineFenceStatus?, ResultCode, string?)
+	return get_quarantine_fence_status_internal(name, scope, key, operation_deadline, false)
+end
+
+function RecordStore.quarantine_profile_writes_async(
+	name: string,
+	scope: string,
+	key: string,
+	quarantine_id: string,
+	operator_id: string,
+	reason: string,
+	expected_generation: number,
+	expected_revision: number,
+	operation_deadline: number?
+): (QuarantineFenceStatus?, ResultCode, string?)
+	return quarantine_profile_writes_internal(
+		name, scope, key, quarantine_id, operator_id, reason,
+		expected_generation, expected_revision, operation_deadline, false
+	)
+end
+
+function RecordStore.mark_quarantine_release_pending_async(
+	name: string,
+	scope: string,
+	key: string,
+	quarantine_id: string,
+	resolution_id: string,
+	operator_id: string,
+	reason: string,
+	expected_revision: number?,
+	operation_deadline: number?
+): (QuarantineFenceStatus?, ResultCode, string?)
+	return mark_quarantine_release_pending_internal(
+		name, scope, key, quarantine_id, resolution_id, operator_id, reason,
+		expected_revision, operation_deadline, false
+	)
+end
+
+function RecordStore.release_quarantine_fence_async(
+	name: string,
+	scope: string,
+	key: string,
+	quarantine_id: string,
+	resolution_id: string,
+	operation_deadline: number?
+): (QuarantineFenceStatus?, ResultCode, string?)
+	return release_quarantine_fence_internal(
+		name, scope, key, quarantine_id, resolution_id, operation_deadline, false
+	)
+end
+
+function RecordStore.get_erasure_status_async(
+	name: string,
+	scope: string,
+	key: string,
+	user_id: number,
+	operation_deadline: number?
+): (ErasureStatus?, ResultCode, string?)
+	return get_erasure_status_internal(name, scope, key, user_id, operation_deadline, false)
+end
+
+function RecordStore.erase_user_data_async(
+	name: string,
+	scope: string,
+	key: string,
+	user_id: number,
+	erasure_id: string,
+	expected_generation: number?,
+	operation_deadline: number?
+): (ErasureStatus?, ResultCode, string?)
+	return erase_user_data_internal(
+		name, scope, key, user_id, erasure_id, expected_generation, operation_deadline, false
+	)
+end
+
+function RecordStore.purge_erased_versions_async(
+	name: string,
+	scope: string,
+	key: string,
+	user_id: number,
+	erasure_id: string,
+	max_versions: number?,
+	operation_deadline: number?
+): (ErasurePurgeProgress?, ResultCode, string?)
+	return purge_erased_versions_internal(
+		name, scope, key, user_id, erasure_id, max_versions, operation_deadline, false
+	)
+end
+
+erasure_internal.get_status = get_erasure_status_internal
+erasure_internal.erase_user_data = erase_user_data_internal
+erasure_internal.purge_erased_versions = purge_erased_versions_internal
+erasure_internal.get_quarantine_fence_status = get_quarantine_fence_status_internal
+erasure_internal.quarantine_profile_writes = quarantine_profile_writes_internal
+erasure_internal.mark_quarantine_release_pending = mark_quarantine_release_pending_internal
+erasure_internal.release_quarantine_fence = release_quarantine_fence_internal
+end
+
 local function data_values_equal(left: JsonValue?, right: JsonValue?, depth: number?): boolean
 	local current_depth = depth or 0
 	if current_depth > 64 then
@@ -10023,8 +12804,12 @@ track_external_data_mutation = function(state: InternalState)
 	if public_record_table ~= nil then
 		public_record_table.Data = state.data
 	end
+	local begins_dirty_generation = state.change_sequence == state.saved_change_sequence
 	state.change_sequence += 1
 	mark_dirty(state)
+	if begins_dirty_generation then
+		state.dirty_age_is_lower_bound = true
+	end
 	local operation_id = HttpService:GenerateGUID(false)
 	state.current_operation_id = operation_id
 	enqueue_change_observation(state, old_data, current_data, operation_id, "direct_data_mutation")
@@ -10233,6 +13018,26 @@ local function is_dirty(self: Record): boolean
 	return state.change_sequence ~= state.saved_change_sequence
 end
 
+scheduler_activation.mutation_backpressure_reason = function(state: InternalState): string?
+	if state.options.durability_mode ~= "read_only_on_risk" then
+		return nil
+	end
+	local dirty = state.change_sequence ~= state.saved_change_sequence
+	if not dirty then
+		return nil
+	end
+	local dirty_since = state.dirty_since_local
+	if dirty_since == nil then
+		return nil
+	end
+	local max_age = state.options.max_dirty_age_seconds
+		or (state.options.autosave_interval or DEFAULT_AUTOSAVE_INTERVAL) * 2
+	if now_local() - dirty_since >= max_age then
+		return "mutation rejected: oldest dirty change exceeded max_dirty_age_seconds"
+	end
+	return nil
+end
+
 local function can_mutate(self: Record): (boolean, string?)
 	local state = private[self]
 	if state == nil then
@@ -10240,6 +13045,10 @@ local function can_mutate(self: Record): (boolean, string?)
 	end
 	if state.state ~= "active" or state.token == nil then
 		return false, "record ownership is not confirmed active"
+	end
+	local backpressure = scheduler_activation.mutation_backpressure_reason(state)
+	if backpressure ~= nil then
+		return false, backpressure
 	end
 	if state.takeover_requested then
 		return false, "session takeover has been requested"
@@ -10267,6 +13076,14 @@ local function get_durability_status(self: Record): { [string]: any }
 			reconciliation_category = "record_missing",
 		}
 	end
+	if not state.public_data_detached then
+		local now = now_local()
+		local max_age = state.options.max_dirty_age_seconds
+			or (state.options.autosave_interval or DEFAULT_AUTOSAVE_INTERVAL) * 2
+		state.next_durability_observation_local = now
+			+ math.max(0.05, math.min(1, max_age * 0.25))
+		track_external_data_mutation(state)
+	end
 	local dirty = state.change_sequence ~= state.saved_change_sequence
 	local pending = state.pending_operation
 	local ownership = if state.state == "unknown" then "uncertain"
@@ -10276,22 +13093,84 @@ local function get_durability_status(self: Record): { [string]: any }
 		elseif state.busy then "saving"
 		elseif dirty then "dirty"
 		else "clean"
+	local dirty_age = if dirty and state.dirty_since_local ~= nil
+		then math.max(0, now_local() - state.dirty_since_local) else 0
+	local max_dirty_age = state.options.max_dirty_age_seconds
+		or (state.options.autosave_interval or DEFAULT_AUTOSAVE_INTERVAL) * 2
+	local slo_exceeded = dirty and dirty_age >= max_dirty_age
+	local backpressure = scheduler_activation.mutation_backpressure_reason(state)
 	return {
 		ownership = ownership,
 		durability = durability,
 		unknown = state.state == "unknown",
+		dirty = dirty,
+		durability_mode = state.options.durability_mode or "balanced",
+		maximum_dirty_age_seconds = max_dirty_age,
+		dirty_age_slo_exceeded = slo_exceeded,
+		dirty_age_basis = if not dirty then "clean"
+			elseif state.dirty_age_is_lower_bound == true
+				then "lower_bound_from_direct_mutation_observation"
+			else "tracked_dirty_generation",
+		dirty_age_is_lower_bound = dirty and state.dirty_age_is_lower_bound == true,
+		mutation_admission = if state.state ~= "active" or state.token == nil
+			then "blocked" elseif backpressure ~= nil then "read_only" else "allowed",
+		risk_active = state.durability_risk_active == true or state.state == "unknown" or slo_exceeded,
+		risk_reason = state.durability_risk_reason or (if state.state == "unknown" then "write_or_lease_outcome_unknown" elseif slo_exceeded then "maximum_dirty_age_exceeded" else nil),
+		observed_at_unix = now_unix(),
 		last_confirmed_revision = state.revision,
 		last_confirmed_generation = state.generation,
 		dirty_watermark = state.change_sequence,
 		durable_watermark = state.saved_change_sequence,
-		oldest_dirty_age = if dirty and state.dirty_since_local ~= nil
-			then math.max(0, now_local() - state.dirty_since_local) else 0,
+		oldest_dirty_age = dirty_age,
 		last_successful_write_age = if state.last_successful_write_local ~= nil
 			then math.max(0, now_local() - state.last_successful_write_local) else nil,
 		lease_margin = math.max(0, state.durable_lease_until - session_now_unix(state.backend.mock)),
 		pending_operation_id = if pending ~= nil then pending.operation_id else nil,
 		reconciliation_category = state.last_reconciliation_category,
 		reconciliation_attempts = if pending ~= nil then pending.attempts else 0,
+	}
+end
+
+RecordStore.get_health_snapshot = function(): { [string]: any }
+	local total_records = 0
+	local active_records_count = 0
+	local unknown_records_count = 0
+	local dirty_records_count = 0
+	local dirty_age_slo_exceeded_count = 0
+	local oldest_dirty_age = 0
+	local now = now_unix()
+
+	for record, state in private do
+		if not state.retired then
+			total_records += 1
+			if state.state == "active" then
+				active_records_count += 1
+			elseif state.state == "unknown" then
+				unknown_records_count += 1
+			end
+			local status = get_durability_status(record)
+			if status.dirty == true then
+				dirty_records_count += 1
+				oldest_dirty_age = math.max(oldest_dirty_age, status.oldest_dirty_age or 0)
+			end
+			if status.dirty_age_slo_exceeded == true then
+				dirty_age_slo_exceeded_count += 1
+			end
+		end
+	end
+
+	local degraded = unknown_records_count > 0 or dirty_age_slo_exceeded_count > 0
+	return {
+		observed_at_unix = now,
+		evidence_scope = "server_local_loaded_records",
+		server_state = if closing then "closing" elseif degraded then "degraded" else "healthy",
+		total_records = total_records,
+		active_records = active_records_count,
+		unknown_records = unknown_records_count,
+		dirty_records = dirty_records_count,
+		dirty_age_slo_exceeded_records = dirty_age_slo_exceeded_count,
+		oldest_dirty_age = oldest_dirty_age,
+		has_unknown_write_outcome = unknown_records_count > 0,
 	}
 end
 
@@ -10310,6 +13189,10 @@ local function set_user_ids(self: Record, user_ids: { number }): (ResultCode, st
 	end
 	if state.state ~= "active" then
 		return "fenced", "record is not actively owned"
+	end
+	local backpressure = scheduler_activation.mutation_backpressure_reason(state)
+	if backpressure ~= nil then
+		return "capacity", backpressure
 	end
 	if state.takeover_requested then
 		return "closing", "session takeover has been requested"
@@ -10343,8 +13226,9 @@ local function add_user_id(self: Record, user_id: number): (ResultCode, string?)
 	if state == nil then
 		return "invalid", "record does not exist"
 	end
-	if type(user_id) ~= "number" or not math.isfinite(user_id) or user_id < 1 or math.floor(user_id) ~= user_id then
-		return "validation", "user_id must be a positive integer"
+	if type(user_id) ~= "number" or not math.isfinite(user_id) or user_id < 1
+		or user_id > 9007199254740991 or math.floor(user_id) ~= user_id then
+		return "validation", "user_id must be a positive safe integer"
 	end
 	local ids = clone_user_ids(state.user_ids)
 	ids[#ids + 1] = user_id
@@ -10356,8 +13240,9 @@ local function remove_user_id(self: Record, user_id: number): (ResultCode, strin
 	if state == nil then
 		return "invalid", "record does not exist"
 	end
-	if type(user_id) ~= "number" or not math.isfinite(user_id) or user_id < 1 or math.floor(user_id) ~= user_id then
-		return "validation", "user_id must be a positive integer"
+	if type(user_id) ~= "number" or not math.isfinite(user_id) or user_id < 1
+		or user_id > 9007199254740991 or math.floor(user_id) ~= user_id then
+		return "validation", "user_id must be a positive safe integer"
 	end
 	local ids: { number } = {}
 	for _, existing in ipairs(state.user_ids) do
@@ -10383,6 +13268,10 @@ local function set_metadata(self: Record, metadata: Metadata): (ResultCode, stri
 	end
 	if state.state ~= "active" then
 		return "fenced", "record is not actively owned"
+	end
+	local backpressure = scheduler_activation.mutation_backpressure_reason(state)
+	if backpressure ~= nil then
+		return "capacity", backpressure
 	end
 	if state.takeover_requested then
 		return "closing", "session takeover has been requested"
@@ -10419,6 +13308,10 @@ local function update_metadata(self: Record, callback: (Metadata) -> Metadata): 
 	end
 	if state.state ~= "active" then
 		return "fenced", "record is not actively owned"
+	end
+	local backpressure = scheduler_activation.mutation_backpressure_reason(state)
+	if backpressure ~= nil then
+		return "capacity", backpressure
 	end
 	if state.takeover_requested then
 		return "closing", "session takeover has been requested"
@@ -10498,6 +13391,10 @@ local function update(self: Record, callback: (JsonValue?) -> JsonValue?): (Resu
 	if state == nil or state.state ~= "active" then
 		return "fenced", "record is not actively owned"
 	end
+	local backpressure = scheduler_activation.mutation_backpressure_reason(state)
+	if backpressure ~= nil then
+		return "capacity", backpressure
+	end
 	if state.takeover_requested then
 		return "closing", "session takeover has been requested"
 	end
@@ -10569,6 +13466,10 @@ local function reconcile(self: Record, template: JsonValue): (ResultCode, string
 	end
 	if state == nil or state.state ~= "active" then
 		return "fenced", "record is not actively owned"
+	end
+	local backpressure = scheduler_activation.mutation_backpressure_reason(state)
+	if backpressure ~= nil then
+		return "capacity", backpressure
 	end
 	if state.takeover_requested then
 		return "closing", "session takeover has been requested"
@@ -10705,7 +13606,9 @@ local function mailbox_bound_for_state(state: InternalState): (EmbeddedMailbox?,
 	end
 	if #state.user_ids > 0 and owner.user_id == nil then return nil, "fenced", "bound mailbox lost the UserId required by this Record" end
 	if owner.user_id ~= nil then
-		if type(owner.user_id) ~= "number" or not math.isfinite(owner.user_id) or math.floor(owner.user_id) ~= owner.user_id then
+		if type(owner.user_id) ~= "number" or not math.isfinite(owner.user_id)
+			or owner.user_id < 1 or owner.user_id > 9007199254740991
+			or math.floor(owner.user_id) ~= owner.user_id then
 			return nil, "fenced", "bound V2 mailbox UserId is invalid"
 		end
 		local found = false
@@ -11121,7 +14024,8 @@ local function bind_mailbox_v2_async(self: Record, mailbox: unknown): (ResultCod
 		return "invalid", "V2 mailbox owner must include a UserId for a UserId-associated Record"
 	end
 	if owner.user_id ~= nil then
-		if type(owner.user_id) ~= "number" or not math.isfinite(owner.user_id) or owner.user_id < 1
+		if type(owner.user_id) ~= "number" or not math.isfinite(owner.user_id)
+			or owner.user_id < 1 or owner.user_id > 9007199254740991
 			or math.floor(owner.user_id) ~= owner.user_id
 		then return "invalid", "V2 mailbox owner UserId must be a positive integer" end
 		local found = false
@@ -11577,9 +14481,10 @@ local function delete_record(self: Record): (ResultCode, string?)
 				return nil, nil, nil
 			end
 			local next_envelope: Envelope = {
-				implementation_version = IMPLEMENTATION_VERSION,
+				implementation_version = envelope.implementation_version,
 				schema_version = state.options.schema_version,
 				revision = target_revision,
+				sidecars = prepared_envelope_cache._sidecar_protocol.clone(envelope.sidecars),
 				fencing_generation = next_generation,
 				created_at = envelope.created_at,
 				updated_at = transform_time,
@@ -11822,6 +14727,7 @@ local function open_internal(state: InternalState, default_data: JsonValue?, rec
 				user_ids = clone_user_ids(snapshot.UserIds),
 				tombstone = nil,
 				session = nil,
+				sidecars = nil,
 				write_id = "history-recovery-" .. HttpService:GenerateGUID(false),
 			}
 			local envelope_valid, envelope_error = validate_envelope(recovered_envelope)
@@ -11947,6 +14853,7 @@ local function open_internal(state: InternalState, default_data: JsonValue?, rec
 					user_ids = clone_user_ids(state.user_ids),
 					tombstone = nil,
 					session = nil,
+					sidecars = nil,
 					write_id = write_id,
 				}
 			elseif not current_format then
@@ -11982,6 +14889,7 @@ local function open_internal(state: InternalState, default_data: JsonValue?, rec
 					user_ids = if backend_info ~= nil then clone_user_ids(backend_info.UserIds) else clone_user_ids(state.user_ids),
 					tombstone = nil,
 					session = nil,
+					sidecars = nil,
 					write_id = write_id,
 				}
 			elseif envelope == nil then
@@ -12060,9 +14968,10 @@ local function open_internal(state: InternalState, default_data: JsonValue?, rec
 			local initial_ids = if is_new_record then clone_user_ids(state.user_ids) elseif recovering_history and recovery_candidate ~= nil then clone_user_ids(recovery_candidate.UserIds) elseif backend_info ~= nil then clone_user_ids(backend_info.UserIds) elseif envelope.user_ids ~= nil then clone_user_ids(envelope.user_ids) else {}
 			local initial_metadata = if is_new_record then clone_metadata(state.metadata) elseif recovering_history and recovery_candidate ~= nil then clone_metadata(recovery_candidate.Metadata) elseif backend_info ~= nil then clone_metadata(backend_info.Metadata) else {}
 			local next_envelope: Envelope = {
-				implementation_version = IMPLEMENTATION_VERSION,
+				implementation_version = envelope.implementation_version,
 				schema_version = state.options.schema_version,
 				revision = if envelope.tombstone ~= nil then envelope.revision + 1 else envelope.revision,
+				sidecars = prepared_envelope_cache._sidecar_protocol.clone(envelope.sidecars),
 				fencing_generation = next_generation,
 				created_at = if envelope.created_at > 0 then envelope.created_at else commit_time,
 				updated_at = commit_time,
@@ -12260,6 +15169,8 @@ local function open_internal(state: InternalState, default_data: JsonValue?, rec
 		state.change_sequence = 0
 		state.saved_change_sequence = 0
 		state.dirty_since_local = nil
+		state.dirty_age_is_lower_bound = false
+		state.next_durability_observation_local = nil
 		state.pending_operation = nil
 		state.next_reconciliation = math.huge
 		state.last_reconciliation_category = nil
@@ -12370,9 +15281,10 @@ local function renew_internal(state: InternalState): (ResultCode, string?)
 			local durable_user_ids = if info ~= nil then clone_user_ids(info.UserIds) elseif envelope.user_ids ~= nil then clone_user_ids(envelope.user_ids) else {}
 			local durable_metadata = if info ~= nil then clone_metadata(info.Metadata) else state.metadata
 			local next_envelope: Envelope = {
-				implementation_version = IMPLEMENTATION_VERSION,
+				implementation_version = envelope.implementation_version,
 				schema_version = envelope.schema_version,
 				revision = envelope.revision,
+				sidecars = prepared_envelope_cache._sidecar_protocol.clone(envelope.sidecars),
 				fencing_generation = generation,
 				created_at = envelope.created_at,
 				updated_at = transform_time,
@@ -12449,6 +15361,7 @@ local function renew_internal(state: InternalState): (ResultCode, string?)
 			target_revision = state.revision,
 			operation_id = write_id,
 			session_token = session_token,
+			base_write_id = if state.last_saved ~= nil then state.last_saved.WriteId else nil,
 			fencing_generation = generation,
 			reason = "renew",
 			started_at = now_local(),
@@ -12456,6 +15369,7 @@ local function renew_internal(state: InternalState): (ResultCode, string?)
 		}
 		state.next_reconciliation = now_local() + 0.25
 		state.last_reconciliation_category = "renewal_outcome_unknown"
+		scheduler_activation.refresh_durability_risk(state)
 		observe(state, "renew", "unknown", last_error or "renewal outcome is unresolved")
 		return "unknown", last_error or "renewal outcome is unresolved"
 	end
@@ -12480,6 +15394,7 @@ local function renew_internal(state: InternalState): (ResultCode, string?)
 	state.last_successful_write_local = now_local()
 	state.busy = false
 	state.state = "active"
+	scheduler_activation.refresh_durability_risk(state)
 	state.next_renewal = now_local() + (state.options.lease_renewal or DEFAULT_LEASE_RENEWAL)
 	if state.change_sequence ~= state.saved_change_sequence then
 		state.next_autosave = now_local()
@@ -12550,6 +15465,7 @@ local function reconcile_unknown_release_internal(state: InternalState): (Result
 		update_local_from_envelope(state, envelope, info)
 		state.saved_change_sequence = state.change_sequence
 		state.dirty_since_local = nil
+		state.dirty_age_is_lower_bound = false
 		state.last_saved = make_durable_snapshot(envelope, info, "reconcile_" .. pending.reason)
 		state.pending_operation = nil
 		state.token = nil
@@ -12565,6 +15481,7 @@ local function reconcile_unknown_release_internal(state: InternalState): (Result
 		state.save_requested = false
 		state.last_successful_write_local = now_local()
 		state.last_reconciliation_category = nil
+		scheduler_activation.refresh_durability_risk(state)
 		disconnect_message_subscription(state)
 		observe(state, "reconcile_release", "success", nil)
 		return "success", nil
@@ -12653,14 +15570,17 @@ local function reconcile_unknown_release_internal(state: InternalState): (Result
 			decision_message = "durable session is missing or expired"
 			return nil, nil, nil
 		end
-		local user_ids = if current_info ~= nil then clone_user_ids(current_info.UserIds)
+		local user_ids = if pending.user_ids ~= nil then clone_user_ids(pending.user_ids)
+			elseif current_info ~= nil then clone_user_ids(current_info.UserIds)
 			elseif current.user_ids ~= nil then clone_user_ids(current.user_ids) else {}
-		local durable_metadata = if current_info ~= nil then clone_metadata(current_info.Metadata)
+		local durable_metadata = if pending.metadata ~= nil then clone_metadata(pending.metadata)
+			elseif current_info ~= nil then clone_metadata(current_info.Metadata)
 			else clone_metadata(state.metadata)
 		local next_envelope: Envelope = {
-			implementation_version = IMPLEMENTATION_VERSION,
+			implementation_version = current.implementation_version,
 			schema_version = state.options.schema_version,
 			revision = pending.target_revision,
+			sidecars = prepared_envelope_cache._sidecar_protocol.clone(current.sidecars),
 			fencing_generation = pending.fencing_generation,
 			created_at = current.created_at,
 			updated_at = transform_time,
@@ -12769,6 +15689,7 @@ local function reconcile_unknown_internal(state: InternalState): (ResultCode, st
 			if state.change_sequence == pending.captured_change_sequence then
 				update_local_from_envelope(state, envelope, info)
 				state.dirty_since_local = nil
+				state.dirty_age_is_lower_bound = false
 				state.save_requested = false
 			else
 				if state.dirty_since_local == nil then state.dirty_since_local = now_local() end
@@ -12781,6 +15702,7 @@ local function reconcile_unknown_internal(state: InternalState): (ResultCode, st
 		state.next_reconciliation = math.huge
 		if envelope.session ~= nil and lease_remaining > required_recovery_lease_margin(state) then
 			state.state = "active"
+			scheduler_activation.refresh_durability_risk(state)
 			state.last_reconciliation_category = nil
 			state.next_renewal = now_local() + (state.options.lease_renewal or DEFAULT_LEASE_RENEWAL)
 			state.next_autosave = if state.change_sequence ~= state.saved_change_sequence
@@ -12795,6 +15717,277 @@ local function reconcile_unknown_internal(state: InternalState): (ResultCode, st
 		disconnect_message_subscription(state)
 		observe(state, "reconcile", "fenced", "operation committed without a safe remaining lease margin")
 		return "fenced", "operation committed without a safe remaining lease margin"
+	end
+
+
+	local function matches_recovered_lease(candidate: Envelope): boolean
+		local candidate_session = candidate.session
+		local recovery_write_id = pending.recovery_write_id
+		local recovery_token = pending.recovery_session_token
+		local recovery_generation = pending.fencing_generation + 1
+		return recovery_write_id ~= nil
+			and recovery_token ~= nil
+			and candidate.write_id == recovery_write_id
+			and candidate.revision == pending.expected_revision
+			and candidate.fencing_generation == recovery_generation
+			and candidate.tombstone == nil
+			and candidate_session ~= nil
+			and candidate_session.token == recovery_token
+			and candidate_session.generation == recovery_generation
+			and candidate_session.job_id == server_id
+			and candidate_session.place_id == game.PlaceId
+	end
+
+	local function finish_lease_recovery(candidate: Envelope, candidate_info: BackendInfo?): (ResultCode, string?)
+		if not backend_metadata_matches(candidate_info, candidate) then
+			return stop("corrupt", "lease_recovery_metadata_mismatch", "corrupt",
+				"lease-recovery operation matched but DataStore key metadata did not match the envelope")
+		end
+		if not matches_recovered_lease(candidate) or candidate.session == nil then
+			return stop("fenced", "lease_recovery_identity_mismatch", "fenced",
+				"durable lease-recovery identity no longer matches the retained operation")
+		end
+		local recovered_session = candidate.session :: SessionEnvelope
+		local lease_remaining = recovered_session.lease_until - session_now_unix(state.backend.mock)
+		if lease_remaining <= required_recovery_lease_margin(state) then
+			return stop("fenced", "lease_recovery_margin_low", "fenced",
+				"reacquired lease no longer has the required recovery safety margin")
+		end
+
+		state.generation = candidate.fencing_generation
+		state.revision = candidate.revision
+		state.created_at = candidate.created_at
+		state.updated_at = candidate.updated_at
+		state.tombstoned = false
+		state.token = recovered_session.token
+		state.durable_lease_until = recovered_session.lease_until
+		update_state_metadata_from_info(state, candidate_info)
+		if pending.user_ids ~= nil then
+			state.user_ids = clone_user_ids(pending.user_ids)
+		end
+		if pending.metadata ~= nil then
+			state.metadata = clone_metadata(pending.metadata)
+		end
+		state.last_saved = make_durable_snapshot(candidate, candidate_info, "lease_reacquisition")
+		state.pending_operation = nil
+		state.busy = false
+		state.state = "active"
+		state.next_reconciliation = math.huge
+		state.last_reconciliation_category = nil
+		state.last_successful_write_local = now_local()
+		state.next_renewal = now_local() + (state.options.lease_renewal or DEFAULT_LEASE_RENEWAL)
+		local dirty = state.change_sequence ~= state.saved_change_sequence
+		state.save_requested = dirty
+		state.next_autosave = if dirty
+			then now_local()
+			else now_local() + (state.options.autosave_interval or DEFAULT_AUTOSAVE_INTERVAL)
+		scheduler_activation.refresh_durability_risk(state)
+		observe(state, "reconcile", "success",
+			"expired session reacquired with a new fencing generation; the uncommitted operation remains unsaved")
+		complete_deferred_takeover(state)
+		return "success", nil
+	end
+
+	local function reacquire_expired_lease(current: Envelope, current_info: BackendInfo?): (ResultCode, string?)
+		if state.options.lease_recovery_enabled ~= true then
+			return stop("fenced", "lease_expired", "fenced",
+				"session lease expired before recovery could safely retry")
+		end
+		if pending.base_write_id == nil or current.write_id ~= pending.base_write_id then
+			return stop("fenced", "lease_recovery_base_write_changed", "fenced",
+				"durable write identity changed; refusing to reacquire an expired session over a newer operation")
+		end
+		if current.revision ~= pending.expected_revision
+			or current.fencing_generation ~= pending.fencing_generation
+			or not matches_session(current, pending.session_token, pending.fencing_generation)
+			or current.session == nil
+			or current.session.job_id ~= server_id
+			or current.session.place_id ~= game.PlaceId
+			or current.tombstone ~= nil
+		then
+			return stop("fenced", "lease_recovery_fence_changed", "fenced",
+				"durable session fence changed; refusing expired-session reacquisition")
+		end
+		if not backend_metadata_matches(current_info, current) then
+			return stop("corrupt", "lease_recovery_base_metadata_mismatch", "corrupt",
+				"durable base envelope and DataStore key metadata disagree")
+		end
+		if current.session.lease_until > session_now_unix(state.backend.mock) then
+			return retry("lease_recovery_not_expired",
+				"durable lease is not yet expired at the conditional reacquisition boundary", nil)
+		end
+		if pending.recovery_write_id == nil or pending.recovery_session_token == nil then
+			local recovery_write_id = HttpService:GenerateGUID(false)
+			local recovery_session_token = HttpService:GenerateGUID(false)
+			if type(recovery_write_id) ~= "string" or recovery_write_id == ""
+				or type(recovery_session_token) ~= "string" or recovery_session_token == ""
+				or recovery_session_token == pending.session_token
+			then
+				return stop("corrupt", "lease_recovery_identity_invalid", "validation",
+					"could not prepare a distinct logical write ID and session token for lease recovery")
+			end
+			pending.recovery_write_id = recovery_write_id
+			pending.recovery_session_token = recovery_session_token
+		end
+		local recovery_write_id = pending.recovery_write_id :: string
+		local recovery_session_token = pending.recovery_session_token :: string
+		local recovery_generation = pending.fencing_generation + 1
+		local deadline = now_local() + (state.options.operation_deadline or DEFAULT_OPERATION_DEADLINE)
+		local decision: ResultCode? = nil
+		local decision_message: string? = nil
+		local result, result_info, result_code, result_message = backend_update(state.backend, function(raw_value, backend_info)
+			decision = nil
+			decision_message = nil
+			local transform_time = session_now_unix(state.backend.mock)
+			local envelope, parse_error, current_format = parse_envelope(raw_value)
+			if not current_format or envelope == nil then
+				decision = if parse_error == "future implementation version" then "future_schema" else "corrupt"
+				decision_message = parse_error or "durable envelope is invalid"
+				return nil, nil, nil
+			end
+			if envelope.schema_version > state.options.schema_version then
+				decision = "future_schema"
+				decision_message = "durable schema is newer than this server supports"
+				return nil, nil, nil
+			end
+			if envelope.write_id == recovery_write_id
+				and envelope.revision == pending.expected_revision
+				and envelope.fencing_generation == recovery_generation
+				and envelope.session ~= nil
+				and envelope.session.token == recovery_session_token
+				and envelope.session.generation == recovery_generation
+				and envelope.session.job_id == server_id
+			then
+				decision = "success"
+				return envelope,
+					(if backend_info ~= nil then backend_info.UserIds else envelope.user_ids),
+					(if backend_info ~= nil then backend_info.RawMetadata else make_backend_metadata(state.metadata, envelope))
+			end
+			if envelope.write_id ~= pending.base_write_id
+				or envelope.revision ~= pending.expected_revision
+				or envelope.fencing_generation ~= pending.fencing_generation
+				or not matches_session(envelope, pending.session_token, pending.fencing_generation)
+				or envelope.session == nil
+				or envelope.session.job_id ~= server_id
+				or envelope.session.place_id ~= game.PlaceId
+				or envelope.tombstone ~= nil
+			then
+				decision = "fenced"
+				decision_message = "durable owner, revision, or write identity changed during lease reacquisition"
+				return nil, nil, nil
+			end
+			if not backend_metadata_matches(backend_info, envelope) then
+				decision = "corrupt"
+				decision_message = "durable base envelope and DataStore key metadata disagree"
+				return nil, nil, nil
+			end
+			local current_session = envelope.session :: SessionEnvelope
+			if current_session.lease_until > transform_time then
+				decision = "busy"
+				decision_message = "lease had not expired when the conditional update ran"
+				return nil, nil, nil
+			end
+			local user_ids = if backend_info ~= nil then clone_user_ids(backend_info.UserIds)
+				elseif envelope.user_ids ~= nil then clone_user_ids(envelope.user_ids) else {}
+			local durable_metadata = if backend_info ~= nil then clone_metadata(backend_info.Metadata)
+				else clone_metadata(state.metadata)
+			local next_envelope: Envelope = {
+				implementation_version = envelope.implementation_version,
+				schema_version = envelope.schema_version,
+				revision = envelope.revision,
+				fencing_generation = recovery_generation,
+				created_at = envelope.created_at,
+				updated_at = transform_time,
+				data = envelope.data,
+				sidecars = prepared_envelope_cache._sidecar_protocol.clone(envelope.sidecars),
+				user_ids = user_ids,
+				tombstone = nil,
+				session = {
+					token = recovery_session_token,
+					generation = recovery_generation,
+					job_id = server_id,
+					place_id = game.PlaceId,
+					acquired_at = transform_time,
+					lease_until = transform_time + (state.options.lease_duration or DEFAULT_LEASE_DURATION),
+				},
+				write_id = recovery_write_id,
+			}
+			local valid, validation_error = validate_envelope(next_envelope)
+			if not valid then
+				decision = "validation"
+				decision_message = validation_error
+				return nil, nil, nil
+			end
+			decision = "success"
+			return next_envelope, user_ids, make_backend_metadata(durable_metadata, next_envelope)
+		end, deadline, state)
+		if result_code ~= nil then
+			decision = normalize_result_code(result_code)
+			decision_message = result_message
+		end
+		if state.retired then
+			return "closing", "record was retired during lease reacquisition"
+		end
+		if result ~= nil then
+			local returned, return_error, returned_format = parse_envelope(result)
+			if returned_format and returned ~= nil and matches_recovered_lease(returned) then
+				return finish_lease_recovery(returned, result_info)
+			end
+			if not returned_format then
+				return stop("corrupt", "lease_recovery_result_invalid", "corrupt",
+					return_error or "lease-recovery update returned an invalid envelope")
+			end
+		end
+		if decision == "future_schema" then
+			return stop("future", "future_schema", "future_schema",
+				decision_message or "durable schema is newer than this server supports")
+		elseif decision == "corrupt" then
+			return stop("corrupt", "lease_recovery_corrupt", "corrupt",
+				decision_message or "durable envelope is corrupt during lease reacquisition")
+		elseif decision == "validation" then
+			return stop("corrupt", "lease_recovery_validation", "validation",
+				decision_message or "lease-recovery envelope failed validation")
+		end
+
+		local verify_deadline = now_local() + (state.options.operation_deadline or DEFAULT_OPERATION_DEADLINE)
+		local verified_raw, verified_info, verify_result, verify_message =
+			backend_get(state.backend, false, verify_deadline, state)
+		if verify_result ~= nil then
+			return retry("lease_recovery_verification_" .. tostring(verify_result),
+				verify_message or decision_message or "could not verify lease-recovery outcome", nil)
+		end
+		if verified_raw == nil then
+			return stop("fenced", "lease_recovery_record_missing", "fenced",
+				"durable record disappeared during lease reacquisition")
+		end
+		local verified, verify_parse_error, verify_format = parse_envelope(verified_raw)
+		if not verify_format or verified == nil then
+			local result_kind: ResultCode = if verify_parse_error == "future implementation version" then "future_schema" else "corrupt"
+			return stop(if result_kind == "future_schema" then "future" else "corrupt",
+				"lease_recovery_verification_invalid", result_kind,
+				verify_parse_error or "verified lease-recovery envelope is invalid")
+		end
+		if matches_recovered_lease(verified) then
+			return finish_lease_recovery(verified, verified_info)
+		end
+		if verified.write_id == pending.base_write_id
+			and verified.revision == pending.expected_revision
+			and verified.fencing_generation == pending.fencing_generation
+			and matches_session(verified, pending.session_token, pending.fencing_generation)
+			and verified.session ~= nil
+			and verified.session.job_id == server_id
+			and verified.session.place_id == game.PlaceId
+			and verified.tombstone == nil
+		then
+			if verified.session.lease_until <= session_now_unix(state.backend.mock) then
+				return retry("lease_recovery_not_confirmed",
+					result_message or decision_message or "conditional lease reacquisition did not commit; retrying the same identity", nil)
+			end
+			return retry("lease_recovery_lease_not_expired",
+				"lease had not expired at the conditional update boundary", nil)
+		end
+		return stop("fenced", "lease_recovery_owner_changed", "fenced",
+			"durable owner or write identity changed; refusing to revive an expired session")
 	end
 
 	local deadline = now_local() + (state.options.operation_deadline or DEFAULT_OPERATION_DEADLINE)
@@ -12812,6 +16005,9 @@ local function reconcile_unknown_internal(state: InternalState): (ResultCode, st
 	end
 	if envelope.schema_version > state.options.schema_version then
 		return stop("future", "future_schema", "future_schema", "durable schema is newer than this server supports")
+	end
+	if matches_recovered_lease(envelope) then
+		return finish_lease_recovery(envelope, info)
 	end
 	if envelope.write_id == pending.operation_id
 		and envelope.revision == pending.target_revision
@@ -12833,7 +16029,7 @@ local function reconcile_unknown_internal(state: InternalState): (ResultCode, st
 	end
 	local remaining_lease = session.lease_until - session_now_unix(state.backend.mock)
 	if remaining_lease <= 0 then
-		return stop("fenced", "lease_expired", "fenced", "session lease expired before recovery could safely retry")
+		return reacquire_expired_lease(envelope, info)
 	end
 	local required_margin = required_recovery_lease_margin(state)
 	if remaining_lease <= required_margin then
@@ -12889,13 +16085,16 @@ local function reconcile_unknown_internal(state: InternalState): (ResultCode, st
 			decision_message = "lease safety margin is insufficient"
 			return nil, nil, nil
 		end
-		local user_ids = if current_info ~= nil then clone_user_ids(current_info.UserIds)
+		local user_ids = if pending.user_ids ~= nil then clone_user_ids(pending.user_ids)
+			elseif current_info ~= nil then clone_user_ids(current_info.UserIds)
 			elseif current.user_ids ~= nil then clone_user_ids(current.user_ids) else {}
-		local durable_metadata = if current_info ~= nil then clone_metadata(current_info.Metadata) else clone_metadata(state.metadata)
+		local durable_metadata = if pending.metadata ~= nil then clone_metadata(pending.metadata)
+			elseif current_info ~= nil then clone_metadata(current_info.Metadata) else clone_metadata(state.metadata)
 		local next_envelope: Envelope = {
-			implementation_version = IMPLEMENTATION_VERSION,
+			implementation_version = current.implementation_version,
 			schema_version = if pending.kind == "save" then state.options.schema_version else current.schema_version,
 			revision = if pending.kind == "save" then pending.target_revision else current.revision,
+			sidecars = prepared_envelope_cache._sidecar_protocol.clone(current.sidecars),
 			fencing_generation = pending.fencing_generation,
 			created_at = current.created_at,
 			updated_at = transform_time,
@@ -13101,9 +16300,10 @@ close_internal = function(state: InternalState, shutdown: boolean): (ResultCode,
 				return nil, nil, nil
 			end
 			local next_envelope: Envelope = {
-				implementation_version = IMPLEMENTATION_VERSION,
+				implementation_version = envelope.implementation_version,
 				schema_version = state.options.schema_version,
 				revision = target_revision,
+				sidecars = prepared_envelope_cache._sidecar_protocol.clone(envelope.sidecars),
 				fencing_generation = generation,
 				created_at = envelope.created_at,
 				updated_at = transform_time,
@@ -13161,6 +16361,8 @@ close_internal = function(state: InternalState, shutdown: boolean): (ResultCode,
 		state.pending_operation = {
 			kind = "release",
 			snapshot = copy_value(snapshot),
+			user_ids = clone_user_ids(state.user_ids),
+			metadata = clone_metadata(state.metadata),
 			captured_change_sequence = state.change_sequence,
 			expected_revision = expected_revision,
 			target_revision = target_revision,
@@ -13173,6 +16375,7 @@ close_internal = function(state: InternalState, shutdown: boolean): (ResultCode,
 		}
 		state.next_reconciliation = now_local() + 0.25
 		state.last_reconciliation_category = "release_outcome_unknown"
+		scheduler_activation.refresh_durability_risk(state)
 		observe(state, "close", "unknown", last_error or "release outcome is unresolved")
 		return "unknown", last_error or "release outcome is unresolved"
 	end
@@ -13187,6 +16390,9 @@ close_internal = function(state: InternalState, shutdown: boolean): (ResultCode,
 	state.next_queue_poll = math.huge
 	state.takeover_requested = false
 	state.queue_hint = false
+	state.dirty_since_local = nil
+	state.dirty_age_is_lower_bound = false
+	scheduler_activation.refresh_durability_risk(state)
 	disconnect_message_subscription(state)
 	observe(state, "close", "closed", nil)
 	return "closed", nil
@@ -13273,7 +16479,7 @@ local function open(self: Record, default_data: JsonValue?, recreate: boolean?):
 	return normalize_result_code(result) or "unknown", message
 end
 
-local function make_record(name: string, scope: string, key: string, options: Options, mock: boolean): Record
+local function make_record(name: string, scope: string, key: string, options: Options, mock: boolean, transact_engine: (Record, string, string, TransactionReducer, TransactionOptions?, string?, JsonValue?, { OutboxEventSpec }?) -> (JsonValue?, TransactionStatus, string?), transaction_status_engine: (Record, string, JsonValue) -> TransactionReceiptStatus): Record
 	local mode = if mock then "mock" else "live"
 	local id = HttpService:JSONEncode({ mode, name, scope, key })
 	local existing = records[id]
@@ -13297,6 +16503,7 @@ local function make_record(name: string, scope: string, key: string, options: Op
 	end
 	local interval = options.autosave_interval or DEFAULT_AUTOSAVE_INTERVAL
 	local state: InternalState = {
+		pending_transaction = nil,
 		name = name,
 		scope = scope,
 		key = key,
@@ -13370,6 +16577,8 @@ local function make_record(name: string, scope: string, key: string, options: Op
 		next_reconciliation = math.huge,
 		last_reconciliation_category = nil,
 		dirty_since_local = nil,
+		dirty_age_is_lower_bound = false,
+		next_durability_observation_local = nil,
 		last_successful_write_local = nil,
 	}
 	local record: Record = {
@@ -13409,6 +16618,39 @@ local function make_record(name: string, scope: string, key: string, options: Op
 		Update = update,
 		Reconcile = reconcile,
 		Save = save,
+		TransactAsync = function(self: Record, operation_id: string, reducer: TransactionReducer, options: TransactionOptions)
+			local result, status, message = transact_engine(self, "transaction", operation_id, reducer, options, nil, nil, nil)
+			sync_public(self)
+			return result, status :: TransactionStatus, message
+		end,
+		GetTransactionStatusAsync = function(self: Record, operation_id: string, request: JsonValue): TransactionReceiptStatus
+			return transaction_status_engine(self, operation_id, request)
+		end,
+		ApplyInboxAsync = function(self: Record, message_id: string, message_type: string, payload: JsonValue, reducer: TransactionReducer, options: TransactionOptions?)
+			local result, status, message = transact_engine(self, "inbox", message_id, reducer, options, message_type, payload, nil)
+			sync_public(self)
+			return result, status :: TransactionStatus, message
+		end,
+		CommitWithOutboxAsync = function(self: Record, commit_key: string, command_type: string, command_payload: JsonValue, outbox_events: { OutboxEventSpec }, reducer: TransactionReducer, options: TransactionOptions?)
+			local result, status, message = transact_engine(self, "outbox", commit_key, reducer, options, command_type, command_payload, outbox_events)
+			sync_public(self)
+			return result, status :: TransactionStatus, message
+		end,
+		GetOutboxAsync = function(self: Record, max_events: number?)
+			local engine = prepared_envelope_cache._outbox_engine :: any
+			if engine == nil then return {}, "invalid", "outbox API is not initialized" end
+			return engine.get(self, max_events)
+		end,
+		DispatchOutboxAsync = function(self: Record, dispatcher: OutboxDispatcher, max_events: number?)
+			local engine = prepared_envelope_cache._outbox_engine :: any
+			if engine == nil then return 0, "invalid", "outbox API is not initialized" end
+			return engine.dispatch(self, dispatcher, max_events)
+		end,
+		PruneOutboxAsync = function(self: Record, delivered_before_unix: number, max_events: number?)
+			local engine = prepared_envelope_cache._outbox_engine :: any
+			if engine == nil then return 0, "invalid", "outbox API is not initialized" end
+			return engine.prune(self, delivered_before_unix, max_events)
+		end,
 		MessageAsync = message,
 		GetMailboxOwner = get_mailbox_owner,
 		CreateMailboxStoreAdapter = mailbox_store_adapter,
@@ -13431,6 +16673,7 @@ local function make_record(name: string, scope: string, key: string, options: Op
 	return record
 end
 
+rawset(RecordStore, "_scheduler_runtime", (function()
 local scheduler_governor = RecordStoreScheduler.new({
 	now_ms = function() return now_local() * 1000 end,
 	now_unix = now_unix,
@@ -13455,22 +16698,7 @@ local scheduler_governor = RecordStoreScheduler.new({
 local scheduler_dispatcher = RecordStoreScheduler.new_dispatcher(scheduler_governor, {
 	now_ms = function() return now_local() * 1000 end,
 })
-local scheduler_activation = {
-	requested = false,
-	revision = 1,
-	percent = 100,
-	salt = "recordstore-scheduler-v1",
-	cohort_bucket = 0,
-}
-local function scheduler_rollout_bucket(salt: string): number
-	local identity = tostring(game.PlaceId) .. ":" .. tostring(server_id) .. ":" .. salt
-	local hash = 0
-	for index = 1, #identity do
-		hash = (hash * 131 + string.byte(identity, index)) % 2147483647
-	end
-	return hash % 100
-end
-scheduler_activation.cohort_bucket = scheduler_rollout_bucket(scheduler_activation.salt)
+
 
 local function apply_scheduler_activation()
 	local cohort_included = scheduler_activation.cohort_bucket < scheduler_activation.percent
@@ -13773,6 +17001,21 @@ function RecordStore.replay_scheduler_trace(
 	return replay:Replay(trace)
 end
 
+scheduler_activation.scheduled_autosave_priority = function(state: InternalState, now: number): string
+	if state.options.durability_mode ~= "durability_first"
+		or state.change_sequence == state.saved_change_sequence
+		or state.dirty_since_local == nil
+	then
+		return "normal"
+	end
+	local max_dirty_age = state.options.max_dirty_age_seconds
+		or (state.options.autosave_interval or DEFAULT_AUTOSAVE_INTERVAL) * 2
+	if now - (state.dirty_since_local :: number) >= max_dirty_age * 0.5 then
+		return "high"
+	end
+	return "normal"
+end
+
 local function run_scheduled_record_work(record: Record, state: InternalState, now: number)
 	local slot = scheduled_state_slot(state)
 	if state.takeover_requested then
@@ -13834,7 +17077,8 @@ local function run_scheduled_record_work(record: Record, state: InternalState, n
 		and slot.pending.autosave ~= true
 	then
 		local next_autosave = now + (state.options.autosave_interval or DEFAULT_AUTOSAVE_INTERVAL) * (0.9 + math.random() * 0.2)
-		local result = enqueue_state_work(record, state, "autosave", "normal", "profile_autosave", "update_async", function()
+		local result = enqueue_state_work(record, state, "autosave", scheduler_activation.scheduled_autosave_priority(state, now),
+			"profile_autosave", "update_async", function()
 			if state.busy or state.queue_busy then
 				return { code = "retryable", message = "record became busy before autosave started" }
 			end
@@ -13924,86 +17168,155 @@ local function run_scheduled_recovery(record: Record, state: InternalState, now:
 	end
 end
 
+scheduler_activation.run_unscheduled_takeover = function(record: Record, state: InternalState): boolean
+	if not state.takeover_requested or state.busy or state.queue_busy then
+		return false
+	end
+	complete_deferred_takeover(state)
+	sync_public(record)
+	return true
+end
+
+scheduler_activation.run_unscheduled_renewal = function(record: Record, state: InternalState, now: number): boolean
+	if state.state ~= "active"
+		or state.busy or state.queue_busy or now < state.next_renewal
+	then
+		return false
+	end
+	state.next_renewal = now + (state.options.lease_renewal or DEFAULT_LEASE_RENEWAL)
+	task.spawn(function()
+		renew_internal(state)
+		sync_public(record)
+	end)
+	return true
+end
+
+scheduler_activation.run_unscheduled_autosave = function(record: Record, state: InternalState, now: number)
+	if state.state ~= "active"
+		or state.busy or state.queue_busy or now < state.next_autosave
+	then
+		return
+	end
+	state.next_autosave = now + (state.options.autosave_interval or DEFAULT_AUTOSAVE_INTERVAL)
+		* (0.9 + math.random() * 0.2)
+	task.spawn(function()
+		save_internal(state, "autosave", nil, nil)
+		sync_public(record)
+	end)
+end
+
+scheduler_activation.run_unscheduled_messaging = function(state: InternalState, now: number)
+	if state.state == "active"
+		and state.options.on_message ~= nil
+		and messaging_enabled(state)
+		and state.message_subscription == nil
+		and now >= state.next_message_subscribe
+	then
+		subscribe_record(state)
+	end
+end
+
+scheduler_activation.run_unscheduled_queue_poll = function(record: Record, state: InternalState, now: number)
+	if state.state ~= "active"
+		or state.options.durable_queue_enabled == false
+		or state.options.on_queue_message == nil
+		or state.queue_busy
+		or not (state.queue_hint or now >= state.next_queue_poll)
+	then
+		return
+	end
+	state.queue_hint = false
+	state.next_queue_poll = now + (state.options.queue_poll_interval or DEFAULT_QUEUE_POLL_INTERVAL)
+	task.spawn(function()
+		process_queue_internal(state, 4)
+		sync_public(record)
+	end)
+end
+
+scheduler_activation.run_unscheduled_record_work = function(record: Record, state: InternalState, now: number)
+	local takeover_handled = scheduler_activation.run_unscheduled_takeover(record, state)
+	if not takeover_handled
+		and not scheduler_activation.run_unscheduled_renewal(record, state, now)
+	then
+		scheduler_activation.run_unscheduled_autosave(record, state, now)
+	end
+	scheduler_activation.run_unscheduled_messaging(state, now)
+	scheduler_activation.run_unscheduled_queue_poll(record, state, now)
+end
+scheduler_activation.prepare_durability_first_deadline = function(state: InternalState, now: number)
+	if state.options.durability_mode ~= "durability_first"
+		or state.change_sequence == state.saved_change_sequence
+		or state.dirty_since_local == nil
+		or state.busy
+		or state.queue_busy
+	then
+		return
+	end
+	local max_dirty_age = state.options.max_dirty_age_seconds
+		or (state.options.autosave_interval or DEFAULT_AUTOSAVE_INTERVAL) * 2
+	local urgent_save_at = state.dirty_since_local + max_dirty_age * 0.5
+	state.next_autosave = math.min(state.next_autosave, urgent_save_at)
+end
+
+scheduler_activation.process_active_record = function(record: Record, state: InternalState)
+	scheduler_activation.refresh_durability_risk(state)
+	if state.state ~= "active" then
+		return
+	end
+	local now = now_local()
+	scheduler_activation.prepare_durability_first_deadline(state, now)
+	if scheduler_enabled then
+		run_scheduled_record_work(record, state, now)
+	else
+		scheduler_activation.run_unscheduled_record_work(record, state, now)
+	end
+end
+
+scheduler_activation.process_recovery_record = function(record: Record, state: InternalState)
+	scheduler_activation.refresh_durability_risk(state)
+	if state.state ~= "unknown" or state.pending_operation == nil then
+		return
+	end
+	local now = now_local()
+	if scheduler_enabled then
+		run_scheduled_recovery(record, state, now)
+	elseif not recovery_in_flight and not state.busy and now >= state.next_reconciliation then
+		recovery_in_flight = true
+		state.next_reconciliation = now + 0.5
+		task.spawn(function()
+			reconcile_unknown_internal(state)
+			sync_public(record)
+			recovery_in_flight = false
+		end)
+	end
+end
+
 local function start_scheduler()
-	if scheduler_started then return end
+	if scheduler_started then
+		return
+	end
 	scheduler_started = true
 	task.spawn(function()
 		while not closing do
 			for record in active_records do
 				local state = private[record]
-				if state ~= nil and (state.state :: SessionState) == "active" then
-					local now = now_local()
-					if scheduler_enabled then
-						run_scheduled_record_work(record, state, now)
-					else
-						local handled_takeover = false
-						if state.takeover_requested and not state.busy and not state.queue_busy then
-							complete_deferred_takeover(state)
-							sync_public(record)
-							handled_takeover = true
-						end
-						if not handled_takeover and state.state == "active"
-							and not state.busy and not state.queue_busy and now >= state.next_renewal
-						then
-							state.next_renewal = now + (state.options.lease_renewal or DEFAULT_LEASE_RENEWAL)
-							task.spawn(function()
-								renew_internal(state)
-								sync_public(record)
-							end)
-						elseif not handled_takeover and state.state == "active"
-							and not state.busy and not state.queue_busy and now >= state.next_autosave
-						then
-							state.next_autosave = now + (state.options.autosave_interval or DEFAULT_AUTOSAVE_INTERVAL) * (0.9 + math.random() * 0.2)
-							task.spawn(function()
-								save_internal(state, "autosave", nil, nil)
-								sync_public(record)
-							end)
-						end
-						if state.state == "active"
-							and state.options.on_message ~= nil
-							and messaging_enabled(state)
-							and state.message_subscription == nil
-							and now >= state.next_message_subscribe
-						then subscribe_record(state) end
-						if state.state == "active"
-							and state.options.durable_queue_enabled ~= false
-							and state.options.on_queue_message ~= nil
-							and not state.queue_busy
-							and (state.queue_hint or now >= state.next_queue_poll)
-						then
-							state.queue_hint = false
-							state.next_queue_poll = now + (state.options.queue_poll_interval or DEFAULT_QUEUE_POLL_INTERVAL)
-							task.spawn(function()
-								process_queue_internal(state, 4)
-								sync_public(record)
-							end)
-						end
-					end
+				if state ~= nil then
+					scheduler_activation.process_active_record(record, state)
 				end
 			end
 			for record in recovery_records do
 				local state = private[record]
-				if state ~= nil and state.state == "unknown" and state.pending_operation ~= nil then
-					local now = now_local()
-					if scheduler_enabled then
-						run_scheduled_recovery(record, state, now)
-					elseif not recovery_in_flight and not state.busy and now >= state.next_reconciliation then
-						recovery_in_flight = true
-						state.next_reconciliation = now + 0.5
-						task.spawn(function()
-							reconcile_unknown_internal(state)
-							sync_public(record)
-							recovery_in_flight = false
-						end)
-					end
+				if state ~= nil then
+					scheduler_activation.process_recovery_record(record, state)
 				end
 			end
-			if scheduler_enabled then scheduler_dispatcher:Kick() end
+			if scheduler_enabled then
+				scheduler_dispatcher:Kick()
+			end
 			task.wait(SCHEDULER_STEP)
 		end
 	end)
 end
-
 RecordStore.shutdown = function()
 	if shutdown_started then
 		return
@@ -14041,8 +17354,2174 @@ RecordStore.shutdown = function()
 		task.wait(0.05)
 	end
 end
+	return { start = start_scheduler }
+end)())
 
 RecordStore._internals = {}
+RecordStore._internals.transact = (function()
+	local protocol = prepared_envelope_cache._sidecar_protocol
+	local DEFAULT_RECEIPT_RETENTION_SECONDS = 30 * 24 * 60 * 60
+	local MAX_RECEIPT_RETENTION_SECONDS = 365 * 24 * 60 * 60
+	local MAX_TRANSACTION_RESULT_BYTES = 4096
+	local MAX_OUTBOX_BATCH_EVENTS = 16
+
+	local function read_receipt(envelope: Envelope, kind: string, operation_id: string): OperationReceipt?
+		local sidecars = envelope.sidecars
+		if sidecars == nil then return nil end
+		local collection = if kind == "inbox" then sidecars.inbox_receipts else sidecars.transaction_receipts
+		return collection[operation_id]
+	end
+
+	local function canonical_request(
+		state: InternalState,
+		kind: string,
+		request: JsonValue
+	): (string?, string?)
+		local encoded, encode_error = protocol.canonicalize({
+			store_name = state.name,
+			scope = state.scope,
+			profile_key = state.key,
+			operation_kind = kind,
+			request = request,
+		})
+		if encoded == nil then return nil, encode_error end
+		if #encoded > 16_384 then return nil, "canonical transaction request exceeds 16384 bytes" end
+		return encoded, nil
+	end
+
+	local function run_reducer(
+		reducer: TransactionReducer,
+		current_data: JsonValue,
+		input: JsonValue?
+	): (JsonValue?, JsonValue?, string?)
+		local resumed_value: JsonValue? = nil
+		local resumed_result: JsonValue? = nil
+		local callback_error: string? = nil
+		local thread = coroutine.create(function()
+			local callback_ok, next_data, result = pcall(reducer, current_data, input)
+			if not callback_ok then
+				callback_error = tostring(next_data)
+				return
+			end
+			resumed_value = next_data
+			resumed_result = result
+		end)
+		local resume_ok, resume_error = coroutine.resume(thread)
+		if not resume_ok then
+			return nil, nil, tostring(resume_error)
+		end
+		if coroutine.status(thread) ~= "dead" then
+			coroutine.close(thread)
+			return nil, nil, "transaction reducer must not yield"
+		end
+		if callback_error ~= nil then return nil, nil, callback_error end
+		return resumed_value, resumed_result, nil
+	end
+
+	local function prepare_outbox_events(
+		state: InternalState,
+		operation_id: string,
+		event_specs: { OutboxEventSpec }?
+	): ({ OutboxEventRecord }?, string?)
+		if event_specs == nil or type(event_specs) ~= "table" then
+			return nil, "outbox events must be a table"
+		end
+		local count = #event_specs
+		if count < 1 or count > MAX_OUTBOX_BATCH_EVENTS then
+			return nil, "outbox batch must contain 1 to " .. tostring(MAX_OUTBOX_BATCH_EVENTS) .. " events"
+		end
+		local seen = 0
+		for key in pairs(event_specs) do
+			if type(key) ~= "number" or not math.isfinite(key) or math.floor(key) ~= key or key < 1 or key > count then
+				return nil, "outbox events must be a dense array"
+			end
+			seen += 1
+		end
+		if seen ~= count then return nil, "outbox events must be a dense array" end
+		local source_identity, source_error = protocol.canonicalize({
+			state.name, state.scope, state.key, operation_id,
+		})
+		if source_identity == nil then return nil, source_error end
+		local prepared: { OutboxEventRecord } = {}
+		for ordinal, raw_event in ipairs(event_specs) do
+			if type(raw_event) ~= "table" then return nil, "outbox event must be a table" end
+			local event = raw_event :: OutboxEventSpec
+			local valid_target, target_error = validate_store_identity(
+				event.target_store, event.target_scope, event.target_key
+			)
+			if not valid_target then return nil, "outbox destination is invalid: " .. tostring(target_error) end
+			if type(event.type) ~= "string" or event.type == "" or #event.type > 100 then
+				return nil, "outbox event type must be 1 to 100 characters"
+			end
+			if type(event.payload_version) ~= "number" or not math.isfinite(event.payload_version)
+				or math.floor(event.payload_version) ~= event.payload_version or event.payload_version < 1 then
+				return nil, "outbox payload_version must be a positive integer"
+			end
+			if event.data == nil then return nil, "outbox event data cannot be nil" end
+			local payload = copy_value(event.data)
+			if payload == nil then return nil, "outbox event payload is invalid" end
+			local payload_ok, payload_error = validate_serialized_size(payload)
+			if not payload_ok then return nil, "outbox payload is invalid: " .. tostring(payload_error) end
+			if event.target_user_id ~= nil and (type(event.target_user_id) ~= "number"
+				or not math.isfinite(event.target_user_id) or math.floor(event.target_user_id) ~= event.target_user_id
+				or event.target_user_id < 1 or event.target_user_id > 9007199254740991) then
+				return nil, "outbox target_user_id must be a positive safe integer"
+			end
+			if event.correlation_id ~= nil and (type(event.correlation_id) ~= "string" or #event.correlation_id > 256) then
+				return nil, "outbox correlation_id must be a string of at most 256 bytes"
+			end
+			if event.causation_id ~= nil and (type(event.causation_id) ~= "string" or #event.causation_id > 256) then
+				return nil, "outbox causation_id must be a string of at most 256 bytes"
+			end
+			local request_identity, identity_error = protocol.canonicalize({
+				type = event.type,
+				payload_version = event.payload_version,
+				payload = payload,
+				destination_store_name = event.target_store,
+				destination_scope = event.target_scope,
+				destination_profile_key = event.target_key,
+				destination_user_id = event.target_user_id,
+				correlation_id = event.correlation_id,
+				causation_id = event.causation_id,
+			})
+			if request_identity == nil or #request_identity > 16_384 then
+				return nil, identity_error or "outbox request identity exceeds 16384 bytes"
+			end
+			local stable_source = source_identity .. ":" .. operation_id .. ":" .. tostring(ordinal)
+			local stable_id = protocol.stable_event_id(stable_source, ordinal)
+			prepared[#prepared + 1] = {
+				id = stable_id,
+				event_type = event.type,
+				payload_version = event.payload_version,
+				request_identity = request_identity,
+				payload = payload,
+				destination_store_name = event.target_store,
+				destination_scope = event.target_scope,
+				destination_profile_key = event.target_key,
+				destination_user_id = event.target_user_id,
+				correlation_id = event.correlation_id or operation_id,
+				causation_id = event.causation_id or stable_id,
+				created_at = 0,
+				attempts = 0,
+				state = "pending",
+				last_error = nil,
+				delivered_at = nil,
+			}
+		end
+		return prepared, nil
+	end
+
+	return function(
+		self: Record,
+		kind: string,
+		operation_id: string,
+		reducer: TransactionReducer,
+		options: TransactionOptions?,
+		input_type: string?,
+		input_payload: JsonValue?,
+		event_specs: { OutboxEventSpec }?
+	): (JsonValue?, TransactionStatus, string?)
+		local state = private[self]
+		if state == nil then return nil, "invalid", "record does not exist" end
+		if state.options.transactional_operations_enabled ~= true then
+			return nil, "disabled", "transactional operations are disabled; opt in only after all active servers run a v3-aware build"
+		end
+		if kind ~= "transaction" and kind ~= "inbox" and kind ~= "outbox" then
+			return nil, "invalid", "transaction operation kind is invalid"
+		end
+		if type(operation_id) ~= "string" or operation_id == "" or #operation_id > 256 then
+			return nil, "invalid", "operation_id must be 1 to 256 bytes"
+		end
+		if kind == "outbox" and #operation_id > 64 then
+			return nil, "invalid", "outbox commit_key must be at most 64 bytes"
+		end
+		if type(reducer) ~= "function" then return nil, "invalid", "reducer must be a function" end
+		if options ~= nil and type(options) ~= "table" then return nil, "invalid", "transaction options must be a table" end
+		if options ~= nil then
+			for option_name in pairs(options) do
+				if option_name ~= "request" and option_name ~= "receipt_retention_seconds" then
+					return nil, "invalid", "unsupported transaction option: " .. tostring(option_name)
+				end
+			end
+		end
+		if kind == "transaction" and (options == nil or options.request == nil) then
+			return nil, "invalid", "TransactAsync requires a canonical request value"
+		end
+		if kind ~= "transaction" and options ~= nil and options.request ~= nil then
+			return nil, "invalid", "request is derived from the inbox or outbox arguments"
+		end
+		local retention = if options ~= nil and options.receipt_retention_seconds ~= nil
+			then options.receipt_retention_seconds else DEFAULT_RECEIPT_RETENTION_SECONDS
+		if type(retention) ~= "number" or not math.isfinite(retention)
+			or retention < 1 or retention > MAX_RECEIPT_RETENTION_SECONDS then
+			return nil, "invalid", "receipt_retention_seconds must be from 1 to 31536000"
+		end
+		if kind == "inbox" then
+			if type(input_type) ~= "string" or input_type == "" or #input_type > 100 then
+				return nil, "invalid", "inbox message_type must be 1 to 100 characters"
+			end
+			if input_payload == nil then return nil, "invalid", "inbox payload cannot be nil" end
+			local payload_ok, payload_error = validate_serialized_size(input_payload)
+			if not payload_ok then return nil, "validation", tostring(payload_error) end
+		elseif kind == "outbox" then
+			if type(input_type) ~= "string" or input_type == "" or #input_type > 100 then
+				return nil, "invalid", "outbox command_type must be 1 to 100 characters"
+			end
+			if input_payload == nil then return nil, "invalid", "outbox command payload cannot be nil" end
+			local payload_ok, payload_error = validate_serialized_size(input_payload)
+			if not payload_ok then return nil, "validation", tostring(payload_error) end
+		end
+
+		local prepared_events: { OutboxEventRecord }? = nil
+		if kind == "outbox" then
+			local prepared, prepare_error = prepare_outbox_events(state, operation_id, event_specs)
+			if prepared == nil then return nil, "invalid", prepare_error end
+			prepared_events = prepared
+		end
+		local request: JsonValue
+		if kind == "transaction" then
+			request = { kind = kind, request = copy_value((options :: TransactionOptions).request :: JsonValue) }
+		elseif kind == "inbox" then
+			request = { kind = kind, message_type = input_type :: string, payload = copy_value(input_payload :: JsonValue) }
+		else
+			request = {
+				kind = kind,
+				command_type = input_type :: string,
+				payload = copy_value(input_payload :: JsonValue),
+				events = copy_value(prepared_events :: { OutboxEventRecord }) :: JsonValue,
+			}
+		end
+		local request_identity, identity_error = canonical_request(state, kind, request)
+		if request_identity == nil then return nil, "invalid", identity_error end
+		if #request_identity > 16_384 then return nil, "invalid", "canonical request identity exceeds 16384 bytes" end
+
+		local was_unknown = state.state == "unknown"
+		if state.retired or closing or state.shutdown or state.tombstoned then
+			return nil, "fenced", "record is retired, closing, or tombstoned"
+		end
+		if state.pending_operation ~= nil then
+			return nil, "unknown", "a durable save/renew/release outcome is still unresolved"
+		end
+		if was_unknown then
+			local pending = state.pending_transaction
+			if pending == nil then return nil, "unknown", "record has an unrelated unresolved durable outcome" end
+			if pending.operation_id ~= operation_id or pending.kind ~= kind then
+				return nil, "unknown", "resolve the outstanding transaction before starting another operation"
+			end
+			if pending.request_identity ~= request_identity then
+				return nil, "conflict", "operation_id was already used for a different request while its outcome was unknown"
+			end
+		elseif state.state ~= "active" then
+			return nil, "fenced", "record must have an active session"
+		end
+		if state.busy or state.queue_busy then return nil, "retryable", "record is busy" end
+		if state.token == nil then return nil, "fenced", "record has no active session token" end
+
+		local deadline, deadline_error = resolve_operation_deadline(state.options.operation_deadline)
+		if deadline == nil then return nil, "invalid", deadline_error end
+		if not was_unknown and state.change_sequence ~= state.saved_change_sequence then
+			local flush_code, flush_message = save_internal(state, "transaction-prerequisite", deadline, nil)
+			if flush_code ~= "saved" then
+				local status: TransactionStatus = if flush_code == "unknown" then "unknown" else "retryable"
+				return nil, status, flush_message or "dirty profile data could not be flushed before transaction"
+			end
+		end
+		if state.state ~= "active" and not was_unknown then return nil, "fenced", "record is no longer active" end
+		local token = state.token
+		if token == nil then return nil, "fenced", "record has no active session token" end
+		local generation = state.generation
+		local expected_revision = state.revision
+		local write_id = HttpService:GenerateGUID(false)
+		local old_data = copy_value(state.data)
+		state.busy = true
+		state.state = "saving"
+		state.current_operation_id = write_id
+		local attempts = math.clamp(math.floor(state.options.retry_attempts or DEFAULT_RETRY_ATTEMPTS), 1, MAX_RETRY_ATTEMPTS)
+		local confirmed: Envelope? = nil
+		local confirmed_info: BackendInfo? = nil
+		local final_result: JsonValue? = nil
+		local final_status: TransactionStatus? = nil
+		local final_message: string? = nil
+
+		for attempt = 1, attempts do
+			if now_local() >= deadline then
+				final_status = "retryable"
+				final_message = "transaction deadline exceeded"
+				break
+			end
+			local decision = "not_started"
+			local decision_message: string? = nil
+			local decision_result: JsonValue? = nil
+			local returned, info, update_code, update_message = backend_update(state.backend, function(raw, info_before)
+				decision = "not_started"
+				decision_message = nil
+				decision_result = nil
+				local transform_time = session_now_unix(state.backend.mock)
+				local envelope, parse_error, current_format = parse_envelope(raw)
+				if not current_format or envelope == nil then
+					decision = if parse_error == "future implementation version" then "fenced" else "corrupt"
+					decision_message = parse_error or "durable envelope is invalid"
+					return nil, nil, nil
+				end
+				if envelope.tombstone ~= nil then
+					decision = "fenced"
+					decision_message = "profile is tombstoned"
+					return nil, nil, nil
+				end
+				if envelope.schema_version > state.options.schema_version then
+					decision = "fenced"
+					decision_message = "durable schema is newer than this server supports"
+					return nil, nil, nil
+				end
+				if envelope.schema_version ~= state.options.schema_version then
+					decision = "retryable"
+					decision_message = "durable schema changed; reopen the profile before transacting"
+					return nil, nil, nil
+				end
+				if not matches_session(envelope, token :: string, generation) then
+					decision = "fenced"
+					decision_message = "durable session no longer matches the active fencing generation"
+					return nil, nil, nil
+				end
+				local session = envelope.session
+				if session == nil or session.lease_until <= transform_time then
+					decision = "fenced"
+					decision_message = "durable session lease has expired"
+					return nil, nil, nil
+				end
+				if envelope.revision ~= expected_revision then
+					local old_receipt = read_receipt(envelope, kind, operation_id)
+					if old_receipt ~= nil and old_receipt.expires_at > transform_time then
+						if old_receipt.request_identity ~= request_identity then
+							decision = "conflict"
+							decision_message = "operation_id has already been committed with a different request"
+							return nil, nil, nil
+						end
+						decision = "duplicate"
+						decision_result = if old_receipt.result_present then copy_value(old_receipt.result) else nil
+							return nil, nil, nil
+					end
+					decision = "conflict"
+					decision_message = "durable revision changed unexpectedly"
+					return nil, nil, nil
+				end
+
+				local sidecars = protocol.clone(envelope.sidecars) or protocol.empty()
+				local receipts = if kind == "inbox" then sidecars.inbox_receipts else sidecars.transaction_receipts
+				for receipt_id, receipt in pairs(receipts) do
+					if receipt.expires_at <= transform_time then receipts[receipt_id] = nil end
+				end
+				local previous_receipt = receipts[operation_id]
+				if previous_receipt ~= nil then
+					if previous_receipt.request_identity ~= request_identity then
+						decision = "conflict"
+						decision_message = "operation_id has already been used for a different request"
+						return nil, nil, nil
+					end
+					decision = "duplicate"
+					decision_result = if previous_receipt.result_present then copy_value(previous_receipt.result) else nil
+					return nil, nil, nil
+				end
+			local receipt_count = 0
+				for _ in pairs(receipts) do receipt_count += 1 end
+				local max_receipts = if kind == "inbox" then 256 else 256
+				if receipt_count >= max_receipts then
+					decision = "capacity"
+					decision_message = "durable receipt capacity is full; unexpired receipts are never evicted"
+					return nil, nil, nil
+				end
+
+				local working_data = if envelope.data ~= nil then copy_value(envelope.data) else nil
+				if working_data == nil then
+					decision = "validation"
+					decision_message = "profile data is missing"
+					return nil, nil, nil
+				end
+				local next_data, reducer_result, reducer_error = run_reducer(
+					reducer,
+					working_data :: JsonValue,
+					if kind == "transaction" then nil else copy_value(input_payload)
+				)
+				if reducer_error ~= nil then
+					decision = "validation"
+					decision_message = reducer_error
+					return nil, nil, nil
+				end
+				if next_data == nil then
+					decision = "validation"
+					decision_message = "transaction reducer must return non-nil profile data"
+					return nil, nil, nil
+				end
+				local data_valid, data_error = validate_value(next_data, state.options.validator)
+				if not data_valid then
+					decision = "validation"
+					decision_message = data_error or "transaction data is invalid"
+					return nil, nil, nil
+				end
+				local frozen_data = copy_value(next_data)
+				if frozen_data == nil then
+					decision = "validation"
+					decision_message = "transaction data could not be copied"
+					return nil, nil, nil
+				end
+				local data_ok, data_message = validate_serialized_size(frozen_data)
+				if not data_ok then
+					decision = "validation"
+					decision_message = data_message
+					return nil, nil, nil
+				end
+				local frozen_result: JsonValue? = nil
+				local result_present = reducer_result ~= nil
+				if result_present then
+					frozen_result = copy_value(reducer_result)
+					if frozen_result == nil then
+						decision = "validation"
+						decision_message = "transaction result is invalid"
+						return nil, nil, nil
+					end
+					local result_ok, result_message = validate_serialized_size(frozen_result)
+					if not result_ok then
+						decision = "validation"
+						decision_message = result_message or "transaction result is invalid"
+						return nil, nil, nil
+					end
+					local result_encoded_ok, result_encoded = pcall(function()
+						return HttpService:JSONEncode(frozen_result)
+					end)
+					if not result_encoded_ok or type(result_encoded) ~= "string" or #result_encoded > MAX_TRANSACTION_RESULT_BYTES then
+						decision = "validation"
+						decision_message = "transaction result exceeds the 4096-byte limit"
+						return nil, nil, nil
+					end
+				end
+
+				local receipt: OperationReceipt = {
+					request_identity = request_identity,
+					result = frozen_result,
+					result_present = result_present,
+					committed_revision = envelope.revision + 1,
+					created_at = transform_time,
+					expires_at = transform_time + retention,
+				}
+				receipts[operation_id] = receipt
+				if kind == "outbox" then
+					local events = prepared_events :: { OutboxEventRecord }
+					for ordinal, prepared in ipairs(events) do
+						local prior = sidecars.outbox_events[prepared.id]
+						if prior ~= nil then
+							decision = if prior.request_identity == prepared.request_identity then "duplicate" else "conflict"
+							decision_message = if prior.request_identity == prepared.request_identity
+								then "outbox event already exists after its transaction receipt expired"
+								else "stable outbox event ID collides with a different request"
+							return nil, nil, nil
+						end
+						if sidecars.outbox_events[prepared.id] == nil then
+							local stored_event = copy_value(prepared) :: OutboxEventRecord
+						stored_event.created_at = transform_time
+						sidecars.outbox_events[prepared.id] = stored_event
+						end
+					end
+				end
+				local sidecars_valid, sidecars_error = protocol.validate(sidecars)
+				if not sidecars_valid then
+					decision = if string.find(sidecars_error or "", "capacity", 1, true) ~= nil
+					or string.find(sidecars_error or "", "encoded-size limit", 1, true) ~= nil
+					then "capacity" else "validation"
+					decision_message = sidecars_error
+					return nil, nil, nil
+				end
+				local next_envelope: Envelope = {
+					implementation_version = protocol.transaction_version,
+					schema_version = envelope.schema_version,
+					revision = envelope.revision + 1,
+					fencing_generation = envelope.fencing_generation,
+					created_at = envelope.created_at,
+					updated_at = transform_time,
+					data = frozen_data,
+					user_ids = clone_user_ids(envelope.user_ids or state.user_ids),
+					tombstone = nil,
+					session = {
+						token = session.token,
+						generation = session.generation,
+						job_id = session.job_id,
+						place_id = session.place_id,
+						acquired_at = session.acquired_at,
+						lease_until = transform_time + (state.options.lease_duration or DEFAULT_LEASE_DURATION),
+					},
+					sidecars = sidecars,
+					write_id = write_id,
+				}
+				local envelope_valid, envelope_error = validate_envelope(next_envelope)
+				if not envelope_valid then
+					decision = "validation"
+					decision_message = envelope_error
+					return nil, nil, nil
+				end
+				decision = "committed"
+				return next_envelope, next_envelope.user_ids, make_backend_metadata(state.metadata, next_envelope)
+			end, deadline, state)
+
+			if update_code ~= nil and update_code ~= "unknown" then
+				local mapped = normalize_result_code(update_code) or "unknown"
+				if mapped == "fenced" or mapped == "future_schema" then
+					final_status = "fenced"
+				elseif mapped == "corrupt" then
+					final_status = "corrupt"
+				elseif mapped == "validation" then
+					final_status = "validation"
+				elseif mapped == "invalid" then
+					final_status = "invalid"
+				elseif mapped == "unknown" then
+					final_status = "unknown"
+				else
+					final_status = "retryable"
+				end
+				final_message = update_message
+				if final_status ~= nil then break end
+			end
+			if decision == "duplicate" or decision == "conflict" or decision == "capacity" or decision == "fenced"
+				or decision == "corrupt" or decision == "retryable" or decision == "validation"
+			then
+				final_status = decision :: TransactionStatus
+				final_result = decision_result
+				final_message = decision_message
+				break
+			end
+
+			local function verify_committed(candidate: unknown, candidate_info: BackendInfo?): (boolean, TransactionStatus?)
+				local candidate_envelope, candidate_error, candidate_format = parse_envelope(candidate)
+				if not candidate_format or candidate_envelope == nil then
+					final_message = candidate_error or "transaction response was not a valid envelope"
+					return false
+				end
+				local receipt = read_receipt(candidate_envelope, kind, operation_id)
+				if receipt == nil then return false end
+				if receipt.request_identity ~= request_identity then
+					final_status = "conflict"
+					final_message = "operation_id is bound to a different durable request"
+					return false, "conflict" :: TransactionStatus
+				end
+				if not matches_session(candidate_envelope, token :: string, generation)
+					or candidate_envelope.session == nil
+					or candidate_envelope.session.lease_until <= session_now_unix(state.backend.mock)
+				then
+					final_status = "fenced"
+					final_message = "transaction receipt exists but the active session fence no longer matches"
+					return false, "fenced" :: TransactionStatus
+				end
+				if receipt.committed_revision > candidate_envelope.revision then
+					final_status = "unknown"
+					final_message = "durable transaction receipt refers to a future revision"
+					return false, "unknown" :: TransactionStatus
+				end
+				confirmed = candidate_envelope
+				confirmed_info = candidate_info
+				final_result = if receipt.result_present then copy_value(receipt.result) else nil
+				return true, nil
+			end
+
+			if decision == "duplicate" then
+				final_status = "duplicate"
+				final_result = decision_result
+				final_message = nil
+				break
+			end
+			if returned ~= nil then
+				local verified, verification_status = verify_committed(returned, info)
+				if verified then
+					final_status = "committed"
+					break
+				end
+				if verification_status ~= nil then
+					final_status = verification_status :: TransactionStatus
+					break
+				end
+			end
+
+			local raw_after, info_after, read_code, read_message = backend_get(state.backend, false, deadline, state)
+			if read_code == nil and raw_after ~= nil then
+				local verified, verification_status = verify_committed(raw_after, info_after)
+				if verified then
+					final_status = "committed"
+					break
+				end
+				if verification_status ~= nil then
+					final_status = verification_status :: TransactionStatus
+					break
+				end
+				local latest, latest_error, latest_format = parse_envelope(raw_after)
+				if latest_format and latest ~= nil and latest.revision ~= expected_revision then
+					final_status = "conflict"
+					final_message = latest_error or "durable revision advanced without the expected transaction receipt"
+					break
+				end
+			elseif read_code ~= nil then
+				final_message = read_message or update_message or "transaction outcome remains unknown"
+			end
+			if attempt < attempts and now_local() < deadline then
+				task.wait(math.min(retry_delay(attempt), math.max(0, deadline - now_local())))
+			else
+				final_status = "unknown"
+				final_message = final_message or update_message or "transaction outcome remains unknown; retry only with the same operation ID and request"
+			end
+		end
+
+		if confirmed ~= nil then
+			local confirmed_receipt = read_receipt(confirmed, kind, operation_id)
+			if confirmed_receipt == nil or confirmed_receipt.request_identity ~= request_identity then
+				state.busy = false
+				state.state = "unknown"
+				state.pending_transaction = { operation_id = operation_id, kind = kind :: string, request_identity = request_identity }
+				state.next_reconciliation = now_local() + 0.25
+				return nil, "unknown", "transaction write was observed without a matching durable receipt"
+			end
+			update_local_from_envelope(state, confirmed, confirmed_info)
+			state.saved_change_sequence = state.change_sequence
+			state.dirty_since_local = nil
+			state.last_saved = make_durable_snapshot(confirmed, confirmed_info, "transaction:" .. kind)
+			state.last_successful_write_local = now_local()
+			state.next_autosave = now_local() + (state.options.autosave_interval or DEFAULT_AUTOSAVE_INTERVAL)
+			state.pending_transaction = nil
+			state.next_reconciliation = math.huge
+			state.last_reconciliation_category = nil
+			state.busy = false
+			state.state = "active"
+			state.current_operation_id = nil
+			state.last_error = nil
+			if kind == "inbox" or kind == "outbox" or kind == "transaction" then
+				enqueue_change_observation(state, old_data, state.data, write_id, kind)
+			end
+			complete_deferred_takeover(state)
+			return final_result, final_status or "committed", nil
+		end
+
+		if final_status == "duplicate" then
+			state.busy = false
+			state.state = "active"
+			state.current_operation_id = nil
+			state.pending_transaction = nil
+			complete_deferred_takeover(state)
+			return final_result, "duplicate", final_message
+		end
+		local status: TransactionStatus = final_status or "unknown"
+		state.busy = false
+		state.current_operation_id = nil
+		if was_unknown or status == "unknown" then
+			state.state = "unknown"
+			state.pending_transaction = { operation_id = operation_id, kind = kind :: string, request_identity = request_identity }
+			state.next_reconciliation = now_local() + 0.25
+			state.last_reconciliation_category = "transaction_outcome_unknown"
+		else
+			state.state = "active"
+			state.pending_transaction = nil
+		end
+		return nil, status, final_message
+	end
+end)();
+
+(RecordStore._internals :: { [string]: any }).get_transaction_status = function(
+	self: Record,
+	operation_id: string,
+	request: JsonValue
+): TransactionReceiptStatus
+	local state = private[self]
+	if state == nil then return { code = "invalid", message = "record does not exist" } end
+	if state.options.transactional_operations_enabled ~= true then
+		return { code = "disabled", message = "transactional operations are disabled for this Record" }
+	end
+	if type(operation_id) ~= "string" or operation_id == "" or #operation_id > 256 then
+		return { code = "invalid", message = "operation_id must be 1 to 256 bytes" }
+	end
+	if request == nil then return { code = "invalid", message = "request is required for identity-bound status lookup" } end
+
+	local copied_request = copy_value(request)
+	if copied_request == nil then return { code = "invalid", message = "request could not be copied" } end
+	local request_material: JsonValue = { kind = "transaction", request = copied_request }
+	local protocol = prepared_envelope_cache._sidecar_protocol
+	local request_identity, identity_error = protocol.canonicalize({
+		store_name = state.name,
+		scope = state.scope,
+		profile_key = state.key,
+		operation_kind = "transaction",
+		request = request_material,
+	})
+	if request_identity == nil then return { code = "invalid", message = identity_error } end
+	if #request_identity > 16_384 then
+		return { code = "invalid", message = "canonical transaction request exceeds 16384 bytes" }
+	end
+
+	local deadline, deadline_error = resolve_operation_deadline(state.options.operation_deadline)
+	if deadline == nil then return { code = "invalid", message = deadline_error } end
+	local raw, _, read_code, read_message = backend_get(state.backend, false, deadline, nil)
+	if read_code ~= nil then
+		local normalized = normalize_result_code(read_code)
+		local code: TransactionReceiptStatusCode = if normalized == "legacy" then "legacy"
+			elseif normalized == "future_schema" then "future_schema"
+			elseif normalized == "corrupt" then "corrupt"
+			elseif normalized == "not_found" then "not_found"
+			elseif normalized == "disabled" then "disabled"
+			else "unknown"
+		return { code = code, message = read_message or "durable transaction receipt could not be read" }
+	end
+	if raw == nil then return { code = "not_found", message = "profile envelope does not exist" } end
+
+	local envelope, parse_error, current_format = parse_envelope(raw)
+	if not current_format then
+		local code: TransactionReceiptStatusCode = if parse_error == "legacy payload" then "legacy"
+			elseif parse_error == "future implementation version" then "future_schema"
+			else "corrupt"
+		return { code = code, message = parse_error or "durable profile format is unsupported" }
+	end
+	if envelope == nil then return { code = "corrupt", message = parse_error or "durable profile envelope is invalid" } end
+	if envelope.sidecars == nil or envelope.implementation_version < protocol.transaction_version then
+		return { code = "unsupported", message = "profile has no transactional receipt sidecars" }
+	end
+
+	local receipt = envelope.sidecars.transaction_receipts[operation_id]
+	if receipt == nil then return { code = "not_found", message = "transaction receipt was not found" } end
+	if receipt.request_identity ~= request_identity then
+		return {
+			code = "conflict",
+			message = "operation_id is bound to a different durable request",
+			committed_revision = receipt.committed_revision,
+			created_at = receipt.created_at,
+			expires_at = receipt.expires_at,
+		}
+	end
+	if receipt.expires_at <= session_now_unix(state.backend.mock) then
+		return {
+			code = "expired",
+			message = "transaction receipt is past its retention deadline",
+			committed_revision = receipt.committed_revision,
+			created_at = receipt.created_at,
+			expires_at = receipt.expires_at,
+		}
+	end
+	if receipt.committed_revision > envelope.revision then
+		return {
+			code = "unknown",
+			message = "transaction receipt refers to a future profile revision",
+			committed_revision = receipt.committed_revision,
+			created_at = receipt.created_at,
+			expires_at = receipt.expires_at,
+		}
+	end
+	if receipt.result_present and receipt.result == nil then
+		return { code = "corrupt", message = "transaction result is missing from its durable receipt" }
+	end
+	return {
+		code = "committed",
+		result = if receipt.result_present then copy_value(receipt.result) else nil,
+		result_present = receipt.result_present,
+		committed_revision = receipt.committed_revision,
+		created_at = receipt.created_at,
+		expires_at = receipt.expires_at,
+	}
+end
+
+prepared_envelope_cache._outbox_engine = (function()
+	local protocol = prepared_envelope_cache._sidecar_protocol
+	local MAX_OUTBOX_API_BATCH = 16
+	local DEFAULT_OUTBOX_API_BATCH = 8
+	local DEFAULT_OUTBOX_PRUNE_BATCH = 16
+
+	local function normalize_limit(value: number?, default_value: number): (number?, string?)
+		local selected: unknown = if value == nil then default_value else value
+		if type(selected) ~= "number" or not math.isfinite(selected)
+			or math.floor(selected) ~= selected or selected < 1 or selected > MAX_OUTBOX_API_BATCH
+		then
+			return nil, "max_events must be an integer from 1 to " .. tostring(MAX_OUTBOX_API_BATCH)
+		end
+		return selected :: number, nil
+	end
+
+	local function parse_error_code(message: string?): ResultCode
+		local detail = string.lower(message or "")
+		if string.find(detail, "future") ~= nil or string.find(detail, "newer implementation") ~= nil then
+			return "future_schema" :: ResultCode
+		end
+		if string.find(detail, "legacy") ~= nil then
+			return "legacy" :: ResultCode
+		end
+		return "corrupt" :: ResultCode
+	end
+
+	local function sanitize_error(message: string?): string
+		local safe = string.gsub(message or "destination did not confirm durable acceptance", "[^ -~]", "?")
+		return string.sub(safe, 1, MAX_QUEUE_ERROR_LENGTH)
+	end
+
+	local function to_public_event(event: OutboxEventRecord): OutboxEvent?
+		local payload = copy_value(event.payload)
+		if payload == nil then return nil end
+		return {
+			EventId = event.id,
+			EventType = event.event_type,
+			PayloadVersion = event.payload_version,
+			Payload = payload,
+			DestinationStoreName = event.destination_store_name,
+			DestinationScope = event.destination_scope,
+			DestinationProfileKey = event.destination_profile_key,
+			DestinationUserId = event.destination_user_id,
+			CorrelationId = event.correlation_id,
+			CausationId = event.causation_id,
+			CreatedAt = event.created_at,
+			Attempts = event.attempts,
+			State = event.state,
+			LastError = event.last_error,
+			DeliveredAt = event.delivered_at,
+			DestinationReceiptId = event.destination_receipt_id,
+		}
+	end
+
+	local function get_entries(
+		self: Record,
+		max_events: number?
+	): ({ OutboxEntry }, ResultCode, string?)
+		local state = private[self]
+		if state == nil or state.retired then
+			return {}, "invalid", "record does not exist or has been retired"
+		end
+		local limit, limit_error = normalize_limit(max_events, DEFAULT_OUTBOX_API_BATCH)
+		if limit == nil then return {}, "invalid", limit_error end
+		local deadline, deadline_error = resolve_operation_deadline(state.options.operation_deadline)
+		if deadline == nil then return {}, "invalid", deadline_error end
+		local raw, _, read_code, read_message = backend_get(state.backend, false, deadline, nil)
+		if read_code ~= nil then
+			return {}, normalize_result_code(read_code) or "unknown", read_message
+		end
+		if raw == nil then return {}, "not_found", "source profile does not exist" end
+
+		local envelope, parse_error, current_format = parse_envelope(raw)
+		if not current_format then return {}, parse_error_code(parse_error), parse_error end
+		if envelope == nil then return {}, "corrupt", parse_error or "source profile envelope is invalid" end
+		if envelope.sidecars == nil or envelope.implementation_version < protocol.transaction_version then
+			return {}, "success", nil
+		end
+
+		local entries: { OutboxEntry } = {}
+		for _, event in pairs(envelope.sidecars.outbox_events) do
+			if event.state == "pending" or event.state == "unknown" then
+				local copied = copy_value(event)
+				if type(copied) ~= "table" then return {}, "corrupt", "outbox event could not be copied" end
+				local stored = copied :: OutboxEventRecord
+				local public = to_public_event(stored)
+				if public == nil then return {}, "corrupt", "outbox payload could not be copied" end
+				entries[#entries + 1] = { stored = stored, public = public }
+			end
+		end
+		table.sort(entries, function(left, right)
+			if left.stored.created_at ~= right.stored.created_at then
+				return left.stored.created_at < right.stored.created_at
+			end
+			return left.stored.id < right.stored.id
+		end)
+		while #entries > limit do table.remove(entries) end
+		return entries, "success", nil
+	end
+
+	local function get(self: Record, max_events: number?): ({ OutboxEvent }, ResultCode, string?)
+		local entries: { OutboxEntry }, code: ResultCode, message: string? = get_entries(self, max_events)
+		local result: { OutboxEvent } = {}
+		for _, entry in ipairs(entries) do result[#result + 1] = entry.public end
+		return result, code, message
+	end
+
+	local function read_current_event(
+		state: InternalState,
+		event_id: string,
+		expected_request_identity: string,
+		deadline: number
+	): (OutboxEventRecord?, ResultCode?, string?)
+		local raw, _, read_code, read_message = backend_get(state.backend, false, deadline, nil)
+		if read_code ~= nil then return nil, normalize_result_code(read_code) or "unknown", read_message end
+		if raw == nil then return nil, "not_found", "source profile does not exist" end
+		local envelope, parse_error, current_format = parse_envelope(raw)
+		if not current_format then return nil, parse_error_code(parse_error), parse_error end
+		if envelope == nil then return nil, "corrupt", parse_error or "source profile envelope is invalid" end
+		if envelope.sidecars == nil or envelope.implementation_version < protocol.transaction_version then
+			return nil, "disabled", "source profile does not contain transactional sidecars"
+		end
+		local current = envelope.sidecars.outbox_events[event_id]
+		if current == nil then return nil, "not_found", "outbox event no longer exists" end
+		if current.request_identity ~= expected_request_identity then
+			return nil, "conflict", "outbox event identity changed during dispatch"
+		end
+		return current, nil, nil
+	end
+
+	local function classify_update_result(
+		state: InternalState,
+		expected_event: OutboxEventRecord,
+		target_state: "pending" | "unknown" | "delivered",
+		receipt_id: string?,
+		raw: unknown
+	): (ResultCode, string?, boolean)
+		if raw == nil then return "not_found", "source profile does not exist", false end
+		local envelope, parse_error, current_format = parse_envelope(raw)
+		if not current_format then
+			return parse_error_code(parse_error), parse_error, false
+		end
+		if envelope == nil then return "corrupt", parse_error or "source profile envelope is invalid", false end
+		if envelope.sidecars == nil or envelope.implementation_version < protocol.transaction_version then
+			return "disabled", "source profile does not contain transactional sidecars", false
+		end
+		local current = envelope.sidecars.outbox_events[expected_event.id]
+		if current == nil then return "not_found", "outbox event no longer exists", false end
+		if current.request_identity ~= expected_event.request_identity then
+			return "conflict", "outbox event identity changed during dispatch", false
+		end
+		if current.state == "delivered" then
+			if target_state == "delivered" and current.destination_receipt_id ~= receipt_id then
+				return "conflict", "event was delivered with a different destination receipt ID", false
+			end
+			return "success", nil, true
+		end
+		if current.state == "blocked" then
+			return "disabled", "outbox event is blocked pending operator review", false
+		end
+		if current.attempts > expected_event.attempts and current.state == target_state then
+			return "success", nil, false
+		end
+		return "unknown", "outbox attempt status was not durably confirmed", false
+	end
+
+	local function update_event(
+		self: Record,
+		expected_event: OutboxEventRecord,
+		target_state: "pending" | "unknown" | "delivered",
+		receipt_id: string?,
+		reason: string?
+	): (ResultCode, string?, boolean)
+		local state = private[self]
+		if state == nil or state.retired then return "invalid", "record does not exist or has been retired", false end
+		if target_state == "delivered"
+			and (type(receipt_id) ~= "string" or receipt_id == "" or #receipt_id > 256)
+		then
+			return "validation", "a confirmed delivery requires a non-empty destination receipt ID of at most 256 bytes", false
+		end
+		local deadline, deadline_error = resolve_operation_deadline(state.options.operation_deadline)
+		if deadline == nil then return "invalid", deadline_error, false end
+		local occurred_at = session_now_unix(state.backend.mock)
+		local sanitized_error = sanitize_error(reason)
+
+		local returned_raw, _, update_code, update_message = backend_update(state.backend, function(raw, info)
+			if raw == nil then return nil, nil, nil end
+			local envelope, _, current_format = parse_envelope(raw)
+			if not current_format or envelope == nil then return nil, nil, nil end
+			if envelope.sidecars == nil or envelope.implementation_version < protocol.transaction_version then
+				return nil, nil, nil
+			end
+			local sidecars = protocol.clone(envelope.sidecars)
+			if sidecars == nil then return nil, nil, nil end
+			local current = sidecars.outbox_events[expected_event.id]
+			if current == nil or current.request_identity ~= expected_event.request_identity
+				or current.state == "delivered" or current.state == "blocked"
+			then
+				return nil, nil, nil
+			end
+
+			local updated_value = copy_value(current)
+			if type(updated_value) ~= "table" then return nil, nil, nil end
+			local updated = updated_value :: OutboxEventRecord
+			updated.attempts += 1
+			updated.state = target_state
+			updated.last_error = if target_state == "delivered" then nil else sanitized_error
+			updated.destination_receipt_id = if target_state == "delivered" then receipt_id else nil
+			updated.delivered_at = if target_state == "delivered" then occurred_at else nil
+			sidecars.outbox_events[expected_event.id] = updated
+
+			local sidecars_valid = protocol.validate(sidecars)
+			if not sidecars_valid then return nil, nil, nil end
+			local raw_value = copy_value(raw)
+			if type(raw_value) ~= "table" then return nil, nil, nil end
+			(raw_value :: { [string]: any }).sidecars = sidecars
+			local raw_valid = validate_serialized_size(raw_value)
+			if not raw_valid then return nil, nil, nil end
+			return {
+				[prepared_envelope_cache] = true,
+				raw_value = raw_value,
+			}, clone_user_ids(if info ~= nil then info.UserIds else envelope.user_ids or state.user_ids),
+				clone_metadata(if info ~= nil then info.RawMetadata else state.metadata)
+		end, deadline, nil)
+
+		if update_code == "unknown" then
+			local current, read_code, read_message = read_current_event(
+				state, expected_event.id, expected_event.request_identity, deadline
+			)
+			if read_code ~= nil then return "unknown", read_message or update_message or "outbox update result is unknown", false end
+			if current == nil then return "unknown", update_message or "outbox update result is unknown", false end
+			if current.state == "delivered" then
+				if target_state == "delivered" and current.destination_receipt_id ~= receipt_id then
+					return "conflict", "event was delivered with a different destination receipt ID", false
+				end
+				return "success", nil, true
+			end
+			if current.state == target_state and current.attempts > expected_event.attempts then
+				return "success", nil, false
+			end
+			return "unknown", update_message or "outbox update result is unknown", false
+		end
+		if update_code ~= nil then
+			return normalize_result_code(update_code) or "unknown", update_message, false
+		end
+		return classify_update_result(state, expected_event, target_state, receipt_id, returned_raw)
+	end
+
+	local function dispatch(
+		self: Record,
+		dispatcher: OutboxDispatcher,
+		max_events: number?
+	): (number, ResultCode, string?)
+		if type(dispatcher) ~= "function" then return 0, "invalid", "dispatcher must be a function" end
+		local entries: { OutboxEntry }, read_code: ResultCode, read_message: string? = get_entries(self, max_events)
+		if read_code ~= "success" then return 0, read_code, read_message end
+		local delivered_count = 0
+		local failed_count = 0
+		local ambiguous = false
+		local first_error: string? = nil
+
+		for _, entry in ipairs(entries) do
+			local stored = entry.stored
+			local public = entry.public
+			local callback_ok, accepted, receipt_id = pcall(dispatcher, public)
+			local target_state: "pending" | "unknown" | "delivered"
+			local reason: string?
+			if not callback_ok then
+				target_state = "unknown"
+				reason = tostring(accepted)
+				ambiguous = true
+			elseif accepted == true then
+				if type(receipt_id) == "string" and receipt_id ~= "" and #receipt_id <= 256 then
+					target_state = "delivered"
+				else
+					target_state = "unknown"
+					reason = "destination acknowledged without a valid durable receipt ID"
+					ambiguous = true
+				end
+			else
+				target_state = "pending"
+				reason = if type(receipt_id) == "string" then receipt_id else "destination did not confirm acceptance"
+			end
+
+			local status, status_message, confirmed = update_event(self, stored, target_state,
+				if target_state == "delivered" then receipt_id else nil, reason)
+			if confirmed then
+				delivered_count += 1
+			elseif status == "success" then
+				if target_state == "pending" then failed_count += 1 end
+				first_error = first_error or reason or status_message
+			elseif status == "duplicate" then
+				first_error = first_error or status_message or "duplicate outbox result was not confirmed"
+			else
+				first_error = first_error or status_message or "outbox delivery status could not be confirmed"
+				if status == "unknown" then return delivered_count, "unknown", first_error end
+				if status == "fenced" or status == "corrupt" or status == "future_schema"
+					or status == "legacy" or status == "invalid" or status == "conflict"
+					or status == "budget" or status == "busy" or status == "retry_exhausted"
+					or status == "disabled" or status == "not_found"
+				then
+					return delivered_count, status, first_error
+				end
+			end
+		end
+
+		if ambiguous then return delivered_count, "unknown", first_error end
+		if failed_count > 0 then return delivered_count, "retry_exhausted", first_error end
+		return delivered_count, "success", nil
+	end
+
+	local function count_missing_events(
+		raw: unknown,
+		event_ids: { string }
+	): (number?, ResultCode?, string?)
+		if raw == nil then return nil, "not_found", "source profile does not exist" end
+		local envelope, parse_error, current_format = parse_envelope(raw)
+		if not current_format then return nil, parse_error_code(parse_error), parse_error end
+		if envelope == nil then return nil, "corrupt", parse_error or "source profile envelope is invalid" end
+		if envelope.sidecars == nil or envelope.implementation_version < protocol.transaction_version then
+			return nil, "disabled", "source profile does not contain transactional sidecars"
+		end
+		local removed = 0
+		for _, event_id in ipairs(event_ids) do
+			if envelope.sidecars.outbox_events[event_id] == nil then removed += 1 end
+		end
+		return removed, nil, nil
+	end
+
+	local function prune(
+		self: Record,
+		delivered_before_unix: number,
+		max_events: number?
+	): (number, ResultCode, string?)
+		local state = private[self]
+		if state == nil or state.retired then return 0, "invalid", "record does not exist or has been retired" end
+		if type(delivered_before_unix) ~= "number" or not math.isfinite(delivered_before_unix) then
+			return 0, "invalid", "delivered_before_unix must be a finite Unix timestamp in seconds"
+		end
+		local limit_value: unknown = if max_events == nil then DEFAULT_OUTBOX_PRUNE_BATCH else max_events
+		if type(limit_value) ~= "number" or not math.isfinite(limit_value)
+			or math.floor(limit_value) ~= limit_value or limit_value < 1 or limit_value > MAX_OUTBOX_API_BATCH
+		then
+			return 0, "invalid", "max_events must be an integer from 1 to " .. tostring(MAX_OUTBOX_API_BATCH)
+		end
+		local limit = limit_value :: number
+		local deadline, deadline_error = resolve_operation_deadline(state.options.operation_deadline)
+		if deadline == nil then return 0, "invalid", deadline_error end
+
+		local initial_raw, _, initial_code, initial_message = backend_get(state.backend, false, deadline, nil)
+		if initial_code ~= nil then
+			return 0, normalize_result_code(initial_code) or "unknown", initial_message
+		end
+		if initial_raw == nil then return 0, "not_found", "source profile does not exist" end
+		local initial_envelope, initial_error, initial_format = parse_envelope(initial_raw)
+		if not initial_format then return 0, parse_error_code(initial_error), initial_error end
+		if initial_envelope == nil then return 0, "corrupt", initial_error or "source profile envelope is invalid" end
+		if initial_envelope.sidecars == nil
+			or initial_envelope.implementation_version < protocol.transaction_version
+		then
+			return 0, "success", nil
+		end
+
+		local eligible: { { id: string, delivered_at: number } } = {}
+		for id, event in pairs(initial_envelope.sidecars.outbox_events) do
+			if event.state == "delivered" and event.delivered_at ~= nil
+				and event.delivered_at < delivered_before_unix
+			then
+				eligible[#eligible + 1] = { id = id, delivered_at = event.delivered_at }
+			end
+		end
+		table.sort(eligible, function(left, right)
+			if left.delivered_at ~= right.delivered_at then return left.delivered_at < right.delivered_at end
+			return left.id < right.id
+		end)
+		while #eligible > limit do table.remove(eligible) end
+		if #eligible == 0 then
+			return 0, "duplicate", "no delivered outbox events are eligible for the requested retention cutoff"
+		end
+		local candidate_ids: { string } = {}
+		for _, event in ipairs(eligible) do candidate_ids[#candidate_ids + 1] = event.id end
+
+		local returned_raw, _, update_code, update_message = backend_update(state.backend, function(raw, info)
+			if raw == nil then return nil, nil, nil end
+			local envelope, _, current_format = parse_envelope(raw)
+			if not current_format or envelope == nil or envelope.sidecars == nil
+				or envelope.implementation_version < protocol.transaction_version
+			then
+				return nil, nil, nil
+			end
+			local sidecars = protocol.clone(envelope.sidecars)
+			if sidecars == nil then return nil, nil, nil end
+			local removed_any = false
+			for _, event_id in ipairs(candidate_ids) do
+				local event = sidecars.outbox_events[event_id]
+				if event ~= nil and event.state == "delivered" and event.delivered_at ~= nil
+					and event.delivered_at < delivered_before_unix
+				then
+					sidecars.outbox_events[event_id] = nil
+					removed_any = true
+				end
+			end
+			if not removed_any then return nil, nil, nil end
+			local sidecars_valid = protocol.validate(sidecars)
+			if not sidecars_valid then return nil, nil, nil end
+			local raw_value = copy_value(raw)
+			if type(raw_value) ~= "table" then return nil, nil, nil end
+			(raw_value :: { [string]: any }).sidecars = sidecars
+			local raw_valid = validate_serialized_size(raw_value)
+			if not raw_valid then return nil, nil, nil end
+			return {
+				[prepared_envelope_cache] = true,
+				raw_value = raw_value,
+			}, clone_user_ids(if info ~= nil then info.UserIds else envelope.user_ids or state.user_ids),
+				clone_metadata(if info ~= nil then info.RawMetadata else state.metadata)
+		end, deadline, nil)
+
+		if update_code ~= nil and update_code ~= "unknown" then
+			return 0, normalize_result_code(update_code) or "unknown", update_message
+		end
+		if update_code == "unknown" then
+			local current_raw, _, read_code, read_message = backend_get(state.backend, false, deadline, nil)
+			if read_code ~= nil then return 0, "unknown", read_message or update_message end
+			local removed, classify_code, classify_message = count_missing_events(current_raw, candidate_ids)
+			if removed == nil then return 0, "unknown", classify_message or update_message or tostring(classify_code) end
+			if removed > 0 then return removed, "success", nil end
+			return 0, "unknown", update_message or "outbox cleanup outcome remains unknown"
+		end
+		local removed, classify_code, classify_message = count_missing_events(returned_raw, candidate_ids)
+		if removed == nil then return 0, (classify_code or "unknown") :: ResultCode, classify_message end
+		if removed > 0 then return removed, "success", nil end
+		return 0, "duplicate", "no delivered outbox events were removed"
+	end
+
+	return {
+		get = get,
+		dispatch = dispatch,
+		prune = prune,
+	}
+end)()
+
+RecordStore._internals.get_session_status_internal = function(
+	name: string,
+	scope: string,
+	key: string,
+	operation_deadline: number?,
+	mock: boolean
+): (SessionStatus?, ResultCode, string?)
+	local valid_identity, identity_message = validate_store_identity(name, scope, key)
+	if not valid_identity then
+		return nil, "invalid", identity_message
+	end
+	local deadline, deadline_error = resolve_operation_deadline(operation_deadline)
+	if deadline == nil then
+		return nil, "invalid", deadline_error
+	end
+	local backend = make_backend(name, scope, key, mock)
+	local raw, _, read_result, read_message = backend_get(backend, false, deadline)
+	if read_result ~= nil then
+		return nil, normalize_result_code(read_result) or "unknown", read_message
+	end
+
+	local observed_at = session_now_unix(mock)
+	local status: SessionStatus = {
+		StoreName = name,
+		Scope = scope,
+		ProfileKey = key,
+		Observation = "not_found",
+		ObservedAt = observed_at,
+		Generation = nil,
+		Revision = nil,
+		OwnerJobId = nil,
+		OwnerPlaceId = nil,
+		AcquiredAt = nil,
+		LeaseUntil = nil,
+		LeaseRemainingSeconds = nil,
+		LeaseAppearsAvailable = true,
+		IsAuthoritativeOwnershipDecision = false,
+	}
+	if raw == nil then
+		return status, "not_found", "record does not exist"
+	end
+
+	local envelope, parse_error, current_format = parse_envelope(raw)
+	if not current_format then
+		local result: ResultCode = if parse_error == "legacy payload" then "legacy"
+			elseif parse_error == "future implementation version" then "future_schema" else "corrupt"
+		return nil, result, parse_error or "durable envelope is invalid"
+	end
+	if envelope == nil then
+		return nil, "corrupt", parse_error or "durable envelope is missing"
+	end
+
+	status.Generation = envelope.fencing_generation
+	status.Revision = envelope.revision
+	if envelope.tombstone ~= nil then
+		status.Observation = "tombstoned"
+		status.LeaseAppearsAvailable = false
+		return status, "success", nil
+	end
+
+	local session = envelope.session
+	if session == nil then
+		status.Observation = "no_session"
+		return status, "success", nil
+	end
+
+	local remaining = session.lease_until - observed_at
+	status.OwnerJobId = session.job_id
+	status.OwnerPlaceId = session.place_id
+	status.AcquiredAt = session.acquired_at
+	status.LeaseUntil = session.lease_until
+	status.LeaseRemainingSeconds = math.max(0, remaining)
+	if remaining > 0 then
+		status.Observation = "active_lease_observed"
+		status.LeaseAppearsAvailable = false
+	else
+		status.Observation = "expired_lease_observed"
+		status.LeaseAppearsAvailable = true
+	end
+	return status, "success", nil
+end
+
+RecordStore.get_session_status_async = (function()
+	local helper: SessionStatusResolver = RecordStore._internals.get_session_status_internal
+	return function(
+		name: string,
+		scope: string,
+		key: string,
+		operation_deadline: number?
+	): (SessionStatus?, ResultCode, string?)
+			return helper(name, scope, key, operation_deadline, false)
+		end
+end)()
+
+RecordStore._internals.get_session_status_mock_async = (function()
+	local helper: SessionStatusResolver = RecordStore._internals.get_session_status_internal
+	return function(
+		name: string,
+		scope: string,
+		key: string,
+		operation_deadline: number?
+	): (SessionStatus?, ResultCode, string?)
+		return helper(name, scope, key, operation_deadline, true)
+	end
+end)()
+
+RecordStore._internals.profile_doctor = (function()
+	local function normalize_options(options: ProfileDoctorOptions?): (ProfileDoctorOptions?, string?)
+		if options ~= nil and type(options) ~= "table" then
+			return nil, "Profile Doctor options must be a table"
+		end
+		local normalized: ProfileDoctorOptions = if options == nil then {} else table.clone(options)
+		local allowed = {
+			operation_deadline = true,
+			legacy_decoder = true,
+			max_nodes = true,
+			max_depth = true,
+			max_changes = true,
+		}
+		if options ~= nil then
+			for key in pairs(options) do
+				if not allowed[key] then
+					return nil, "unsupported Profile Doctor option: " .. tostring(key)
+				end
+			end
+		end
+		if normalized.legacy_decoder ~= nil and type(normalized.legacy_decoder) ~= "function" then
+			return nil, "legacy_decoder must be a function"
+		end
+		if normalized.max_nodes == nil then normalized.max_nodes = 4096 end
+		if normalized.max_depth == nil then normalized.max_depth = 32 end
+		if normalized.max_changes == nil then normalized.max_changes = 256 end
+		if type(normalized.max_nodes) ~= "number"
+			or not math.isfinite(normalized.max_nodes)
+			or math.floor(normalized.max_nodes) ~= normalized.max_nodes
+			or normalized.max_nodes < 1
+			or normalized.max_nodes > 50000
+		then
+			return nil, "max_nodes must be an integer from 1 to 50000"
+		end
+		if type(normalized.max_depth) ~= "number"
+			or not math.isfinite(normalized.max_depth)
+			or math.floor(normalized.max_depth) ~= normalized.max_depth
+			or normalized.max_depth < 1
+			or normalized.max_depth > 64
+		then
+			return nil, "max_depth must be an integer from 1 to 64"
+		end
+		if type(normalized.max_changes) ~= "number"
+			or not math.isfinite(normalized.max_changes)
+			or math.floor(normalized.max_changes) ~= normalized.max_changes
+			or normalized.max_changes < 1
+			or normalized.max_changes > 2048
+		then
+			return nil, "max_changes must be an integer from 1 to 2048"
+		end
+		return normalized, nil
+	end
+
+	local function classify_read(
+		snapshot: Snapshot?,
+		read_result: ResultCode,
+		observed_at: number
+	): ProfileDoctorClassification
+		if read_result == "not_found" then return "missing" end
+		if read_result == "legacy" then return "legacy" end
+		if read_result == "future_schema" then return "future_schema" end
+		if read_result == "corrupt" then return "corrupt" end
+		if snapshot == nil then return "unreadable" end
+		if snapshot.Tombstoned then return "tombstoned" end
+		if snapshot.LeaseUntil ~= nil then
+			return if snapshot.LeaseUntil > observed_at then "active_session" else "expired_session"
+		end
+		return "no_session"
+	end
+
+	local function summarize_data(data: JsonValue?, max_nodes: number, max_depth: number): (number, number, boolean, number?, boolean)
+		if data == nil then
+			return 0, 0, false, 0, true
+		end
+		local node_count = 0
+		local deepest = 0
+		local truncated = false
+		local active_tables: { [any]: boolean } = {}
+		local function visit(value: unknown, depth: number)
+			if node_count >= max_nodes then
+				truncated = true
+				return
+			end
+			node_count += 1
+			deepest = math.max(deepest, depth)
+			if type(value) ~= "table" then return end
+			local current = value :: { [any]: unknown }
+			if active_tables[current] then
+				truncated = true
+				return
+			end
+			if depth >= max_depth then
+				if next(current) ~= nil then truncated = true end
+				return
+			end
+			active_tables[current] = true
+			for _, child in pairs(current) do
+				if node_count >= max_nodes then
+					truncated = true
+					break
+				end
+				visit(child, depth + 1)
+				if truncated and node_count >= max_nodes then break end
+			end
+			active_tables[current] = nil
+		end
+		visit(data, 0)
+
+		local encoded_bytes: number? = nil
+		local size_available = false
+		if not truncated then
+			local encoded_ok, encoded_value = pcall(function()
+				return HttpService:JSONEncode(encode_non_finite_numbers(data))
+			end)
+			if encoded_ok and type(encoded_value) == "string" then
+				encoded_bytes = #encoded_value
+				size_available = true
+			end
+		end
+		return node_count, deepest, truncated, encoded_bytes, size_available
+	end
+
+	local function inspect(
+		name: string,
+		scope: string,
+		key: string,
+		options: ProfileDoctorOptions?,
+		reader: any,
+		mock: boolean
+	): (ProfileInspection?, ResultCode, string?)
+		local valid_identity, identity_message = validate_store_identity(name, scope, key)
+		if not valid_identity then return nil, "invalid", identity_message end
+		local normalized, options_error = normalize_options(options)
+		if normalized == nil then return nil, "invalid", options_error end
+		local deadline, deadline_error = resolve_operation_deadline(normalized.operation_deadline)
+		if deadline == nil then return nil, "invalid", deadline_error end
+
+		local remaining_deadline = deadline - now_local()
+		if remaining_deadline <= 0 then return nil, "budget", "Profile Doctor inspection deadline expired" end
+		local snapshot, read_result, read_message = reader(
+			name,
+			scope,
+			key,
+			remaining_deadline,
+			normalized.legacy_decoder
+		)
+		if read_result == "invalid" then return nil, "invalid", read_message end
+		local code: ResultCode = (normalize_result_code(read_result) or "unknown") :: ResultCode
+		local observed_at = session_now_unix(mock)
+		local classification: ProfileDoctorClassification = classify_read(snapshot, code, observed_at)
+		local node_count: number? = nil
+		local data_depth: number? = nil
+		local encoded_bytes: number? = nil
+		local size_available = false
+		local summary_truncated = false
+		if snapshot ~= nil then
+			node_count, data_depth, summary_truncated, encoded_bytes, size_available =
+				summarize_data(snapshot.Data, normalized.max_nodes :: number, normalized.max_depth :: number)
+		end
+		local report: ProfileInspection = {
+			StoreName = name,
+			Scope = scope,
+			ProfileKey = key,
+			ObservedAt = observed_at,
+			Consistency = "point_in_time_non_authoritative",
+			Classification = classification,
+			ReadResult = code,
+			SchemaVersion = if snapshot ~= nil then snapshot.SchemaVersion else nil,
+			Revision = if snapshot ~= nil then snapshot.Revision else nil,
+			Generation = if snapshot ~= nil then snapshot.Generation else nil,
+			CreatedAt = if snapshot ~= nil then snapshot.CreatedAt else nil,
+			UpdatedAt = if snapshot ~= nil then snapshot.UpdatedAt else nil,
+			Tombstoned = if snapshot ~= nil then snapshot.Tombstoned else nil,
+			SessionActive = if snapshot ~= nil then
+				snapshot.LeaseUntil ~= nil and snapshot.LeaseUntil > observed_at and not snapshot.Tombstoned
+				else nil,
+			LeaseUntil = if snapshot ~= nil then snapshot.LeaseUntil else nil,
+			OwnerJobId = if snapshot ~= nil then snapshot.SessionJobId else nil,
+			OwnerPlaceId = if snapshot ~= nil then snapshot.SessionPlaceId else nil,
+			BackendVersion = if snapshot ~= nil then snapshot.BackendVersion else nil,
+			DataNodeCount = node_count,
+			DataDepth = data_depth,
+			DataEncodedBytes = encoded_bytes,
+			DataSizeAvailable = size_available,
+			DataSummaryTruncated = summary_truncated,
+		}
+		return report, code, read_message
+	end
+
+	local function diff(
+		name: string,
+		scope: string,
+		key: string,
+		before_version: string,
+		after_version: string,
+		options: ProfileDoctorOptions?,
+		version_reader: any
+	): (ProfileVersionDiff?, ResultCode, string?)
+		local valid_identity, identity_message = validate_store_identity(name, scope, key)
+		if not valid_identity then return nil, "invalid", identity_message end
+		if type(before_version) ~= "string" or before_version == "" then
+			return nil, "invalid", "before_version must be a non-empty string"
+		end
+		if type(after_version) ~= "string" or after_version == "" then
+			return nil, "invalid", "after_version must be a non-empty string"
+		end
+		local normalized, options_error = normalize_options(options)
+		if normalized == nil then return nil, "invalid", options_error end
+		local deadline, deadline_error = resolve_operation_deadline(normalized.operation_deadline)
+		if deadline == nil then return nil, "invalid", deadline_error end
+
+		local before_remaining = deadline - now_local()
+		if before_remaining <= 0 then return nil, "budget", "Profile Doctor diff deadline expired before first version read" end
+		local before_snapshot, before_result, before_message = version_reader(
+			name, scope, key, before_version, before_remaining, normalized.legacy_decoder
+		)
+		if before_snapshot == nil or (before_result ~= "success" and before_result ~= "legacy") then
+			return nil, normalize_result_code(before_result) or "unknown", before_message
+		end
+		local after_remaining = deadline - now_local()
+		if after_remaining <= 0 then return nil, "budget", "Profile Doctor diff deadline expired before second version read" end
+		local after_snapshot, after_result, after_message = version_reader(
+			name, scope, key, after_version, after_remaining, normalized.legacy_decoder
+		)
+		if after_snapshot == nil or (after_result ~= "success" and after_result ~= "legacy") then
+			return nil, normalize_result_code(after_result) or "unknown", after_message
+		end
+
+		local changes: { ProfileDiffChange } = {}
+		local visited_nodes = 0
+		local truncated = false
+		local node_limit = normalized.max_nodes :: number
+		local depth_limit = normalized.max_depth :: number
+		local change_limit = normalized.max_changes :: number
+
+		local function child_path(parent: string, child_key: string | number): string
+			if type(child_key) == "number" then
+				return parent .. "[" .. tostring(child_key) .. "]"
+			end
+			if string.match(child_key, "^[%a_][%w_]*$") then
+				return parent .. "." .. child_key
+			end
+			local encoded_ok, encoded_key = pcall(function()
+				return HttpService:JSONEncode(child_key)
+			end)
+			if encoded_ok and type(encoded_key) == "string" then
+				return parent .. "[" .. encoded_key .. "]"
+			end
+			return parent .. "[<key>]"
+		end
+
+		local function append_change(
+			path: string,
+			kind: "added" | "removed" | "changed",
+			before_value: unknown,
+			after_value: unknown,
+			before_present: boolean,
+			after_present: boolean
+		): boolean
+			if #changes >= change_limit then
+				truncated = true
+				return false
+			end
+			changes[#changes + 1] = {
+				Path = string.sub(path, 1, 512),
+				Kind = kind,
+				BeforeType = if before_present then typeof(before_value) else nil,
+				AfterType = if after_present then typeof(after_value) else nil,
+			}
+			return true
+		end
+
+		local function visit(
+			before_value: unknown,
+			after_value: unknown,
+			path: string,
+			depth: number,
+			before_present: boolean,
+			after_present: boolean
+		)
+			if truncated then return end
+			if visited_nodes >= node_limit then
+				truncated = true
+				return
+			end
+			visited_nodes += 1
+			if not before_present then
+				append_change(path, "added", nil, after_value, false, true)
+				return
+			end
+			if not after_present then
+				append_change(path, "removed", before_value, nil, true, false)
+				return
+			end
+			if before_value == after_value then return end
+			if type(before_value) == "number" and type(after_value) == "number"
+				and math.isnan(before_value) and math.isnan(after_value)
+			then
+				return
+			end
+			if typeof(before_value) == "buffer" or typeof(after_value) == "buffer" then
+				if typeof(before_value) == "buffer" and typeof(after_value) == "buffer"
+					and buffer.tostring(before_value :: buffer) == buffer.tostring(after_value :: buffer)
+				then
+					return
+				end
+				append_change(path, "changed", before_value, after_value, true, true)
+				return
+			end
+			if type(before_value) ~= "table" or type(after_value) ~= "table" then
+				append_change(path, "changed", before_value, after_value, true, true)
+				return
+			end
+			local before_table = before_value :: { [string | number]: JsonValue }
+			local after_table = after_value :: { [string | number]: JsonValue }
+			if next(before_table) == nil and next(after_table) == nil then return end
+			if depth >= depth_limit then
+				truncated = true
+				append_change(path, "changed", before_value, after_value, true, true)
+				return
+			end
+
+			local key_set: { [string | number]: boolean } = {}
+			for child_key in pairs(before_table) do key_set[child_key] = true end
+			for child_key in pairs(after_table) do key_set[child_key] = true end
+			local ordered_keys: { string | number } = {}
+			for child_key in pairs(key_set) do
+				ordered_keys[#ordered_keys + 1] = child_key
+			end
+			table.sort(ordered_keys, function(left, right)
+				if type(left) ~= type(right) then return type(left) < type(right) end
+				if type(left) == "number" then return (left :: number) < (right :: number) end
+				return (left :: string) < (right :: string)
+			end)
+			for _, child_key in ipairs(ordered_keys) do
+				if truncated then return end
+				local before_child = before_table[child_key]
+				local after_child = after_table[child_key]
+				visit(
+					before_child,
+					after_child,
+					child_path(path, child_key),
+					depth + 1,
+					before_child ~= nil,
+					after_child ~= nil
+				)
+			end
+		end
+
+		visit(
+			before_snapshot.Data,
+			after_snapshot.Data,
+			"$",
+			0,
+			before_snapshot.Data ~= nil,
+			after_snapshot.Data ~= nil
+		)
+		local report: ProfileVersionDiff = {
+			StoreName = name,
+			Scope = scope,
+			ProfileKey = key,
+			BeforeVersion = before_version,
+			AfterVersion = after_version,
+			BeforeRevision = before_snapshot.Revision,
+			AfterRevision = after_snapshot.Revision,
+			BeforeSchemaVersion = before_snapshot.SchemaVersion,
+			AfterSchemaVersion = after_snapshot.SchemaVersion,
+			ObservedAt = now_unix(),
+			Consistency = "bounded_historical_diff",
+			VisitedNodes = visited_nodes,
+			Truncated = truncated,
+			Changes = changes,
+		}
+		return report, if before_result == "legacy" or after_result == "legacy" then "legacy" else "success", nil
+	end
+
+	return {
+		inspect = inspect,
+		diff = diff,
+		summarize_data = summarize_data,
+	}
+end)()
+
+RecordStore.inspect_profile_async = (function()
+	local inspect = RecordStore._internals.profile_doctor.inspect
+	local reader = RecordStore.read_async
+	return function(
+		name: string,
+		scope: string,
+		key: string,
+		options: ProfileDoctorOptions?
+	): (ProfileInspection?, ResultCode, string?)
+		return inspect(name, scope, key, options, reader, false)
+	end
+end)()
+
+RecordStore.diff_profile_versions_async = (function()
+	local diff = RecordStore._internals.profile_doctor.diff
+	local version_reader = RecordStore.get_version_async
+	return function(
+		name: string,
+		scope: string,
+		key: string,
+		before_version: string,
+		after_version: string,
+		options: ProfileDoctorOptions?
+	): (ProfileVersionDiff?, ResultCode, string?)
+		return diff(name, scope, key, before_version, after_version, options, version_reader)
+	end
+end)()
+
+RecordStore._internals.migration_registry = (function()
+	local registries: { [string]: { [string]: MigrationRegistration } } = {}
+	local summarize_profile_data = RecordStore._internals.profile_doctor.summarize_data
+	local MAX_MIGRATIONS_PER_STORE = 128
+	local MAX_SCHEMA_VERSION = 1_000_000
+
+	local function valid_version(value: unknown): boolean
+		return type(value) == "number"
+			and math.isfinite(value)
+			and math.floor(value) == value
+			and value >= 0
+			and value <= MAX_SCHEMA_VERSION
+	end
+
+	local function normalize_registration(value: unknown): (MigrationRegistration?, string?)
+		if type(value) ~= "table" then
+			return nil, "migration registration must be a table"
+		end
+		local raw = value :: { [string]: unknown }
+		local allowed = {
+			id = true,
+			from_version = true,
+			to_version = true,
+			implementation_revision = true,
+			compatible_schema_min = true,
+			compatible_schema_max = true,
+			transform = true,
+			validator = true,
+		}
+		for key in pairs(raw) do
+			if not allowed[key] then
+				return nil, "unsupported migration registration field: " .. tostring(key)
+			end
+		end
+		if type(raw.id) ~= "string" or raw.id == "" or #raw.id > 96 then
+			return nil, "migration id must be 1 to 96 characters"
+		end
+		if not valid_version(raw.from_version) or not valid_version(raw.to_version) then
+			return nil, "migration versions must be integers from 0 to 1000000"
+		end
+		local from_version = raw.from_version :: number
+		local to_version = raw.to_version :: number
+		if to_version <= from_version then
+			return nil, "migration edges must move to a strictly newer schema version"
+		end
+		if type(raw.implementation_revision) ~= "string"
+			or raw.implementation_revision == ""
+			or #raw.implementation_revision > 128
+		then
+			return nil, "implementation_revision must be 1 to 128 characters"
+		end
+		if not valid_version(raw.compatible_schema_min)
+			or not valid_version(raw.compatible_schema_max)
+		then
+			return nil, "compatibility bounds must be schema-version integers from 0 to 1000000"
+		end
+		local compatible_min = raw.compatible_schema_min :: number
+		local compatible_max = raw.compatible_schema_max :: number
+		if compatible_min > compatible_max
+			or from_version < compatible_min
+			or to_version > compatible_max
+		then
+			return nil, "migration versions fall outside the declared compatibility range"
+		end
+		if type(raw.transform) ~= "function" then
+			return nil, "migration transform must be a function"
+		end
+		if raw.validator ~= nil and type(raw.validator) ~= "function" then
+			return nil, "migration validator must be a function or nil"
+		end
+		return {
+			id = raw.id,
+			from_version = from_version,
+			to_version = to_version,
+			implementation_revision = raw.implementation_revision,
+			compatible_schema_min = compatible_min,
+			compatible_schema_max = compatible_max,
+			transform = raw.transform :: Migration,
+			validator = raw.validator :: Validator?,
+		}, nil
+	end
+
+	local function same_registration(left: MigrationRegistration, right: MigrationRegistration): boolean
+		return left.id == right.id
+			and left.from_version == right.from_version
+			and left.to_version == right.to_version
+			and left.implementation_revision == right.implementation_revision
+			and left.compatible_schema_min == right.compatible_schema_min
+			and left.compatible_schema_max == right.compatible_schema_max
+			and left.transform == right.transform
+			and left.validator == right.validator
+	end
+
+	local function build_graph(registrations: { [string]: MigrationRegistration }): ({ [number]: { MigrationRegistration } }, { [number]: boolean })
+		local graph: { [number]: { MigrationRegistration } } = {}
+		local versions: { [number]: boolean } = {}
+		for _, registration in pairs(registrations) do
+			local outgoing = graph[registration.from_version]
+			if outgoing == nil then
+				outgoing = {}
+				graph[registration.from_version] = outgoing
+			end
+			outgoing[#outgoing + 1] = registration
+			versions[registration.from_version] = true
+			versions[registration.to_version] = true
+		end
+		for _, outgoing in pairs(graph) do
+			table.sort(outgoing, function(left, right)
+				if left.to_version ~= right.to_version then
+					return left.to_version < right.to_version
+				end
+				return left.id < right.id
+			end)
+		end
+		return graph, versions
+	end
+
+	local function unique_paths(registrations: { [string]: MigrationRegistration }): (boolean, string?)
+		local graph, versions = build_graph(registrations)
+		local registration_count = 0
+		for _ in pairs(registrations) do registration_count += 1 end
+		local function count_paths(from_version: number, target_version: number, depth: number): number
+			if from_version == target_version then return 1 end
+			if depth > registration_count then return 0 end
+			local outgoing = graph[from_version]
+			if outgoing == nil then return 0 end
+			local total = 0
+			for _, edge in ipairs(outgoing) do
+				if edge.to_version <= target_version then
+					total += count_paths(edge.to_version, target_version, depth + 1)
+					if total > 1 then return 2 end
+				end
+			end
+			return total
+		end
+		for from_version in pairs(versions) do
+			for target_version in pairs(versions) do
+				if target_version > from_version and count_paths(from_version, target_version, 0) > 1 then
+					return false, ("migration registry has ambiguous paths from schema %d to %d"):format(
+						from_version, target_version
+					)
+				end
+			end
+		end
+		return true, nil
+	end
+
+	local function register(store_name: string, value: MigrationRegistration): (ResultCode, string?)
+		if type(store_name) ~= "string" or store_name == "" or #store_name > 50 then
+			return "invalid", "store_name must be 1 to 50 characters"
+		end
+		local registration, message = normalize_registration(value)
+		if registration == nil then return "invalid", message end
+		local current = registries[store_name] or {}
+		local existing = current[registration.id]
+		if existing ~= nil then
+			if same_registration(existing, registration) then
+				return "duplicate", "the same migration id and implementation revision are already registered"
+			end
+			return "conflict", "migration id is already registered with different metadata or implementation"
+		end
+		local count = 0
+		for _ in pairs(current) do count += 1 end
+		if count >= MAX_MIGRATIONS_PER_STORE then
+			return "capacity", "migration registry reached its per-store registration limit"
+		end
+		local candidate = table.clone(current)
+		candidate[registration.id] = registration
+		local paths_ok, paths_error = unique_paths(candidate)
+		if not paths_ok then return "conflict", paths_error end
+		registries[store_name] = candidate
+		return "success", nil
+	end
+
+	local function normalize_preview_options(options: MigrationPreviewOptions?): (MigrationPreviewOptions?, string?)
+		if options ~= nil and type(options) ~= "table" then
+			return nil, "migration preview options must be a table"
+		end
+		local normalized: MigrationPreviewOptions = if options == nil then {} else table.clone(options)
+		local allowed = {
+			operation_deadline = true,
+			legacy_decoder = true,
+			max_nodes = true,
+			max_depth = true,
+			max_changes = true,
+		}
+		if options ~= nil then
+			for key in pairs(options) do
+				if not allowed[key] then
+					return nil, "unsupported migration preview option: " .. tostring(key)
+				end
+			end
+		end
+		if normalized.legacy_decoder ~= nil and type(normalized.legacy_decoder) ~= "function" then
+			return nil, "legacy_decoder must be a function"
+		end
+		if normalized.max_nodes == nil then normalized.max_nodes = 4096 end
+		if normalized.max_depth == nil then normalized.max_depth = 32 end
+		if normalized.max_changes == nil then normalized.max_changes = 256 end
+		if type(normalized.max_nodes) ~= "number" or not math.isfinite(normalized.max_nodes)
+			or math.floor(normalized.max_nodes) ~= normalized.max_nodes
+			or normalized.max_nodes < 1 or normalized.max_nodes > 50000
+		then
+			return nil, "max_nodes must be an integer from 1 to 50000"
+		end
+		if type(normalized.max_depth) ~= "number" or not math.isfinite(normalized.max_depth)
+			or math.floor(normalized.max_depth) ~= normalized.max_depth
+			or normalized.max_depth < 1 or normalized.max_depth > 64
+		then
+			return nil, "max_depth must be an integer from 1 to 64"
+		end
+		if type(normalized.max_changes) ~= "number" or not math.isfinite(normalized.max_changes)
+			or math.floor(normalized.max_changes) ~= normalized.max_changes
+			or normalized.max_changes < 1 or normalized.max_changes > 2048
+		then
+			return nil, "max_changes must be an integer from 1 to 2048"
+		end
+		return normalized, nil
+	end
+
+	local function find_path(store_name: string, from_version: number, target_version: number): ({ MigrationRegistration }?, string?)
+		if from_version == target_version then return {}, nil end
+		if target_version < from_version then
+			return nil, "backwards migrations are not supported"
+		end
+		local registrations = registries[store_name]
+		if registrations == nil then
+			return nil, ("no migration path is registered from schema %d to %d"):format(from_version, target_version)
+		end
+		local graph = build_graph(registrations)
+		local path: { MigrationRegistration } = {}
+		local function walk(version: number): boolean
+			if version == target_version then return true end
+			local outgoing = graph[version]
+			if outgoing == nil then return false end
+			for _, edge in ipairs(outgoing) do
+				if edge.to_version <= target_version then
+					path[#path + 1] = edge
+					if walk(edge.to_version) then return true end
+					path[#path] = nil
+				end
+			end
+			return false
+		end
+		if not walk(from_version) then
+			return nil, ("no migration path is registered from schema %d to %d"):format(from_version, target_version)
+		end
+		return table.clone(path), nil
+	end
+
+	local function summarize(
+		value: JsonValue,
+		max_nodes: number,
+		max_depth: number
+	): (number, number, boolean, number?, boolean)
+		return summarize_profile_data(value, max_nodes, max_depth)
+	end
+
+	local function path_diff(
+		before_value: JsonValue,
+		after_value: JsonValue,
+		max_nodes: number,
+		max_depth: number,
+		max_changes: number
+	): ({ ProfileDiffChange }, number, boolean)
+		local changes: { ProfileDiffChange } = {}
+		local visited = 0
+		local truncated = false
+		local function make_child_path(parent: string, key: string | number): string
+			if type(key) == "number" then return parent .. "[" .. tostring(key) .. "]" end
+			if string.match(key, "^[%a_][%w_]*$") then return parent .. "." .. key end
+			local ok, encoded = pcall(function() return HttpService:JSONEncode(key) end)
+			return if ok and type(encoded) == "string" then parent .. "[" .. encoded .. "]" else parent .. "[<key>]"
+		end
+		local function append(path: string, kind: "added" | "removed" | "changed", before: unknown, after: unknown, before_present: boolean, after_present: boolean)
+			if #changes >= max_changes then
+				truncated = true
+				return
+			end
+			changes[#changes + 1] = {
+				Path = string.sub(path, 1, 512),
+				Kind = kind,
+				BeforeType = if before_present then typeof(before) else nil,
+				AfterType = if after_present then typeof(after) else nil,
+			}
+		end
+		local function visit(before: unknown, after: unknown, path: string, depth: number, before_present: boolean, after_present: boolean)
+			if truncated then return end
+			if visited >= max_nodes then
+				truncated = true
+				return
+			end
+			visited += 1
+			if not before_present then append(path, "added", nil, after, false, true); return end
+			if not after_present then append(path, "removed", before, nil, true, false); return end
+			if type(before) == "table" and type(after) == "table" then
+				local left = before :: { [string | number]: JsonValue }
+				local right = after :: { [string | number]: JsonValue }
+				if next(left) == nil and next(right) == nil then return end
+				if depth >= max_depth then
+					truncated = true
+					append(path, "changed", before, after, true, true)
+					return
+				end
+				local keys: { [string | number]: boolean } = {}
+				for key in pairs(left) do keys[key] = true end
+				for key in pairs(right) do keys[key] = true end
+				local ordered: { string | number } = {}
+				for key in pairs(keys) do ordered[#ordered + 1] = key end
+				table.sort(ordered, function(a, b)
+					if type(a) ~= type(b) then return type(a) < type(b) end
+					if type(a) == "number" then return (a :: number) < (b :: number) end
+					return (a :: string) < (b :: string)
+				end)
+				for _, key in ipairs(ordered) do
+					if truncated then return end
+					local left_value, right_value = left[key], right[key]
+					visit(left_value, right_value, make_child_path(path, key), depth + 1, left_value ~= nil, right_value ~= nil)
+				end
+				return
+			end
+			if type(before) == "number" and type(after) == "number"
+				and math.isnan(before) and math.isnan(after) then return end
+			if typeof(before) == "buffer" or typeof(after) == "buffer" then
+				if typeof(before) == "buffer" and typeof(after) == "buffer"
+					and buffer.tostring(before :: buffer) == buffer.tostring(after :: buffer) then return end
+			elseif before == after then
+				return
+			end
+			append(path, "changed", before, after, true, true)
+		end
+		visit(before_value, after_value, "$", 0, true, true)
+		return changes, visited, truncated
+	end
+
+	local function preview(
+		store_name: string,
+		scope: string,
+		key: string,
+		target_version: number,
+		options: MigrationPreviewOptions?,
+		reader: any,
+		mock: boolean
+	): (MigrationPreview?, ResultCode, string?)
+		local valid_identity, identity_message = validate_store_identity(store_name, scope, key)
+		if not valid_identity then return nil, "invalid", identity_message end
+		if not valid_version(target_version) then return nil, "invalid", "target_version must be an integer from 0 to 1000000" end
+		local normalized, options_error = normalize_preview_options(options)
+		if normalized == nil then return nil, "invalid", options_error end
+		local deadline, deadline_error = resolve_operation_deadline(normalized.operation_deadline)
+		if deadline == nil then return nil, "invalid", deadline_error end
+		local remaining = deadline - now_local()
+		if remaining <= 0 then return nil, "budget", "migration preview deadline expired before profile read" end
+		local snapshot, read_result, read_message = reader(
+			store_name,
+			scope,
+			key,
+			remaining,
+			normalized.legacy_decoder
+		)
+		if snapshot == nil or (read_result ~= "success" and read_result ~= "legacy") then
+			return nil, normalize_result_code(read_result) or "unknown", read_message
+		end
+		if snapshot.Tombstoned or snapshot.Data == nil then
+			return nil, "tombstoned", "migration preview refuses tombstoned or data-less profiles"
+		end
+		local source_version = snapshot.SchemaVersion
+		local path, path_error = find_path(store_name, source_version, target_version)
+		if path == nil then return nil, "migration", path_error end
+		local current = copy_value(snapshot.Data)
+		if current == nil then return nil, "validation", "source profile data could not be copied" end
+		local steps: { MigrationPreviewStep } = {}
+		for _, edge in ipairs(path) do
+			if now_local() >= deadline then return nil, "budget", "migration preview deadline expired during transforms" end
+			local migrated, migration_error = run_migration(edge.transform, edge.from_version, current)
+			if migrated == nil then return nil, "migration", migration_error end
+			local valid, validation_error = validate_value(migrated, edge.validator)
+			if not valid then return nil, "validation", validation_error end
+			current = migrated
+			steps[#steps + 1] = {
+				Id = edge.id,
+				FromVersion = edge.from_version,
+				ToVersion = edge.to_version,
+				ImplementationRevision = edge.implementation_revision,
+			}
+		end
+		local max_nodes = normalized.max_nodes :: number
+		local max_depth = normalized.max_depth :: number
+		local max_changes = normalized.max_changes :: number
+		local _before_nodes, _, before_truncated = summarize(snapshot.Data :: JsonValue, max_nodes, max_depth)
+		local target_nodes, target_depth, target_summary_truncated, target_bytes, target_size_available =
+			summarize(current, max_nodes, max_depth)
+		local changes, visited, diff_truncated = path_diff(snapshot.Data :: JsonValue, current, max_nodes, max_depth, max_changes)
+		local observed_at = session_now_unix(mock)
+		local session_active = snapshot.LeaseUntil ~= nil and snapshot.LeaseUntil > observed_at and not snapshot.Tombstoned
+		return {
+			StoreName = store_name,
+			Scope = scope,
+			ProfileKey = key,
+			ObservedAt = observed_at,
+			Consistency = "read_only_non_authoritative_preview",
+			SourceSchemaVersion = source_version,
+			TargetSchemaVersion = target_version,
+			SourceRevision = snapshot.Revision,
+			SourceGeneration = snapshot.Generation,
+			SessionActive = session_active,
+			Steps = steps,
+			Changes = changes,
+			VisitedNodes = visited,
+			Truncated = before_truncated or target_summary_truncated or diff_truncated,
+			TargetDataNodeCount = target_nodes,
+			TargetDataDepth = target_depth,
+			TargetDataEncodedBytes = target_bytes,
+			TargetDataSizeAvailable = target_size_available,
+		}, "success", nil
+	end
+
+	return {
+		register = register,
+		preview = preview,
+	}
+end)()
+
+RecordStore.register_migration = (function()
+	local register = RecordStore._internals.migration_registry.register
+	return function(store_name: string, registration: MigrationRegistration): (ResultCode, string?)
+		return register(store_name, registration)
+	end
+end)()
+
+RecordStore.preview_migration_async = (function()
+	local preview = RecordStore._internals.migration_registry.preview
+	local reader = RecordStore.read_async
+	return function(
+		store_name: string,
+		scope: string,
+		key: string,
+		target_version: number,
+		options: MigrationPreviewOptions?
+	): (MigrationPreview?, ResultCode, string?)
+		return preview(store_name, scope, key, target_version, options, reader, false)
+	end
+end)()
+
 RecordStore._internals.normalize_options = function(options: Options): (Options?, string?)
 	if type(options) ~= "table" then
 		return nil, "options must be a table"
@@ -14050,6 +19529,15 @@ RecordStore._internals.normalize_options = function(options: Options): (Options?
 	local copied = table.clone(options)
 	if copied.autosave_interval == nil then
 		copied.autosave_interval = DEFAULT_AUTOSAVE_INTERVAL
+	end
+	if copied.durability_mode == nil then
+		copied.durability_mode = "balanced"
+	end
+	if copied.lease_recovery_enabled == nil then
+		copied.lease_recovery_enabled = false
+	end
+	if copied.max_dirty_age_seconds == nil then
+		copied.max_dirty_age_seconds = (copied.autosave_interval :: number) * 2
 	end
 	if copied.lease_duration == nil then
 		copied.lease_duration = DEFAULT_LEASE_DURATION
@@ -14087,6 +19575,9 @@ RecordStore._internals.normalize_options = function(options: Options): (Options?
 	if copied.durable_queue_enabled == nil then
 		copied.durable_queue_enabled = true
 	end
+	if copied.transactional_operations_enabled == nil then
+		copied.transactional_operations_enabled = false
+	end
 	if copied.queue_store_name == nil then
 		copied.queue_store_name = DEFAULT_QUEUE_STORE_NAME
 	end
@@ -14118,6 +19609,12 @@ RecordStore._internals.normalize_options = function(options: Options): (Options?
 	end
 	if type(copied.durable_queue_enabled) ~= "boolean" then
 		return nil, "durable_queue_enabled must be a boolean"
+	end
+	if type(copied.lease_recovery_enabled) ~= "boolean" then
+		return nil, "lease_recovery_enabled must be a boolean"
+	end
+	if type(copied.transactional_operations_enabled) ~= "boolean" then
+		return nil, "transactional_operations_enabled must be a boolean"
 	end
 	if type(copied.message_topic_prefix) ~= "string" then
 		return nil, "message_topic_prefix must be a string of at most 72 characters"
@@ -14155,6 +19652,17 @@ RecordStore._internals.normalize_options = function(options: Options): (Options?
 	end
 	if not valid_positive_number(copied.autosave_interval) then
 		return nil, "autosave_interval must be a positive finite number"
+	end
+	if copied.durability_mode ~= "balanced"
+		and copied.durability_mode ~= "durability_first"
+		and copied.durability_mode ~= "read_only_on_risk"
+	then
+		return nil, "durability_mode must be balanced, durability_first, or read_only_on_risk"
+	end
+	if not valid_positive_number(copied.max_dirty_age_seconds)
+		or (copied.max_dirty_age_seconds :: number) > 86400
+	then
+		return nil, "max_dirty_age_seconds must be positive and no greater than 86400"
 	end
 	if not valid_positive_number(copied.lease_duration) then
 		return nil, "lease_duration must be a positive finite number"
@@ -14354,10 +19862,19 @@ RecordStore.enqueue_async = (function()
 	return function(name: string, scope: string, key: string, message_type: string, data: JsonValue?, queue_store_name: string?, operation_deadline: number?): (ResultCode, string?)
 		return enqueue_production(name, scope, key, message_type, data, queue_store_name, operation_deadline)
 	end
-end)()
+end)();
+
+(function(mailbox_v2_migration_production)
+	RecordStore.begin_mailbox_v2_migration_async = mailbox_v2_migration_production.begin_mailbox_v2_migration_async
+	RecordStore.get_mailbox_v2_migration_status_async = mailbox_v2_migration_production.get_mailbox_v2_migration_status_async
+	RecordStore.get_mailbox_v2_migration_source_page_async = mailbox_v2_migration_production.get_mailbox_v2_migration_source_page_async
+end)(mailbox_v2_migration_api(false))
 
 RecordStore.new = (function()
 	local normalize_options = RecordStore._internals.normalize_options
+	local transact_engine = RecordStore._internals.transact :: (Record, string, string, TransactionReducer, TransactionOptions?, string?, JsonValue?, { OutboxEventSpec }?) -> (JsonValue?, TransactionStatus, string?)
+	local transaction_status_engine = (RecordStore._internals :: { [string]: any }).get_transaction_status :: (Record, string, JsonValue) -> TransactionReceiptStatus
+	local start_scheduler: () -> () = ((RecordStore :: any)._scheduler_runtime).start
 	return function(name: string, scope: string, key: string, options: Options): Record
 	if closing then
 		error("RecordStore is shutting down", 2)
@@ -14374,7 +19891,7 @@ RecordStore.new = (function()
 	if valid_options == nil then
 		error("normalized options are missing", 2)
 	end
-	local record = make_record(name, scope, key, valid_options, false)
+	local record = make_record(name, scope, key, valid_options, false, transact_engine, transaction_status_engine)
 	start_scheduler()
 	return record
 	end
@@ -14382,7 +19899,10 @@ end)()
 
 RecordStore.Mock = (function()
 	local normalize_options = RecordStore._internals.normalize_options
+	local transact_engine = RecordStore._internals.transact :: (Record, string, string, TransactionReducer, TransactionOptions?, string?, JsonValue?, { OutboxEventSpec }?) -> (JsonValue?, TransactionStatus, string?)
+	local transaction_status_engine = (RecordStore._internals :: { [string]: any }).get_transaction_status :: (Record, string, JsonValue) -> TransactionReceiptStatus
 	local enqueue_mock = RecordStore._internals.enqueue_static.mock
+	local start_scheduler: () -> () = ((RecordStore :: any)._scheduler_runtime).start
 	local function mock_new(name: string, scope: string, key: string, options: Options): Record
 		if closing then
 			error("RecordStore is shutting down", 2)
@@ -14402,7 +19922,7 @@ RecordStore.Mock = (function()
 		valid_options.messaging_enabled = false
 		valid_options.takeover_enabled = false
 		start_scheduler()
-		return make_record(name, scope, key, valid_options, true)
+		return make_record(name, scope, key, valid_options, true, transact_engine, transaction_status_engine)
 	end
 
 	local function read_async_mock(name: string, scope: string, key: string, operation_deadline: number?, legacy_decoder: LegacyDecoder?): (Snapshot?, ResultCode, string?)
@@ -14535,6 +20055,67 @@ RecordStore.Mock = (function()
 		return if entry == nil then nil else copy_value(entry.Value)
 	end
 
+
+	local function mock_get_erasure_status_async(
+		name: string, scope: string, key: string, user_id: number, operation_deadline: number?
+	): (ErasureStatus?, ResultCode, string?)
+		return erasure_internal.get_status(name, scope, key, user_id, operation_deadline, true)
+	end
+
+	local function mock_erase_user_data_async(
+		name: string, scope: string, key: string, user_id: number, erasure_id: string,
+		expected_generation: number?, operation_deadline: number?
+	): (ErasureStatus?, ResultCode, string?)
+		return erasure_internal.erase_user_data(
+			name, scope, key, user_id, erasure_id, expected_generation, operation_deadline, true
+		)
+	end
+
+	local function mock_purge_erased_versions_async(
+		name: string, scope: string, key: string, user_id: number, erasure_id: string,
+		max_versions: number?, operation_deadline: number?
+	): (ErasurePurgeProgress?, ResultCode, string?)
+		return erasure_internal.purge_erased_versions(
+			name, scope, key, user_id, erasure_id, max_versions, operation_deadline, true
+		)
+	end
+
+	local function mock_get_quarantine_fence_status_async(
+		name: string, scope: string, key: string, operation_deadline: number?
+	): (QuarantineFenceStatus?, ResultCode, string?)
+		return erasure_internal.get_quarantine_fence_status(name, scope, key, operation_deadline, true)
+	end
+
+	local function mock_quarantine_profile_writes_async(
+		name: string, scope: string, key: string, quarantine_id: string, operator_id: string,
+		reason: string, expected_generation: number, expected_revision: number,
+		operation_deadline: number?
+	): (QuarantineFenceStatus?, ResultCode, string?)
+		return erasure_internal.quarantine_profile_writes(
+			name, scope, key, quarantine_id, operator_id, reason,
+			expected_generation, expected_revision, operation_deadline, true
+		)
+	end
+
+	local function mock_mark_quarantine_release_pending_async(
+		name: string, scope: string, key: string, quarantine_id: string, resolution_id: string,
+		operator_id: string, reason: string, expected_revision: number?, operation_deadline: number?
+	): (QuarantineFenceStatus?, ResultCode, string?)
+		return erasure_internal.mark_quarantine_release_pending(
+			name, scope, key, quarantine_id, resolution_id, operator_id, reason,
+			expected_revision, operation_deadline, true
+		)
+	end
+
+	local function mock_release_quarantine_fence_async(
+		name: string, scope: string, key: string, quarantine_id: string,
+		resolution_id: string, operation_deadline: number?
+	): (QuarantineFenceStatus?, ResultCode, string?)
+		return erasure_internal.release_quarantine_fence(
+			name, scope, key, quarantine_id, resolution_id, operation_deadline, true
+		)
+	end
+
 	local function mock_get_record_version_raw(name: string, scope: string, key: string, version: string): unknown
 		local store = get_mock_store(name, scope)
 		local entry = store[key]
@@ -14551,6 +20132,14 @@ RecordStore.Mock = (function()
 		end
 		mock_test_clock = clock
 		mock_test_clock_offset = 0
+	end
+
+	local function mock_set_before_next_update(hook: (() -> ())?)
+		if hook ~= nil and type(hook) ~= "function" then
+			error("before-update hook must be a function or nil", 2)
+		end
+		local mock_state = mock_database :: any
+		mock_state[RecordStore] = hook
 	end
 
 	local function mock_set_update_replay(retries: number, advance_seconds: number)
@@ -14655,6 +20244,7 @@ RecordStore.Mock = (function()
 		return closing
 	end
 
+	local mock_mailbox_v2_migration_api = mailbox_v2_migration_api(true)
 	local Mock = {
 		new = mock_new,
 		reconcile = function(record: Record): (ResultCode, string?)
@@ -14675,7 +20265,51 @@ RecordStore.Mock = (function()
 			sync_public(record)
 			return normalize_result_code(result) or "unknown", message
 		end,
+		get_session_status_async = RecordStore._internals.get_session_status_mock_async,
+		inspect_profile_async = (function()
+			local inspect = RecordStore._internals.profile_doctor.inspect
+			return function(
+				name: string,
+				scope: string,
+				key: string,
+				options: ProfileDoctorOptions?
+			): (ProfileInspection?, ResultCode, string?)
+				return inspect(name, scope, key, options, read_async_mock, true)
+			end
+		end)(),
+		diff_profile_versions_async = (function()
+			local diff = RecordStore._internals.profile_doctor.diff
+			return function(
+				name: string,
+				scope: string,
+				key: string,
+				before_version: string,
+				after_version: string,
+				options: ProfileDoctorOptions?
+			): (ProfileVersionDiff?, ResultCode, string?)
+				return diff(name, scope, key, before_version, after_version, options, get_version_mock)
+			end
+		end)(),
+		preview_migration_async = (function()
+			local preview = RecordStore._internals.migration_registry.preview
+			return function(
+				store_name: string,
+				scope: string,
+				key: string,
+				target_version: number,
+				options: MigrationPreviewOptions?
+			): (MigrationPreview?, ResultCode, string?)
+				return preview(store_name, scope, key, target_version, options, read_async_mock, true)
+			end
+		end)(),
 		read_async = read_async_mock,
+		get_erasure_status_async = mock_get_erasure_status_async,
+		erase_user_data_async = mock_erase_user_data_async,
+		purge_erased_versions_async = mock_purge_erased_versions_async,
+		get_quarantine_fence_status_async = mock_get_quarantine_fence_status_async,
+		quarantine_profile_writes_async = mock_quarantine_profile_writes_async,
+		mark_quarantine_release_pending_async = mock_mark_quarantine_release_pending_async,
+		release_quarantine_fence_async = mock_release_quarantine_fence_async,
 		claim_queue_message = mock_claim_queue_message,
 		dead_letter_queue_message = mock_dead_letter_queue_message,
 		list_versions_async = list_versions_mock,
@@ -14684,6 +20318,9 @@ RecordStore.Mock = (function()
 		enqueue_async = function(name: string, scope: string, key: string, message_type: string, data: JsonValue?, queue_store_name: string?, operation_deadline: number?): (ResultCode, string?)
 			return enqueue_mock(name, scope, key, message_type, data, queue_store_name, operation_deadline)
 		end,
+		begin_mailbox_v2_migration_async = mock_mailbox_v2_migration_api.begin_mailbox_v2_migration_async,
+		get_mailbox_v2_migration_status_async = mock_mailbox_v2_migration_api.get_mailbox_v2_migration_status_async,
+		get_mailbox_v2_migration_source_page_async = mock_mailbox_v2_migration_api.get_mailbox_v2_migration_source_page_async,
 		seed_queue_raw = function(name: string, scope: string, key: string, value: unknown, queue_store_name: string?): (ResultCode, string?)
 			return mock_seed_queue_value(name, scope, key, value, false, queue_store_name)
 		end,
@@ -14697,6 +20334,7 @@ RecordStore.Mock = (function()
 		set_test_clock = mock_set_test_clock,
 		set_update_replay = mock_set_update_replay,
 		set_update_failures = mock_set_update_failures,
+		set_before_next_update = mock_set_before_next_update,
 		set_update_commit_then_failures = mock_set_update_commit_then_failures,
 		set_get_failures = mock_set_get_failures,
 		reset = function()
@@ -14755,7 +20393,8 @@ game:BindToClose(RecordStore.shutdown)
 
 table.freeze(RecordStore._internals.enqueue_static)
 table.freeze(RecordStore._internals)
-rawset(RecordStore, "_internals", nil)
+rawset(RecordStore :: any, "_internals", nil)
+rawset(RecordStore :: any, "_scheduler_runtime", nil)
 table.freeze(RecordStore)
 
 return RecordStore

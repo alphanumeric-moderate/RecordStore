@@ -1,4 +1,4 @@
-name: CodSpeed
+name: CodSpeed CPU Simulation
 
 on:
   push:
@@ -18,7 +18,7 @@ env:
 
 jobs:
   benchmarks:
-    name: Run benchmarks
+    name: Run simulation benchmarks
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -34,53 +34,10 @@ jobs:
           rm lune.zip
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
-      - name: Regression - RecordStore core
-        timeout-minutes: 2
-        run: timeout --signal=TERM --kill-after=5s 60s lune run bench/run_regression_tests.luau
-
-      - name: Regression - InfiniteMath range
-        timeout-minutes: 2
-        run: timeout --signal=TERM --kill-after=5s 60s lune run bench/run_infinimath_regression_tests.luau
-
-      - name: Regression - InfiniteMathValue persistence
-        timeout-minutes: 2
-        run: timeout --signal=TERM --kill-after=5s 60s lune run bench/run_infinimathvalue_regression_tests.luau
-
-      - name: Regression - PlayerData.Set
-        timeout-minutes: 2
-        run: timeout --signal=TERM --kill-after=5s 60s lune run bench/run_playerdata_set_regression_tests.luau
-
-      - name: Regression - PlayerData ResetOnJoin
-        timeout-minutes: 2
-        run: timeout --signal=TERM --kill-after=5s 60s lune run bench/run_playerdata_reset_on_join_regression.luau
-
-      - name: Regression - Advanced scheduler
-        timeout-minutes: 2
-        run: timeout --signal=TERM --kill-after=5s 60s lune run bench/run_advanced_scheduler_regression.luau
-
-      - name: Regression - scheduler admission safety
-        timeout-minutes: 2
-        run: timeout --signal=TERM --kill-after=5s 60s lune run bench/run_scheduler_security_regression.luau
-
-      - name: Regression - scheduler bug fixes
-        timeout-minutes: 2
-        run: timeout --signal=TERM --kill-after=5s 60s lune run bench/run_scheduler_bugfix_regression.luau
-
-      - name: Regression - scheduler critical vulnerabilities
-        timeout-minutes: 2
-        run: timeout --signal=TERM --kill-after=5s 60s lune run bench/run_scheduler_critical_vulnerability_regression.luau
-
-      - name: Regression - scheduler hot-path performance
-        timeout-minutes: 2
-        run: timeout --signal=TERM --kill-after=5s 60s lune run bench/run_scheduler_hot_path_regression.luau
-
-      - name: Regression - V2 mailbox ordering and security
-        timeout-minutes: 2
-        run: timeout --signal=TERM --kill-after=5s 60s lune run bench/run_mailbox_v2_ordering_regression.luau
-
       - name: Run the benchmarks
         timeout-minutes: 16
         uses: CodSpeedHQ/action@v5
         with:
-          mode: simulation,walltime
+          # Use hosted-runner CPU simulation. This personal account cannot run Macro Runners; do not accept exec-harness WallTime results.
+          mode: simulation
           # Benchmarks are defined in codspeed.yml

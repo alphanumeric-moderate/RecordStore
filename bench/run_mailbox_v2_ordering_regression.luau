@@ -55,6 +55,15 @@ local function new_mailbox(options, store)
 	return MailboxV2.new(store, owner, options), store
 end
 
+do
+	local unsafe_owner = table.clone(owner)
+	unsafe_owner.user_id = 9007199254740992
+	local accepted = pcall(function()
+		MailboxV2.new(MailboxV2.MockStore(), unsafe_owner, {})
+	end)
+	assert(not accepted, "embedded Mailbox V2 accepted an owner UserId beyond the safe-integer range")
+end
+
 local function enqueue(mailbox, message_type, idempotency_key, ordering_key, priority, available_at)
 	local result = mailbox:EnqueueAsync(message_type, { id = idempotency_key }, {
 		idempotency_key = idempotency_key,
@@ -227,6 +236,142 @@ local function test_ordering_is_opt_in_and_input_validation_is_side_effect_free(
 		new_mailbox({ strict_ordering_enabled = true }, store_without_fresh)
 	end)
 	assert(not ok, "strict ordering accepted an adapter without uncached authoritative reads")
+end
+
+local function test_producer_idempotency_conflict_and_preparation_response_loss()
+	local backing = MailboxV2.MockStore()
+	local route = nil
+	local lost_route_write = false
+	local store = {
+		GetAsync = function(_, key) return backing:GetAsync(key) end,
+		GetAsyncFresh = function(_, key) return backing:GetAsyncFresh(key) end,
+		UpdateAsync = function(_, key, transform)
+			if key == route and not lost_route_write then
+				lost_route_write = true
+				backing:FailNextUpdate("after")
+			end
+			return backing:UpdateAsync(key, transform)
+		end,
+		RemoveAsync = function(_, key) return backing:RemoveAsync(key) end,
+	}
+	local mailbox = new_mailbox({ strict_ordering_enabled = true }, store)
+	local route_error
+	route, route_error = mailbox:_route_key("producer-crash-window")
+	assert(route ~= nil, tostring(route_error))
+
+	local options = {
+		idempotency_key = "producer-crash-window",
+		ordering_key = "producer-crash-account",
+		priority = "normal",
+		available_at = now_ms,
+	}
+	local first = mailbox:EnqueueAsync("purchase", { sku = "item-A" }, options)
+	assert(lost_route_write, "test did not inject response loss on the canonical preparation write")
+	assert(first.code == "unknown",
+		"ambiguous canonical preparation write was not exposed as unknown: " .. tostring(first.code))
+
+	local recovery = mailbox:RecoverAsync()
+	assert(recovery.code == "success",
+		"bounded preparation recovery failed after canonical response loss: " .. tostring(recovery.error))
+	local delivery, delivery_result = mailbox:GetDeliveryAsync(route)
+	assert(delivery_result.code == "success" and delivery ~= nil,
+		"recovered producer receipt could not be read: " .. tostring(delivery_result.error))
+	assert(delivery.State == "ready", "recovered producer receipt did not reach ready")
+
+	local duplicate = mailbox:EnqueueAsync("purchase", { sku = "item-A" }, options)
+	assert(duplicate.code == "duplicate", "same producer request was not idempotent: " .. tostring(duplicate.code))
+	assert(duplicate.message_id == route, "duplicate producer request returned a different message ID")
+
+	local conflict = mailbox:EnqueueAsync("purchase", { sku = "item-B" }, options)
+	assert(conflict.code == "conflict", "reused producer key with a changed payload was not rejected")
+	local queue, queue_result = mailbox:GetQueueAsync()
+	assert(queue_result.code == "success", "queue could not be read after producer recovery")
+	local route_count = 0
+	for _, message in ipairs(queue) do
+		if message.Id == route then route_count += 1 end
+	end
+	assert(route_count == 1, "response-loss recovery or duplicate enqueue created multiple active placements")
+end
+
+local function test_every_enqueue_write_boundary_recovers_durably()
+	local function create_mailbox(failure_index, failure_mode)
+		local backing = MailboxV2.MockStore()
+		local write_trace = {}
+		local store = {
+			GetAsync = function(_, key) return backing:GetAsync(key) end,
+			GetAsyncFresh = function(_, key) return backing:GetAsyncFresh(key) end,
+			UpdateAsync = function(_, key, transform)
+				table.insert(write_trace, key)
+				if failure_index == #write_trace then
+					backing:FailNextUpdate(failure_mode)
+				end
+				return backing:UpdateAsync(key, transform)
+			end,
+		}
+		local mailbox = new_mailbox({}, store)
+		return mailbox, backing, write_trace
+	end
+
+	local baseline, _, baseline_trace = create_mailbox(nil, nil)
+	local baseline_result = baseline:EnqueueAsync("preparation-matrix", { value = "stable" }, {
+		idempotency_key = "preparation-matrix-baseline",
+		priority = "normal",
+		available_at = now_ms,
+	})
+	assert(baseline_result.code == "accepted", "producer write-matrix baseline failed")
+	local write_count = #baseline_trace
+	assert(write_count >= 5, "producer write-matrix observed too few durable preparation writes")
+
+	for failure_index = 1, write_count do
+		for _, failure_mode in ipairs({ "before", "after" }) do
+			local mailbox, backing, write_trace = create_mailbox(failure_index, failure_mode)
+			local producer_key = ("preparation-matrix-%d-%s"):format(failure_index, failure_mode)
+			local options = {
+				idempotency_key = producer_key,
+				priority = "normal",
+				available_at = now_ms,
+			}
+			local first = mailbox:EnqueueAsync("preparation-matrix", { value = "stable" }, options)
+			assert(#write_trace >= failure_index,
+				("fault injection %d/%s was not reached"):format(failure_index, failure_mode))
+			assert(type(first.message_id) == "string" and first.message_id ~= "",
+				("producer receipt identity was not returned for fault %d/%s"):format(failure_index, failure_mode))
+
+			local route = first.message_id
+			local recovered = false
+			local last_status = tostring(first.code) .. ": " .. tostring(first.error)
+			for attempt = 1, 4 do
+				local recovery = mailbox:RecoverAsync()
+				last_status = "recovery=" .. tostring(recovery.code) .. ": " .. tostring(recovery.error)
+				local delivery, delivery_result = mailbox:GetDeliveryAsync(route)
+				if delivery ~= nil and delivery_result.code == "success" and delivery.State == "ready" then
+					recovered = true
+					break
+				end
+				last_status ..= "; delivery=" .. tostring(delivery_result.code) .. ": " .. tostring(delivery_result.error)
+				local retry = mailbox:EnqueueAsync("preparation-matrix", { value = "stable" }, options)
+				last_status ..= "; retry=" .. tostring(retry.code) .. ": " .. tostring(retry.error)
+			end
+			assert(recovered,
+				("producer recovery did not converge for write %d/%s: %s"):format(
+					failure_index, failure_mode, last_status
+				))
+			local duplicate = mailbox:EnqueueAsync("preparation-matrix", { value = "stable" }, options)
+			assert(duplicate.code == "duplicate" and duplicate.message_id == route,
+				("producer receipt was not discoverable after recovery at write %d/%s"):format(failure_index, failure_mode))
+			local queue, queue_result = mailbox:GetQueueAsync()
+			assert(queue_result.code == "success",
+				("queue read failed after write %d/%s recovery"):format(failure_index, failure_mode))
+			local active_placements = 0
+			for _, item in ipairs(queue) do
+				if item.Id == route then active_placements += 1 end
+			end
+			assert(active_placements == 1,
+				("recovery left %d active placements for write %d/%s"):format(
+					active_placements, failure_index, failure_mode
+				))
+		end
+	end
 end
 
 local function test_priority_never_overtakes_an_earlier_ordered_message()
@@ -498,6 +643,353 @@ local function test_corrupt_ready_message_metadata_fails_closed()
 		"negative retry accounting reached a message handler")
 end
 
+local function test_future_message_version_fails_closed()
+	local mailbox, store = new_mailbox({ strict_ordering_enabled = true })
+	local queued = enqueue(mailbox, "future-schema", "future-schema-id", nil, "normal")
+	store.values[queued.message_id].version = 3
+
+	local delivery, delivery_result = mailbox:GetDeliveryAsync(queued.message_id)
+	assert(delivery == nil and delivery_result.code == "unsupported_schema",
+		"public delivery read treated a future message version as a v2 envelope")
+
+	local queue, queue_result = mailbox:GetQueueAsync()
+	assert(#queue == 0 and queue_result.code == "unsupported_schema",
+		"public queue read exposed a future-version message as a v2 entry")
+
+	local commits_before_guard = store.committed_update_calls
+	local guarded_record, guarded_error = mailbox:_update_message(queued.message_id, function(current)
+		return current
+	end)
+	assert(guarded_record == nil and string.find(tostring(guarded_error), "unsupported schema version", 1, true) ~= nil,
+		"message mutation helper did not fail closed on a future-version canonical record")
+	assert(store.committed_update_calls == commits_before_guard,
+		"message mutation helper re-persisted a future-version canonical record")
+	local claimed, claim_result = mailbox:_claim(queued.message_id)
+	assert(claimed == nil and claim_result.code == "unsupported_schema",
+		"claim attempted to process a message from an unsupported schema version")
+	assert(store.values[queued.message_id].version == 3 and store.values[queued.message_id].state == "ready",
+		"unsupported message schema was rewritten during fail-closed validation")
+
+	local ack_mailbox, ack_store = new_mailbox()
+	local acknowledging = enqueue(ack_mailbox, "future-ack-schema", "future-ack-schema-id", nil, "normal")
+	ack_store.values[acknowledging.message_id].version = 3
+	ack_store.values[acknowledging.message_id].state = "acknowledging"
+	ack_store.values[acknowledging.message_id].claim_token = "future-claim-token"
+	local ack_result = ack_mailbox:_finish_acknowledgement(acknowledging.message_id, "future-claim-token")
+	assert(ack_result.code == "unsupported_schema"
+		and ack_store.values[acknowledging.message_id].state == "acknowledging",
+		"acknowledgement recovery mutated a future-version canonical message")
+
+	local dlq_mailbox, dlq_store = new_mailbox()
+	local dead_lettering = enqueue(dlq_mailbox, "future-dlq-schema", "future-dlq-schema-id", nil, "normal")
+	dlq_store.values[dead_lettering.message_id].version = 3
+	dlq_store.values[dead_lettering.message_id].state = "dead_lettering"
+	local dlq_result = dlq_mailbox:_finish_dead_letter(dead_lettering.message_id)
+	assert(dlq_result.code == "unsupported_schema"
+		and dlq_store.values[dead_lettering.message_id].state == "dead_lettering",
+		"dead-letter recovery mutated a future-version canonical message")
+end
+
+local function test_future_message_version_cannot_confirm_duplicate_producer_receipt()
+	local mailbox, store = new_mailbox()
+	local producer_key = "future-producer-v3-id"
+	local queued = enqueue(mailbox, "future-producer", producer_key, nil, "normal")
+	local canonical = store.values[queued.message_id]
+	assert(type(canonical) == "table", "producer fixture omitted its canonical record")
+	canonical.version = 3
+	store.values[queued.message_id] = canonical
+	local writes_before_retry = store.update_calls
+
+	local retry = mailbox:EnqueueAsync("future-producer", { id = producer_key }, {
+		idempotency_key = producer_key,
+		priority = "normal",
+		available_at = now_ms,
+	})
+	assert(retry.code == "unsupported_schema",
+		"V2 producer retry acknowledged a future-version canonical record as a duplicate")
+	assert(store.update_calls == writes_before_retry,
+		"future-version producer receipt triggered a canonical or index write")
+	assert(store.values[queued.message_id].version == 3
+		and store.values[queued.message_id].state == "ready",
+		"future-version producer record was modified by V2 compatibility handling")
+end
+
+local function test_future_index_schema_versions_fail_closed()
+	local function poison_index_segment(mailbox, store, kind)
+		local manifest = store.values[mailbox:_manifest_key(kind)]
+		assert(type(manifest) == "table" and type(manifest.slots) == "table",
+			"index-schema fixture omitted its manifest")
+		for slot_number, slot in ipairs(manifest.slots) do
+			if type(slot) == "table"
+				and (slot.state == "open" or slot.state == "sealed" or slot.state == "draining")
+			then
+				local key = mailbox:_segment_key(kind, slot_number, slot.generation)
+				local segment = store.values[key]
+				if type(segment) == "table" and segment.generation == slot.generation then
+					local future_segment = clone(segment)
+					future_segment.version = 3
+					store.values[key] = future_segment
+					return key
+				end
+			end
+		end
+		error("index-schema fixture could not find a live segment for " .. kind)
+	end
+
+	local active_mailbox, active_store = new_mailbox()
+	local active = enqueue(active_mailbox, "future-active-index", "future-active-index-id", nil, "normal")
+	assert(type(active.message_id) == "string", "active-index fixture did not create a canonical message")
+	poison_index_segment(active_mailbox, active_store, "active")
+	local active_writes = active_store.update_calls
+	local queue, queue_result = active_mailbox:GetQueueAsync()
+	assert(#queue == 0 and queue_result.code == "unsupported_schema",
+		"queue reader interpreted a future-version index segment as V2")
+	assert(active_store.update_calls == active_writes,
+		"queue read wrote while rejecting a future-version index segment")
+	local recovery = active_mailbox:RecoverAsync()
+	assert(recovery.code == "unsupported_schema",
+		"mailbox recovery did not surface an unsupported active-index schema")
+	assert(active_store.update_calls == active_writes,
+		"mailbox recovery wrote after encountering a future-version index segment")
+
+	local manifest_mailbox, manifest_store = new_mailbox()
+	enqueue(manifest_mailbox, "future-manifest", "future-manifest-id", nil, "normal")
+	local manifest_key = manifest_mailbox:_manifest_key("active")
+	local future_manifest = clone(manifest_store.values[manifest_key])
+	future_manifest.version = 3
+	manifest_store.values[manifest_key] = future_manifest
+	local manifest_writes = manifest_store.update_calls
+	local manifest_queue, manifest_result = manifest_mailbox:GetQueueAsync()
+	assert(#manifest_queue == 0 and manifest_result.code == "unsupported_schema",
+		"queue reader did not surface a future-version manifest")
+	assert(manifest_store.update_calls == manifest_writes,
+		"queue read wrote after encountering a future-version manifest")
+
+	local dlq_mailbox, dlq_store = new_mailbox({ max_attempts = 1 })
+	local dlq_message = enqueue(dlq_mailbox, "future-dlq-index", "future-dlq-index-id", nil, "normal")
+	local dlq_transition = process_one(dlq_mailbox, function() return false end)
+	assert(dlq_transition.code == "dead_lettered",
+		"DLQ index fixture did not reach the dead-letter state")
+	assert(type(dlq_message.message_id) == "string", "DLQ fixture omitted its canonical message ID")
+	poison_index_segment(dlq_mailbox, dlq_store, "dlq")
+	local dlq_writes = dlq_store.update_calls
+	local dead_letters, _, dlq_result = dlq_mailbox:GetDeadLettersAsync(nil, 100)
+	assert(#dead_letters == 0 and dlq_result.code == "unsupported_schema",
+		"dead-letter reader interpreted a future-version DLQ segment as V2")
+	assert(dlq_store.update_calls == dlq_writes,
+		"dead-letter read wrote while rejecting a future-version DLQ segment")
+end
+
+local function test_future_schema_writers_cancel_updates()
+	local manifest_mailbox, manifest_store = new_mailbox()
+	enqueue(manifest_mailbox, "future-manifest-write", "future-manifest-write-id", nil, "normal")
+	local manifest_key = manifest_mailbox:_manifest_key("active")
+	local future_manifest = clone(manifest_store.values[manifest_key])
+	future_manifest.version = 3
+	manifest_store.values[manifest_key] = future_manifest
+	local commits_before_slot = manifest_store.committed_update_calls
+	local slot = nil
+	for index, candidate in ipairs(future_manifest.slots) do
+		if type(candidate) == "table" and candidate.state == "open" then
+			slot = { slot = index, generation = candidate.generation, key = manifest_mailbox:_segment_key("active", index, candidate.generation) }
+			break
+		end
+	end
+	assert(slot ~= nil, "future-manifest fixture has no open slot")
+	assert(manifest_mailbox:_set_slot_state("active", slot, "open", "sealed") == false,
+		"slot mutation accepted a future-version manifest")
+	assert(manifest_store.committed_update_calls == commits_before_slot,
+		"slot mutation re-persisted a future-version manifest")
+
+	local segment_mailbox, segment_store = new_mailbox()
+	local queued = enqueue(segment_mailbox, "future-segment-write", "future-segment-write-id", nil, "normal")
+	local segment_key = segment_store.values[segment_mailbox:_manifest_key("active")]
+	local segment_locator = nil
+	for index, candidate in ipairs(segment_key.slots) do
+		if type(candidate) == "table" and candidate.state == "open" then
+			local key = segment_mailbox:_segment_key("active", index, candidate.generation)
+			local segment = segment_store.values[key]
+			if type(segment) == "table" and segment.generation == candidate.generation then
+				segment.version = 3
+				segment_store.values[key] = segment
+				segment_locator = { slot = index, generation = candidate.generation, key = key }
+				break
+			end
+		end
+	end
+	assert(segment_locator ~= nil and type(queued.message_id) == "string",
+		"future-segment fixture could not find an open segment")
+	local commits_before_append = segment_store.committed_update_calls
+	local append_status, append_error = segment_mailbox:_append_at_locator("active", segment_locator, {
+		route = "future-segment-write-extra", placement_generation = 1, reservation_token = "regression",
+	})
+	assert(append_status == "unknown" and string.find(tostring(append_error), "unsupported schema version", 1, true) ~= nil,
+		"index append did not fail closed on a future-version segment")
+	assert(segment_store.committed_update_calls == commits_before_append,
+		"index append re-persisted a future-version segment")
+
+	local order_key = "future-ordering-schema"
+	local intercepted_order_route = nil
+	local order_backing = MailboxV2.MockStore()
+	local order_store = {
+		GetAsync = function(_, key) return order_backing:GetAsync(key) end,
+		GetAsyncFresh = function(_, key) return order_backing:GetAsyncFresh(key) end,
+		UpdateAsync = function(_, key, transform)
+			local cancelled = false
+			local result = order_backing:UpdateAsync(key, function(raw, key_info)
+				local proposed = transform(raw, key_info)
+				if key == intercepted_order_route and proposed == nil then cancelled = true end
+				return proposed
+			end)
+			if cancelled then return nil end
+			return result
+		end,
+		RemoveAsync = function(_, key) return order_backing:RemoveAsync(key) end,
+	}
+	local ordering_mailbox = new_mailbox({}, order_store)
+	local order_route = ordering_mailbox:_ordering_route(order_key)
+	intercepted_order_route = order_route
+	order_backing.values[order_route] = {
+		version = 3, owner = ordering_mailbox.owner, ordering_key = order_key,
+		next_sequence = 2, routes = { ["future-ordering-route"] = 1 }, replay_operations = {},
+	}
+	local commits_before_order = order_backing.committed_update_calls
+	local sequence, order_error = ordering_mailbox:_ensure_ordering_slot("future-ordering-route-2", order_key)
+	assert(sequence == nil and string.find(tostring(order_error), "unsupported schema version", 1, true) ~= nil,
+		"ordering reservation did not reject a future-version index after a cancelled UpdateAsync")
+	assert(order_backing.committed_update_calls == commits_before_order,
+		"ordering reservation re-persisted a future-version index")
+end
+
+local function test_reclaim_fences_a_concurrent_append()
+	local backing = MailboxV2.MockStore()
+	local target_segment_key = nil
+	local intercept_armed = false
+	local injected = false
+	local store = {
+		GetAsync = function(_, key) return backing:GetAsync(key) end,
+		GetAsyncFresh = function(_, key) return backing:GetAsyncFresh(key) end,
+		UpdateAsync = function(_, key, transform)
+			if intercept_armed and not injected and key == target_segment_key then
+				local current = backing.values[key]
+				if type(current) == "table" and current.state == "sealed" then
+					local raced = clone(current)
+					table.insert(raced.entries, {
+						route = "concurrent-active-route",
+						placement_generation = 999,
+					})
+					backing.values[key] = raced
+					injected = true
+				end
+			end
+			return backing:UpdateAsync(key, transform)
+		end,
+		RemoveAsync = function(_, key) return backing:RemoveAsync(key) end,
+	}
+	local mailbox = new_mailbox({ segment_max_messages = 1 }, store)
+	local queued = enqueue(mailbox, "reclaim-race-owner", "reclaim-race-producer", nil, "normal")
+	local processed = process_one(mailbox, function() return true end)
+	assert(processed.code == "processed", "reclaim-race fixture did not acknowledge the canonical message")
+	local manifest = backing.values[mailbox:_manifest_key("active")]
+	assert(type(manifest) == "table" and type(manifest.slots) == "table",
+		"reclaim-race fixture omitted the active manifest")
+	for slot_number, slot in ipairs(manifest.slots) do
+		if type(slot) == "table" and slot.state == "sealed" then
+			target_segment_key = mailbox:_segment_key("active", slot_number, slot.generation)
+			break
+		end
+	end
+	assert(type(target_segment_key) == "string", "reclaim-race fixture did not create a sealed segment")
+	intercept_armed = true
+	local reclaimed = mailbox:_reclaim_slot("active")
+	assert(injected, "concurrent segment append was not injected before retirement")
+	assert(reclaimed == false, "reclaimer removed a segment changed after the safety scan")
+	local remaining = backing.values[target_segment_key]
+	assert(type(remaining) == "table" and remaining.state == "sealed",
+		"reclaimer removed or retired a concurrently changed segment")
+	local found_raced_row = false
+	for _, row in ipairs(remaining.entries) do
+		if type(row) == "table" and row.route == "concurrent-active-route" then found_raced_row = true end
+	end
+	assert(found_raced_row, "reclaimer discarded the concurrent index row")
+
+	local stale_mailbox, stale_store = new_mailbox()
+	local original = enqueue(stale_mailbox, "retired-segment-stale-writer", "retired-segment-stale-writer-id", nil, "normal")
+	local stale_manifest = stale_store.values[stale_mailbox:_manifest_key("active")]
+	local stale_locator = nil
+	for slot_number, slot in ipairs(stale_manifest.slots) do
+		if type(slot) == "table" and slot.state == "open" then
+			local key = stale_mailbox:_segment_key("active", slot_number, slot.generation)
+			local segment = stale_store.values[key]
+			if type(segment) == "table" and segment.generation == slot.generation then
+				segment.state = "retired"
+				stale_store.values[key] = segment
+				stale_locator = { slot = slot_number, generation = slot.generation, key = key }
+				break
+			end
+		end
+	end
+	assert(stale_locator ~= nil and type(original.message_id) == "string",
+		"retired-segment fixture could not locate its segment")
+	local commits_before = stale_store.committed_update_calls
+	local stale_status = stale_mailbox:_append_at_locator("active", stale_locator, {
+		route = "stale-writer-extra-route", placement_generation = 1,
+		reservation_token = "stale-writer",
+	})
+	assert(stale_status == "full", "stale writer revived a retired segment instead of retrying elsewhere")
+	assert(stale_store.committed_update_calls == commits_before,
+		"stale writer committed a mutation to a retired segment")
+	assert(stale_store.values[stale_locator.key].state == "retired",
+		"stale writer changed the retired segment state")
+end
+
+local function test_reclaim_uses_fresh_canonical_state()
+	local backing = MailboxV2.MockStore()
+	local stale_route = nil
+	local stale_terminal = nil
+	local store = {
+		GetAsync = function(_, key)
+			if stale_route ~= nil and key == stale_route and stale_terminal ~= nil then
+				return clone(stale_terminal)
+			end
+			return backing:GetAsync(key)
+		end,
+		GetAsyncFresh = function(_, key) return backing:GetAsyncFresh(key) end,
+		UpdateAsync = function(_, key, transform) return backing:UpdateAsync(key, transform) end,
+		RemoveAsync = function(_, key) return backing:RemoveAsync(key) end,
+	}
+	local mailbox = new_mailbox({ segment_max_messages = 1 }, store)
+	local queued = enqueue(mailbox, "reclaim-fresh-state", "reclaim-fresh-state-id", nil, "normal")
+	local processed = process_one(mailbox, function() return true end)
+	assert(processed.code == "processed", "fresh-state fixture did not finish the original delivery")
+	local terminal = backing.values[queued.message_id]
+	assert(type(terminal) == "table" and terminal.state == "acknowledged",
+		"fresh-state fixture did not create a terminal cached snapshot")
+	stale_route = queued.message_id
+	stale_terminal = clone(terminal)
+	local authoritative_live = clone(terminal)
+	authoritative_live.state = "ready"
+	backing.values[queued.message_id] = authoritative_live
+	assert(store:GetAsync(stale_route).state == "acknowledged"
+		and store:GetAsyncFresh(stale_route).state == "ready",
+		"fresh-state fixture did not create the intended stale-cache disagreement")
+
+	local manifest = backing.values[mailbox:_manifest_key("active")]
+	local segment_key = nil
+	for slot_number, slot in ipairs(manifest.slots) do
+		if type(slot) == "table" and slot.state == "sealed" then
+			segment_key = mailbox:_segment_key("active", slot_number, slot.generation)
+			break
+		end
+	end
+	assert(type(segment_key) == "string", "fresh-state fixture omitted its sealed segment")
+	assert(mailbox:_reclaim_slot("active") == false,
+		"reclaimer trusted a cached terminal record over an authoritative active record")
+	assert(type(backing.values[segment_key]) == "table"
+		and backing.values[segment_key].state == "sealed",
+		"reclaimer removed an index segment containing an authoritatively active message")
+end
+
 local function test_high_priority_burst_does_not_starve_background_messages()
 	local mailbox = new_mailbox({ strict_ordering_enabled = true })
 	for index = 1, 7 do
@@ -646,6 +1138,278 @@ local function test_priority_burst_policy_is_bounded_and_configurable()
 		"configurable burst failed to serve background work after two high-priority claims")
 end
 
+local function test_acknowledgement_response_loss_recovers_without_redelivery()
+	local backing = MailboxV2.MockStore()
+	local route = nil
+	local fail_next_route_update = false
+	local store = {
+		GetAsync = function(_, key) return backing:GetAsync(key) end,
+		GetAsyncFresh = function(_, key) return backing:GetAsyncFresh(key) end,
+		UpdateAsync = function(_, key, transform)
+			if fail_next_route_update and key == route then
+				fail_next_route_update = false
+				backing:FailNextUpdate("after")
+			end
+			return backing:UpdateAsync(key, transform)
+		end,
+		RemoveAsync = function(_, key) return backing:RemoveAsync(key) end,
+	}
+	local mailbox = new_mailbox({ strict_ordering_enabled = true }, store)
+	local queued = enqueue(mailbox, "ack-response-loss", "ack-response-loss-id", "ack-account", "high")
+	route = queued.message_id
+	local handler_calls = 0
+	local first = process_one(mailbox, function()
+		handler_calls += 1
+		fail_next_route_update = true
+		return true
+	end)
+	assert(first.code == "unknown" or first.code == "processed",
+		"response-loss acknowledgement returned an unexpected status: " .. tostring(first.code))
+	local before_recovery = backing:GetAsyncFresh(route)
+	assert(before_recovery.state == "acknowledging" or before_recovery.state == "acknowledged",
+		"response-loss did not leave a recoverable acknowledgement state")
+	local recovered = mailbox:RecoverAsync()
+	assert(recovered.code == "success", "acknowledgement recovery failed: " .. tostring(recovered.error))
+	local durable = backing:GetAsyncFresh(route)
+	assert(durable.state == "acknowledged" and durable.effect_outcome == "handler_succeeded",
+		"recovery did not reconcile the acknowledged terminal state")
+	local delivery, delivery_result = mailbox:GetDeliveryAsync(route)
+	assert(delivery_result.code == "success" and delivery.State == "acknowledged",
+		"acknowledgement terminal state was not visible through the public API")
+	local retried = process_one(mailbox, function()
+		handler_calls += 1
+		return true
+	end)
+	assert(retried.code == "empty" and handler_calls == 1,
+		"recovered acknowledgement redelivered a successfully handled message")
+end
+
+local function test_acknowledgement_terminal_write_fault_matrix()
+	for _, failure_mode in ipairs({ "before", "after" }) do
+		local backing = MailboxV2.MockStore()
+		local route = nil
+		local injected = false
+		local store = {
+			GetAsync = function(_, key) return backing:GetAsync(key) end,
+			GetAsyncFresh = function(_, key) return backing:GetAsyncFresh(key) end,
+			UpdateAsync = function(_, key, transform)
+				if not injected and key == route then
+					local current = backing.values[key]
+					if type(current) == "table" and current.state == "acknowledging" then
+						injected = true
+						backing:FailNextUpdate(failure_mode)
+					end
+				end
+				return backing:UpdateAsync(key, transform)
+			end,
+		}
+		local mailbox = new_mailbox({ strict_ordering_enabled = true }, store)
+		local queued = enqueue(
+			mailbox,
+			"ack-terminal-" .. failure_mode,
+			"ack-terminal-" .. failure_mode,
+			"ack-terminal-account-" .. failure_mode,
+			"high"
+		)
+		route = queued.message_id
+		local handler_calls = 0
+		local first = process_one(mailbox, function()
+			handler_calls += 1
+			return true
+		end)
+		assert(injected, "acknowledgement terminal-state failure was not injected: " .. failure_mode)
+		assert(first.code == "unknown",
+			"ambiguous terminal acknowledgement was not reported as unknown: " .. tostring(first.code))
+
+		local interrupted = backing:GetAsyncFresh(route)
+		if failure_mode == "before" then
+			assert(interrupted.state == "acknowledging",
+				"pre-commit acknowledgement failure did not preserve its recoverable intermediate state")
+		else
+			assert(interrupted.state == "acknowledged",
+				"post-commit acknowledgement response loss did not preserve the committed state")
+		end
+
+		local recovery = mailbox:RecoverAsync()
+		assert(recovery.code == "success",
+			"terminal acknowledgement recovery failed: " .. tostring(recovery.error))
+		local durable = backing:GetAsyncFresh(route)
+		assert(durable.state == "acknowledged" and durable.effect_outcome == "handler_succeeded",
+			"terminal acknowledgement did not recover to its durable success state")
+		local delivery, delivery_result = mailbox:GetDeliveryAsync(route)
+		assert(delivery_result.code == "success" and delivery ~= nil and delivery.State == "acknowledged",
+			"terminal acknowledgement result was not discoverable")
+		local retry = process_one(mailbox, function()
+			handler_calls += 1
+			return true
+		end)
+		assert(retry.code == "empty" and handler_calls == 1,
+			"terminal acknowledgement recovery redelivered a successfully handled message")
+	end
+end
+
+local function test_dead_letter_transition_response_loss_recovers_once()
+	local backing = MailboxV2.MockStore()
+	local route = nil
+	local fail_next_route_update = false
+	local store = {
+		GetAsync = function(_, key) return backing:GetAsync(key) end,
+		GetAsyncFresh = function(_, key) return backing:GetAsyncFresh(key) end,
+		UpdateAsync = function(_, key, transform)
+			if fail_next_route_update and key == route then
+				fail_next_route_update = false
+				backing:FailNextUpdate("after")
+			end
+			return backing:UpdateAsync(key, transform)
+		end,
+		RemoveAsync = function(_, key) return backing:RemoveAsync(key) end,
+	}
+	local mailbox = new_mailbox({
+		strict_ordering_enabled = true,
+		max_attempts = 1,
+		retry_base_ms = 1000,
+		retry_max_ms = 1000,
+	}, store)
+	local queued = enqueue(mailbox, "dlq-response-loss", "dlq-response-loss-id", "dlq-account", "high")
+	route = queued.message_id
+	local handler_calls = 0
+	local first = process_one(mailbox, function()
+		handler_calls += 1
+		fail_next_route_update = true
+		return false, "injected handler failure"
+	end)
+	assert(first.code == "unknown" or first.code == "dead_lettered",
+		"response-loss dead-letter transition returned an unexpected status: " .. tostring(first.code))
+	local before_recovery = backing:GetAsyncFresh(route)
+	assert(before_recovery.state == "dead_lettering" or before_recovery.state == "dead_lettered",
+		"response loss did not leave a recoverable dead-letter state")
+	local recovered = mailbox:RecoverAsync()
+	assert(recovered.code == "success", "dead-letter recovery failed: " .. tostring(recovered.error))
+	local durable = backing:GetAsyncFresh(route)
+	assert(durable.state == "dead_lettered", "dead-letter recovery did not reach its terminal state")
+	local entries, _, result = mailbox:GetDeadLettersAsync(nil, 8)
+	assert(result.code == "success", "dead-letter index could not be read: " .. tostring(result.error))
+	local copies = 0
+	for _, entry in ipairs(entries) do if entry.Id == route then copies += 1 end end
+	assert(copies == 1, "dead-letter response-loss recovery duplicated the DLQ entry")
+	assert(handler_calls == 1, "dead-letter recovery reran a completed handler")
+end
+
+local function test_expired_claim_is_recovered_and_retried_at_least_once()
+	local mailbox, backing = new_mailbox({
+		strict_ordering_enabled = true,
+		lease_ms = 10000,
+		lease_renewal_horizon_ms = 40000,
+		retry_base_ms = 1000,
+		retry_max_ms = 1000,
+	})
+	local queued = enqueue(mailbox, "expired-claim", "expired-claim-id", "expired-account", "high")
+	local handler_calls = 0
+	local first = process_one(mailbox, function()
+		handler_calls += 1
+		now_ms += 20000
+		return true
+	end)
+	assert(first.code ~= "processed", "expired claim was acknowledged after its lease elapsed")
+	local claimed = backing:GetAsyncFresh(queued.message_id)
+	assert(claimed.state == "claimed", "expired claim was not left for explicit recovery")
+	local recovered = mailbox:RecoverAsync()
+	assert(recovered.code == "success", "expired claim recovery failed: " .. tostring(recovered.error))
+	local ready = backing:GetAsyncFresh(queued.message_id)
+	assert(ready.state == "ready", "expired claim was not returned to a retryable state")
+	now_ms += 60000
+	local second = process_one(mailbox, function()
+		handler_calls += 1
+		return true
+	end)
+	assert(second.code == "processed" and handler_calls == 2,
+		"expired handler outcome was not retried with at-least-once semantics")
+	local completed = backing:GetAsyncFresh(queued.message_id)
+	assert(completed.state == "acknowledged", "retry did not finish acknowledgement")
+end
+
+local function test_competing_mailbox_instances_cannot_claim_the_same_message()
+	local first_mailbox, backing = new_mailbox({ strict_ordering_enabled = true })
+	local second_mailbox = new_mailbox({ strict_ordering_enabled = true }, backing)
+	local queued = enqueue(first_mailbox, "competing-claim", "competing-claim-id", nil, "high")
+	local first_claim, first_result = first_mailbox:_claim(queued.message_id)
+	assert(type(first_claim) == "table" and first_claim.state == "claimed",
+		"first mailbox did not acquire the claim: " .. tostring(first_result.code))
+	local second_claim, second_result = second_mailbox:_claim(queued.message_id)
+	assert(second_claim == nil and second_result.code ~= "claimed",
+		"second mailbox instance acquired a live claim: " .. tostring(second_result.code))
+	local durable = backing:GetAsyncFresh(queued.message_id)
+	assert(durable.state == "claimed" and durable.claim_token == first_claim.claim_token,
+		"competing claim changed the authoritative owner token")
+end
+
+local function test_mailbox_capacity_is_bounded_and_reported()
+	local mailbox = new_mailbox({
+		max_segments = 1,
+		segment_max_messages = 1,
+		preparation_shard_count = 1,
+		preparation_max_entries_per_shard = 4,
+	})
+	local first = enqueue(mailbox, "capacity-one", "capacity-one-id", nil, "normal")
+	local second = mailbox:EnqueueAsync("capacity-two", { value = 2 }, {
+		idempotency_key = "capacity-two-id",
+		priority = "normal",
+		available_at = now_ms,
+	})
+	assert(second.code == "capacity" or second.code == "unknown",
+		"mailbox capacity exhaustion returned unsafe success: " .. tostring(second.code))
+	local recovery = mailbox:RecoverAsync()
+	assert(recovery.code == "success",
+		"capacity-blocked preparation was not safely recoverable: " .. tostring(recovery.code))
+	if second.code == "unknown" then
+		assert(type(recovery.message) == "table" and recovery.message.capacity_blocked_preparations == 1,
+			"ambiguous capacity rejection was not exposed in recovery metadata")
+	end
+	local queue, queue_result = mailbox:GetQueueAsync()
+	assert(queue_result.code == "success" and #queue == 1 and queue[1].Id == first.message_id,
+		"capacity exhaustion created an extra active placement")
+	local stats, stats_result = mailbox:GetStatsAsync()
+	assert(stats_result.code == "success" and stats.active_capacity <= 1,
+		"mailbox stats exceeded the configured active capacity")
+end
+
+local function test_mailbox_maintenance_reports_bounded_state_and_fails_closed()
+	local mailbox = new_mailbox({
+		max_segments = 1,
+		segment_max_messages = 2,
+		preparation_shard_count = 1,
+		preparation_max_entries_per_shard = 4,
+	})
+	local queued = enqueue(mailbox, "maintenance-ready", "maintenance-ready-id", nil, "normal")
+	local report, maintenance_result = mailbox:MaintenanceAsync()
+	assert(maintenance_result.code == "success" and report.complete == true,
+		"mailbox maintenance did not finish its bounded recovery/reclaim/status sequence")
+	assert(type(report.recovery) == "table" and report.recovery.code == "success",
+		"mailbox maintenance omitted recovery evidence")
+	assert(type(report.reclaim) == "table"
+		and (report.reclaim.code == "success" or report.reclaim.code == "empty"),
+		"mailbox maintenance omitted bounded reclamation evidence")
+	assert(type(report.stats) == "table"
+		and report.stats.consistency == "bounded_non_linearizable"
+		and report.stats.completeness.global_snapshot == false,
+		"mailbox maintenance misrepresented its bounded status snapshot")
+	assert(report.stats.active_capacity == 2 and report.stats.ready == 1,
+		"mailbox maintenance capacity/readiness report was inconsistent with the observed queue")
+	assert(queued.message_id ~= nil, "maintenance fixture did not retain a canonical message ID")
+
+	local denied_store = MailboxV2.MockStore()
+	local denied_mailbox = MailboxV2.new(denied_store, owner, {
+		active_record = active_record,
+		activation_guard = function() return false, "maintenance not enabled" end,
+		encode = function(value) return serde.encode("json", value) end,
+	})
+	local denied_report, denied_result = denied_mailbox:MaintenanceAsync()
+	assert(denied_result.code == "disabled" and denied_report.complete ~= true,
+		"mailbox maintenance reported completion after activation was denied")
+	assert(denied_store.get_calls == 0 and denied_store.update_calls == 0,
+		"denied mailbox maintenance touched the backing store")
+end
+
 local function test_recordstore_installs_shared_scheduler_for_v2_claim_renewal()
 	RecordStore.Mock.reset()
 	local renewal_calls = 0
@@ -713,6 +1477,8 @@ test_injected_clock_and_guid_contracts_fail_closed()
 test_clock_is_never_called_inside_update_async_transform()
 test_ordering_is_opt_in_and_input_validation_is_side_effect_free()
 test_recordstore_installs_shared_scheduler_for_v2_claim_renewal()
+test_producer_idempotency_conflict_and_preparation_response_loss()
+test_every_enqueue_write_boundary_recovers_durably()
 test_priority_never_overtakes_an_earlier_ordered_message()
 test_delayed_predecessor_blocks_later_high_priority_work()
 test_retrying_predecessor_blocks_same_key_successor()
@@ -723,9 +1489,22 @@ test_corrupt_existing_ordering_slot_fails_closed()
 test_corrupt_ordering_index_fails_closed()
 test_stale_cache_cannot_bypass_claim_metadata_validation()
 test_corrupt_ready_message_metadata_fails_closed()
+test_future_message_version_fails_closed()
+test_future_message_version_cannot_confirm_duplicate_producer_receipt()
+test_future_index_schema_versions_fail_closed()
+test_future_schema_writers_cancel_updates()
+test_reclaim_fences_a_concurrent_append()
+test_reclaim_uses_fresh_canonical_state()
 test_high_priority_burst_does_not_starve_background_messages()
 test_clock_skew_cannot_break_ordering_under_adversarial_sort_keys()
 test_priority_burst_policy_is_bounded_and_configurable()
+test_acknowledgement_response_loss_recovers_without_redelivery()
+test_acknowledgement_terminal_write_fault_matrix()
+test_dead_letter_transition_response_loss_recovers_once()
+test_expired_claim_is_recovered_and_retried_at_least_once()
+test_competing_mailbox_instances_cannot_claim_the_same_message()
+test_mailbox_capacity_is_bounded_and_reported()
+test_mailbox_maintenance_reports_bounded_state_and_fails_closed()
 
-print("[MailboxV2] ordering, replay recovery, stale-read resistance, deterministic priority fairness, and input validation regressions passed.")
+print("[MailboxV2] ordering, claim/ack recovery, bounded capacity, maintenance reporting, stale-read resistance, and idempotency regressions passed.")
 Shim.close()
