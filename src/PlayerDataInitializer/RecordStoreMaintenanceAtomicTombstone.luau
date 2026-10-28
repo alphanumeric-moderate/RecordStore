@@ -309,6 +309,37 @@ function AtomicTombstone.new(config: Options): Adapter
 		return action, fenced_generation, message
 	end
 
+	local function release_fence_if_generation(
+		store: any,
+		key: string,
+		expected_generation: number,
+		job_id: string
+	): (boolean, string?)
+		local ok, observed = pcall(function()
+			return store:UpdateAsync(key, function(current: unknown): unknown?
+				if type(current) ~= "table" then return nil end
+				local raw = current :: { [string]: unknown }
+				if raw[generation_field] ~= expected_generation or raw[job_fence_field] ~= job_id then return nil end
+				local released = clone(current) :: { [string]: unknown }
+				released[generation_field] = expected_generation + 1
+				released[job_fence_field] = nil
+				return released
+			end)
+		end)
+		if not ok or observed == nil then
+			local readback, _, read_error = read_fresh(store, key)
+			if read_error ~= nil then return false, "maintenance fence release is unresolved: " .. read_error end
+			observed = readback
+		end
+		if type(observed) == "table" then
+			local raw = observed :: { [string]: unknown }
+			if raw[generation_field] == expected_generation and raw[job_fence_field] == job_id then
+				return false, "maintenance fence release did not confirm a generation advance"
+			end
+		end
+		return true, nil
+	end
+
 	function self:FenceAndDeleteIfGeneration(
 		store: any,
 		item: unknown,
@@ -340,6 +371,10 @@ function AtomicTombstone.new(config: Options): Adapter
 					end
 				elseif delete_action == "unknown" then
 					return "unknown", (delete_error or "tombstone outcome unresolved") .. "; readback failed: " .. read_error
+				end
+				if delete_action == "skipped" then
+					local released, release_error = release_fence_if_generation(store, key :: string, fenced_generation, job_id)
+					if not released then return "unknown", release_error end
 				end
 			end
 			return delete_action, delete_error

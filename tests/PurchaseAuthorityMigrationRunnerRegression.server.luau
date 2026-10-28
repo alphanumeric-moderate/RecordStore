@@ -119,7 +119,7 @@ local function new_runner(job_id, source, processor, checkpoint_store, revision,
 		source = source,
 		processor = processor,
 		checkpoint_store = checkpoint_store,
-		checkpoint_key = "purchase-migration:" .. job_id,
+		checkpoint_key = "pm:" .. job_id,
 		initial_cursor = initial_cursor,
 		page_size = 16,
 		inventory_manifest_id = "manifest:" .. (revision or source.source_revision or "snapshot-v1"),
@@ -189,7 +189,7 @@ do
 		"terminal page with fewer rows than the manifest was accepted")
 	expect(processor.calls == 0 and calls.count == 1,
 		"runner imported a terminal page before inventory-count reconciliation")
-	local checkpoint, read_error = backing:GetAsyncFresh("purchase-migration:historical-import-short-manifest")
+	local checkpoint, read_error = backing:GetAsyncFresh("pm:historical-import-short-manifest")
 	expect(checkpoint == nil and read_error == nil,
 		"incomplete inventory manifest created a terminal checkpoint")
 end
@@ -262,7 +262,7 @@ do
 	local failed = runner:RunBatchAsync(1)
 	expect(failed.code == "partial" and failed.cursor == nil and failed.pages_processed == 0,
 		"partial external backfill advanced the checkpoint cursor")
-	local checkpoint, read_error = backing:GetAsyncFresh("purchase-migration:historical-import-partial")
+	local checkpoint, read_error = backing:GetAsyncFresh("pm:historical-import-partial")
 	expect(checkpoint == nil and read_error == nil,
 		"partial external backfill persisted a checkpoint before completing the source page")
 	local retry = runner:RunBatchAsync(1)
@@ -332,7 +332,7 @@ do
 		["<initial>"] = page({ purchase("terminal-cursor-001") }, nil, true),
 	}, "snapshot-terminal-cursor", calls)
 	local job_id = "historical-import-terminal-cursor"
-	backing.values["purchase-migration:" .. job_id] = {
+	backing.values["pm:" .. job_id] = {
 		version = 4,
 		digest_algorithm = "sha256-chain-v1",
 		job_id = job_id,
@@ -371,7 +371,7 @@ do
 		["<initial>"] = page({ purchase("revision-zero-001") }, nil, true),
 	}, "snapshot-revision-zero", calls)
 	local job_id = "historical-import-revision-zero"
-	backing.values["purchase-migration:" .. job_id] = {
+	backing.values["pm:" .. job_id] = {
 		version = 4,
 		digest_algorithm = "sha256-chain-v1",
 		job_id = job_id,
@@ -405,7 +405,7 @@ end
 -- the cursor to the beginning of an existing migration.
 do
 	local backing = make_checkpoint_store()
-	backing.values["purchase-migration:historical-import-corrupt"] = {
+	backing.values["pm:historical-import-corrupt"] = {
 		version = 1,
 		job_id = "some-other-job",
 		source_revision = "snapshot-corrupt",
@@ -443,7 +443,7 @@ do
 	local result = runner:RunBatchAsync(1)
 	expect(result.code == "invalid" and result.purchases_processed == 0,
 		"out-of-order purchases within a page were accepted")
-	expect(processor.calls == 0 and backing.values["purchase-migration:historical-import-unsorted-page"] == nil,
+	expect(processor.calls == 0 and backing.values["pm:historical-import-unsorted-page"] == nil,
 		"unsorted page caused an import or checkpoint write")
 end
 
@@ -460,7 +460,7 @@ do
 	local first = runner:RunBatchAsync(1)
 	expect(first.code == "incomplete" and first.cursor == "page-2",
 		"first page did not produce a resumable checkpoint")
-	local saved = backing.values["purchase-migration:historical-import-cross-page-order"]
+	local saved = backing.values["pm:historical-import-cross-page-order"]
 	expect(saved ~= nil and saved.last_purchase_id == "purchase-z"
 		and saved.last_player_id == 123 and saved.last_product_id == 1001,
 		"checkpoint did not persist the last verified ordering tuple")
@@ -501,7 +501,7 @@ do
 		local result = runner:RunBatchAsync(1)
 		expect(result.code == "conflict" and result.pages_processed == 0 and result.cursor == nil,
 			"malformed continuation cursor was accepted")
-		expect(processor.calls == 0 and backing.values["purchase-migration:" .. job_id] == nil,
+		expect(processor.calls == 0 and backing.values["pm:" .. job_id] == nil,
 			"malformed cursor caused an import or checkpoint write")
 	end
 end
@@ -514,7 +514,7 @@ do
 		["<initial>"] = page({ purchase("legacy-v3-purchase") }, nil, true),
 	}, "snapshot-legacy-v3", calls)
 	local job_id = "historical-import-legacy-v3"
-	backing.values["purchase-migration:" .. job_id] = {
+	backing.values["pm:" .. job_id] = {
 		version = 3,
 		digest_algorithm = "sha256-chain-v1",
 		job_id = job_id,
@@ -552,7 +552,7 @@ do
 		["page-3"] = page({ purchase("concurrent-004") }, nil, true),
 	}, "snapshot-concurrent-checkpoint", calls)
 	local job_id = "historical-import-concurrent-checkpoint"
-	local checkpoint_key = "purchase-migration:" .. job_id
+	local checkpoint_key = "pm:" .. job_id
 	local competing_digest, digest_error = RunnerModule.ComputeInventoryDigest({
 		purchase("concurrent-001"),
 		purchase("concurrent-002", 1002),

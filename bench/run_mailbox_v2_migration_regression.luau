@@ -1,5 +1,6 @@
 --!nocheck
 local Shim = require("./RobloxShim")
+local serde = require("@lune/serde")
 local initializer = Shim.environment.game:GetService("ServerScriptService"):WaitForChild("PlayerDataInitializer")
 local Runner = Shim.environment.require(initializer:WaitForChild("RecordStoreMailboxV2Migration"))
 local Adapter = Shim.environment.require(initializer:WaitForChild("RecordStoreMailboxV2MigrationAdapter"))
@@ -489,3 +490,48 @@ do -- The concrete bridge must preserve source locators and gate completion proo
 end
 
 print("[MailboxV2Migration] pagination, import identity, replay, source bridge and migration recovery regressions passed")
+
+-- Verify the coordinator and real importer agree on legacy casing and precedence.
+do
+	local Mailbox = Shim.load().MailboxV2
+	for _, variant in ipairs({ "uppercase", "nonfinite-lowercase", "lowercase-priority", "defaults" }) do
+		local active = { Id = "active-" .. variant, Type = "award", Data = { amount = 3 }, CreatedAt = 100,
+			Attempts = 2, TotalAttempts = 5, ReplayCount = 1 }
+		local expected_attempts, expected_total, expected_replay = 2, 5, 1
+		if variant == "nonfinite-lowercase" then
+			active.attempts, active.total_attempts, active.replay_count = 0 / 0, math.huge, -math.huge
+		elseif variant == "lowercase-priority" then
+			active.attempts, active.total_attempts, active.replay_count = 0, 3, 0
+			expected_attempts, expected_total, expected_replay = 0, 3, 0
+		elseif variant == "defaults" then
+			active.TotalAttempts, active.ReplayCount = nil, nil
+			expected_total, expected_replay = 2, 0
+		end
+		local dead = copy(active)
+		dead.Id = "dead-" .. variant
+		dead.DeadLetteredAt, dead.LastError = 110, "handler failure"
+		local mailbox = Mailbox.new(Mailbox.MockStore(), {
+			store_name = "MigrationCounterRepair", scope = "global", profile_key = variant, user_id = 1,
+		}, {
+			allow_unattested_activation = true,
+			strict_ordering_enabled = true,
+			now_ms = function() return 1800000000000 end,
+			encode = function(value) return serde.encode("json", value) end,
+		})
+		local runner = fixture({ active = { active }, dead = { dead } })
+		runner.mailbox = mailbox
+		local imported = mailbox:ImportLegacyAsync(active, "migration-regression-r1")
+		expect(imported.code == "accepted", "real importer rejected " .. variant .. ": " .. tostring(imported.error))
+		local first = runner:Step(1)
+		expect(first.code == "progress", "counter normalization failed active migration: " .. tostring(first.message))
+		local second = runner:Step(1)
+		expect(second.code == "ready_to_activate", "counter normalization failed dead-letter migration: " .. tostring(second.message))
+		for _, id in ipairs({ active.Id, dead.Id }) do
+			local delivery, result = mailbox:GetDeliveryAsync(id)
+			expect(result.code == "success" and delivery.Attempts == expected_attempts
+				and delivery.TotalAttempts == expected_total and delivery.ReplayCount == expected_replay,
+				"legacy counters were lost for " .. variant)
+		end
+	end
+end
+print("[MailboxMigration] real import and coordinator counter normalization passed")

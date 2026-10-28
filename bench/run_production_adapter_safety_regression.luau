@@ -22,6 +22,25 @@ do
 		"cache default changed lookup or call-counter semantics")
 end
 
+-- Clone failures must release the key lock, and replay metrics count extra calls.
+do
+	local fixture = FakeDataStore.new()
+	local store = fixture.service:GetDataStore("LockCleanup")
+	local cyclic = {}; cyclic.self = cyclic
+	assert(not pcall(function() store:UpdateAsync("key", function() return cyclic end) end),
+		"cyclic fake-store value was accepted")
+	store:UpdateAsync("key", function() return { value = 1 } end)
+	local before = fixture.control:metrics()
+	fixture.control:replay_next_update(3)
+	store:UpdateAsync("key", function(value) return { value = value.value + 1 } end)
+	local after = fixture.control:metrics()
+	assert(after.transform_calls - before.transform_calls == 4
+		and after.transform_replays - before.transform_replays == 3,
+		"fake-store replay calls or replay metrics are incorrect")
+	assert(store:GetAsync("key", { UseCache = false }).value == 2,
+		"clone failure retained the lock or replay committed more than once")
+end
+
 local fake = FakeDataStore.new()
 Shim.set_service("DataStoreService", fake.service)
 local RecordStore = Shim.load()

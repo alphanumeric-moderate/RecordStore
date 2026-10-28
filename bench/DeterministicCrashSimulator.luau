@@ -199,9 +199,10 @@ function Simulator.new(options)
 		return true
 	end
 
-	function self:_take_fault(operation, phase, key, server)
+	function self:_take_fault(operation, phase, key, server, applicable_actions)
 		for index, rule in ipairs(self.faults) do
-			if rule.remaining > 0 and fault_matches(rule, operation, phase, key, server) then
+			if rule.remaining > 0 and applicable_actions[rule.action] == true
+				and fault_matches(rule, operation, phase, key, server) then
 				rule.remaining -= 1
 				self.counters.faults_consumed += 1
 				self:_trace(server, rule.operation_id, rule.key_family or "fault-script", "fault:" .. phase, rule.action, "deterministic fault consumed")
@@ -413,8 +414,9 @@ function Simulator.new(options)
 	function self:_read(server, key, fresh, context)
 		if not valid_text(server, 96) or not valid_text(key, 2048) then error("server and key are required", 3) end
 		local phase = if fresh then "before_fresh_read" else "before_read"
-		local fault = self:_take_fault("GetAsync", phase, key, server)
-		if fault == nil then fault = self:_take_fault("*", phase, key, server) end
+		local fault = self:_take_fault("GetAsync", phase, key, server,
+			if fresh then { fail_before_commit = true, throttle = true, budget_exhaustion = true }
+			else { fail_before_commit = true, throttle = true, budget_exhaustion = true, stale_read = true })
 		if fault and (fault.action == "fail_before_commit" or fault.action == "throttle" or fault.action == "budget_exhaustion") then
 			error("simulated " .. fault.action .. " during " .. phase, 3)
 		end
@@ -458,8 +460,7 @@ function Simulator.new(options)
 		if not valid_text(server, 96) or not valid_text(key, 2048) or type(transform) ~= "function" then
 			error("UpdateAsync requires server, key, and transform", 2)
 		end
-		local before_fault = self:_take_fault("UpdateAsync", "before_update", key, server)
-		if before_fault == nil then before_fault = self:_take_fault("*", "before_update", key, server) end
+		local before_fault = self:_take_fault("UpdateAsync", "before_update", key, server, { fail_before_commit = true, throttle = true, budget_exhaustion = true })
 		if before_fault and (before_fault.action == "fail_before_commit" or before_fault.action == "throttle" or before_fault.action == "budget_exhaustion") then
 			error("simulated " .. before_fault.action .. " before UpdateAsync", 2)
 		end
@@ -478,8 +479,7 @@ function Simulator.new(options)
 			return next_value, next_user_ids, next_metadata
 		end
 
-		local transform_fault = self:_take_fault("UpdateAsync", "during_transform", key, server)
-		if transform_fault == nil then transform_fault = self:_take_fault("*", "during_transform", key, server) end
+		local transform_fault = self:_take_fault("UpdateAsync", "during_transform", key, server, { ownership_race = true, transform_replay = true })
 		local current_entry = self.store[key]
 		local current = if current_entry then clone(current_entry.value) else nil
 		local next_value, next_user_ids, next_metadata = invoke_transform(current)
@@ -497,8 +497,7 @@ function Simulator.new(options)
 			next_value, next_user_ids, next_metadata = invoke_transform(current)
 		end
 
-		local commit_fault = self:_take_fault("UpdateAsync", "before_commit", key, server)
-		if commit_fault == nil then commit_fault = self:_take_fault("*", "before_commit", key, server) end
+		local commit_fault = self:_take_fault("UpdateAsync", "before_commit", key, server, { fail_before_commit = true, throttle = true, budget_exhaustion = true })
 		if commit_fault and (commit_fault.action == "fail_before_commit" or commit_fault.action == "throttle" or commit_fault.action == "budget_exhaustion") then
 			error("simulated " .. commit_fault.action .. " at UpdateAsync commit boundary", 2)
 		end
@@ -516,8 +515,7 @@ function Simulator.new(options)
 		}
 		self:_trace(server, context and context.operation_id, context and context.key_family or "datastore", "update", "committed", "durable mock entry updated")
 
-		local after_fault = self:_take_fault("UpdateAsync", "after_commit", key, server)
-		if after_fault == nil then after_fault = self:_take_fault("*", "after_commit", key, server) end
+		local after_fault = self:_take_fault("UpdateAsync", "after_commit", key, server, { commit_then_error = true })
 		if after_fault and after_fault.action == "commit_then_error" then
 			error("simulated response loss after durable commit", 2)
 		end
@@ -526,7 +524,8 @@ function Simulator.new(options)
 
 	function self:SetAsync(server, key, value, user_ids, metadata, context)
 		server = server or "server-a"
-		local fault = self:_take_fault("SetAsync", "before_update", key, server)
+		local fault = self:_take_fault("SetAsync", "before_update", key, server,
+			{ fail_before_commit = true, throttle = true, budget_exhaustion = true, commit_then_error = true })
 		if fault and (fault.action == "fail_before_commit" or fault.action == "throttle" or fault.action == "budget_exhaustion") then
 			error("simulated " .. fault.action .. " during SetAsync", 2)
 		end
@@ -539,7 +538,8 @@ function Simulator.new(options)
 
 	function self:RemoveAsync(server, key, context)
 		server = server or "server-a"
-		local fault = self:_take_fault("RemoveAsync", "before_update", key, server)
+		local fault = self:_take_fault("RemoveAsync", "before_update", key, server,
+			{ fail_before_commit = true, throttle = true, budget_exhaustion = true, commit_then_error = true })
 		if fault and (fault.action == "fail_before_commit" or fault.action == "throttle" or fault.action == "budget_exhaustion") then
 			error("simulated " .. fault.action .. " during RemoveAsync", 2)
 		end
@@ -819,6 +819,19 @@ function Simulator.new(options)
 				if sort_key ~= nil and not finite(sort_key) then error("sorted map sort key must be finite when supplied", 2) end
 				return memory_set(name, key, value, expiration_seconds, sort_key)
 			end
+			function map:UpdateAsync(key, transform, expiration_seconds)
+				if type(transform) ~= "function" then error("MemoryStore UpdateAsync requires transform", 2) end
+				local before = memory_get(name, key)
+				local entry = memory_namespace(name)[key]
+				local prior_sort_key = if entry ~= nil then entry.sort_key else nil
+				local ok, next_value, sort_key = call_non_yielding(transform, clone(before), prior_sort_key)
+				if not ok then error("MemoryStore transform failed: " .. tostring(next_value), 2) end
+				if next_value == nil then return before, prior_sort_key end
+				if sort_key == nil then sort_key = prior_sort_key end
+				if sort_key ~= nil and not finite(sort_key) then error("sorted map sort key must be finite when supplied", 2) end
+				memory_set(name, key, next_value, expiration_seconds, sort_key)
+				return clone(next_value), sort_key
+			end
 			function map:GetRangeAsync(direction, count, exclusive_lower_bound, exclusive_upper_bound)
 				if direction ~= "Ascending" and direction ~= "Descending" then error("invalid sorted-map direction", 2) end
 				count = math.clamp(math.floor(count or 20), 1, 20)
@@ -872,8 +885,8 @@ function Simulator.new(options)
 			local server = self._server_id
 			if not valid_text(topic, 128) then error("PublishAsync requires a topic", 2) end
 			options = options or {}
-			local fault = self._sim:_take_fault("PublishAsync", "before_publish", topic, server)
-			if fault == nil then fault = self._sim:_take_fault("*", "before_publish", topic, server) end
+			local fault = self._sim:_take_fault("PublishAsync", "before_publish", topic, server,
+				{ throttle = true, drop_hint = true, duplicate_hint = true, delay_hint = true, reorder_hint = true, expire_hint = true })
 			if fault and fault.action == "throttle" then error("simulated MessagingService throttle", 2) end
 			if fault and fault.action == "drop_hint" then
 				self._sim.counters.dropped_hints += 1

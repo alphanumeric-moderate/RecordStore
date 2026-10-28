@@ -173,3 +173,59 @@ expect(simulator:Stats().counters.events_dropped >= 1,
 	"simulator did not account for dropped or expired asynchronous hints")
 
 connection:Disconnect()
+
+-- Phase-less rules remain pending until a probe can apply their action.
+do
+	local probe = Simulator.new({ seed = 82 })
+	expect(probe:LoadFaultScript({
+		{ action = "commit_then_error" },
+		{ operation = "UpdateAsync", action = "transform_replay" },
+	}), "could not install wildcard-phase faults")
+	local calls = 0
+	local ok = pcall(function()
+		probe:UpdateAsync("a", "wildcard", function()
+			calls += 1
+			return { value = calls }
+		end)
+	end)
+	expect(not ok and calls == 2 and probe:GetAsyncFresh("a", "wildcard").value == 2,
+		"wildcard replay and response loss did not both fire at their applicable probes")
+	expect(probe:Stats().counters.faults_consumed == 2, "inapplicable probes consumed faults")
+	expect(probe:InjectFault({ action = "ownership_race", concurrent_value = { value = 10 } }),
+		"could not inject phase-less ownership race")
+	local raced = probe:UpdateAsync("a", "wildcard", function(value) return { value = value.value + 1 } end)
+	expect(raced.value == 11, "phase-less ownership race did not replay against the competing write")
+
+	probe:SetAsync("a", "cached", { value = 1 })
+	probe:GetAsync("b", "cached")
+	probe:SetAsync("a", "cached", { value = 2 })
+	probe.now_ms += 6000
+	expect(probe:InjectFault({ action = "stale_read" }), "could not inject stale read")
+	local before = probe:Stats().counters.faults_consumed
+	expect(probe:GetAsyncFresh("b", "cached").value == 2
+		and probe:Stats().counters.faults_consumed == before,
+		"fresh read consumed a stale-read rule")
+	expect(probe:GetAsync("b", "cached").value == 1
+		and probe:Stats().counters.faults_consumed == before + 1,
+		"cached read did not apply its retained stale-read rule")
+end
+
+-- Sorted-map transforms retain their sort key unless they return a replacement.
+do
+	local sorted = Simulator.new({ seed = 83 }):MemoryStoreService():GetSortedMap("sorted-repair")
+	sorted:SetAsync("hint", { n = 1 }, 60, 3)
+	local value, sort_key = sorted:UpdateAsync("hint", function(current, current_sort_key)
+		expect(current.n == 1 and current_sort_key == 3, "sorted transform lost its input sort key")
+		return { n = 2 }, 5
+	end, 60)
+	expect(value.n == 2 and sort_key == 5, "sorted transform lost its returned sort key")
+	sorted:UpdateAsync("hint", function() return { n = 3 } end, 60)
+	local range = sorted:GetRangeAsync("Ascending", 10)
+	expect(#range == 1 and range[1].sort_key == 5 and range[1].value.n == 3,
+		"value-only sorted update removed an entry from range queries")
+	expect(not pcall(function()
+		sorted:UpdateAsync("hint", function() return { n = 4 }, math.huge end, 60)
+	end), "sorted transform accepted a non-finite sort key")
+	expect(sorted:GetAsync("hint").n == 3, "rejected sorted update mutated its value")
+end
+print("[CrashSimulator] applicable faults and sorted-map update regressions passed")

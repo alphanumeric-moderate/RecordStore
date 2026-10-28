@@ -108,6 +108,15 @@ local MAX_PURCHASE_ID_BYTES = MAX_OPERATION_ID_BYTES - #OPERATION_ID_PREFIX
 local MAX_RECEIPT_RETENTION_SECONDS = 31_536_000
 local MAX_PERMANENT_PURCHASE_LEDGER_ENTRIES = 8192
 local PERMANENT_LEDGER_RESULT_KEY = "recordstore_internal_purchase_ledger_status_v1"
+local LEDGER_REJECTION_PREFIX = "permanent purchase ledger rejected: "
+
+local function ledger_rejection_status(message: string?): string?
+	if type(message) ~= "string" then return nil end
+	for _, status in { "corrupt", "capacity", "invalid_grant" } do
+		if string.find(message, LEDGER_REJECTION_PREFIX .. status, 1, true) ~= nil then return status end
+	end
+	return nil
+end
 
 local function normalize_config(config: unknown): NormalizedConfig
 	if type(config) ~= "table" then
@@ -440,15 +449,15 @@ local function create_handler(
 				return { [PERMANENT_LEDGER_RESULT_KEY] = marker }
 			end
 			if type(current_data) ~= "table" then
-				return current_data, ledger_result("corrupt")
+				error(LEDGER_REJECTION_PREFIX .. "corrupt", 0)
 			end
 			local current = current_data :: { [string]: RecordStore.JsonValue }
 			for key in pairs(current) do
-				if type(key) ~= "string" then return current_data, ledger_result("corrupt") end
+				if type(key) ~= "string" then error(LEDGER_REJECTION_PREFIX .. "corrupt", 0) end
 			end
 			local raw_ledger = current[ledger_key]
 			if raw_ledger ~= nil and type(raw_ledger) ~= "table" then
-				return current_data, ledger_result("corrupt")
+				error(LEDGER_REJECTION_PREFIX .. "corrupt", 0)
 			end
 			local ledger: { [string]: RecordStore.JsonValue } = {}
 			local prior_count = 0
@@ -456,13 +465,13 @@ local function create_handler(
 				local raw_entries = raw_ledger :: { [string]: RecordStore.JsonValue }
 				for prior_id, raw_prior in pairs(raw_entries) do
 					if type(prior_id) ~= "string" or prior_id == "" or type(raw_prior) ~= "table" then
-						return current_data, ledger_result("corrupt")
+						error(LEDGER_REJECTION_PREFIX .. "corrupt", 0)
 					end
 					local prior_fields = raw_prior :: { [string]: RecordStore.JsonValue }
 					if not is_positive_integer(prior_fields.player_id)
 						or not is_positive_integer(prior_fields.product_id)
 					then
-						return current_data, ledger_result("corrupt")
+						error(LEDGER_REJECTION_PREFIX .. "corrupt", 0)
 					end
 					ledger[prior_id] = {
 						player_id = prior_fields.player_id,
@@ -473,7 +482,7 @@ local function create_handler(
 			end
 		local prior = ledger[validated_purchase_id]
 		if prior ~= nil then
-			if type(prior) ~= "table" then return current_data, ledger_result("corrupt") end
+			if type(prior) ~= "table" then error(LEDGER_REJECTION_PREFIX .. "corrupt", 0) end
 			local prior_fields = prior :: { [string]: RecordStore.JsonValue }
 			if prior_fields.player_id == validated_player_id and prior_fields.product_id == validated_product_id then
 				return current_data, ledger_result("duplicate")
@@ -481,15 +490,15 @@ local function create_handler(
 			return current_data, ledger_result("conflict")
 		end
 			if prior_count >= (config.permanent_purchase_ledger_capacity :: number) then
-				return current_data, ledger_result("capacity")
+				error(LEDGER_REJECTION_PREFIX .. "capacity", 0)
 			end
 			local next_data, result = grant_reducer(current_data, receipt_context)
 			if type(next_data) ~= "table" then
-				return current_data, ledger_result("invalid_grant")
+				error(LEDGER_REJECTION_PREFIX .. "invalid_grant", 0)
 			end
 			local next_data_dictionary = next_data :: { [string]: RecordStore.JsonValue }
 			for next_key in pairs(next_data_dictionary) do
-				if type(next_key) ~= "string" then return current_data, ledger_result("invalid_grant") end
+				if type(next_key) ~= "string" then error(LEDGER_REJECTION_PREFIX .. "invalid_grant", 0) end
 			end
 			ledger[validated_purchase_id] = {
 				player_id = validated_player_id,
@@ -579,6 +588,12 @@ local function create_handler(
 
 		if transaction_ok and (status == "committed" or status == "duplicate") then
 			return acknowledge_committed_receipt(_result)
+		end
+
+		local rejected_status = ledger_rejection_status(message)
+		if transaction_ok and status == "validation" and rejected_status ~= nil then
+			defer_for_permanent_ledger({ [PERMANENT_LEDGER_RESULT_KEY] = { status = rejected_status } })
+			return not_processed_yet
 		end
 
 		if not transaction_ok or status == "unknown" then
@@ -769,14 +784,14 @@ local function backfill_permanent_ledger(
 				local result_value: RecordStore.JsonValue = { [PERMANENT_LEDGER_RESULT_KEY] = marker_payload }
 				return result_value
 			end
-			if type(current_data) ~= "table" then return current_data, marker("corrupt") end
+			if type(current_data) ~= "table" then error(LEDGER_REJECTION_PREFIX .. "corrupt", 0) end
 			local current = current_data :: { [string]: RecordStore.JsonValue }
 			for key in pairs(current) do
-				if type(key) ~= "string" then return current_data, marker("corrupt") end
+				if type(key) ~= "string" then error(LEDGER_REJECTION_PREFIX .. "corrupt", 0) end
 			end
 			local raw_ledger = current[ledger_key :: string]
 			if raw_ledger ~= nil and type(raw_ledger) ~= "table" then
-				return current_data, marker("corrupt")
+				error(LEDGER_REJECTION_PREFIX .. "corrupt", 0)
 			end
 			local ledger: { [string]: RecordStore.JsonValue } = {}
 			local prior_count = 0
@@ -785,11 +800,11 @@ local function backfill_permanent_ledger(
 					if type(prior_id) ~= "string" or prior_id == ""
 						or #prior_id > MAX_PURCHASE_ID_BYTES or type(raw_prior) ~= "table"
 					then
-						return current_data, marker("corrupt")
+						error(LEDGER_REJECTION_PREFIX .. "corrupt", 0)
 					end
 					local prior = raw_prior :: { [string]: RecordStore.JsonValue }
 					if not is_positive_integer(prior.player_id) or not is_positive_integer(prior.product_id) then
-						return current_data, marker("corrupt")
+						error(LEDGER_REJECTION_PREFIX .. "corrupt", 0)
 					end
 					ledger[prior_id] = {
 						player_id = prior.player_id,
@@ -807,7 +822,7 @@ local function backfill_permanent_ledger(
 				return current_data, marker("conflict")
 			end
 			if prior_count >= (config.permanent_purchase_ledger_capacity :: number) then
-				return current_data, marker("capacity")
+				error(LEDGER_REJECTION_PREFIX .. "capacity", 0)
 			end
 			ledger[purchase_id] = {
 				player_id = player_id,
@@ -833,6 +848,11 @@ local function backfill_permanent_ledger(
 			elseif status ~= nil then
 				return status, "permanent ledger rejected the historical purchase"
 			end
+		end
+
+		local rejected_status = ledger_rejection_status(transaction_message)
+		if call_ok and transaction_status == "validation" and rejected_status ~= nil then
+			return rejected_status, "permanent ledger rejected the historical purchase"
 		end
 
 		if not call_ok or transaction_status == "unknown" then

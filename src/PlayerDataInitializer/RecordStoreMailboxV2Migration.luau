@@ -139,9 +139,9 @@ local function legacy_fields(item: LegacyMessage): (string?, string?, any, numbe
 	local id = if type(item.id) == "string" then item.id else item.Id
 	local message_type = if type(item.type) == "string" then item.type else item.Type
 	local payload = if item.data ~= nil then item.data else item.Data
-	local attempts = if finite(item.attempts) then item.attempts else 0
-	local total = if finite(item.total_attempts) then item.total_attempts else attempts
-	local replay = if finite(item.replay_count) then item.replay_count else 0
+	local attempts = if finite(item.attempts) then item.attempts else if finite(item.Attempts) then item.Attempts else 0
+	local total = if finite(item.total_attempts) then item.total_attempts else if finite(item.TotalAttempts) then item.TotalAttempts else attempts
+	local replay = if finite(item.replay_count) then item.replay_count else if finite(item.ReplayCount) then item.ReplayCount else 0
 	local created_seconds = if finite(item.created_at) then item.created_at else item.CreatedAt
 	local error_message = if type(item.last_error) == "string" then item.last_error else item.LastError
 	if not valid_text(id, 100) or not valid_text(message_type, 100)

@@ -135,6 +135,7 @@ function FakeDataStore.new(options)
 			assert(not state.inside_transform, "nested DataStore update attempted inside UpdateAsync transform")
 			state.update_calls += 1
 			enter_request()
+			local locked_identity = nil
 			local call_ok, result, info = pcall(function()
 				if state.delay_seconds > 0 then
 					task.wait(state.delay_seconds)
@@ -145,6 +146,7 @@ function FakeDataStore.new(options)
 					task.wait(0.001)
 				end
 				state.locks[identity] = true
+				locked_identity = identity
 
 				local previous = state.records[identity]
 				local previous_value = if previous == nil then nil else clone(previous.Value)
@@ -152,8 +154,9 @@ function FakeDataStore.new(options)
 				local replay_count = state.next_replay_count
 				state.next_replay_count = 0
 				local new_value, user_ids, metadata
-				for _ = 0, replay_count do
+				for replay_index = 0, replay_count do
 					state.transform_calls += 1
+					if replay_index > 0 then state.transform_replays += 1 end
 					state.inside_transform = true
 					local transform_ok
 					transform_ok, new_value, user_ids, metadata = pcall(
@@ -163,18 +166,15 @@ function FakeDataStore.new(options)
 					)
 					state.inside_transform = false
 					if not transform_ok then
-						state.locks[identity] = nil
 						error(new_value, 0)
 					end
 					if new_value == nil then
-						state.locks[identity] = nil
 						return nil, previous_info
 					end
 				end
 
 				local fault = table.remove(state.update_faults, 1)
 				if fault == "before_commit" then
-					state.locks[identity] = nil
 					error("injected fake DataStore failure before commit", 0)
 				end
 
@@ -198,7 +198,6 @@ function FakeDataStore.new(options)
 				if state.cache_updates_enabled then
 					cache[key] = { at = os.clock(), value = clone(entry.Value), info = clone(key_info(entry)) }
 				end
-				state.locks[identity] = nil
 
 				if fault == "commit_then_error" then
 					error("injected fake DataStore response loss after durable commit", 0)
@@ -206,6 +205,7 @@ function FakeDataStore.new(options)
 				return clone(entry.Value), key_info(entry)
 			end)
 			state.inside_transform = false
+			if locked_identity ~= nil then state.locks[locked_identity] = nil end
 			leave_request()
 			if not call_ok then
 				error(result, 0)

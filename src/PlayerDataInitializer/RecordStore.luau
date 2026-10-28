@@ -4727,9 +4727,9 @@ do
 			return nil, nil, "legacy message still has an unexpired processing lease; wait for expiry and reconcile the old handler before migration"
 		end
 
-		local attempts_raw = legacy.attempts
-		local total_attempts_raw = legacy.total_attempts
-		local replay_count_raw = legacy.replay_count
+		local attempts_raw = if type(legacy.attempts) == "number" and is_finite(legacy.attempts) then legacy.attempts else legacy.Attempts
+		local total_attempts_raw = if type(legacy.total_attempts) == "number" and is_finite(legacy.total_attempts) then legacy.total_attempts else legacy.TotalAttempts
+		local replay_count_raw = if type(legacy.replay_count) == "number" and is_finite(legacy.replay_count) then legacy.replay_count else legacy.ReplayCount
 		local attempts = if type(attempts_raw) == "number" and is_finite(attempts_raw) then attempts_raw else 0
 		local total_attempts = if type(total_attempts_raw) == "number" and is_finite(total_attempts_raw) then total_attempts_raw else attempts
 		local replay_count = if type(replay_count_raw) == "number" and is_finite(replay_count_raw) then replay_count_raw else 0

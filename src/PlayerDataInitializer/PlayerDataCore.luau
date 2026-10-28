@@ -880,6 +880,10 @@ local function new(dependencies: Dependencies?): Controller
 					if not save_ok or save_result ~= "saved" then
 						last_result = if save_ok then save_result :: RecordStore.ResultCode else "unknown"
 						last_message = if save_ok then save_message else tostring(save_result)
+						if save_ok and save_result == "busy" then
+							scheduler.wait(0.05)
+							continue
+						end
 						break
 					end
 					drained_read_only_snapshot = true

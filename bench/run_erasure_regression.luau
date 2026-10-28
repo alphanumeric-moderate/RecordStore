@@ -379,6 +379,8 @@ end
 -- not certify any other application-owned key family or live Roblox behavior.
 do
 	local user_id = 203
+	local dependencies_allowed = false
+	local kicks = 0
 	local record, key = create_profile(user_id, 30)
 	local manifest_store = new_manifest_store()
 	local v2 = V2Module.new(RecordStore, RecordStore.MailboxV2)
@@ -399,7 +401,9 @@ do
 				and templates[1].template.scope == "global"
 				and templates[1].template.key == "Player_" .. tostring(user_id)
 		end,
+		dependencies_clear = function() return dependencies_allowed, "live dependent record" end,
 		kick_player = function(kicked_user_id, _erasure_id)
+			kicks += 1
 			return kicked_user_id == user_id
 		end,
 	})
@@ -415,6 +419,13 @@ local plan = erasure:PlanAsync(user_id, "erase-coordinator-203")
 		"verified PlayerDataCore plan failed: " .. tostring(plan.message))
 	expect(#plan.entries == 1 and plan.entries[1].item.key == key,
 		"erasure plan omitted the deterministic PlayerDataCore profile key")
+	local blocked_progress = erasure:ExecuteAsync(user_id, "erase-coordinator-203", 1)
+	expect(blocked_progress.code == "retryable" and kicks == 0,
+		"dependency-blocked erasure must not claim a writer fence or kick the player")
+	local preserved = RecordStore.Mock.read_async("PlayerData_Test1", "global", key, 10)
+	expect(preserved ~= nil and preserved.Data.kills == 32,
+		"fence_user destroyed the profile before checking live dependencies")
+	dependencies_allowed = true
 	local progress = erasure:ExecuteAsync(user_id, "erase-coordinator-203", 1)
 	expect(progress.code == "committed" and progress.rtbf_coverage_verified == true,
 		"PlayerDataCore coordinator did not commit: " .. tostring(progress.message))

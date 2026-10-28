@@ -531,3 +531,77 @@ expect(diagnostics[#diagnostics].category == "external_purchase_authority_migrat
 	"external migration gate failure was not diagnosed")
 
 expect(authority_record:Close() == "closed", "external authority fixture profile did not close")
+
+-- Transient ledger failures must not create negative receipts that poison retries.
+for _, failure in { "capacity", "corrupt", "invalid_grant", "conflict" } do
+	local purchase = { PurchaseId = "repair-" .. failure, PlayerId = 123, ProductId = 1001 }
+	local initial_ledger = if failure == "capacity" then { full = { player_id = 123, product_id = 1001 } }
+		elseif failure == "corrupt" then "malformed"
+		elseif failure == "conflict" then { [purchase.PurchaseId] = { player_id = 123, product_id = 1002 } }
+		else {}
+	local retry_record = Mock.new("PurchaseRepairRegression", "global", failure, {
+		schema_version = 1, autosave_interval = 1000, lease_duration = 180, lease_renewal = 60,
+		transactional_operations_enabled = true,
+	})
+	expect(retry_record:Open({ coins = 0, purchase_ledger = initial_ledger }) == "created", "retry fixture failed to open")
+	local processor = ReceiptProcessor.new({
+		get_record = function() return retry_record end, receipt_retention_seconds = 60,
+		permanent_purchase_ledger_key = "purchase_ledger", permanent_purchase_ledger_capacity = 1,
+		permanent_purchase_ledger_migration_complete = true,
+	})
+	local invalid_grant = failure == "invalid_grant"
+	local handler = processor:CreateHandler({ [1001] = function(data)
+		if invalid_grant then return { "not a profile" } end
+		local changed = table.clone(data); changed.coins += 10
+		return changed, { granted = 10 }
+	end })
+	expect(handler(purchase) == Enum.ProductPurchaseDecision.NotProcessedYet, "ledger failure was acknowledged")
+	local request = { receipt_type = "developer_product", purchase_id = purchase.PurchaseId, player_id = 123, product_id = 1001 }
+	local status = retry_record:GetTransactionStatusAsync("purchase:" .. purchase.PurchaseId, request)
+	expect(if failure == "conflict" then status.code == "committed"
+		else status.code == "not_found" or status.code == "unsupported",
+		"transient ledger failure created a receipt, or identity conflict lost its sticky receipt: " .. failure
+			.. " status=" .. tostring(status.code) .. " message=" .. tostring(status.message))
+	expect(retry_record:Get().coins == 0, "rejected grant changed currency")
+	expect(retry_record:Update(function(data) data.purchase_ledger = {}; return data end) == "success", "ledger repair failed")
+	invalid_grant = false
+	local retried = handler(purchase)
+	if failure == "conflict" then
+		expect(retried == Enum.ProductPurchaseDecision.NotProcessedYet and retry_record:Get().coins == 0,
+			"permanent identity mismatch became retryable after ledger edits")
+	else
+		expect(retried == Enum.ProductPurchaseDecision.PurchaseGranted and retry_record:Get().coins == 10,
+			"repaired ledger/grant could not retry the same PurchaseId: " .. failure)
+		expect(handler(purchase) == Enum.ProductPurchaseDecision.PurchaseGranted and retry_record:Get().coins == 10,
+			"successful retry granted twice")
+	end
+	expect(retry_record:Close() == "closed", "retry fixture failed to close")
+end
+
+for _, failure in { "capacity", "corrupt" } do
+	local retry_record = Mock.new("PurchaseBackfillRepairRegression", "global", failure, {
+		schema_version = 1, autosave_interval = 1000, lease_duration = 180, lease_renewal = 60,
+		transactional_operations_enabled = true, user_ids = { 123 },
+	})
+	local ledger = if failure == "corrupt" then "malformed" else { full = { player_id = 123, product_id = 1001 } }
+	expect(retry_record:Open({ coins = 0, purchase_ledger = ledger }) == "created", "backfill retry fixture failed to open")
+	local processor = ReceiptProcessor.new({
+		get_record = function() return retry_record end, receipt_retention_seconds = 60,
+		permanent_purchase_ledger_key = "purchase_ledger", permanent_purchase_ledger_capacity = 1,
+		permanent_purchase_ledger_migration_complete = false,
+	})
+	local id = "repair-backfill-" .. failure
+	local batch = { { PurchaseId = id, PlayerId = 123, ProductId = 1001 } }
+	local result = processor:BackfillPermanentLedgerAsync(retry_record, batch, 1)
+	expect(result.code == failure, "backfill lost its typed rejection: " .. tostring(result.code))
+	local request = { receipt_type = "developer_product_backfill", purchase_id = id, player_id = 123, product_id = 1001 }
+	local rejected_status = retry_record:GetTransactionStatusAsync("pb:" .. id, request)
+	expect(rejected_status.code == "not_found" or rejected_status.code == "unsupported",
+		"rejected backfill wrote a negative receipt")
+	expect(retry_record:Update(function(data) data.purchase_ledger = {}; return data end) == "success", "backfill ledger repair failed")
+	local retried = processor:BackfillPermanentLedgerAsync(retry_record, batch, 1)
+	expect(retried.code == "complete" and retry_record:Get().purchase_ledger[id].player_id == 123
+		and retry_record:Get().coins == 0, "repaired backfill could not retry without granting")
+	expect(retry_record:Close() == "closed", "backfill retry fixture failed to close")
+end
+print("[PurchaseReceipts] retryable rejections and sticky identity conflicts passed")

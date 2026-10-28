@@ -277,3 +277,40 @@ for _, configured_scope in ipairs({ "", "global" }) do
 end
 
 print("[MaintenanceAtomicTombstone] same-key fencing, generation CAS, callback isolation, fail-closed policy, tombstone verification and ambiguous-write recovery regressions passed")
+
+-- Eligibility can change after acquisition. Release only the exact fence we acquired.
+for _, outcome in ipairs({ "released", "new-generation", "foreign-job", "response-loss", "unresolved" }) do
+	local target = make_store(profile(4, nil, true, true))
+	local update = target.UpdateAsync
+	local updates = 0
+	target.UpdateAsync = function(self, key, transform)
+		updates += 1
+		if updates == 2 then self.row.eligible = false end
+		if updates == 3 then
+			if outcome == "new-generation" then self.row.fencing_generation = 7 end
+			if outcome == "foreign-job" then self.row.maintenance_fence_job_id = "foreign" end
+			if outcome == "response-loss" then self.lose_next_response = true end
+			if outcome == "unresolved" then self.throw_before_update = true; self.fail_reads = true end
+		end
+		return update(self, key, transform)
+	end
+	local action = make_adapter():FenceAndDeleteIfGeneration(target, item, 4, "job-atomic-1")
+	if outcome == "released" or outcome == "response-loss" then
+		expect(action == "skipped" and target.row.maintenance_fence_job_id == nil
+			and target.row.fencing_generation == 6 and target.row.payload.coins == 100,
+			"skipped tombstone did not confirm release of its own fence")
+	elseif outcome == "new-generation" then
+		expect(action == "skipped" and target.row.fencing_generation == 7
+			and target.row.maintenance_fence_job_id == "job-atomic-1",
+			"release changed a newer generation")
+	elseif outcome == "foreign-job" then
+		expect(action == "skipped" and target.row.fencing_generation == 5
+			and target.row.maintenance_fence_job_id == "foreign", "release cleared a foreign fence")
+	else
+		expect(action == "unknown" and target.row.fencing_generation == 5
+			and target.row.maintenance_fence_job_id == "job-atomic-1",
+			"unresolved release lost its fence or reported confirmed progress")
+	end
+	expect(target.row.tombstone ~= true, "skipped release tombstoned the payload")
+end
+print("[MaintenanceAtomicTombstone] conditional skipped-item fence release passed")

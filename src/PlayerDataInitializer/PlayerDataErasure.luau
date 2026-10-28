@@ -138,6 +138,20 @@ local function new(manifest_store: any, options: Options?): any
 		return true, nil
 	end
 
+	local function dependencies_clear(item: ErasureItem, user_id: number): (boolean, string?)
+		if item.name ~= profile_store_name or item.scope ~= profile_scope
+			or item.key ~= resolve_key(user_id)
+		then
+			return false, "inventory locator is outside the declared PlayerDataCore family"
+		end
+		if type(config.dependencies_clear) == "function" then
+			return config.dependencies_clear(item, user_id)
+		end
+		-- PlayerDataCore's configured profile fields are scalar values and contain no
+		-- external object references. Additional key families need their own checks.
+		return true, nil
+	end
+
 	local family: Family = {
 		name = "PlayerDataCore",
 		templates = {
@@ -200,6 +214,8 @@ local function new(manifest_store: any, options: Options?): any
 			then
 				return false, "planned profile inventory identity or generation is invalid"
 			end
+			local clear, dependency_error = dependencies_clear(planned, user_id)
+			if clear ~= true then return false, dependency_error or "live dependency blocks deletion" end
 			local kicked, kick_error = kick_active_player(user_id, erasure_id)
 			if not kicked then return false, kick_error or "active player could not be fenced" end
 			local _, code, message = record_store.erase_user_data_async(
@@ -209,19 +225,7 @@ local function new(manifest_store: any, options: Options?): any
 			if code ~= "success" then return false, message or ("generation-aware profile fence failed: " .. tostring(code)) end
 			return true, nil
 		end,
-		dependencies_clear = function(item: ErasureItem, user_id: number): (boolean, string?)
-			if item.name ~= profile_store_name or item.scope ~= profile_scope
-				or item.key ~= resolve_key(user_id)
-			then
-				return false, "inventory locator is outside the declared PlayerDataCore family"
-			end
-			if type(config.dependencies_clear) == "function" then
-				return config.dependencies_clear(item, user_id)
-			end
-			-- PlayerDataCore's configured profile fields are scalar values and contain no
-			-- external object references. Additional key families need their own checks.
-			return true, nil
-		end,
+		dependencies_clear = dependencies_clear,
 		redact_or_delete_if_generation = function(
 			item: ErasureItem,
 			user_id: number,
