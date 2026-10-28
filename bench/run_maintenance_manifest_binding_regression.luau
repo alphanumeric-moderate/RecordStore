@@ -189,6 +189,20 @@ expect(unfenced_store.value.fencing_generation == 6
 	"unfenced record was not fenced and tombstoned with sequential generation advances")
 
 local rejected_calls = 0
+local empty_scope_manifest = manifest()
+empty_scope_manifest.families[1].scope = ""
+local empty_scope_config, _, empty_scope_error = Binder.bind(empty_scope_manifest, runtime(), verify_ok)
+expect(empty_scope_config ~= nil, empty_scope_error or "empty-scope manifest failed to bind")
+unfenced_store.value = clone(unfenced)
+local empty_scope_action, empty_scope_delete_error = empty_scope_config.families[1].delete_if_generation(
+	unfenced_store,
+	{ name = "Profiles", scope = "global", key = "Player_1001" },
+	4,
+	"maintenance-job-regression-r1"
+)
+expect(empty_scope_action == "deleted" and unfenced_store.value.fencing_generation == 6,
+	empty_scope_delete_error or "empty-scope manifest rejected the DataStore adapter's global locator")
+
 local rejected_config = Binder.bind(manifest(), runtime(), function()
 	rejected_calls += 1
 	return false, "independent reconciliation failed"

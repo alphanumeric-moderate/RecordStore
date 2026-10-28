@@ -172,7 +172,7 @@ local test_ok, test_error = pcall(function()
 	local pressure_controller = PlayerDataCore.new({
 		RecordStore = RecordStore.Mock,
 		DurabilityMode = "read_only_on_risk",
-		MaxDirtyAgeSeconds = 0.1,
+		MaxDirtyAgeSeconds = 0.5,
 		task = controlled_task,
 	})
 	player:SetAttribute("PlayerDataLoadStatus", "NotLoaded")
@@ -200,7 +200,7 @@ local test_ok, test_error = pcall(function()
 	assert(pressure_kills.Value == pressure_baseline + 1,
 		"the first mutation should be accepted into the pending buffer")
 
-	task.wait(0.15)
+	task.wait(0.6)
 	local stale_buffer_set_ok, stale_buffer_set_message = pressure_controller.Set(
 		player, "kills", pressure_baseline + 2
 	)
@@ -210,6 +210,7 @@ local test_ok, test_error = pcall(function()
 		"Set should identify pending-buffer age as the backpressure reason")
 
 	pressure_kills.Value = pressure_baseline + 3
+	task.wait(0.05)
 	assert(pressure_kills.Value == pressure_baseline + 1,
 		"Value.Changed must restore a mutation after pending PlayerData changes exceed the dirty-age limit")
 	assert(pressure_controller:Shutdown(), "durability backpressure controller failed to shut down")

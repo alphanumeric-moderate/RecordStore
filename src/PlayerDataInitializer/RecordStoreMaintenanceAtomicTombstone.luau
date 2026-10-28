@@ -34,6 +34,10 @@ local MAX_JOB_ID_BYTES = 96
 local MAX_FIELD_BYTES = 128
 local MAX_GENERATION = 9007199254740991
 
+local function normalized_scope(scope: unknown): unknown
+	return if scope == "" then "global" else scope
+end
+
 local function valid_text(value: unknown, maximum: number, allow_empty: boolean?): boolean
 	return type(value) == "string"
 		and (allow_empty == true or value ~= "")
@@ -105,6 +109,7 @@ function AtomicTombstone.new(config: Options): Adapter
 	if type(config) ~= "table" then error("config must be a table", 2) end
 	if not valid_text(config.store_name, MAX_KEY_BYTES) then error("store_name is invalid", 2) end
 	if not valid_text(config.scope, MAX_KEY_BYTES, true) then error("scope is invalid", 2) end
+	local configured_scope = normalized_scope(config.scope)
 	local prefix = if config.key_prefix == nil then "" else config.key_prefix
 	if not valid_text(prefix, MAX_KEY_BYTES, true) then error("key_prefix is invalid", 2) end
 	if not valid_text(config.job_id, MAX_JOB_ID_BYTES) then error("job_id is invalid", 2) end
@@ -239,9 +244,9 @@ function AtomicTombstone.new(config: Options): Adapter
 
 		local locator = item :: { [string]: unknown }
 		local name = if type(locator.name) == "string" then locator.name else locator.store_name
-		local scope = locator.scope
+		local scope = normalized_scope(locator.scope)
 		local key = locator.key
-		if name ~= config.store_name or scope ~= config.scope or not valid_text(key, MAX_KEY_BYTES)
+		if name ~= config.store_name or scope ~= configured_scope or not valid_text(key, MAX_KEY_BYTES)
 			or (prefix ~= "" and string.sub(key :: string, 1, #prefix) ~= prefix)
 		then
 			return "skipped", nil, "maintenance locator is outside the configured store/scope/prefix"
@@ -322,7 +327,7 @@ function AtomicTombstone.new(config: Options): Adapter
 			local name = if locator ~= nil and type(locator.name) == "string" then locator.name
 				elseif locator ~= nil then locator.store_name else nil
 			local key = if locator ~= nil then locator.key else nil
-			if name == config.store_name and locator ~= nil and locator.scope == config.scope
+			if name == config.store_name and locator ~= nil and normalized_scope(locator.scope) == configured_scope
 				and valid_text(key, MAX_KEY_BYTES)
 				and (prefix == "" or string.sub(key :: string, 1, #prefix) == prefix)
 			then
@@ -348,7 +353,7 @@ function AtomicTombstone.new(config: Options): Adapter
 			local locator = item :: { [string]: unknown }
 			local name = if type(locator.name) == "string" then locator.name else locator.store_name
 			local key = locator.key
-			if name == config.store_name and locator.scope == config.scope
+			if name == config.store_name and normalized_scope(locator.scope) == configured_scope
 				and valid_text(key, MAX_KEY_BYTES)
 				and (prefix == "" or string.sub(key :: string, 1, #prefix) == prefix)
 			then
@@ -380,9 +385,9 @@ function AtomicTombstone.new(config: Options): Adapter
 
 		local locator = item :: { [string]: unknown }
 		local name = if type(locator.name) == "string" then locator.name else locator.store_name
-		local scope = locator.scope
+		local scope = normalized_scope(locator.scope)
 		local key = locator.key
-		if name ~= config.store_name or scope ~= config.scope or not valid_text(key, MAX_KEY_BYTES)
+		if name ~= config.store_name or scope ~= configured_scope or not valid_text(key, MAX_KEY_BYTES)
 			or (prefix ~= "" and string.sub(key :: string, 1, #prefix) ~= prefix)
 		then
 			return "skipped", "maintenance locator is outside the configured store/scope/prefix"

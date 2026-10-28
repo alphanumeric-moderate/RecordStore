@@ -1,6 +1,6 @@
 --!nocheck
 -- Shared mock PlayerDataCore harness for regression and CodSpeed path benchmarks.
-return function(use_cached_paths, initial_saved_data)
+return function(use_cached_paths, initial_saved_data, controller_overrides)
 
 local function replace_source_once(source, old_text, new_text)
 	local start_index, end_index = string.find(source, old_text, 1, true)
@@ -391,7 +391,7 @@ end
 		"PlayerDataCore eagerly required optional InfiniteMathValue in the default configuration"
 	)
 	
-	local controller = PlayerDataCore.new({
+	local controller_options = {
 		Players = Players,
 		RecordStore = RecordStore,
 		IntegerInfinityValue = IntegerInfinityValue,
@@ -399,7 +399,9 @@ end
 		InfiniteMathFormatter = InfiniteMathFormatter,
 		new_instance = function(class_name) return Instance.new(class_name) end,
 		task = task,
-	})
+	}
+	for key, value in pairs(controller_overrides or {}) do controller_options[key] = value end
+	local controller = PlayerDataCore.new(controller_options)
 	
 	assert(
 		module_require_counts.InfiniteMathValue == 0,

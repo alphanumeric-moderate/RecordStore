@@ -225,4 +225,55 @@ expect(adapter:FenceAndDeleteIfGeneration(proxy, item, 4, "job-atomic-1") == "de
 	"userdata retry failed to recognize the already-committed tombstone")
 
 
+-- Empty and explicit global scopes must agree on initial writes and retry readbacks.
+for _, configured_scope in ipairs({ "", "global" }) do
+	for _, locator_scope in ipairs({ "", "global" }) do
+		local scoped = make_adapter({ scope = configured_scope })
+		local locator = { name = "Profiles", scope = locator_scope, key = "Player_1" }
+		local target = make_store(profile(4, nil, true, true))
+		expect(scoped:FenceAndDeleteIfGeneration(target, locator, 4, "job-atomic-1") == "deleted"
+			and target.row.fencing_generation == 6,
+			"equivalent global scopes must allow the fenced tombstone")
+		expect(scoped:FenceAndDeleteIfGeneration(target, locator, 4, "job-atomic-1") == "deleted"
+			and target.row.fencing_generation == 6,
+			"equivalent global scopes must recognize a committed tombstone on retry")
+
+		local lost_confirmation = make_store(profile(4, nil, true, true))
+		local update = lost_confirmation.UpdateAsync
+		local read = lost_confirmation.GetAsync
+		local updates = 0
+		local fail_next_read = false
+		lost_confirmation.UpdateAsync = function(self, ...)
+			updates += 1
+			if updates == 2 then
+				self.lose_next_response = true
+				fail_next_read = true
+			end
+			return update(self, ...)
+		end
+		lost_confirmation.GetAsync = function(self, ...)
+			if fail_next_read then
+				fail_next_read = false
+				error("injected unavailable first delete readback")
+			end
+			return read(self, ...)
+		end
+		expect(scoped:FenceAndDeleteIfGeneration(lost_confirmation, locator, 4, "job-atomic-1") == "deleted",
+			"equivalent global scopes must permit composite post-delete readback")
+		for _, unsafe in ipairs({
+			{ value = profile(5, nil, true, true), scope = locator_scope, job = "job-atomic-1" },
+			{ value = profile(4, "foreign-job", true, true), scope = locator_scope, job = "job-atomic-1" },
+			{ value = profile(4, nil, true, true), scope = "other-scope", job = "job-atomic-1" },
+			{ value = profile(4, nil, true, true), scope = locator_scope, job = "foreign-job" },
+		}) do
+			local protected = make_store(unsafe.value)
+			local action = scoped:FenceAndDeleteIfGeneration(protected,
+				{ name = "Profiles", scope = unsafe.scope, key = "Player_1" }, 4, unsafe.job)
+			expect(action == "skipped" and protected.row.tombstone ~= true
+				and protected.row.fencing_generation == unsafe.value.fencing_generation,
+				"scope normalization must preserve scope, generation and job fences")
+		end
+	end
+end
+
 print("[MaintenanceAtomicTombstone] same-key fencing, generation CAS, callback isolation, fail-closed policy, tombstone verification and ambiguous-write recovery regressions passed")

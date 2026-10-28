@@ -1487,6 +1487,7 @@ local function new(dependencies: Dependencies?): Controller
 		end
 		local pending_at = pending_since[record]
 		if pending_at ~= nil and os.clock() - pending_at >= max_dirty_age_seconds then
+			request_recovery_flush(record)
 			return "pending PlayerData changes exceeded MaxDirtyAgeSeconds; mutations are paused"
 		end
 		local status_ok, status = pcall(function()
