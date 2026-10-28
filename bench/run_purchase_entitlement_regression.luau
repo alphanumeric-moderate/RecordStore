@@ -497,4 +497,38 @@ do -- A thrown grant keeps its reservation retryable with the same operation ID.
 		"grant exception prevented a later retry of the original receipt")
 end
 
+
+-- Recovery is explicit and revision-fenced; ordinary competing receipts stay pending.
+do
+	local store = make_store()
+	local authority = Authority.new({ store_adapter = store, now_unix = function() return now end })
+	local first = authority:ReserveAsync("recovery", 4209, 501, "old-owner")
+	expect(first.code == "claimed" and first.record.revision == 1, "initial recovery claim failed")
+	expect(authority:ReserveAsync("recovery", 4209, 501, "new-owner").code == "pending",
+		"ordinary reserve took over an unresolved claim")
+	expect(authority:ReserveAsync("recovery", 4209, 501, "new-owner", 2).code == "pending",
+		"stale recovery revision changed ownership")
+	store.lose_next_response = true
+	local taken = authority:ReserveAsync("recovery", 4209, 501, "new-owner", 1)
+	expect(taken.code == "claimed" and taken.record.revision == 2, "fenced takeover did not reconcile response loss")
+	expect(authority:ReserveAsync("recovery", 4209, 501, "new-owner", 1).record.revision == 2,
+		"takeover replay advanced revision")
+	local late = authority:CommitAsync("recovery", 4209, 501, "old-owner")
+	expect(late.code ~= "committed" and late.record.purchase_id == "new-owner" and late.record.status == "pending",
+		"released purchase committed over its replacement")
+	expect(authority:ReserveAsync("recovery", 4209, 501, "third-owner", 1).code == "pending",
+		"stale concurrent takeover displaced the replacement")
+	expect(authority:CommitAsync("recovery", 4209, 501, "new-owner").code == "committed",
+		"replacement owner could not commit")
+	expect(authority:ReserveAsync("recovery", 4209, 501, "third-owner", 3).code == "already_owned",
+		"takeover displaced a committed entitlement")
+	expect(authority:CommitAsync("recovery", 4209, 501, "old-owner").code ~= "committed",
+		"released purchase committed over owned entitlement")
+	for _, revision in { 0, -1, 1.5, math.huge, 0/0, "1" } do
+		expect(authority:ReserveAsync("recovery", 4209, 501, "bad-owner", revision).code == "invalid",
+			"invalid recovery revision was accepted")
+	end
+end
+
+
 print("[PurchaseEntitlement] identity bounds, independent owners, reservation contention, restart recovery and receipt regressions passed")

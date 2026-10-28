@@ -603,3 +603,19 @@ do
 	expect(processor.calls == 1,
 		"stale runner read or imported another page after losing its checkpoint compare-and-set")
 end
+
+
+for index, code in { "complete", "duplicate", false, 42, "unknown", "conflict" } do
+	local source = make_source({
+		["<initial>"] = page({ purchase("unreconciled-001") }, nil, true),
+	}, "snapshot-unreconciled", { count = 0 })
+	local processor = make_processor({ {
+		code = code, processed_count = 0, backfilled_count = 0, duplicate_count = 0,
+		message = "keep diagnostic",
+	} })
+	local runner = new_runner("unreconciled-" .. index, source, processor, make_checkpoint_store(), "snapshot-unreconciled")
+	local outcome = runner:RunBatchAsync(1)
+	local expected = if code == "unknown" or code == "conflict" then code else "unreconciled"
+	expect(outcome.code == expected and outcome.cursor == nil and outcome.pages_processed == 0
+		and outcome.message == "keep diagnostic", "unreconciled processor result was reported as success")
+end

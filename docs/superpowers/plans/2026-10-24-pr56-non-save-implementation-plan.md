@@ -61,7 +61,7 @@
 - [x] Add validated `max_dirty_age_seconds` and `durability_mode` policies (`balanced`, `durability_first`, `read_only_on_risk`), edge-triggered durability-risk/recovered events, dirty/durable watermarks, oldest-dirty-age evidence, and age-aware autosave selection while preserving due lease renewal and the critical persistence reserve.
 - [x] Wire PlayerDataCore overrides for freshness policy and mutation admission. `read_only_on_risk` rejects new Set calls on verified persistence risk and restores tracked Value-object edits rejected by the pending buffer; accepted pending values remain eligible for flush.
 - [x] Port a deterministic pre-UpdateAsync mock fault hook, production-adapter fake DataStore harness, ambiguous-write recovery regressions, PlayerData backpressure regressions, a focused CodSpeed benchmark entry and CI regression step.
-- [x] Execute the durable-save regression suite, strict Luau typecheck and production-adapter fault matrix. On code-bearing revision `63d30bd`, the CodSpeed workflow passed all 23 explicitly named Lune regression steps; its core runner also invokes crash-simulator, wake-up acceleration, erasure, quarantine, purchase-authority, and non-save service fixtures through `RobloxShim`. Luau Type Check, Bencher Continuous Benchmarks, and RecordStore Update Latency also passed. This is Lune/fake-store CI evidence, not live Roblox acceptance.
+- [x] Execute the durable-save regression suite, strict Luau typecheck and production-adapter fault matrix. On code-bearing revision `9ee4b56`, the Luau Regression Tests workflow (run `40529718478`) passed all 24 explicitly named Lune regression steps; its core runner also invokes crash-simulator, wake-up acceleration, erasure, quarantine, purchase-authority, and non-save service fixtures through `RobloxShim`. Earlier Luau Type Check, Bencher Continuous Benchmarks, and RecordStore Update Latency runs also passed. This is Lune/fake-store CI evidence, not live Roblox acceptance.
 - [ ] Independently review the full durable-save diff against the PR #39 §26.13 contract, including every uncertain-result branch and lease-reacquisition invariant.
 
 ### Slice 2: Mailbox V2 protocol and operations
@@ -145,9 +145,9 @@
 
 ### Slice 8: Verification and merge gates
 
-- [x] Run all Lune regression stages and Luau Type Check on the latest code-bearing head. CI for `63d30bd` passed the 23 explicit regression steps, including purchase manifest/digest checks, invalid cursor rejection, fail-closed legacy v3 checkpoint handling, SHA-256 vectors, purchase/entitlement erasure, atomic maintenance tombstones, maintenance manifest binding and RTBF manifest binding; the core regression runner also runs the additional mock-backed regressions. This is not live Roblox acceptance.
-- [x] Verify that the current workflow invokes the test fixtures rather than merely storing them in the repository: `bench/run_regression_tests.luau` runs crash simulation, wake-up acceleration, erasure, quarantine, purchase receipt/authority migration and other non-save fixtures; the current CodSpeed core regression step passed.
-- [ ] Establish comparable focused CodSpeed performance evidence. The workflow on `63d30bd` completed successfully, but prior comparative reports warned about wall-time outside Macro Runners, runner-type mismatch, and syscall-dominated workloads. A green action is not a comparable performance result; keep the performance gate open until same-environment measurements cover the affected benchmarks.
+- [x] Run all Lune regression stages on the latest checked code snapshot; retain the earlier Luau Type Check evidence separately. Luau Regression Tests run `40529718478` for `9ee4b56` passed the 24 explicit regression steps, including purchase manifest/digest checks, invalid cursor rejection, fail-closed legacy v3 checkpoint handling, SHA-256 vectors, purchase/entitlement erasure, atomic maintenance tombstones, maintenance manifest binding and RTBF manifest binding; the core regression runner also runs the additional mock-backed regressions. This is not live Roblox acceptance.
+- [x] Verify that the current workflow invokes the test fixtures rather than merely storing them in the repository: `bench/run_regression_tests.luau` runs crash simulation, wake-up acceleration, erasure, quarantine, purchase receipt/authority migration and other non-save fixtures; the Luau Regression Tests core regression step passed in run `40529718478`.
+- [ ] Establish comparable focused CodSpeed performance evidence. The regression workflow on `9ee4b56` completed successfully, but prior CodSpeed comparative reports warned about wall-time outside Macro Runners, runner-type mismatch, and syscall-dominated workloads. A green action is not a comparable performance result; keep the performance gate open until same-environment measurements cover the affected benchmarks.
 - [ ] Complete independent code review and inspect every changed file.
 - [ ] Keep live Roblox Studio/DataStore multi-server, throttling/cache, crash/shutdown, mixed-version/V3 rollout and rollback, purchase fulfillment, retention compaction, and RTBF-template/fence acceptance blocked until executed and recorded in a real test experience.
 
@@ -155,13 +155,13 @@
 
 ### Latest verified code snapshot
 
-The latest code-bearing revision checked for this plan is `63d30bde9c8ff7b5ce99b0f47fcf88e9cf502a31` (`Fail closed on malformed cursors and legacy purchase checkpoints`). The GitHub Actions run completed successfully:
+The latest code-bearing revision checked for this plan is `9ee4b56bc24ff9901c98605c9123242f6928287b` (`ci: isolate walltime benchmarks on Macro Runner`). The GitHub Actions run completed successfully:
 
-- CodSpeed workflow run `40353114458`: all 23 explicitly named Lune regression steps passed. The core runner also executes additional fixtures for crash simulation, wake-up acceleration, erasure, quarantine, purchase receipt/authority migration, and non-save services through `RobloxShim`.
-- Luau Type Check run `40353114453`: passed.
-- Bencher Continuous Benchmarks run `40353114519`: passed.
-- RecordStore Update Latency run `40353114428`: passed.
-- The CodSpeed action itself completed, but performance improvement/regression is not certified: earlier comparison reports flagged unreliable wall-time outside Macro Runners, different runner types, and syscall-dominated workloads.
+- Luau Regression Tests workflow run `40529718478`: all 24 explicitly named Lune regression steps passed. The core runner also executes additional fixtures for crash simulation, wake-up acceleration, erasure, quarantine, purchase receipt/authority migration, and non-save services through `RobloxShim`.
+- Earlier Luau Type Check run `40353114453`: passed.
+- Earlier Bencher Continuous Benchmarks run `40353114519`: passed.
+- Earlier RecordStore Update Latency run `40353114428`: passed.
+- The earlier CodSpeed action itself completed, but performance improvement/regression is not certified: earlier comparison reports flagged unreliable wall-time outside Macro Runners, different runner types, and syscall-dominated workloads.
 
 These are CI, Lune, and simulated/fake-store results. They do not establish real Roblox DataStoreService semantics, mixed-version deployment safety, or live multi-server behavior.
 

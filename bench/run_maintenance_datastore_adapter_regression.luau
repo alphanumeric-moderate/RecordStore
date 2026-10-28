@@ -15,7 +15,7 @@ local function make_service(initial_stores)
 		service.stores[name .. "\n" .. "global"] = { data = clone(data) }
 	end
 	function service:GetDataStore(name, scope)
-		local identity = name .. "\n" .. (scope or "")
+		local identity = name .. "\n" .. (if scope == nil or scope == "" then "global" else scope)
 		local store = self.stores[identity]
 		if store == nil then
 			store = { data = {}, lose_next_response = false, before_next_update = nil }
@@ -322,6 +322,29 @@ assert(runner:Stats().processed == 2,
 	"the integrated dry run did not preserve processed-item progress")
 assert(runner_store.data.Profile_1.tombstone ~= true and runner_store.data.Profile_2.tombstone ~= true,
 	"dry-run integration unexpectedly mutated profile records")
+
+
+for _, scope in { "", "global", false } do
+	local family = make_family("default-scope", "Profiles", "Player_")
+	family.scope = if scope == false then nil else scope
+	local overlapping = make_family("overlap", "Profiles", "Player_")
+	assert(not pcall(function() AdapterModule.new(make_config(service, { family, overlapping })) end),
+		"default scope alias bypassed overlap validation")
+	local config = make_config(service, { family })
+	config.checkpoint_store_name = "Profiles"
+	assert(not pcall(function() AdapterModule.new(config) end), "default scope alias bypassed checkpoint isolation")
+	local scoped = AdapterModule.new(make_config(service, { family }))
+	local rows = scoped:NextPage(nil, 10)
+	assert(rows[1].scope == "global", "listed scope was not normalized")
+	local locator = clone(rows[1])
+	locator.scope = if scope == false then nil else scope
+	local inspected, inspect_error = scoped:Inspect(locator)
+	assert(inspect_error == nil and inspected.status == "success", "default scope alias failed inspection")
+	local action, message = scoped:DeleteIfGeneration(locator, 999)
+	assert(action == "skipped" and message == "generation changed after inspection",
+		"scope alias failed to reach generation guard")
+end
+
 
 print("RecordStoreMaintenanceDataStoreAdapter regression checks passed")
 Shim.close()

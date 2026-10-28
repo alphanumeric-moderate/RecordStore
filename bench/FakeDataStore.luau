@@ -97,7 +97,7 @@ function FakeDataStore.new(options)
 		function Store:GetAsync(key, get_options)
 			assert(not state.inside_transform, "DataStore reads must not run inside UpdateAsync transforms")
 			state.get_calls += 1
-			local use_cache = get_options ~= nil and get_options.UseCache == true
+			local use_cache = get_options == nil or get_options.UseCache ~= false
 			if use_cache then
 				local cached = cache[key]
 				if cached ~= nil and os.clock() - cached.at < state.cache_seconds then

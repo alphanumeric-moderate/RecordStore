@@ -655,7 +655,10 @@ function MigrationRunner.new(config: Config)
 					or backfill_result.failed_index ~= nil
 					or (backfill_result.code ~= "complete" and backfill_result.code ~= "duplicate")
 				then
-					return result(backfill_result.code or "unknown", checkpoint,
+					local failure_code = if type(backfill_result.code) == "string"
+						and backfill_result.code ~= "complete" and backfill_result.code ~= "duplicate"
+						then backfill_result.code else "unreconciled"
+					return result(failure_code, checkpoint,
 						backfill_result.message or "historical PurchaseId batch result did not reconcile; cursor was not advanced")
 				end
 				local next_checkpoint: Checkpoint = {

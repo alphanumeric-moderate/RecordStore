@@ -171,9 +171,6 @@ local function new(manifest_store: any, options: Options?): any
 				if history_code ~= "success" or history == nil then
 					return nil, history_message or ("historical inventory failed: " .. tostring(history_code))
 				end
-				if #history >= 1024 then
-					return nil, "historical inventory reached the 1,024-version bound; erasure is blocked until a larger verified retention scan is configured"
-				end
 			end
 			return {
 				{

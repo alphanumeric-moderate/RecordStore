@@ -1,5 +1,6 @@
 --!strict
 local ErasureBinding = {}
+local SHA256 = require(script.Parent:WaitForChild("RecordStoreSHA256"))
 
 export type RuntimeOptions = {
 	record_store: any?,
@@ -173,6 +174,11 @@ function ErasureBinding.bind(
 	if profile_family == nil then return nil, nil, "manifest lacks the explicit player-profile family" end
 	local key_prefix, prefix_error = profile_prefix(profile_family)
 	if key_prefix == nil then return nil, nil, prefix_error end
+	if profile_family.generation_field ~= "fencing_generation"
+		or profile_family.fence_field ~= "__recordstore_erasure_fence"
+	then
+		return nil, nil, "profile generation and fence fields do not match PlayerDataErasure"
+	end
 
 	local adapters_by_id: { [string]: any } = {}
 	local normalized_adapters: { any } = {}
@@ -269,7 +275,11 @@ function ErasureBinding.bind(
 		profile_scope = profile_family.scope,
 		key_prefix = key_prefix,
 		profile_family_verified = true,
-		application_inventory_manifest_id = activated.manifest_id,
+		-- Length framing binds both fields without delimiter ambiguity; hashing keeps
+		-- even two maximum-length identifiers within the 128-byte coordinator limit.
+		application_inventory_manifest_id = "rtbf:" .. SHA256.digest(
+			tostring(#activated.manifest_id) .. ":" .. activated.manifest_id .. activated.revision
+		),
 		writer_inventory_verified = true,
 		verify_templates = runtime.verify_templates,
 		additional_families = additional_families,

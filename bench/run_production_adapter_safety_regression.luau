@@ -5,6 +5,23 @@ local process = require("@lune/process")
 local Shim = require("./RobloxShim")
 local FakeDataStore = require("./FakeDataStore")
 
+-- Native reads cache by default and bypass only an explicit UseCache=false.
+do
+	local fixture = FakeDataStore.new()
+	local reader = fixture.service:GetDataStore("CacheDefaults")
+	local writer = fixture.service:GetDataStore("CacheDefaults")
+	writer:UpdateAsync("key", function() return { value = 1 } end)
+	assert(reader:GetAsync("key").value == 1)
+	writer:UpdateAsync("key", function() return { value = 2 } end)
+	assert(reader:GetAsync("key").value == 1)
+	assert(reader:GetAsync("key", {}).value == 1)
+	assert(reader:GetAsync("key", { UseCache = true }).value == 1)
+	assert(reader:GetAsync("key", { UseCache = false }).value == 2)
+	local metrics = fixture.control:metrics()
+	assert(metrics.get_calls == 5 and metrics.cache_get_calls == 3 and metrics.fresh_get_calls == 1,
+		"cache default changed lookup or call-counter semantics")
+end
+
 local fake = FakeDataStore.new()
 Shim.set_service("DataStoreService", fake.service)
 local RecordStore = Shim.load()

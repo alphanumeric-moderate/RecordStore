@@ -370,15 +370,19 @@ function Simulator.new(options)
 	end
 
 	function self:InjectFault(rule)
-		local list = clone(self.faults)
+		local list = {}
+		for _, active in ipairs(self.faults) do
+			if active.remaining > 0 then table.insert(list, clone(active)) end
+		end
 		table.insert(list, rule)
 		return self:LoadFaultScript(list)
 	end
 
 	function self:SerializeFaultScript()
 		local data = {}
-		for index, rule in ipairs(self.faults) do
-			data[index] = {
+		for _, rule in ipairs(self.faults) do
+			if rule.remaining <= 0 then continue end
+			data[#data + 1] = {
 				operation = rule.operation,
 				phase = rule.phase,
 				key = rule.key,

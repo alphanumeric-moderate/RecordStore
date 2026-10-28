@@ -210,4 +210,19 @@ expect(yielding_adapter:FenceIfGeneration(yielding_store, item, 4, "job-atomic-1
 expect(yielding_store.row.fencing_generation == 4 and yielding_store.row.maintenance_fence_job_id == nil,
 	"yielding callback mutated the record before returning unknown")
 
+
+local proxy_target = make_store(profile(4, nil, true, true))
+local proxy = newproxy(true)
+getmetatable(proxy).__index = function(_, method)
+	return function(_, ...) return proxy_target[method](proxy_target, ...) end
+end
+expect(type(proxy) == "userdata", "proxy fixture is not userdata")
+expect(adapter:FenceAndDeleteIfGeneration(proxy, item, 4, "job-atomic-1") == "deleted",
+	"userdata store failed initial tombstone commit")
+local committed_generation = proxy_target.row.fencing_generation
+expect(adapter:FenceAndDeleteIfGeneration(proxy, item, 4, "job-atomic-1") == "deleted"
+	and proxy_target.row.fencing_generation == committed_generation,
+	"userdata retry failed to recognize the already-committed tombstone")
+
+
 print("[MaintenanceAtomicTombstone] same-key fencing, generation CAS, callback isolation, fail-closed policy, tombstone verification and ambiguous-write recovery regressions passed")

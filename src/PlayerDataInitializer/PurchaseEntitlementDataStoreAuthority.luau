@@ -56,7 +56,7 @@ type NormalizedOptions = {
 }
 
 type Authority = {
-	ReserveAsync: (self: Authority, entitlement_id: string, player_id: number, product_id: number, purchase_id: string) -> Result,
+	ReserveAsync: (self: Authority, entitlement_id: string, player_id: number, product_id: number, purchase_id: string, expected_revision: number?) -> Result,
 	CommitAsync: (self: Authority, entitlement_id: string, player_id: number, product_id: number, purchase_id: string) -> Result,
 	BackfillAsync: (self: Authority, entitlement_id: string, player_id: number, product_id: number, purchase_id: string) -> Result,
 	GetStatusAsync: (self: Authority, entitlement_id: string, player_id: number) -> Result,
@@ -81,11 +81,6 @@ end
 local function positive_integer(value: unknown): boolean
 	return type(value) == "number" and math.isfinite(value)
 		and value >= 1 and value <= MAX_SAFE_INTEGER and math.floor(value) == value
-end
-
-local function nonnegative_integer(value: unknown): boolean
-	return type(value) == "number" and math.isfinite(value)
-		and value >= 0 and math.floor(value) == value
 end
 
 local function valid_revision(value: unknown): boolean
@@ -192,8 +187,7 @@ local function parse_record(raw: unknown): (EntitlementRecord?, string?)
 		or not positive_integer(fields.player_id)
 		or not valid_text(fields.purchase_id, MAX_PURCHASE_ID_BYTES)
 		or not positive_integer(fields.product_id)
-		or not nonnegative_integer(fields.revision)
-		or (fields.revision :: number) < 1
+		or not positive_integer(fields.revision)
 		or not finite_timestamp(fields.created_at)
 		or not finite_timestamp(fields.updated_at)
 		or (fields.updated_at :: number) < (fields.created_at :: number)
@@ -202,9 +196,6 @@ local function parse_record(raw: unknown): (EntitlementRecord?, string?)
 	end
 	if fields.status ~= "pending" and fields.status ~= "owned" then
 		return nil, "corrupt: entitlement row has an unknown state"
-	end
-	if fields.status == "pending" and fields.revision ~= 1 then
-		return nil, "corrupt: pending entitlement row has an invalid revision"
 	end
 	return {
 		version = VERSION,
@@ -452,7 +443,9 @@ local function result_from_row(
 			end
 			return result("already_owned", record, nil)
 		end
-		if record.purchase_id ~= purchase_id then return result("pending", record, nil) end
+		if record.purchase_id ~= purchase_id then
+			return result("conflict", record, "purchase no longer owns the pending reservation")
+		end
 		if record.product_id ~= product_id then return result("conflict", record, "purchase ID is bound to another product") end
 		return result("pending", record, "entitlement claim is still pending")
 	end
@@ -480,7 +473,8 @@ function AuthorityModule.new(raw_options: Options): Authority
 		entitlement_id: string,
 		player_id: number,
 		product_id: number,
-		purchase_id: string
+		purchase_id: string,
+		expected_revision: number?
 	): Result
 		local key = key_for(entitlement_id, player_id)
 		local now_ok, now_value = pcall(options.now_unix)
@@ -500,11 +494,20 @@ function AuthorityModule.new(raw_options: Options): Authority
 			local existing = parse_record(raw)
 			if existing == nil then return nil end
 			if existing.entitlement_id ~= entitlement_id or existing.player_id ~= player_id then return nil end
-			if operation == "reserve" then return copy_record(existing) end
+			if operation == "reserve" then
+				if existing.status == "pending" and existing.purchase_id ~= purchase_id
+					and expected_revision == existing.revision and existing.revision < MAX_SAFE_INTEGER
+				then
+					return make_record(entitlement_id, player_id, product_id, purchase_id,
+						"pending", existing.revision + 1, existing.created_at, math.max(existing.updated_at, now))
+				end
+				return copy_record(existing)
+			end
 			if operation == "backfill" then return copy_record(existing) end
 			if operation == "commit" then
 				if existing.status == "owned" then return copy_record(existing) end
-				if existing.purchase_id ~= purchase_id or existing.product_id ~= product_id then
+				if existing.purchase_id ~= purchase_id or existing.product_id ~= product_id
+					or existing.revision >= MAX_SAFE_INTEGER then
 					return copy_record(existing)
 				end
 				return make_record(
@@ -538,10 +541,13 @@ function AuthorityModule.new(raw_options: Options): Authority
 		return result_from_row(operation, raw, entitlement_id, player_id, product_id, purchase_id)
 	end
 
-	function self:ReserveAsync(entitlement_id: string, player_id: number, product_id: number, purchase_id: string): Result
+	function self:ReserveAsync(entitlement_id: string, player_id: number, product_id: number, purchase_id: string, expected_revision: number?): Result
 		local id, subject, product, purchase, invalid = normalized_input(entitlement_id, player_id, product_id, purchase_id)
 		if invalid ~= nil then return result("invalid", nil, invalid) end
-		return run_write("reserve", id :: string, subject :: number, product :: number, purchase :: string)
+		if expected_revision ~= nil and not positive_integer(expected_revision) then
+			return result("invalid", nil, "expected_revision must be a positive safe integer")
+		end
+		return run_write("reserve", id :: string, subject :: number, product :: number, purchase :: string, expected_revision)
 	end
 
 	function self:CommitAsync(entitlement_id: string, player_id: number, product_id: number, purchase_id: string): Result

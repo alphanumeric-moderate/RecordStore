@@ -61,6 +61,18 @@ expect(next_value.kills == 4 and transform_info ~= nil,
 expect(simulator:Stats().counters.transform_replays >= 1,
 	"simulator did not account for an UpdateAsync transform replay")
 
+-- Exhausted faults must remain reloadable, and active rules retain their counts.
+do
+	local active = simulator:InjectFault({ operation = "UpdateAsync", phase = "during_transform",
+		key = "unused", action = "transform_replay", times = 2 })
+	expect(active, "active rule could not be added after fault exhaustion")
+	local replay = Simulator.new({ seed = 777 })
+	expect(replay:LoadSerializedFaultScript(simulator:SerializeFaultScript()),
+		"partially consumed fault script failed to reload")
+	expect(#replay.faults == 1 and replay.faults[1].remaining == 2,
+		"serialized faults retained exhausted rules or lost active counts")
+end
+
 -- Crashes clear process-local state and invalidate queued callbacks without
 -- rolling back already committed DataStore data.
 local local_state = simulator:LocalState("server-a")

@@ -333,23 +333,30 @@ end
 do
 	local rows, pumps, events = {}, {}, {}
 	local reads, fail_reads, fail_writes = 0, false, false
+	local now = 100
 	local map = {}
 	function map:SetAsync(key, message, ttl, score)
-		expect(ttl == 30 and score == 100, "memory hint lost its TTL or millisecond score")
+		expect(ttl == 30 and score == now, "memory hint lost its TTL or millisecond score")
 		if fail_writes then error("injected MemoryStore write failure") end
-		rows[key] = message
+		rows[key] = { key = key, value = message, sortKey = score }
 	end
-	function map:GetRangeAsync(_direction, maximum)
+	function map:GetRangeAsync(_direction, maximum, lower)
 		reads += 1
 		if fail_reads then error("injected MemoryStore read failure") end
 		local page = {}
-		for key, value in pairs(rows) do
-			if #page == maximum then break end
-			table.insert(page, { key = key, value = value })
+		for _, row in pairs(rows) do
+			if row.sortKey > lower.sortKey or (row.sortKey == lower.sortKey
+				and lower.key ~= nil and row.key > lower.key) then
+				table.insert(page, row)
+			end
 		end
+		table.sort(page, function(a, b)
+			return a.sortKey < b.sortKey or (a.sortKey == b.sortKey and a.key < b.key)
+		end)
+		while #page > maximum do table.remove(page) end
 		return page
 	end
-	function map:RemoveAsync(key) rows[key] = nil end
+	function map:RemoveAsync() error("shared hints must not be removed by readers") end
 	local messaging = {
 		SubscribeAsync = function() return { Disconnect = function() end } end,
 		PublishAsync = function() error("injected MessagingService failure") end,
@@ -359,7 +366,7 @@ do
 			server_id = server_id, enabled = true, messaging_service = messaging,
 			enable_memory_store = true, max_memory_hint_slots = 2,
 			memory_store_service = { GetSortedMap = function() return map end },
-			now_ms = function() return 100 end,
+			now_ms = function() return now end,
 			schedule = function(delay, callback)
 				if delay == 25 then table.insert(pumps, callback) end
 				return true
@@ -367,22 +374,41 @@ do
 		})
 	end
 	local publisher, receiver = new_instance("memory-publisher"), new_instance("memory-receiver")
+	local other = new_instance("memory-other")
+	local other_events = {}
+	rows.old = { key = "old", sortKey = 99, value = {} }
+	expect(other:Start(), "second receiver failed to start")
+	subscribe(other, "memory-owner", other_events)
 	expect(publisher:Start() and receiver:Start(), "memory hint fixture failed to start")
 	subscribe(receiver, "memory-owner", events)
 	for _, maximum in { 0, 3, 1.5, math.huge, 0 / 0, "1" } do
 		expect(receiver:PollMemoryHints(maximum).code == "invalid" and reads == 0,
 			"invalid memory poll bound reached the provider")
 	end
+	now = 101
 	expect(publisher:Publish("memory-owner", "enqueue").code == "scheduled"
 		and publisher:Stats().metrics.publish_errors == 1, "MemoryStore fallback was lost after messaging failure")
 	local polled = receiver:PollMemoryHints()
-	expect(polled.code == "success" and polled.processed == 1 and next(rows) == nil and #pumps == 1,
-		"memory hint was not queued and removed in the bounded default poll")
+	expect(polled.code == "success" and polled.processed == 1 and next(rows) ~= nil and #pumps == 1,
+		"new memory hint was not queued while retaining shared rows")
 	pumps[1]()
 	expect(#events == 1 and events[1] == "enqueue", "MemoryStore fallback did not wake the registered owner")
-	rows.invalid = { shard = 0, version = 99 }
-	expect(receiver:PollMemoryHints(1).processed == 0 and next(rows) == nil and #events == 1,
-		"malformed memory hint was delivered or retained to starve later polls")
+	expect(other:PollMemoryHints(1).processed == 1, "first reader stole the second reader's hint")
+	pumps[2]()
+	expect(#other_events == 1, "second receiver was not woken")
+	expect(receiver:PollMemoryHints(1).processed == 0, "cursor replayed consumed hints")
+	rows.invalid = { key = "invalid", sortKey = 102, value = { shard = 0, version = 99 } }
+	rows.invalid2 = { key = "invalid2", sortKey = 102, value = { shard = 0, version = 99 } }
+	expect(receiver:PollMemoryHints(1).processed == 0 and receiver.memory_cursor.key == "invalid",
+		"malformed row did not advance cursor")
+	expect(receiver:PollMemoryHints(1).processed == 0 and receiver.memory_cursor.key == "invalid2",
+		"equal sort keys skipped a later row")
+	expect(receiver:PollMemoryHints(1).processed == 0 and #events == 1,
+		"consumed malformed rows starved subsequent polls")
+	receiver:Stop()
+	now = 103
+	expect(receiver:Start() and receiver.memory_cursor.sortKey == now,
+		"restart retained an old memory cursor")
 	fail_reads = true
 	expect(receiver:PollMemoryHints(2).code == "unknown" and receiver:Stats().metrics.memory_poll_errors == 1,
 		"failed MemoryStore read was treated as an empty successful poll")
@@ -390,7 +416,7 @@ do
 	expect(publisher:Publish("memory-owner", "retry").code == "unavailable"
 		and publisher:Stats().metrics.memory_write_errors == 1,
 		"loss of both hint providers was reported as scheduled")
-	publisher:Stop(); receiver:Stop()
+	publisher:Stop(); receiver:Stop(); other:Stop()
 end
 
 print("[Acceleration] identity, lifecycle, coalescing, capacity, MemoryStore fallback and advisory failure regressions passed")

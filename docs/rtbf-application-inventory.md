@@ -49,12 +49,12 @@ Do not use `RemoveVersionAsync` as a workaround for retention. Keep the permanen
 The included adapter requires all of the following before the generic erasure coordinator can certify this family's coverage:
 
 - `profile_family_verified = true` for the exact configured PlayerDataCore family;
-- `application_inventory_manifest_id` containing the reviewed, immutable application inventory manifest ID;
+- `application_inventory_manifest_id` containing the reviewed, immutable application inventory identity;
 - `writer_inventory_verified = true` after the independent direct-writer/recreation audit;
 - `verify_templates` rechecking the exact configured templates for the current UserId; and
 - successful bounded inventory, generation checks, dependency checks and durable manifest reconciliation.
 
-The first three fields are explicit application attestations. Setting them does not create evidence by itself; the reviewed manifest and live acceptance record must exist. The durable erasure manifest binds to the inventory-manifest ID and fails closed if that ID changes on resume. Any change to key layout or writers requires a new reviewed manifest and a new acceptance pass.
+The first three fields are explicit application attestations. Setting them does not create evidence by itself; the reviewed manifest and live acceptance record must exist. The durable erasure manifest binds to the inventory identity and fails closed if it changes on resume. `PlayerDataErasureManifestBinding` derives this identity from both `manifest_id` and `revision` using a length-framed SHA-256 digest within the 128-byte limit. Plans persisted with only the manifest ID fail closed when resumed through this binding. The built-in profile family must declare `generation_field = "fencing_generation"` and `fence_field = "__recordstore_erasure_fence"`. Any change to key layout or writers requires a new reviewed manifest and a new acceptance pass.
 
 ## Live acceptance checklist
 

@@ -328,6 +328,19 @@ do
 			return kicked_user_id == user_id
 		end,
 	})
+	local bounded_store = table.clone(RecordStore.Mock)
+	bounded_store.list_versions_async = function() return table.create(1024, {}), "success" end
+	local bounded_erasure = ErasureModule.new(new_manifest_store(), {
+		record_store = bounded_store,
+		record_store_v2 = { new = function() return v2 end },
+		mailbox_module = RecordStore.MailboxV2,
+		profile_store_name = "PlayerData_Test1", profile_scope = "global", key_prefix = "Player_",
+		profile_family_verified = true, writer_inventory_verified = true,
+		application_inventory_manifest_id = "test-inventory-playerdata-v1",
+		verify_templates = function() return true end,
+	})
+	expect(bounded_erasure:PlanAsync(user_id, "erase-at-scan-bound").code == "success",
+		"reaching the historical scan bound blocked erasure planning")
 	local plan = erasure:PlanAsync(user_id, "erase-retention-plan-205")
 	expect(plan.code == "success" and plan.rtbf_coverage_verified == true,
 		"verified historical inventory was rejected by the retention-based erase plan: " .. tostring(plan.message))

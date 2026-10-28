@@ -152,8 +152,12 @@ local function same_checkpoint(left: Checkpoint?, right: Checkpoint): boolean
 		and left.status == right.status
 end
 
+local function normalized_scope(scope: string?): string
+	return if scope == nil or scope == "" then "global" else scope
+end
+
 local function same_store(left: Family, right: Family): boolean
-	return left.store_name == right.store_name and (left.scope or "") == (right.scope or "")
+	return left.store_name == right.store_name and normalized_scope(left.scope) == normalized_scope(right.scope)
 end
 
 local function prefixes_overlap(left: string, right: string): boolean
@@ -250,7 +254,7 @@ function Adapter.new(config: Config)
 	end
 	for _, family in ipairs(families) do
 		if family.store_name == config.checkpoint_store_name
-			and (family.scope or "") == (config.checkpoint_scope or "")
+			and normalized_scope(family.scope) == normalized_scope(config.checkpoint_scope)
 		then
 			error("checkpoint store/scope must be separate from every catalog data family", 2)
 		end
@@ -268,7 +272,7 @@ function Adapter.new(config: Config)
 	table.freeze(families)
 
 	local function get_store(name: string, scope: string?): any
-		local cache_key = name .. "\n" .. (scope or "")
+		local cache_key = name .. "\n" .. normalized_scope(scope)
 		local cached = store_cache[cache_key]
 		if cached ~= nil then
 			return cached
@@ -361,7 +365,7 @@ function Adapter.new(config: Config)
 			items[#items + 1] = {
 				family_name = family.name,
 				store_name = family.store_name,
-				scope = family.scope or "",
+				scope = normalized_scope(family.scope),
 				key = key_name,
 			}
 		end
@@ -392,7 +396,8 @@ function Adapter.new(config: Config)
 			return inspection_failure("invalid", "inventory item lacks family_name or key"), "invalid inventory locator"
 		end
 		local family = family_by_name[family_name]
-		if family == nil or locator.store_name ~= family.store_name or locator.scope ~= (family.scope or "") then
+		if family == nil or locator.store_name ~= family.store_name or (locator.scope ~= nil and type(locator.scope) ~= "string")
+			or normalized_scope(locator.scope :: string?) ~= normalized_scope(family.scope) then
 			return inspection_failure("invalid", "inventory locator does not match the explicit family catalog"), "catalog mismatch"
 		end
 		local prefix = family.prefix or ""
@@ -445,7 +450,8 @@ function Adapter.new(config: Config)
 		local family = if type(locator.family_name) == "string" then family_by_name[locator.family_name] else nil
 		local key = locator.key
 		if family == nil or type(key) ~= "string" or not valid_text(key, MAX_NAME_BYTES)
-			or locator.store_name ~= family.store_name or locator.scope ~= (family.scope or "")
+			or locator.store_name ~= family.store_name or (locator.scope ~= nil and type(locator.scope) ~= "string")
+			or normalized_scope(locator.scope :: string?) ~= normalized_scope(family.scope)
 		then
 			return "skipped", "inventory locator does not match the explicit family catalog"
 		end

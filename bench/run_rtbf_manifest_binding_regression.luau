@@ -4,6 +4,7 @@ local RecordStore = Shim.load()
 local initializer = Shim.environment.game:GetService("ServerScriptService"):WaitForChild("PlayerDataInitializer")
 local RecordStoreV2Factory = Shim.environment.require(initializer:WaitForChild("RecordStoreV2"))
 local Manifest = Shim.environment.require(initializer:WaitForChild("RecordStoreApplicationInventory"))
+local SHA256 = Shim.environment.require(initializer:WaitForChild("RecordStoreSHA256"))
 local ErasureBinding = Shim.environment.require(initializer:WaitForChild("PlayerDataErasureManifestBinding"))
 
 local function expect(value, message)
@@ -45,7 +46,7 @@ local function manifest()
 				locator_mode = "user_id_template",
 				key_template = "Player_{user_id}",
 				generation_field = "fencing_generation",
-				fence_field = "erasure_fence",
+				fence_field = "__recordstore_erasure_fence",
 				action = "tombstone",
 				writer_ids = { "playerdata-core" },
 				evidence_ref = "evidence:profile-family",
@@ -174,7 +175,9 @@ expect(bound.profile_store_name == "PlayerData_Test1"
 	and bound.key_prefix == "Player_"
 	and bound.profile_family_verified == true
 	and bound.writer_inventory_verified == true
-	and bound.application_inventory_manifest_id == bound_manifest.manifest_id
+	and bound.application_inventory_manifest_id == "rtbf:" .. SHA256.digest(
+		tostring(#bound_manifest.manifest_id) .. ":" .. bound_manifest.manifest_id .. bound_manifest.revision
+	)
 	and #bound.additional_families == 0 and table.isfrozen(bound),
 	"erasure config did not derive the exact profile identity and reviewed attestations")
 expect(verifier_calls == 1, "RTBF verifier did not run exactly once")
@@ -377,4 +380,33 @@ expect(row.player_id == nil and row.purchase_id == "historical-purchase-opaque-7
 	and row.status == "committed" and row.retained_uniqueness_fence == true
 	and row.erasure_fence == "erase-purchase-user-77",
 	"retain-fence action did not remove the user identity while preserving purchase uniqueness")
+
+for _, field in { "generation_field", "fence_field" } do
+	local bad = manifest()
+	bad.families[1][field] = "unsupported_field"
+	local called = false
+	local config = ErasureBinding.bind(Manifest, bad, runtime(1), {}, function() called = true; return true end)
+	expect(config == nil and not called, "unsupported profile field reached activation: " .. field)
+end
+local changed = manifest()
+changed.revision = "inventory-review-r2"
+local revised = ErasureBinding.bind(Manifest, changed, runtime(1), {}, function() return true end)
+expect(revised.application_inventory_manifest_id ~= bound.application_inventory_manifest_id,
+	"review revision did not change the bound inventory identity")
+local large = manifest()
+large.manifest_id = string.rep("i", 128)
+large.revision = string.rep("r", 128)
+local large_bound = ErasureBinding.bind(Manifest, large, runtime(1), {}, function() return true end)
+expect(large_bound ~= nil and #large_bound.application_inventory_manifest_id <= 128,
+	"maximum-size manifest identities cannot bind within the coordinator limit")
+-- The persisted plan above used only the ID. Binding it to a revision must fail closed.
+local rebound = v2.Erasure.new(manifest_store, { external_family }, {
+	verify_templates = function() return true end,
+	require_inventory_attestation = true,
+	application_inventory_manifest_id = dynamic_config.application_inventory_manifest_id,
+	writer_inventory_verified = true,
+})
+expect(rebound:GetStatus(77).code == "coverage_unverified", "legacy ID-only plan resumed under a revision binding")
+
+
 print("[RTBFManifest] external inventory planning/resume, retained uniqueness fence, manifest binding, and fail-closed activation passed")

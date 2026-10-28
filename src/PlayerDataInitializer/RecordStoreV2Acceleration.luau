@@ -427,7 +427,7 @@ function Acceleration.new(options)
 			return { code = "invalid", processed = 0, message = "max_items must be an integer from 1 to the smaller of 20 and configured MemoryStore hint slots" }
 		end
 		local ok, rows = pcall(function()
-			return self.memory_map:GetRangeAsync(self.sort_ascending, max_items)
+			return self.memory_map:GetRangeAsync(self.sort_ascending, max_items, self.memory_cursor)
 		end)
 		if not ok or type(rows) ~= "table" then
 			self.metrics.memory_poll_errors += 1
@@ -444,16 +444,11 @@ function Acceleration.new(options)
 					self:_receive(shard, payload)
 					processed += 1
 				end
-				-- Sorted-map entries are a bounded best-effort hint queue. Remove each
-				-- observed slot after attempting delivery, including malformed entries,
-				-- or a stale first page will starve newer hints indefinitely. A concurrent
-				-- overwrite can be lost here by design; durable polling is the fallback.
+				-- Each receiver advances independently; shared hints remain until TTL expiry.
+				local sort_key = row.sortKey or row.SortKey
 				local memory_key = row.key or row.Key
-				if type(memory_key) == "string" and memory_key ~= "" and #memory_key <= 128 then
-					local remove_ok = pcall(function()
-						self.memory_map:RemoveAsync(memory_key)
-					end)
-					if not remove_ok then self.metrics.memory_remove_errors += 1 end
+				if finite(sort_key) and type(memory_key) == "string" then
+					self.memory_cursor = { sortKey = sort_key, key = memory_key }
 				end
 			end
 		end
@@ -474,6 +469,9 @@ function Acceleration.new(options)
 	function self:Start()
 		if not self.enabled then return false, "wake-up acceleration is disabled by configuration" end
 		if self.running then return true, nil end
+		local started_at = self.now_ms()
+		if not finite(started_at) then return false, "clock_invalid" end
+		self.memory_cursor = { sortKey = started_at }
 		local connections = {}
 		for shard = 1, self.shard_count do
 			local shard_index = shard

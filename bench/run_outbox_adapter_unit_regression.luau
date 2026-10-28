@@ -109,6 +109,7 @@ for _, enqueue_code in { "accepted", "duplicate" } do
 end
 
 local invalid_events = {
+	{ field = "CorrelationId", value = "" }, { field = "CausationId", value = "" },
 	{ field = "EventId", value = "" }, { field = "EventId", value = string.rep("e", 257) },
 	{ field = "EventType", value = string.rep("t", 101) },
 	{ field = "PayloadVersion", value = 0 }, { field = "PayloadVersion", value = 1.5 },

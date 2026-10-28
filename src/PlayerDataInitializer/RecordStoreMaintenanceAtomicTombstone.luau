@@ -341,7 +341,8 @@ function AtomicTombstone.new(config: Options): Adapter
 		end
 
 		if job_id == config.job_id and generation(expected_generation)
-			and expected_generation <= MAX_GENERATION - 2 and type(store) == "table"
+			and expected_generation <= MAX_GENERATION - 2
+			and (type(store) == "table" or type(store) == "userdata")
 			and type(item) == "table"
 		then
 			local locator = item :: { [string]: unknown }
