@@ -5,8 +5,6 @@ local HttpService = game:GetService("HttpService")
 local MessagingService = game:GetService("MessagingService")
 local RecordStore = {}
 
--- Durable same-key fences are deliberately newer than this writer. Older RecordStore
--- releases fail closed rather than treating a quarantined/enclosed key as writable.
 local QUARANTINE_FENCE_IMPLEMENTATION_VERSION = 2147483646
 local QUARANTINE_FENCE_FIELD = "__recordstore_quarantine_fence_v1"
 local ERASURE_FENCE_IMPLEMENTATION_VERSION = 2147483647
@@ -15,7 +13,6 @@ local MAX_ERASURE_HISTORY_SCAN = 1024
 local erasure_internal: { [string]: any } = {}
 
 
--- BEGIN EMBEDDED SCHEDULER MODULE
 type EmbeddedSchedulerDynamicRecord = { [string]: any }
 type EmbeddedSchedulerOptions = {
 	now_ms: (() -> number)?,
@@ -2475,9 +2472,7 @@ do
 	Scheduler.new_dispatcher = create_dispatcher
 
 end
--- END EMBEDDED SCHEDULER MODULE
 
--- BEGIN EMBEDDED MAILBOX V2 MODULE
 local MailboxV2 = {}
 MailboxV2.__index = MailboxV2
 type EmbeddedMailboxDict = { [string]: unknown }
@@ -3114,8 +3109,7 @@ do
 			if raw == nil then
 				return initial
 			end
-			-- A racing writer already created this key. Cancel rather than
-			-- re-persisting an envelope that might belong to a newer schema.
+
 			return nil
 		end)
 		if write_error ~= nil then
@@ -3295,8 +3289,7 @@ do
 					local terminal = record.state == "acknowledged" or record.state == "dead_lettered"
 						or record.state == "discarded" or record.state == "expired"
 					if same_generation and same_location and not terminal then
-						-- A matching generation without a published locator can be a
-						-- partially prepared placement. Do not reclaim it as stale.
+		
 						return false
 					end
 					if record.state == "replaying" and same_generation then
@@ -3368,7 +3361,7 @@ do
 						then
 							return nil
 						end
-						-- A new append after the safety scan invalidates this retirement.
+				
 						if canonical(current.entries) ~= expected_entries then return nil end
 						local next_segment = clone_dict(current)
 						next_segment.state = "retired"
@@ -3701,9 +3694,7 @@ do
 		end
 		local record = as_dict(updated)
 		if updated == nil then
-			-- UpdateAsync returning nil means the write was cancelled. Read back
-			-- authoritatively to distinguish a missing record from an incompatible
-			-- version that must never be re-persisted by an older writer.
+			
 			local latest_value, latest_error = self:_get_fresh(route)
 			if latest_error ~= nil then
 				return nil, "canonical update was cancelled but read-back is unresolved: " .. latest_error
@@ -4975,8 +4966,7 @@ do
 			return nil, ok("invalid", message_id, nil, "message_id must be a valid V2 or legacy message ID")
 		end
 		local route = self:_route_from_public_id(message_id)
-		-- Public delivery reads are used to confirm durable outbox receipts and
-		-- migration imports, so they must bypass Roblox's short-lived GetAsync cache.
+	
 		local raw, read_error = self:_get_fresh(route)
 		if read_error ~= nil then
 			return nil, ok("unknown", message_id, nil, read_error)
@@ -6238,7 +6228,7 @@ do
 	MailboxV2.Version = VERSION
 
 end
--- END EMBEDDED MAILBOX V2 MODULE
+--// end embedded mailbox v2 module
 
 type MetadataValue = boolean | number | string
 export type Metadata = { [string]: MetadataValue }
@@ -9710,9 +9700,7 @@ local function ensure_legacy_queue_clear(
 		return "invalid", "legacy queue retirement clock returned an invalid timestamp"
 	end
 
-	-- Seal the old q: key only while its current value is absent or a valid,
-	-- empty V1 envelope. Old V1 writers using UpdateAsync will subsequently see
-	-- a future-version marker and must fail closed rather than recreate the queue.
+	
 	local _, _, update_code, update_message = backend_update(legacy_backend, function(current_raw)
 		local already_retired, _, _ = legacy_queue_retirement_status(current_raw, owner)
 		if already_retired then return nil end
@@ -9727,8 +9715,7 @@ local function ensure_legacy_queue_clear(
 		}
 	end, deadline, state)
 
-	-- A response can be lost after the marker commits. Verify the durable
-	-- state with an uncached read; the transform never mutates control state.
+	
 	local fresh, _, read_code, read_message = backend_get(legacy_backend, false, deadline, nil)
 	if read_code ~= nil then
 		return "unknown", "could not verify legacy queue retirement marker: " .. (read_message or read_code)
@@ -9794,9 +9781,6 @@ local function queue_size_error(queue: QueueEnvelope, max_bytes: number): string
 	return nil
 end
 
--- Mailbox V2 migration source bridge. The source queue remains in the same
--- q2 key and is frozen by a future-version marker written atomically with
--- UpdateAsync. Every source read below bypasses the read cache.
 type MailboxV2MigrationStatus = {
 	MigrationId: string,
 	FrozenAt: number,
@@ -10018,7 +10002,7 @@ local function begin_mailbox_v2_migration_internal(
 		return candidate
 	end, context.deadline, nil)
 
-	-- The durable state, not UpdateAsync's possibly ambiguous response, decides.
+	
 	local fresh, _, read_code, read_message = backend_get(context.backend, false, context.deadline, nil)
 	if read_code ~= nil then
 		return "unknown", "could not verify Mailbox V2 freeze marker: " .. (read_message or read_code)
@@ -12478,9 +12462,7 @@ local function purge_erased_versions_internal(
 	if not finite_erasure_number(fence_updated_ms) or (fence_updated_ms :: number) < 0 then
 		return nil, "unknown", "the durable erasure fence has no verified platform update timestamp"
 	end
-	-- Superseded backups expire 30 days after the write that superseded them.
-	-- Use the fence's UpdatedTime, not the version's CreatedTime: writes inside
-	-- one UTC hour can update an existing version without creating a new version.
+	
 	local retention_until = math.ceil((fence_updated_ms :: number) / 1000) + 30 * 24 * 60 * 60
 	if not mock and historical_version_found then
 		if session_now_unix(false) < retention_until then
