@@ -130,6 +130,43 @@ task.wait(0.1)
 assert(saved_records[saved_key].kills == previous_kills,
 	"PlayerData.Set should persist the restored baseline after recovery")
 
+-- A reconciliation event can arrive while the active flush has moved its batch out of pending_changes.
+-- It must schedule another flush even though the buffer is temporarily empty at event time.
+local recovery_race = create_harness(true)
+local recovery_race_controller = recovery_race.controller
+local recovery_race_player = recovery_race.player
+local recovery_race_record = recovery_race.record
+local recovery_race_options = recovery_race.get_record_options()
+local recovery_race_task = recovery_race.task
+local recovery_race_key = "PlayerData_Test1|global|Player_" .. tostring(recovery_race_player.UserId)
+local recovery_race_baseline = recovery_race.saved_records[recovery_race_key].kills
+local recovery_race_update = recovery_race_record.Update
+local recovery_race_attempts = 0
+
+recovery_race_record.Update = function(self, transform)
+	recovery_race_attempts += 1
+	if recovery_race_attempts == 1 then
+		recovery_race_options.on_event("reconcile", self.Key, "success", nil)
+		recovery_race_task.wait(0.05)
+		return "capacity", "injected transient failure after reconciliation notification"
+	end
+	return recovery_race_update(self, transform)
+end
+
+local recovery_race_target = recovery_race_baseline + 23
+local recovery_race_set, recovery_race_message = recovery_race_controller.Set(
+	recovery_race_player,
+	"kills",
+	recovery_race_target
+)
+assert(recovery_race_set, recovery_race_message)
+recovery_race_task.wait(0.2)
+assert(recovery_race_attempts >= 2,
+	"reconciliation during an in-flight flush did not trigger an automatic retry")
+assert(recovery_race.saved_records[recovery_race_key].kills == recovery_race_target,
+	"accepted PlayerData changes remained blocked after successful reconciliation")
+assert(recovery_race_controller:Shutdown(), "recovery-race controller failed to shut down")
+
 -- A removed cached value must trigger a safe child lookup rather than being reused.
 local lookups_before_removed_value = get_find_first_child_calls()
 kills:Destroy()
