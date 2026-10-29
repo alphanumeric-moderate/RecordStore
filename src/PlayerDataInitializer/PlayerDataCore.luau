@@ -1749,7 +1749,10 @@ local function new(dependencies: Dependencies?): Controller
 		local data = raw_data :: PlayerData
 		local targets: {[string]: DataValue} = {}
 		local instances: {[string]: Instance} = {}
+		local pending = pending_changes[record]
 		for key, field in pairs(CONFIG.data) do
+			-- Preserve gameplay edits accepted while the transaction was in flight.
+			if pending ~= nil and pending[key] ~= nil then continue end
 			local stored_value = data[key]
 			local normalized = decode_stored_field_value(
 				field,

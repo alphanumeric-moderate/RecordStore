@@ -355,4 +355,66 @@ local tx_receipt = tx_controller.GetTransactionStatus(tx_player, tx_operation_id
 assert(tx_receipt.code == "committed", "PlayerDataCore transaction receipt status was incorrect")
 assert(tx_controller:Shutdown(), "transaction-enabled PlayerData controller failed to shut down")
 
+-- Gameplay edits accepted while TransactAsync yields must survive its live-value refresh.
+local transaction_flushes = {}
+local concurrent = create_harness(true, nil, {
+	TransactionalOperationsEnabled = true,
+	task = {
+		spawn = task.spawn,
+		wait = task.wait,
+		defer = function(callback) table.insert(transaction_flushes, callback) end,
+	},
+})
+local concurrent_controller = concurrent.controller
+local concurrent_player = concurrent.player
+local concurrent_record = concurrent.record
+local concurrent_key = "PlayerData_Test1|global|Player_" .. tostring(concurrent_player.UserId)
+local concurrent_kills = concurrent_player:FindFirstChild("PlayerDataValues"):FindFirstChild("kills")
+local concurrent_equipped = concurrent_player:FindFirstChild("leaderstats"):FindFirstChild("Equipped")
+local original_transact = concurrent_record.TransactAsync
+concurrent_record.TransactAsync = function(self, ...)
+	local result, status, message = original_transact(self, ...)
+	coroutine.yield()
+	return result, status, message
+end
+local function change_profile(current)
+	current.kills += 12
+	current.equipped = "TransactionGlove"
+	return current, { kills = current.kills }
+end
+for _, expected_status in { "committed", "duplicate" } do
+	local pending_kills = concurrent_kills.Value + 100
+	local transaction_thread = coroutine.create(function()
+		local _, status, message = concurrent_controller.Transact(
+			concurrent_player, "concurrent-gameplay-edit", tx_request, change_profile
+		)
+		assert(status == expected_status, message or status)
+	end)
+	local started, start_error = coroutine.resume(transaction_thread)
+	assert(started, start_error)
+	assert(coroutine.status(transaction_thread) == "suspended", "transaction did not yield before refresh")
+	if expected_status == "committed" then
+		assert(concurrent_controller.Set(concurrent_player, "kills", pending_kills))
+	else
+		concurrent_kills.Value = pending_kills
+	end
+	assert(#transaction_flushes == 1, "concurrent gameplay edit did not schedule its normal flush")
+	local resumed, resume_error = coroutine.resume(transaction_thread)
+	assert(resumed, resume_error)
+	assert(coroutine.status(transaction_thread) == "dead", "transaction did not finish")
+	assert(concurrent_kills.Value == pending_kills,
+		"transaction refresh overwrote a buffered gameplay edit")
+	assert(concurrent_equipped.Value == "TransactionGlove",
+		"transaction refresh skipped a field without buffered changes")
+	local concurrent_status = concurrent_controller.GetStatus(concurrent_player)
+	assert(concurrent_status.pending_change_count == 1,
+		"transaction refresh discarded a buffered edit or queued an extra mutation")
+	table.remove(transaction_flushes, 1)()
+	assert(concurrent.saved_records[concurrent_key].kills == pending_kills,
+		"normal flush did not persist the gameplay edit accepted during the transaction")
+	assert(concurrent.saved_records[concurrent_key].equipped == "TransactionGlove",
+		"normal flush lost the transaction change to an unbuffered field")
+end
+assert(concurrent_controller:Shutdown(), "concurrent-transaction controller failed to shut down")
+
 print("[PlayerData.Set] Lune integration regression passed")
