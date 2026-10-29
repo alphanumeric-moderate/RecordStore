@@ -73,14 +73,6 @@ jobs:
         timeout-minutes: 2
         run: timeout --signal=TERM --kill-after=5s 60s lune run bench/run_scheduler_hot_path_regression.luau
 
-      - name: Regression - V2 mailbox ordering and security
-        timeout-minutes: 2
-        run: timeout --signal=TERM --kill-after=5s 60s lune run bench/run_mailbox_v2_ordering_regression.luau
-
-      - name: Regression - V3-to-V2 migration protocol
-        timeout-minutes: 2
-        run: timeout --signal=TERM --kill-after=5s 60s lune run bench/run_mailbox_v2_migration_regression.luau
-
       - name: Regression - independent maintenance runner
         timeout-minutes: 2
         run: timeout --signal=TERM --kill-after=5s 60s lune run bench/run_offline_maintenance_runner_regression.luau

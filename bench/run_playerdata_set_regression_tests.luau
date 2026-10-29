@@ -12,6 +12,23 @@ local get_find_first_child_calls = harness.get_find_first_child_calls
 local record_options = harness.get_record_options()
 assert(record_options ~= nil, "PlayerDataCore did not create a RecordStore session")
 
+assert(record_options.transactional_operations_enabled == false,
+	"PlayerDataCore must keep transactional operations disabled by default")
+local default_status, default_status_error = controller.GetStatus(player)
+assert(default_status ~= nil, default_status_error)
+assert(default_status.state == "active", "PlayerDataCore diagnostics returned the wrong session state")
+assert(default_status.pending_change_count == 0, "new PlayerData session should not have pending mutations")
+assert(default_status.ownership == "owned", "PlayerDataCore diagnostics omitted ownership state")
+assert(default_status.kills == nil and default_status.profile == nil,
+	"PlayerDataCore diagnostics must not expose player profile contents")
+local disabled_result, disabled_status = controller.Transact(player, "disabled-operation", {}, function(data)
+	return data, nil
+end)
+assert(disabled_result == nil and disabled_status == "disabled",
+	"PlayerDataCore must not enable transactions by default")
+local disabled_receipt = controller.GetTransactionStatus(player, "disabled-operation", {})
+assert(disabled_receipt.code == "disabled", "disabled transaction status leaked a receipt")
+
 assert(record_options.autosave_interval == 90, "unexpected autosave interval")
 assert(record_options.lease_duration == 180, "unexpected session lease duration")
 assert(record_options.lease_renewal == 60, "unexpected session lease renewal interval")
@@ -112,6 +129,43 @@ assert(success, message)
 task.wait(0.1)
 assert(saved_records[saved_key].kills == previous_kills,
 	"PlayerData.Set should persist the restored baseline after recovery")
+
+-- A reconciliation event can arrive while the active flush has moved its batch out of pending_changes.
+-- It must schedule another flush even though the buffer is temporarily empty at event time.
+local recovery_race = create_harness(true)
+local recovery_race_controller = recovery_race.controller
+local recovery_race_player = recovery_race.player
+local recovery_race_record = recovery_race.record
+local recovery_race_options = recovery_race.get_record_options()
+local recovery_race_task = recovery_race.task
+local recovery_race_key = "PlayerData_Test1|global|Player_" .. tostring(recovery_race_player.UserId)
+local recovery_race_baseline = recovery_race.saved_records[recovery_race_key].kills
+local recovery_race_update = recovery_race_record.Update
+local recovery_race_attempts = 0
+
+recovery_race_record.Update = function(self, transform)
+	recovery_race_attempts += 1
+	if recovery_race_attempts == 1 then
+		recovery_race_options.on_event("reconcile", self.Key, "success", nil)
+		recovery_race_task.wait(0.05)
+		return "capacity", "injected transient failure after reconciliation notification"
+	end
+	return recovery_race_update(self, transform)
+end
+
+local recovery_race_target = recovery_race_baseline + 23
+local recovery_race_set, recovery_race_message = recovery_race_controller.Set(
+	recovery_race_player,
+	"kills",
+	recovery_race_target
+)
+assert(recovery_race_set, recovery_race_message)
+recovery_race_task.wait(0.2)
+assert(recovery_race_attempts >= 2,
+	"reconciliation during an in-flight flush did not trigger an automatic retry")
+assert(recovery_race.saved_records[recovery_race_key].kills == recovery_race_target,
+	"accepted PlayerData changes remained blocked after successful reconciliation")
+assert(recovery_race_controller:Shutdown(), "recovery-race controller failed to shut down")
 
 -- A removed cached value must trigger a safe child lookup rather than being reused.
 local lookups_before_removed_value = get_find_first_child_calls()
@@ -239,5 +293,128 @@ assert(save_calls == 1 and pressure.saved_records[pressure_key].kills == pressur
 	"non-busy Save failure must stop while preserving accepted values")
 drain_saved = true
 assert(pressure.controller:Shutdown(), "pressure controller failed to shut down")
+
+local transactions = create_harness(true, nil, { TransactionalOperationsEnabled = true })
+local tx_controller = transactions.controller
+local tx_player = transactions.player
+local tx_record = transactions.record
+local tx_record_options = transactions.get_record_options()
+local tx_key = "PlayerData_Test1|global|Player_" .. tostring(tx_player.UserId)
+assert(tx_record_options.transactional_operations_enabled == true,
+	"PlayerDataCore did not opt the record into transactions")
+local tx_initial_data = tx_record:Get()
+local tx_initial_kills = tx_initial_data.kills
+local tx_request = { operation = "increment-kills", amount = 12 }
+local tx_operation_id = "playerdata-set-regression-increment-1"
+local function increment_kills(current)
+	local data = current :: { [string]: any }
+	data.kills = (data.kills :: number) + 12
+	return data, { kills = data.kills }
+end
+
+local tx_result, tx_status, tx_message = tx_controller.Transact(
+	tx_player,
+	tx_operation_id,
+	tx_request,
+	increment_kills
+)
+assert(tx_status == "committed", tx_message)
+assert(type(tx_result) == "table" and tx_result.kills == tx_initial_kills + 12,
+	"PlayerDataCore transaction returned an incorrect result")
+assert(transactions.saved_records[tx_key].kills == tx_initial_kills + 12,
+	"PlayerDataCore transaction did not persist its updated profile")
+local tx_values = tx_player:FindFirstChild("PlayerDataValues")
+local tx_kills = if tx_values ~= nil then tx_values:FindFirstChild("kills") else nil
+assert(tx_kills ~= nil and tx_kills.Value == tx_initial_kills + 12,
+	"PlayerDataCore did not sync committed transaction values to the live backing instance")
+local tx_live_status, tx_live_status_error = tx_controller.GetStatus(tx_player)
+assert(tx_live_status ~= nil, tx_live_status_error)
+assert(tx_live_status.pending_change_count == 0,
+	"transaction value synchronization queued a duplicate PlayerData mutation")
+
+local duplicate_result, duplicate_status, duplicate_message = tx_controller.Transact(
+	tx_player,
+	tx_operation_id,
+	tx_request,
+	increment_kills
+)
+assert(duplicate_status == "duplicate", duplicate_message)
+assert(type(duplicate_result) == "table" and duplicate_result.kills == tx_initial_kills + 12,
+	"duplicate PlayerData transaction did not return the original receipt result")
+assert(transactions.saved_records[tx_key].kills == tx_initial_kills + 12,
+	"duplicate PlayerData transaction applied the mutation twice")
+local conflicting_result, conflicting_status = tx_controller.Transact(
+	tx_player,
+	tx_operation_id,
+	{ operation = "increment-kills", amount = 13 },
+	increment_kills
+)
+assert(conflicting_result == nil and conflicting_status == "conflict",
+	"PlayerDataCore accepted an operation ID bound to a different request")
+local tx_receipt = tx_controller.GetTransactionStatus(tx_player, tx_operation_id, tx_request)
+assert(tx_receipt.code == "committed", "PlayerDataCore transaction receipt status was incorrect")
+assert(tx_controller:Shutdown(), "transaction-enabled PlayerData controller failed to shut down")
+
+-- Gameplay edits accepted while TransactAsync yields must survive its live-value refresh.
+local transaction_flushes = {}
+local concurrent = create_harness(true, nil, {
+	TransactionalOperationsEnabled = true,
+	task = {
+		spawn = task.spawn,
+		wait = task.wait,
+		defer = function(callback) table.insert(transaction_flushes, callback) end,
+	},
+})
+local concurrent_controller = concurrent.controller
+local concurrent_player = concurrent.player
+local concurrent_record = concurrent.record
+local concurrent_key = "PlayerData_Test1|global|Player_" .. tostring(concurrent_player.UserId)
+local concurrent_kills = concurrent_player:FindFirstChild("PlayerDataValues"):FindFirstChild("kills")
+local concurrent_equipped = concurrent_player:FindFirstChild("leaderstats"):FindFirstChild("Equipped")
+local original_transact = concurrent_record.TransactAsync
+concurrent_record.TransactAsync = function(self, ...)
+	local result, status, message = original_transact(self, ...)
+	coroutine.yield()
+	return result, status, message
+end
+local function change_profile(current)
+	current.kills += 12
+	current.equipped = "TransactionGlove"
+	return current, { kills = current.kills }
+end
+for _, expected_status in { "committed", "duplicate" } do
+	local pending_kills = concurrent_kills.Value + 100
+	local transaction_thread = coroutine.create(function()
+		local _, status, message = concurrent_controller.Transact(
+			concurrent_player, "concurrent-gameplay-edit", tx_request, change_profile
+		)
+		assert(status == expected_status, message or status)
+	end)
+	local started, start_error = coroutine.resume(transaction_thread)
+	assert(started, start_error)
+	assert(coroutine.status(transaction_thread) == "suspended", "transaction did not yield before refresh")
+	if expected_status == "committed" then
+		assert(concurrent_controller.Set(concurrent_player, "kills", pending_kills))
+	else
+		concurrent_kills.Value = pending_kills
+	end
+	assert(#transaction_flushes == 1, "concurrent gameplay edit did not schedule its normal flush")
+	local resumed, resume_error = coroutine.resume(transaction_thread)
+	assert(resumed, resume_error)
+	assert(coroutine.status(transaction_thread) == "dead", "transaction did not finish")
+	assert(concurrent_kills.Value == pending_kills,
+		"transaction refresh overwrote a buffered gameplay edit")
+	assert(concurrent_equipped.Value == "TransactionGlove",
+		"transaction refresh skipped a field without buffered changes")
+	local concurrent_status = concurrent_controller.GetStatus(concurrent_player)
+	assert(concurrent_status.pending_change_count == 1,
+		"transaction refresh discarded a buffered edit or queued an extra mutation")
+	table.remove(transaction_flushes, 1)()
+	assert(concurrent.saved_records[concurrent_key].kills == pending_kills,
+		"normal flush did not persist the gameplay edit accepted during the transaction")
+	assert(concurrent.saved_records[concurrent_key].equipped == "TransactionGlove",
+		"normal flush lost the transaction change to an unbuffered field")
+end
+assert(concurrent_controller:Shutdown(), "concurrent-transaction controller failed to shut down")
 
 print("[PlayerData.Set] Lune integration regression passed")

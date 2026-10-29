@@ -205,6 +205,27 @@ end
 		return result
 	end
 
+	local function copy_json(value)
+		if type(value) ~= "table" then return value end
+		local result = {}
+		for key, child in pairs(value) do
+			result[copy_json(key)] = copy_json(child)
+		end
+		return result
+	end
+
+	local function json_equal(left, right)
+		if type(left) ~= type(right) then return false end
+		if type(left) ~= "table" then return left == right end
+		for key, value in pairs(left) do
+			if not json_equal(value, right[key]) then return false end
+		end
+		for key in pairs(right) do
+			if left[key] == nil then return false end
+		end
+		return true
+	end
+
 	if initial_saved_data ~= nil then
 		local seeded_key = "PlayerData_Test1|global|Player_" .. tostring(player.UserId)
 		saved_records[seeded_key] = clone_data(initial_saved_data)
@@ -226,6 +247,7 @@ end
 			_options = options,
 			_storage_key = storage_key,
 			_update_calls = 0,
+			_transaction_receipts = {},
 		}
 		captured_record = record
 	
@@ -281,6 +303,66 @@ end
 	
 		function record:GetLastError()
 			return nil
+		end
+
+		function record:GetDurabilityStatus()
+			return {
+				ownership = if self.State == "active" then "owned" else "uncertain",
+				durability = "clean",
+				dirty = false,
+				mutation_admission = "allow",
+				dirty_age_slo_exceeded = false,
+			}
+		end
+
+		function record:TransactAsync(operation_id, reducer, transaction_options)
+			if self._options.transactional_operations_enabled ~= true then
+				return nil, "disabled", "transactional operations are disabled"
+			end
+			if type(operation_id) ~= "string" or operation_id == "" or #operation_id > 256 then
+				return nil, "invalid", "invalid operation ID"
+			end
+			if type(transaction_options) ~= "table" or transaction_options.request == nil then
+				return nil, "invalid", "transaction request is required"
+			end
+			if self.State ~= "active" then
+				return nil, if self.State == "unknown" then "unknown" else "fenced", "record is not active"
+			end
+
+			local receipt = self._transaction_receipts[operation_id]
+			if receipt ~= nil then
+				if not json_equal(receipt.request, transaction_options.request) then
+					return nil, "conflict", "operation ID is bound to a different request"
+				end
+				return copy_json(receipt.result), "duplicate", nil
+			end
+
+			local call_ok, next_data, result = pcall(reducer, self:Get(), nil)
+			if not call_ok or type(next_data) ~= "table" then
+				return nil, "validation", "transaction reducer failed"
+			end
+			if self._options.validator ~= nil then
+				local valid, message = self._options.validator(next_data)
+				if not valid then return nil, "validation", message end
+			end
+			saved_records[self._storage_key] = clone_data(next_data)
+			self._transaction_receipts[operation_id] = {
+				request = copy_json(transaction_options.request),
+				result = copy_json(result),
+			}
+			return copy_json(result), "committed", nil
+		end
+
+		function record:GetTransactionStatusAsync(operation_id, request)
+			if self._options.transactional_operations_enabled ~= true then
+				return { code = "disabled", message = "transactional operations are disabled" }
+			end
+			local receipt = self._transaction_receipts[operation_id]
+			if receipt == nil then return { code = "not_found" } end
+			if not json_equal(receipt.request, request) then
+				return { code = "conflict", message = "operation ID is bound to a different request" }
+			end
+			return { code = "committed", result = copy_json(receipt.result), result_present = receipt.result ~= nil }
 		end
 	
 		return record
@@ -429,6 +511,7 @@ end
 		player = player,
 		players = Players,
 		record = captured_record,
+		record_store = RecordStore,
 		saved_records = saved_records,
 		get_record_options = function()
 			return captured_record_options

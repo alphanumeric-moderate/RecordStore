@@ -137,6 +137,7 @@ export type Dependencies = {
 	DurabilityMode: DurabilityMode?,
 	MaxDirtyAgeSeconds: number?,
 	LeaseRecoveryEnabled: boolean?,
+	TransactionalOperationsEnabled: boolean?,
 }
 
 type PlayerRecord = RecordStore.Record
@@ -148,10 +149,37 @@ type PlayerValuePathCache = {
 }
 type PlayerValuePathKey = "leaderstats" | "player_data_values"
 
+export type PlayerDataStatus = {
+	state: RecordStore.SessionState,
+	pending_change_count: number,
+	pending_age_seconds: number?,
+	flush_running: boolean,
+	dirty: boolean?,
+	mutation_admission: string?,
+	dirty_age_slo_exceeded: boolean?,
+	ownership: string?,
+	last_error_code: string?,
+	last_error_retryable: boolean?,
+	last_error_requires_verification: boolean?,
+}
+
 export type Controller = {
 	Start: (self: Controller) -> boolean,
 	Shutdown: (self: Controller) -> boolean,
 	Set: (player: Player, key: string, value: unknown) -> (boolean, string?),
+	GetStatus: (player: Player) -> (PlayerDataStatus?, string?),
+	Transact: (
+		player: Player,
+		operation_id: string,
+		request: RecordStore.JsonValue,
+		reducer: RecordStore.TransactionReducer,
+		receipt_retention_seconds: number?
+	) -> (RecordStore.JsonValue?, RecordStore.TransactionStatus, string?),
+	GetTransactionStatus: (
+		player: Player,
+		operation_id: string,
+		request: RecordStore.JsonValue
+	) -> RecordStore.TransactionReceiptStatus,
 }
 
 local function define_data_field(
@@ -592,6 +620,11 @@ local function new(dependencies: Dependencies?): Controller
 	local max_dirty_age_seconds: number = injected.MaxDirtyAgeSeconds or CONFIG.max_dirty_age_seconds
 	local lease_recovery_enabled: boolean = if injected.LeaseRecoveryEnabled ~= nil
 		then injected.LeaseRecoveryEnabled else CONFIG.lease_recovery_enabled
+	local transactional_operations_enabled: boolean = if injected.TransactionalOperationsEnabled ~= nil
+		then injected.TransactionalOperationsEnabled else false
+	if type(transactional_operations_enabled) ~= "boolean" then
+		error("TransactionalOperationsEnabled must be a boolean")
+	end
 	if durability_mode ~= "balanced"
 		and durability_mode ~= "durability_first"
 		and durability_mode ~= "read_only_on_risk"
@@ -784,6 +817,7 @@ local function new(dependencies: Dependencies?): Controller
 	local departed_players: {[Player]: boolean} = {}
 	local removing: {[Player]: boolean} = {}
 	local closing_records: {[PlayerRecord]: boolean} = {}
+	local transaction_sync_targets: {[PlayerRecord]: {[string]: DataValue}} = {}
 
 	local pending_changes: {[PlayerRecord]: {[string]: DataValue}} = {}
 	local pending_since: {[PlayerRecord]: number} = {}
@@ -1042,6 +1076,24 @@ local function new(dependencies: Dependencies?): Controller
 
 		instance.Changed:Connect(function(new_value)
 			if restoring then return end
+			local sync_targets = transaction_sync_targets[record]
+			local expected_sync_value = if sync_targets ~= nil then sync_targets[key] else nil
+			if expected_sync_value ~= nil then
+				local normalized_sync_value = normalize_runtime_field_value(
+					field,
+					new_value :: DataValue,
+					integer_infinity_value_factory,
+					infinitemath_value_factory
+				)
+				if normalized_sync_value ~= nil and data_values_equal(normalized_sync_value, expected_sync_value) then
+					last_valid_value = normalized_sync_value
+					sync_targets[key] = nil
+					if next(sync_targets) == nil then transaction_sync_targets[record] = nil end
+					return
+				end
+				sync_targets[key] = nil
+				if next(sync_targets) == nil then transaction_sync_targets[record] = nil end
+			end
 			if record.State ~= "active" or closing_records[record] then
 				restoring = true
 				local restore_ok = pcall(assign_backing_value, instance, last_valid_value)
@@ -1114,6 +1166,19 @@ local function new(dependencies: Dependencies?): Controller
 		local restoring = false
 		backing_value.Changed:Connect(function(serialized_value: string)
 			if restoring then return end
+			local sync_targets = transaction_sync_targets[record]
+			local expected_sync_value = if sync_targets ~= nil then sync_targets[key] else nil
+			if expected_sync_value ~= nil then
+				local normalized_sync_value = normalize_serialized_infinitemath(infinitemath_value_factory, serialized_value)
+				if normalized_sync_value ~= nil and normalized_sync_value == expected_sync_value then
+					last_valid_serialized = normalized_sync_value
+					sync_targets[key] = nil
+					if next(sync_targets) == nil then transaction_sync_targets[record] = nil end
+					return
+				end
+				sync_targets[key] = nil
+				if next(sync_targets) == nil then transaction_sync_targets[record] = nil end
+			end
 			local normalized = normalize_serialized_infinitemath(infinitemath_value_factory, serialized_value)
 			if normalized == nil then
 				restoring = true
@@ -1552,6 +1617,289 @@ local function new(dependencies: Dependencies?): Controller
 		return true, nil
 	end
 
+
+	local function resolve_session_record(
+		player: Player,
+		allow_unknown: boolean
+	): (PlayerRecord?, string?)
+		if typeof(player) ~= "Instance" or not player:IsA("Player") then
+			return nil, "player must be a Player instance"
+		end
+		if player.Parent ~= players or departed_players[player] or removing[player] then
+			return nil, "player is leaving or is no longer connected"
+		end
+		local record = sessions[player]
+		if record == nil then
+			return nil, "player does not have a loaded PlayerData session"
+		end
+		if closing_records[record] or deferred_close_records[record] ~= nil then
+			return nil, "PlayerData session is closing"
+		end
+		if record.State == "fenced" or record.State == "closed" or record.State == "corrupt"
+			or record.State == "future" or record.State == "tombstoned"
+		then
+			return nil, "PlayerData session is no longer usable"
+		end
+		if record.State ~= "active" and not (allow_unknown and record.State == "unknown") then
+			return nil, "PlayerData session is not active"
+		end
+		return record, nil
+	end
+
+	local function get_player_status(player: Player): (PlayerDataStatus?, string?)
+		local record, session_error = resolve_session_record(player, true)
+		if record == nil then
+			return nil, session_error
+		end
+
+		local durability_ok, durability = pcall(function()
+			return record:GetDurabilityStatus()
+		end)
+		if not durability_ok or type(durability) ~= "table" then
+			return nil, "could not inspect PlayerData durability status"
+		end
+
+		local pending = pending_changes[record]
+		local pending_count = 0
+		if pending ~= nil then
+			for _ in pairs(pending) do
+				pending_count += 1
+			end
+		end
+		local pending_at = pending_since[record]
+		local last_error_code: string? = nil
+		local last_error_retryable: boolean? = nil
+		local last_error_requires_verification: boolean? = nil
+		local error_ok, last_error = pcall(function()
+			return record:GetLastError()
+		end)
+		if error_ok and last_error ~= nil then
+			last_error_code = if type(last_error.Code) == "string" then last_error.Code else nil
+			last_error_retryable = if type(last_error.Retryable) == "boolean" then last_error.Retryable else nil
+			last_error_requires_verification = if type(last_error.RequiresVerification) == "boolean"
+				then last_error.RequiresVerification else nil
+		end
+
+		return {
+			state = record.State,
+			pending_change_count = pending_count,
+			pending_age_seconds = if pending_at ~= nil then math.max(0, os.clock() - pending_at) else nil,
+			flush_running = flush_running[record] == true,
+			dirty = if type(durability.dirty) == "boolean" then durability.dirty else nil,
+			mutation_admission = if type(durability.mutation_admission) == "string"
+				then durability.mutation_admission else nil,
+			dirty_age_slo_exceeded = if type(durability.dirty_age_slo_exceeded) == "boolean"
+				then durability.dirty_age_slo_exceeded else nil,
+			ownership = if type(durability.ownership) == "string" then durability.ownership else nil,
+			last_error_code = last_error_code,
+			last_error_retryable = last_error_retryable,
+			last_error_requires_verification = last_error_requires_verification,
+		}, nil
+	end
+
+	local function normalize_transaction_data(value: RecordStore.JsonValue?): (PlayerData?, string?)
+		if type(value) ~= "table" then
+			return nil, "transaction reducer must return a PlayerData table"
+		end
+		local valid, validation_message = validate_player_data(value, infinitemath_value_factory)
+		if not valid then
+			return nil, validation_message or "transaction returned invalid PlayerData"
+		end
+
+		local data: PlayerData = table.clone(value :: PlayerData)
+		for key, field in pairs(CONFIG.data) do
+			local stored_value = data[key]
+			if stored_value == nil then
+				return nil, ("transaction cannot remove configured PlayerData field %q"):format(key)
+			end
+			local normalized = normalize_runtime_field_value(
+				field,
+				stored_value,
+				integer_infinity_value_factory,
+				infinitemath_value_factory
+			)
+			if normalized == nil then
+				return nil, ("transaction returned an invalid value for PlayerData field %q"):format(key)
+			end
+			data[key] = encode_field_value(
+				field,
+				normalized,
+				integer_infinity_value_factory,
+				infinitemath_value_factory
+			)
+		end
+		return data, nil
+	end
+
+	local function sync_transaction_values(player: Player, record: PlayerRecord)
+		if sessions[player] ~= record or departed_players[player] or removing[player]
+			or closing_records[record] or record.State ~= "active"
+		then
+			return
+		end
+
+		local read_ok, raw_data = pcall(function()
+			return record:Get()
+		end)
+		if not read_ok or type(raw_data) ~= "table" then
+			warn("[PlayerData]", record.Key, "transaction committed but live values could not be refreshed")
+			return
+		end
+
+		local data = raw_data :: PlayerData
+		local targets: {[string]: DataValue} = {}
+		local instances: {[string]: Instance} = {}
+		local pending = pending_changes[record]
+		for key, field in pairs(CONFIG.data) do
+			-- Preserve gameplay edits accepted while the transaction was in flight.
+			if pending ~= nil and pending[key] ~= nil then continue end
+			local stored_value = data[key]
+			local normalized = decode_stored_field_value(
+				field,
+				stored_value,
+				integer_infinity_value_factory,
+				infinitemath_value_factory
+			)
+			if normalized == nil then
+				warn("[PlayerData]", record.Key, "transaction committed but a configured field could not be decoded", key)
+				return
+			end
+			local instance = find_player_value_instance(player, key, field)
+			if instance ~= nil then
+				targets[key] = normalized
+				instances[key] = instance
+			end
+		end
+
+		if next(targets) ~= nil then
+			transaction_sync_targets[record] = targets
+		end
+		for key, instance in pairs(instances) do
+			local target_value = targets[key]
+			if target_value ~= nil then
+				local assign_ok = pcall(assign_player_value, instance, target_value)
+				if not assign_ok then
+					local sync_targets = transaction_sync_targets[record]
+					if sync_targets ~= nil then
+						sync_targets[key] = nil
+						if next(sync_targets) == nil then transaction_sync_targets[record] = nil end
+					end
+					warn("[PlayerData]", record.Key, "transaction committed but a live value could not be assigned", key)
+				end
+			end
+		end
+	end
+
+	local function transact_player(
+		player: Player,
+		operation_id: string,
+		request: RecordStore.JsonValue,
+		reducer: RecordStore.TransactionReducer,
+		receipt_retention_seconds: number?
+	): (RecordStore.JsonValue?, RecordStore.TransactionStatus, string?)
+		local record, session_error = resolve_session_record(player, true)
+		if record == nil then
+			return nil, "fenced", session_error
+		end
+		if not transactional_operations_enabled then
+			return nil, "disabled", "PlayerData transactional operations are disabled"
+		end
+		if type(operation_id) ~= "string" or operation_id == "" or #operation_id > 256 then
+			return nil, "invalid", "operation_id must be 1 to 256 bytes"
+		end
+		if request == nil then
+			return nil, "invalid", "transaction request is required for idempotency"
+		end
+		if type(reducer) ~= "function" then
+			return nil, "invalid", "transaction reducer must be a function"
+		end
+		if receipt_retention_seconds ~= nil and (
+			type(receipt_retention_seconds) ~= "number"
+			or not math.isfinite(receipt_retention_seconds)
+			or receipt_retention_seconds < 1
+			or receipt_retention_seconds > 31_536_000
+		) then
+			return nil, "invalid", "receipt_retention_seconds must be from 1 to 31536000"
+		end
+
+		if record.State == "active" then
+			local backpressure = mutation_backpressure_reason(record)
+			if backpressure ~= nil then
+				return nil, "retryable", backpressure
+			end
+			local flushed, flush_result, flush_message = flush_pending_changes(record)
+			if not flushed then
+				local status: RecordStore.TransactionStatus = if flush_result == "unknown" then "unknown"
+					elseif flush_result == "fenced" or record.State ~= "active" then "fenced"
+					elseif flush_result == "capacity" then "capacity"
+					elseif flush_result == "validation" then "validation"
+					else "retryable"
+				return nil, status, flush_message or "pending PlayerData changes could not be flushed before transaction"
+			end
+		end
+
+		local guarded_reducer: RecordStore.TransactionReducer = function(current, input)
+			if type(current) ~= "table" then
+				error("transaction current PlayerData is not a table", 0)
+			end
+			local next_data, result = reducer(table.clone(current :: PlayerData), input)
+			local normalized_data, normalize_error = normalize_transaction_data(next_data)
+			if normalized_data == nil then
+				error(normalize_error or "transaction returned invalid PlayerData", 0)
+			end
+			return normalized_data, result
+		end
+		local transaction_options: RecordStore.TransactionOptions = { request = request }
+		if receipt_retention_seconds ~= nil then
+			transaction_options.receipt_retention_seconds = receipt_retention_seconds
+		end
+
+		local result: RecordStore.JsonValue? = nil
+		local transaction_status: RecordStore.TransactionStatus = "unknown"
+		local message: string? = nil
+		local call_ok = pcall(function()
+			result, transaction_status, message = record:TransactAsync(
+				operation_id,
+				guarded_reducer,
+				transaction_options
+			)
+		end)
+		if not call_ok then
+			return nil, "unknown", "transaction call raised an error; retry only with the same operation ID and request"
+		end
+		if transaction_status == "committed" or transaction_status == "duplicate" then
+			sync_transaction_values(player, record)
+		end
+		return result, transaction_status, message
+	end
+
+	local function get_transaction_status(
+		player: Player,
+		operation_id: string,
+		request: RecordStore.JsonValue
+	): RecordStore.TransactionReceiptStatus
+		if not transactional_operations_enabled then
+			return { code = "disabled", message = "PlayerData transactional operations are disabled" }
+		end
+		local record, session_error = resolve_session_record(player, true)
+		if record == nil then
+			return { code = "invalid", message = session_error }
+		end
+		if type(operation_id) ~= "string" or operation_id == "" or #operation_id > 256 then
+			return { code = "invalid", message = "operation_id must be 1 to 256 bytes" }
+		end
+		if request == nil then
+			return { code = "invalid", message = "transaction request is required for status lookup" }
+		end
+		local call_ok, status = pcall(function()
+			return record:GetTransactionStatusAsync(operation_id, request)
+		end)
+		if not call_ok or type(status) ~= "table" then
+			return { code = "unknown", message = "transaction receipt status could not be read" }
+		end
+		return status
+	end
+
 	local function close_record(player: Player, record: PlayerRecord)
 		local call_ok, result, message = pcall(function()
 			return record:Close()
@@ -1581,6 +1929,7 @@ local function new(dependencies: Dependencies?): Controller
 		end
 		pending_changes[record] = nil
 		pending_since[record] = nil
+		transaction_sync_targets[record] = nil
 		deferred_close_records[record] = nil
 		deferred_close_requested[record] = nil
 		recovery_flush_requested[record] = nil
@@ -1697,6 +2046,7 @@ local function new(dependencies: Dependencies?): Controller
 				durability_mode = durability_mode,
 				max_dirty_age_seconds = max_dirty_age_seconds,
 				lease_recovery_enabled = lease_recovery_enabled,
+				transactional_operations_enabled = transactional_operations_enabled,
 				lease_duration = CONFIG.lease_duration,
 				lease_renewal = CONFIG.lease_renewal,
 				retry_attempts = CONFIG.retry_attempts,
@@ -1716,10 +2066,7 @@ local function new(dependencies: Dependencies?): Controller
 						end)
 					elseif event == "reconcile" and result == "success" and observed_record ~= nil then
 						scheduler.defer(function()
-							local pending = pending_changes[observed_record]
-						if pending ~= nil and next(pending) ~= nil then
 							request_recovery_flush(observed_record)
-						end
 						end)
 					end
 					if should_warn_result(result) then
@@ -2095,6 +2442,25 @@ local function new(dependencies: Dependencies?): Controller
 		end,
 		Set = function(player: Player, key: string, value: unknown): (boolean, string?)
 			return set_player_value(player, key, value)
+		end,
+		GetStatus = function(player: Player): (PlayerDataStatus?, string?)
+			return get_player_status(player)
+		end,
+		Transact = function(
+			player: Player,
+			operation_id: string,
+			request: RecordStore.JsonValue,
+			reducer: RecordStore.TransactionReducer,
+			receipt_retention_seconds: number?
+		): (RecordStore.JsonValue?, RecordStore.TransactionStatus, string?)
+			return transact_player(player, operation_id, request, reducer, receipt_retention_seconds)
+		end,
+		GetTransactionStatus = function(
+			player: Player,
+			operation_id: string,
+			request: RecordStore.JsonValue
+		): RecordStore.TransactionReceiptStatus
+			return get_transaction_status(player, operation_id, request)
 		end,
 	}
 

@@ -4,8 +4,8 @@ local RecordStore = Shim.load()
 local initializer = game:GetService("ServerScriptService"):WaitForChild("PlayerDataInitializer")
 local V2Module = require(initializer:WaitForChild("RecordStoreV2"))
 local ServicesModule = require(initializer:WaitForChild("RecordStoreServices"))
-local V2 = V2Module.new(RecordStore, RecordStore.MailboxV2)
-local V2Mock = V2Module.new(RecordStore.Mock, RecordStore.MailboxV2)
+local V2 = V2Module.new(RecordStore)
+local V2Mock = V2Module.new(RecordStore.Mock)
 
 local function expect(value, message)
 	assert(value, message)
@@ -16,9 +16,6 @@ expect(service_bundle.Core == RecordStore, "service registry is bound to a diffe
 expect(service_bundle.V2.Version == 2, "service registry did not initialize the V2 API against the core")
 for _, name in {
 	"RecordStoreV2",
-	"RecordStoreV2Acceleration",
-	"RecordStoreMailboxV2Migration",
-	"RecordStoreMailboxV2MigrationAdapter",
 	"PurchaseDataStoreAuthority",
 	"PurchaseAuthorityMigrationRunner",
 	"PurchaseInventoryManifest",
@@ -34,8 +31,6 @@ for _, name in {
 	"RecordStoreApplicationInventory",
 	"PlayerDataErasure",
 	"PlayerDataErasureManifestBinding",
-	"RecordStoreOutboxConsumerAdapter",
-	"RecordStoreOutboxMailboxAdapter",
 	"RecordStoreSHA256",
 } do
 	expect(type(service_bundle.Modules[name]) == "table", "service registry omitted " .. name)
@@ -46,8 +41,10 @@ expect(service_bundle.Maintenance.DataStoreAdapter == service_bundle.Modules.Rec
 	"maintenance namespace does not reuse the canonical module instance")
 expect(service_bundle.Erasure.ManifestBinding == service_bundle.Modules.PlayerDataErasureManifestBinding,
 	"erasure namespace does not reuse the canonical module instance")
-expect(service_bundle.Outbox.MailboxAdapter == service_bundle.Modules.RecordStoreOutboxMailboxAdapter,
-	"outbox namespace does not reuse the canonical module instance")
+expect(RecordStore.MailboxV2 == nil, "obsolete Mailbox V2 runtime must not be exported")
+expect(service_bundle.Acceleration == nil and service_bundle.MailboxMigration == nil and service_bundle.Outbox == nil,
+	"service registry exposed removed mailbox-only integrations")
+
 
 local function clone(value, depth)
 	depth = depth or 0
@@ -131,7 +128,7 @@ local trace_b = V2.Tracing.new({
 })
 expect(trace_b:Emit({
 	operation_id = "operation-1", correlation_id = "correlation-1",
-	component = "mailbox", operation = "claim", result = "unknown", duration_ms = 19,
+	component = "outbox", operation = "claim", result = "unknown", duration_ms = 19,
 	timestamp_unix = 1700000000,
 }), "second process trace event was rejected")
 local cross_process_flush = trace_b:FlushAsync("operation-1", 8)
