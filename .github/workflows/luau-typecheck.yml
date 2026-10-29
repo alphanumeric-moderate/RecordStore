@@ -68,45 +68,38 @@ jobs:
           print("Strict mode enabled for the consolidated RecordStore module")
           PY
 
-      - name: Require in-file scheduler and mailbox implementations
+      - name: Require in-file scheduler and no embedded Mailbox V2 runtime
         run: |
           set -euo pipefail
           python3 - <<'PY'
-          import re
           from pathlib import Path
 
           root = Path("src/PlayerDataInitializer")
           source = (root / "RecordStore.luau").read_text()
-          forbidden = [
-              r"require\s*\(\s*script\.Parent\.RecordStoreScheduler\s*\)",
-              r"require\s*\(\s*script\.Parent\.MailboxV2\s*\)",
-          ]
           required_markers = [
               "-- BEGIN EMBEDDED SCHEDULER MODULE",
               "-- END EMBEDDED SCHEDULER MODULE",
-              "-- BEGIN EMBEDDED MAILBOX V2 MODULE",
-              "-- END EMBEDDED MAILBOX V2 MODULE",
           ]
-          violations = [pattern for pattern in forbidden if re.search(pattern, source)]
+          removed_runtime_identifiers = [
+              "MailboxV2", "EmbeddedMailbox", "mailbox_v2", "on_queue_message_async",
+              "MAILBOX_V2_FREEZE", "mailbox_claim", "CreateMailboxStoreAdapter",
+              "BindMailboxV2Async",
+          ]
           missing = [marker for marker in required_markers if source.count(marker) != 1]
+          lingering = [name for name in removed_runtime_identifiers if name in source]
           separate = [
-              str(path) for path in (
-                  root / "RecordStoreScheduler.luau",
-                  root / "MailboxV2.luau",
-              ) if path.exists()
+              str(path) for path in (root / "RecordStoreScheduler.luau", root / "MailboxV2.luau")
+              if path.exists()
           ]
-          if violations or missing or separate:
-              if violations:
-                  print("RecordStore must not require separate scheduler/mailbox implementations:")
-                  print("\n".join(violations))
+          if missing or lingering or separate:
               if missing:
-                  print("Missing or duplicated embedded implementation markers:")
                   print("\n".join(missing))
+              if lingering:
+                  print("\n".join(lingering))
               if separate:
-                  print("Separate implementation files must not remain:")
                   print("\n".join(separate))
               raise SystemExit(1)
-          print("Scheduler and Mailbox V2 implementations are embedded in RecordStore.luau")
+          print("Scheduler remains embedded; superseded Mailbox V2 runtime is absent")
           PY
 
       - name: Require explicit types at Studio solver-sensitive boundaries

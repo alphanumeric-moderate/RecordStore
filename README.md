@@ -6,7 +6,7 @@ RecordStore is a server-side Roblox Luau persistence module.
 
 ## Install in Roblox Studio
 
-The Rojo projects map `src/PlayerDataInitializer` to a Script named `ServerScriptService.PlayerDataInitializer`. Its child ModuleScripts include `PlayerData`, `PlayerDataCore`, `RecordStore`, `IntegerInfinityValue` and `InfiniteMathValue`. The scheduler and Mailbox V2 implementations are embedded in `RecordStore.luau`. InfiniteMath Revised is vendored at `src/InfiniteMath` and mapped to `ReplicatedStorage.InfiniteMath`.
+The Rojo projects map `src/PlayerDataInitializer` to a Script named `ServerScriptService.PlayerDataInitializer`. Its child ModuleScripts include `PlayerData`, `PlayerDataCore`, `RecordStore`, `IntegerInfinityValue` and `InfiniteMathValue`. The scheduler implementation is embedded in `RecordStore.luau`. InfiniteMath Revised is vendored at `src/InfiniteMath` and mapped to `ReplicatedStorage.InfiniteMath`.
 
 **`InfiniteMath` must be a ModuleScript at `ReplicatedStorage.InfiniteMath`.** The vendored InfiniteMath Revised module is outside `PlayerDataInitializer` because `InfiniteMathValue` resolves it from `ReplicatedStorage`. Do not move `InfiniteMath` into `PlayerDataInitializer`.
 
@@ -70,9 +70,7 @@ The repository also includes:
 
 - `src/PlayerDataInitializer/PlayerData.luau`: the shared controller ModuleScript required by the initializer and gameplay scripts.
 - `src/PlayerDataInitializer/PlayerDataCore.luau`: a configurable player session, leaderstats, persistence, retry, and shutdown controller.
-- `src/PlayerDataInitializer/RecordStore.luau`: the persistence, session ownership, versioning and recovery API, including its bounded request governor, scheduling policy, dispatcher, and durable Mailbox V2 implementation.
-- `src/PlayerDataInitializer/RecordStoreOutboxMailboxAdapter.luau`: source outbox dispatch to a destination Mailbox V2, with exact durable enqueue receipt verification.
-- `src/PlayerDataInitializer/RecordStoreOutboxConsumerAdapter.luau`: destination message worker that applies registered versioned reducers through a durable Inbox receipt before acknowledging delivery.
+- `src/PlayerDataInitializer/RecordStore.luau`: the persistence, session ownership, versioning and recovery API, including its bounded request governor, scheduling policy, dispatcher, and durable per-record queue.
 - `src/PlayerDataInitializer/PurchaseReceiptProcessor.luau` and `PurchaseDataStoreAuthority.luau`: opt-in developer-product receipt processing with bounded per-profile idempotency and an optional global PurchaseId authority.
 - `src/PlayerDataInitializer/PurchaseAuthorityMigrationRunner.luau`: resumable, bounded import of an application-enumerated historical PurchaseId snapshot with uncached durable checkpoints, source count and rolling digest reconciliation; unresolved batches never advance the cursor.
 - `src/PlayerDataInitializer/RecordStoreMaintenanceRobloxAdapter.luau`: paged real DataStore key enumeration, uncached inspection, and revision-checked checkpoint adapters for the bounded maintenance runner. Generation-aware deletion remains explicitly application supplied.
@@ -448,7 +446,7 @@ Applications must reconcile ambiguous effects using stable business operation ID
 
 The scheduler and its due-time heap are **server-local and non-durable**. A process
 restart discards queued callbacks. Do not use generic scheduled callbacks as the durable
-mailbox or as an exactly-once transaction mechanism. Scheduled entry points may coexist
+queue or as an exactly-once transaction mechanism. Scheduled entry points may coexist
 with existing direct APIs; callers must deliberately route work through the selector when
 they require scheduler ordering. The generic `schedule_work` API does not provide durable
 `ordering_key` semantics. Global or per-server-instance priority is intentionally not part of
@@ -465,21 +463,6 @@ generation, session token, and job/place identity are unchanged and the lease is
 uses a distinct stable operation ID and new session token, increments the fencing generation, preserves
 the durable payload/revision, and does not replay the ambiguous operation's snapshot. Any uncommitted
 local changes remain dirty for a later save. A competing owner or changed fence always wins.
-
-The separate `RecordStore.MailboxV2` API supports an opt-in strict per-key message order. Pass
-`strict_ordering_enabled = true` when constructing the mailbox before using a non-nil
-`ordering_key`; the default remains disabled and rejects those enqueues. When enabled, every
-earlier message on that key must reach a terminal state before a successor can be claimed, even
-when the successor has higher priority or the predecessor is delayed, claimed, or retrying.
-Dead-letter replay obtains a new durable sequence, so replay cannot jump ahead of older live
-messages. The mailbox adapter must provide `GetAsyncFresh(key)` for uncached authoritative reads;
-RecordStore's `CreateMailboxStoreAdapter()` does this with `DataStoreGetOptions.UseCache = false`.
-Strict mode fails closed rather than falling back to a potentially stale cached read. Per-key
-ordering can cause head-of-line blocking and should be enabled only for workflows that require it.
-Priority tiers are bounded to `high`, `normal`, and `background`; `high_priority_burst`
-sets the maximum consecutive high-priority claims before non-high work gets a selection turn
-(default `4`, maximum `32`). These are local scheduling preferences, not ownership or durability
-guarantees.
 
 Scheduler design and durable-save recovery are governed by [PR #39](https://github.com/alphanumeric-moderate/RecordStore/pull/39), especially sections 26.13, 27.4, 29 and P0 release blockers 9-10 in section 31. PR #56 contains bounded save/renewal/release reconciliation, freshness budgets, mutation admission and opt-in same-process expired-lease reacquisition. The historical [Luau Regression Tests run](https://github.com/alphanumeric-moderate/RecordStore/actions/runs/40529718478) passed on code-bearing revision `9ee4b56bc24ff9901c98605c9123242f6928287b`. That regression run is separate from the earlier passing Luau Type Check, Bencher Continuous Benchmarks and RecordStore Update Latency runs; those historical results do not validate later reviewed heads. Each later revision requires its own affected checks. Those runs use Lune, Roblox shims and fake stores; they do not establish the full durability contract or real DataStoreService behavior. Previous CodSpeed comparisons flagged unreliable wall-time outside Macro Runners, runner-type mismatch and syscall-dominated workloads, so performance remains inconclusive until comparable measurements are collected. Real Roblox multi-server, throttling/cache, crash/shutdown and rollout acceptance remain open.
 
@@ -544,7 +527,7 @@ a healthy result is not a global DataStore service health guarantee.
 The Lune regression suite exercises direct-data status, risk reporting, unknown-write reconciliation,
 and pending-buffer backpressure. Mock tests do not establish live-service latency, throttling, or
 cross-server guarantees. Full PR #39 acceptance still requires the complete failure-injection matrix,
-Roblox Studio/server validation, and the separately gated Mailbox, transaction, saga, migration,
+Roblox Studio/server validation, and the separately gated transaction, saga, migration,
 operations, and erasure phases.
 
 ## Non-save operational diagnostics
@@ -559,16 +542,6 @@ if result == "success" then
     print(status.Observation, status.LeaseRemainingSeconds)
 end
 ```
-
-For an opt-in Mailbox V2 operational pass, `mailbox:MaintenanceAsync()` runs bounded recovery, safe empty-slot reclamation, and a status snapshot in that order. It returns the outcome of the first unsuccessful stage instead of reporting the entire pass as complete. Its report is explicitly bounded and non-linearizable across the separate reads; it is diagnostic and must not authorize delivery, ownership, deletion, or rollout decisions.
-
-```lua
-local report, result = mailbox:MaintenanceAsync()
-if result.code == "success" then
-    print(report.stats.ready, report.stats.preparing_reservations)
-end
-```
-
 
 ## Profile Doctor and schema migration preview
 
@@ -650,7 +623,7 @@ These operations can read and update the source outbox while the source `Record`
 
 ### Unified service entry point
 
-The optional service modules are exposed through `RecordStoreServices.new(record_store, options?)`. Keep the core and registry as separate ModuleScripts: this avoids require cycles because several adapters depend on core RecordStore types. Constructing the bundle explicitly loads the optional modules and creates a V2 facade bound to the supplied core and its embedded Mailbox V2.
+The optional service modules are exposed through `RecordStoreServices.new(record_store, options?)`. Keep the core and registry as separate ModuleScripts: this avoids require cycles because several adapters depend on core RecordStore types. Constructing the bundle explicitly loads the optional modules and creates a V2 facade bound to the supplied core.
 
 ```lua
 local initializer = game:GetService("ServerScriptService"):WaitForChild("PlayerDataInitializer")
@@ -662,10 +635,9 @@ local v2 = services.V2
 local PurchaseAuthority = services.Purchases.Authority
 local MaintenanceAdapter = services.Maintenance.DataStoreAdapter
 local ErasureBinding = services.Erasure.ManifestBinding
-local OutboxConsumer = services.Outbox.ConsumerAdapter
 ```
 
-The returned bundle contains `Core`, `V2`, `Acceleration`, `Modules`, `MailboxMigration`, `Purchases`, `Maintenance`, `Erasure`, and `Outbox`. `Modules` exposes every optional service ModuleScript by its source-module name; the grouped fields point to those same module instances. `options.v2` is passed to the V2 constructor, and the acceleration module is registered there by default. The registry does not require the core, so it can safely expose adapters whose type contracts refer back to RecordStore.
+The returned bundle contains `Core`, `V2`, `Modules`, `Purchases`, `Maintenance`, and `Erasure`. `Modules` exposes every remaining optional service ModuleScript by its source-module name; the grouped fields point to those same module instances. `options.v2` is passed to the V2 constructor. The registry does not require the core, so it can safely expose adapters whose type contracts refer back to RecordStore.
 
 Creating the bundle does **not** start wake-up acceleration, assign `MarketplaceService.ProcessReceipt`, import historical purchases, run maintenance, or execute erasure. Those operations remain explicit and require application-owned configuration, authorization, inventory evidence, and live-platform acceptance. Construct the bundle once per application service graph; create separately configured bundles only when their distinct V2 policy state is intentional.
 
@@ -673,7 +645,7 @@ Creating the bundle does **not** start wake-up acceleration, assign `Marketplace
 
 The saga coordinator is a **recoverable multi-key workflow**, not a cross-key atomic transaction. Its durable manifest retains the latest 32 validated phase/status transitions with timestamps and attempt numbers, so an operator can inspect the progression without storing raw transfer payloads in the history. Use stable transfer IDs, retain the source/recipient operation IDs, and reconcile `unknown` before deciding whether to retry or compensate. Each saga records bounded per-leg outcomes for its stable reserve/credit/refund/settle transaction IDs, including request fingerprints, observed attempts, outcome status, and sanitized errors. When a definitive credit failure triggers a refund whose result is uncertain, the saga enters `compensation_pending`; retries reconcile the same refund operation before considering credit again. If automated reconciliation is insufficient, `Sagas:RequireManualResolutionAsync(id, request, expected_phase, expected_status, manual_request_id, operator_id, reason)` durably pauses a nonterminal saga against its expected state. `Sagas:ResolveManualAsync(id, request, manual_request_id, resolution_id, decision, operator_id, reason, verify_outcome?)` supports `resume`, `confirm_settled`, and `confirm_rejected`; terminal decisions require a caller-supplied verifier that proves the durable cross-profile outcome and returns a stable evidence ID. Replays with the same resolution ID and exact operator/reason input are idempotent; reusing either manual ID with different input conflicts, stale snapshots conflict, and a saga in `manual_resolution_required` cannot proceed through normal automatic retry. Trace events use unique `trace_event_id` values rather than process-local sequence numbers for deduplication. `Tracing:GetOperationTrace` labels events `process_local`; `Tracing:GetOperationTraceAsync` marks records as `durable_store`, `process_local`, or `durable_store_and_local`, and returns an `evidence_summary`: `process_local_events` and `durable_events` count unique returned events observed in those respective sources (including overlaps), while `process_local_only_events`, `durable_only_events`, and `durable_and_local_events` partition those sources. These fields describe evidence provenance, not a linearizable global history. Payloads and player identity fields are deliberately omitted. Projection rows are eventual and require durable source revision/event IDs. Event receipts retain a bounded fingerprint of the canonical event payload, so reusing a recent event ID for different content returns a conflict instead of silently treating it as a duplicate; older IDs outside the 64-receipt window are still protected from reapplication by source-revision checks. `Projections:RebuildDurableAsync(name, rebuild_id, source_snapshot_id, fetch_page, max_pages?)` persists bounded rebuild progress and can resume with the same stable rebuild ID after restart. The `fetch_page(cursor, page_size, source_snapshot_id)` adapter must return `items, next_cursor, complete, observed_snapshot_id` and enforce the immutable source snapshot. Completed pages must return no next cursor; incomplete pages must return an advancing cursor; `GetRebuildStatusAsync(name, rebuild_id)` reads the durable cursor/status. A rebuild ID cannot be reused with a different snapshot, and pages are limited to 64 events. Erasure coverage is only as complete as the application-provided family inventories, writer fences, dependency checks, and key templates. Each family inventory callback must return a dense list of `{ name, scope, key, generation }` locators plus a second return value of `true` only when the list is exhaustive; missing completeness flags, oversized lists, and template-unmatched locators prevent `rtbf_coverage_verified` from being true. `coverage[family].unmatched_count` and a bounded `unmatched_samples` list surface mismatches for operator follow-up.
 
-Versioned runtime policy updates are routed to the current RecordStore scheduler policy API when scheduler fields are present. `max_dirty_age_seconds` is diagnostic/SLO policy; it does not create an unconditional save guarantee. The V2 facade does not register hidden request hooks or enable Mailbox V2 globally. Provide an explicit activation guard.
+Versioned runtime policy updates are routed to the current RecordStore scheduler policy API when scheduler fields are present. `max_dirty_age_seconds` is diagnostic/SLO policy; it does not create an unconditional save guarantee. The V2 facade does not register hidden request hooks.
 
 Durable migration manifests and quarantine records help coordinate operators. `ProfileDoctor.Restore` fails closed unless the application supplies an authorization callback and an erasure-status callback, uses active session ownership and expected revision, binds the transaction to the preflight profile digest, preserves reserved RecordStore keys, and records operator identity/reason. `ProfileDoctor.QuarantineAsync` now installs an atomic same-key durable fence before committing its audit manifest. The fence is represented as a fail-closed future implementation marker, so normal RecordStore reads/writes by stale or new RecordStore versions cannot recreate or mutate the profile. Resolution stages the marker as `release_pending`, confirms the durable audit manifest as `resolved`, and only then removes the marker with a generation-advancing write; unknown outcomes remain fenced and are retried using a stable resolution ID. `ProfileDoctor.CheckWritableAsync` remains a useful pre-write gate, but is not itself atomic and cannot protect application code that bypasses RecordStore or writes other user-associated keys directly. Those external write paths still need exhaustive inventory/integration and live acceptance before production enablement. For crash recovery after the original server exits, `GetQuarantineStatusAsync`, `QuarantineAsync`, `ResolveQuarantineAsync`, and `CheckWritableAsync` also accept an identity table `{store_name = ..., scope = ..., profile_key = ...}` in place of the live Record. This identity-only path reconciles a missing audit manifest from the authoritative same-key fence; it does not allow changing the original operator decision, and unresolved fence/audit disagreement remains write-blocking.
 
@@ -690,75 +662,6 @@ This path is not automatically registered with `MarketplaceService.ProcessReceip
 `RecordStoreApplicationInventory` validates the structure of a bounded application inventory manifest, and `PlayerDataErasureManifestBinding` binds a reviewed manifest to explicit family adapters and the existing erasure coordinator. `RecordStoreMaintenanceManifestBinding` binds a reviewed multi-family catalog to application policy callbacks; `RecordStoreMaintenanceAtomicTombstone` provides same-key generation/job-fence mutation helpers with ambiguous-write reconciliation.
 
 These are production code-level integration primitives, not automatic application discovery. The application must still provide exact deployed store/scope/key inventories, writer and recreation-path coverage, dependency/eligibility policies, authorization, compatible durable fencing, and live acceptance. In particular, no RTBF-completeness claim is valid merely because a manifest passes structural validation or a callback returns an attestation.
-
-## Legacy V3 mailbox migration
-
-The retired pre-V2 `q:` queue key is now atomically sealed when absent or valid and empty. Its marker binds the exact store/scope/profile identity and uses a future implementation version so older parser-based `UpdateAsync` writers fail closed. Non-empty or malformed legacy values remain untouched and require manual recovery; a failed/ambiguous marker write is reconciled through an uncached read before queue operations continue.
-
-The embedded mailbox exposes `ImportLegacyAsync` and `ImportLegacyDeadLetterAsync` for bounded, idempotent V3 imports. They derive an owner-bound V2 storage route while retaining the original legacy message ID in public snapshots and results. They preserve the old attempt/replay counters, sender job ID and creation/dead-letter timestamps; legacy timestamps are converted from Unix seconds to V2 milliseconds. Old lock tokens are retained only as migration audit fields and never become active V2 claim tokens. Importing active messages requires `strict_ordering_enabled = true` to preserve FIFO order through a dedicated per-migration ordering key. Active messages with an unexpired V3 processing lease are rejected until that lease expires; the application source-fence adapter must also prove old workers/handlers are drained before import and activation.
-
-The freeze marker leaves the original queue content in place and preserves the V2/V3 fields for source verification. Queue updates use `UpdateAsync` and are accepted only when a fresh uncached read proves the marker; an ambiguous response without a matching durable marker is `unknown`. If the added marker would exceed the configured queue limit, or if a malformed/future-version queue or reserved V2 ID is detected, the freeze is rejected without overwriting source data. Existing queue operations fail closed after the marker is installed.
-
-`RecordStoreMailboxV2MigrationAdapter.bind(...)` supplies a concrete source adapter using `RecordStore.begin_mailbox_v2_migration_async`, `get_mailbox_v2_migration_status_async`, and `get_mailbox_v2_migration_source_page_async`. The latter performs fresh reads against the existing q2 queue key. The coordinator then coordinates the cutover in bounded steps. Its application adapters must freeze the exact legacy source, prove all old writers are drained, provide bounded active/dead-letter page readers, persist a revision-checked durable checkpoint, and supply a mandatory `verify_complete` callback that checks destination inventory/contents as well as the frozen source counts. The adapter rejects configuration without this callback; count agreement and per-item read-back alone are not treated as proof that the destination contains no extras or duplicates. V2 can be enabled atomically only after that verification succeeds. The coordinator stops at `ready_to_activate`; activation is a separate explicit call. It never deletes the frozen source. The application must configure its activation guard to permit the migration operation while blocking normal V2 enqueue/processing until cutover is approved.
-
-## Mailbox V2 operations and maintenance
-
-The embedded Mailbox V2 exposes bounded `RecoverAsync`, `GetStatsAsync`, `ReclaimAsync`, and `MaintenanceAsync` operations. Maintenance sequences recovery, slot reclamation, and a capacity/status read; its report uses `consistency = "bounded_non_linearizable"` and `complete = true` means that bounded sequence finished, not that it captured a linearizable cross-server snapshot. Activation denial is returned before backing-store reads or writes.
-
-## Opt-in outbox-to-Mailbox V2 delivery
-The adapter does not acknowledge the source event from the enqueue result alone. It resolves the returned message ID with an uncached, authoritative Mailbox V2 read, then verifies the public ID, message type, and full canonical payload (including the source event ID) before returning the destination receipt ID. An unresolved read-back or identity mismatch leaves the source event unacknowledged for reconciliation.
-
-
-`RecordStoreOutboxMailboxAdapter` adapts `Record:DispatchOutboxAsync()` to the embedded Mailbox V2. It verifies the resolved destination's store, scope, profile key, and optional UserId, requires an explicit activation guard, binds Mailbox V2 only when the destination Record is active and its legacy queue is empty, and uses the durable outbox event ID as the mailbox idempotency key.
-
-The destination receipt is the stable Mailbox V2 message ID. The source outbox is marked delivered only after Mailbox V2 returns `accepted` or `duplicate` with that non-empty ID. Unknown enqueue/bind outcomes throw so the source outbox records an uncertain outcome and retries the same event ID. Known rejections do not receive a success receipt.
-
-This is **durable mailbox acceptance**, not proof that the destination's eventual handler ran or that an arbitrary external side effect completed. Keep destination handlers idempotent, check `payload_version`, and treat external effects as at-least-once. The adapter never enables Mailbox V2 globally; the application supplies the rollout/activation guard.
-
-### Destination outbox consumer
-
-`src/PlayerDataInitializer/RecordStoreOutboxConsumerAdapter.luau` closes the destination-profile mutation path. Register a reducer for each supported event type and payload version, then call `ProcessBatchAsync(record, limit)` from a dedicated worker/maintenance loop. The reducer is a pure, non-yielding transformation passed into `RecordStoreV2.Inbox.ApplyAsync`; the source event ID is the Inbox receipt's idempotency key **while that receipt is retained**. Inbox receipts are bounded (128 by default); a full receipt set fails closed and leaves delivery retryable rather than evicting a prior receipt. `PruneInboxReceiptsAsync(record, older_than_unix, operation_id, max_items)` provides explicit bounded pruning, with a stable operation ID for reconciliation. Receipt pruning can permit a delayed duplicate to run the reducer again, so events that require lifetime exactly-once domain effects must also update a permanent domain event/entitlement ledger or use a naturally idempotent domain transition in the same profile transaction. The worker acknowledges a Mailbox V2 message only after the destination Inbox transaction returns `committed` or `duplicate`. If a profile write is uncertain, the message claim is lost, the destination locator does not match, or the payload version is unsupported, the worker leaves the message retryable.
-
-Do **not** call the consumer from `Record:ProcessQueueAsync()`. That method holds the Record queue mutex, which rejects a nested Inbox transaction. The consumer creates a separate Mailbox V2 instance for durable claim processing while still checking the active Record identity and explicit `activation_guard`. This does not make arbitrary external effects atomic: have the destination reducer record state and any next-step outbox intent together, then perform external effects through another idempotent adapter.
-
-```lua
-local Consumer = require(
-    game:GetService("ServerScriptService").PlayerDataInitializer.RecordStoreOutboxConsumerAdapter
-)
-local consumer = Consumer.new({
-    activation_guard = function(record, operation)
-        return record:GetState() == "active" and record:IsOpen()
-    end,
-    handlers = {
-        CreditBalance = {
-            payload_version = 1,
-            reduce = function(data, payload, event)
-                local updated = table.clone(data)
-                updated.coins += payload.amount
-                updated.last_event_id = event.EventId
-                return updated
-            end,
-        },
-    },
-})
-
--- Call from a dedicated worker, not from record:ProcessQueueAsync().
-local progress = consumer:ProcessBatchAsync(active_records[destination_key], 8)
-```
-
-The adapter and its regression cases are wired into the final Lune runner but are still awaiting the deferred final verification phase and live multi-server acceptance.
-
-```lua
-local adapter = RecordStoreOutboxMailboxAdapter.new({
-    get_record = function(event)
-        return active_records[event.DestinationProfileKey]
-    end,
-    activation_guard = function(record, operation)
-        return rollout_is_enabled(record, operation)
-    end,
-})
-source_record:DispatchOutboxAsync(adapter.Dispatch, 8)
-```
 
 ## Opt-in developer product receipts
 
@@ -886,38 +789,6 @@ local progress = migration:RunBatchAsync(2)
 
 The source implements `read_page(cursor, maximum)` and returns `{items, next_cursor, done, source_revision}`. The checkpoint adapter implements `GetAsyncFresh(key)` and atomic `UpdateAsync(key, transform)`. Each invocation processes at most 8 pages and each source page at most 16 PurchaseIds. A partially imported or ambiguous batch leaves the cursor unchanged; replay is safe because the authority import is idempotent. The runner rejects a non-advancing cursor, malformed/dense-page violations, a changed source revision, corrupt or conflicting checkpoints, terminal row-count mismatch, and terminal digest mismatch. The independent historical source and manifest still require operator reconciliation and live-platform acceptance. See [historical PurchaseId inventory reconciliation](docs/purchase-inventory-reconciliation.md).
 
-
-## Optional cross-server mailbox wake-ups
-
-`src/PlayerDataInitializer/RecordStoreV2Acceleration.luau` implements the opt-in adapter required by `RecordStoreV2.BindMailboxWakeups`. It uses a bounded set of MessagingService topic shards, opaque owner fingerprints, bounded local registrations and coalesced wake-ups. An optional MemoryStore sorted-map hint cache is enabled explicitly and is also bounded; each range poll requests at most Roblox's 20-entry API limit and observed entries are evicted after each poll attempt so stale hints cannot permanently occupy the first page. Entries are advisory and may be overwritten, duplicated, delayed, dropped or expire. The adapter is disabled unless configured with `enabled = true` and started with `Start()`. Wake-ups are never proof that a durable message exists, was claimed or completed. Periodic durable polling and reconciliation must remain active.
-
-Example wiring (supply the same canonical owner identity used to construct the mailbox):
-
-```lua
-local Acceleration = require(
-    game:GetService("ServerScriptService").PlayerDataInitializer.RecordStoreV2Acceleration
-)
-local wakeups = Acceleration.new({
-    messaging_service = game:GetService("MessagingService"),
-    memory_store_service = game:GetService("MemoryStoreService"),
-    http_service = game:GetService("HttpService"),
-    server_id = game.JobId,
-    enabled = true,
-    enable_memory_store = false,
-})
-assert(wakeups:Start())
-
--- v2_services is the value returned by RecordStoreV2.new(...).
-local bound, bind_error = v2_services.BindMailboxWakeups(
-    wakeups,
-    owner_identity,
-    mailbox,
-    handler,
-    4
-)
-assert(bound, bind_error)
-game:BindToClose(function() wakeups:Stop() end)
-```
 
 ## Deterministic protocol fault simulation
 
