@@ -54,6 +54,7 @@ for _, path in {
 	"tests/PurchaseReceiptProcessorRegression.server.luau",
 	"bench/playerdata_set_harness.luau",
 	"bench/playerdata_set_paths.bench.luau",
+	"bench/playerdata_transactions.bench.luau",
 	"bench/playerdata_startup_common.luau",
 	"bench/playerdata_startup_eager.bench.luau",
 	"bench/playerdata_startup_lazy.bench.luau",
