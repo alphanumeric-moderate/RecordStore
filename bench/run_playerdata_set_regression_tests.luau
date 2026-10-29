@@ -12,6 +12,23 @@ local get_find_first_child_calls = harness.get_find_first_child_calls
 local record_options = harness.get_record_options()
 assert(record_options ~= nil, "PlayerDataCore did not create a RecordStore session")
 
+assert(record_options.transactional_operations_enabled == false,
+	"PlayerDataCore must keep transactional operations disabled by default")
+local default_status, default_status_error = controller.GetStatus(player)
+assert(default_status ~= nil, default_status_error)
+assert(default_status.state == "active", "PlayerDataCore diagnostics returned the wrong session state")
+assert(default_status.pending_change_count == 0, "new PlayerData session should not have pending mutations")
+assert(default_status.ownership == "owned", "PlayerDataCore diagnostics omitted ownership state")
+assert(default_status.kills == nil and default_status.profile == nil,
+	"PlayerDataCore diagnostics must not expose player profile contents")
+local disabled_result, disabled_status = controller.Transact(player, "disabled-operation", {}, function(data)
+	return data, nil
+end)
+assert(disabled_result == nil and disabled_status == "disabled",
+	"PlayerDataCore must not enable transactions by default")
+local disabled_receipt = controller.GetTransactionStatus(player, "disabled-operation", {})
+assert(disabled_receipt.code == "disabled", "disabled transaction status leaked a receipt")
+
 assert(record_options.autosave_interval == 90, "unexpected autosave interval")
 assert(record_options.lease_duration == 180, "unexpected session lease duration")
 assert(record_options.lease_renewal == 60, "unexpected session lease renewal interval")
@@ -239,5 +256,66 @@ assert(save_calls == 1 and pressure.saved_records[pressure_key].kills == pressur
 	"non-busy Save failure must stop while preserving accepted values")
 drain_saved = true
 assert(pressure.controller:Shutdown(), "pressure controller failed to shut down")
+
+local transactions = create_harness(true, nil, { TransactionalOperationsEnabled = true })
+local tx_controller = transactions.controller
+local tx_player = transactions.player
+local tx_record = transactions.record
+local tx_record_options = transactions.get_record_options()
+local tx_key = "PlayerData_Test1|global|Player_" .. tostring(tx_player.UserId)
+assert(tx_record_options.transactional_operations_enabled == true,
+	"PlayerDataCore did not opt the record into transactions")
+local tx_initial_data = tx_record:Get()
+local tx_initial_kills = tx_initial_data.kills
+local tx_request = { operation = "increment-kills", amount = 12 }
+local tx_operation_id = "playerdata-set-regression-increment-1"
+local function increment_kills(current)
+	local data = current :: { [string]: any }
+	data.kills = (data.kills :: number) + 12
+	return data, { kills = data.kills }
+end
+
+local tx_result, tx_status, tx_message = tx_controller.Transact(
+	tx_player,
+	tx_operation_id,
+	tx_request,
+	increment_kills
+)
+assert(tx_status == "committed", tx_message)
+assert(type(tx_result) == "table" and tx_result.kills == tx_initial_kills + 12,
+	"PlayerDataCore transaction returned an incorrect result")
+assert(transactions.saved_records[tx_key].kills == tx_initial_kills + 12,
+	"PlayerDataCore transaction did not persist its updated profile")
+local tx_values = tx_player:FindFirstChild("PlayerDataValues")
+local tx_kills = if tx_values ~= nil then tx_values:FindFirstChild("kills") else nil
+assert(tx_kills ~= nil and tx_kills.Value == tx_initial_kills + 12,
+	"PlayerDataCore did not sync committed transaction values to the live backing instance")
+local tx_live_status, tx_live_status_error = tx_controller.GetStatus(tx_player)
+assert(tx_live_status ~= nil, tx_live_status_error)
+assert(tx_live_status.pending_change_count == 0,
+	"transaction value synchronization queued a duplicate PlayerData mutation")
+
+local duplicate_result, duplicate_status, duplicate_message = tx_controller.Transact(
+	tx_player,
+	tx_operation_id,
+	tx_request,
+	increment_kills
+)
+assert(duplicate_status == "duplicate", duplicate_message)
+assert(type(duplicate_result) == "table" and duplicate_result.kills == tx_initial_kills + 12,
+	"duplicate PlayerData transaction did not return the original receipt result")
+assert(transactions.saved_records[tx_key].kills == tx_initial_kills + 12,
+	"duplicate PlayerData transaction applied the mutation twice")
+local conflicting_result, conflicting_status = tx_controller.Transact(
+	tx_player,
+	tx_operation_id,
+	{ operation = "increment-kills", amount = 13 },
+	increment_kills
+)
+assert(conflicting_result == nil and conflicting_status == "conflict",
+	"PlayerDataCore accepted an operation ID bound to a different request")
+local tx_receipt = tx_controller.GetTransactionStatus(tx_player, tx_operation_id, tx_request)
+assert(tx_receipt.code == "committed", "PlayerDataCore transaction receipt status was incorrect")
+assert(tx_controller:Shutdown(), "transaction-enabled PlayerData controller failed to shut down")
 
 print("[PlayerData.Set] Lune integration regression passed")
