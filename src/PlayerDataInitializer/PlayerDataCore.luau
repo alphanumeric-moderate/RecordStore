@@ -1625,8 +1625,8 @@ local function new(dependencies: Dependencies?): Controller
 		if typeof(player) ~= "Instance" or not player:IsA("Player") then
 			return nil, "player must be a Player instance"
 		end
-		if departed_players[player] or removing[player] then
-			return nil, "player is leaving and no longer accepts PlayerData operations"
+		if player.Parent ~= players or departed_players[player] or removing[player] then
+			return nil, "player is leaving or is no longer connected"
 		end
 		local record = sessions[player]
 		if record == nil then
