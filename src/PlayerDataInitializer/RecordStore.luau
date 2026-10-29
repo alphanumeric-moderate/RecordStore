@@ -82,6 +82,7 @@ type EmbeddedSchedulerModule = {
 	new: (options: EmbeddedSchedulerOptions?) -> EmbeddedSchedulerGovernor,
 	new_dispatcher: (governor: EmbeddedSchedulerGovernor, options: EmbeddedSchedulerDispatcherOptions?) -> EmbeddedSchedulerDispatcher,
 }
+-- BEGIN EMBEDDED SCHEDULER MODULE
 local RecordStoreScheduler: EmbeddedSchedulerModule = {} :: EmbeddedSchedulerModule
 do
 	local Scheduler = RecordStoreScheduler
@@ -2472,7 +2473,9 @@ do
 	Scheduler.new_dispatcher = create_dispatcher
 
 end
+-- END EMBEDDED SCHEDULER MODULE
 
+-- BEGIN EMBEDDED MAILBOX V2 MODULE
 local MailboxV2 = {}
 MailboxV2.__index = MailboxV2
 type EmbeddedMailboxDict = { [string]: unknown }
@@ -6228,7 +6231,7 @@ do
 	MailboxV2.Version = VERSION
 
 end
---// end embedded mailbox v2 module
+-- END EMBEDDED MAILBOX V2 MODULE
 
 type MetadataValue = boolean | number | string
 export type Metadata = { [string]: MetadataValue }
@@ -17990,7 +17993,6 @@ RecordStore._internals.transact = (function()
 					kind = kind :: string,
 					request_identity = request_identity,
 				}
-				state.next_reconciliation = now_local() + 0.25
 				state.last_reconciliation_category = "transaction_outcome_unknown"
 				return nil, status, message
 			end
