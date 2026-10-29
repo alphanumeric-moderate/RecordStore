@@ -150,7 +150,7 @@ type PlayerValuePathCache = {
 type PlayerValuePathKey = "leaderstats" | "player_data_values"
 
 export type PlayerDataStatus = {
-	state: string,
+	state: RecordStore.SessionState,
 	pending_change_count: number,
 	pending_age_seconds: number?,
 	flush_running: boolean,
@@ -1169,7 +1169,7 @@ local function new(dependencies: Dependencies?): Controller
 			local sync_targets = transaction_sync_targets[record]
 			local expected_sync_value = if sync_targets ~= nil then sync_targets[key] else nil
 			if expected_sync_value ~= nil then
-				local normalized_sync_value = normalize_serialized_infinemath(infinitemath_value_factory, serialized_value)
+				local normalized_sync_value = normalize_serialized_infinitemath(infinitemath_value_factory, serialized_value)
 				if normalized_sync_value ~= nil and normalized_sync_value == expected_sync_value then
 					last_valid_serialized = normalized_sync_value
 					sync_targets[key] = nil
@@ -1851,17 +1851,23 @@ local function new(dependencies: Dependencies?): Controller
 			transaction_options.receipt_retention_seconds = receipt_retention_seconds
 		end
 
-		local call_ok, result, status, message = pcall(function()
-			return record:TransactAsync(operation_id, guarded_reducer, transaction_options)
+		local result: RecordStore.JsonValue? = nil
+		local transaction_status: RecordStore.TransactionStatus = "unknown"
+		local message: string? = nil
+		local call_ok = pcall(function()
+			result, transaction_status, message = record:TransactAsync(
+				operation_id,
+				guarded_reducer,
+				transaction_options
+			)
 		end)
 		if not call_ok then
 			return nil, "unknown", "transaction call raised an error; retry only with the same operation ID and request"
 		end
-		local transaction_status = status :: RecordStore.TransactionStatus
 		if transaction_status == "committed" or transaction_status == "duplicate" then
 			sync_transaction_values(player, record)
 		end
-		return result :: RecordStore.JsonValue?, transaction_status, message
+		return result, transaction_status, message
 	end
 
 	local function get_transaction_status(
