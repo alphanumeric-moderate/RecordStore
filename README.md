@@ -133,6 +133,61 @@ display-only `StringValue`.
 `Set` is server-side. Do not use it as a client-authoritative economy or permission boundary; validate
 gameplay actions and authorization on the server before changing protected fields.
 
+### PlayerDataCore diagnostics and transactions
+
+`PlayerData.GetStatus(player)` returns a sanitized snapshot of the loaded session: session state,
+pending-change count and age, flush activity, durability admission and ownership indicators, and a
+small set of diagnostic error fields. It does not return the player's profile data.
+
+`PlayerDataCore` also exposes `Transact` and `GetTransactionStatus` as an opt-in bridge to
+RecordStore's idempotent same-profile transaction API. Transactions remain **disabled by default**.
+To enable them for the standard single controller, change the existing
+`src/PlayerDataInitializer/PlayerData.luau` factory, rather than creating a second controller:
+
+```luau
+local PlayerDataCore = require(script.Parent.PlayerDataCore)
+
+return PlayerDataCore.new({
+	TransactionalOperationsEnabled = true,
+})
+```
+
+Enable this only after all active servers have been updated to a compatible RecordStore build. A
+transaction reducer must be deterministic, non-yielding, and free of external side effects. The
+request value is an idempotency fingerprint; it is not passed to the reducer as its second argument.
+Use the same operation ID and identical request whenever reconciling an uncertain result:
+
+```luau
+local operation_id = "kill-grant:" .. receipt_id
+local request = { kind = "kill-grant", amount = 5 }
+
+local result, status, message = PlayerData.Transact(
+	player,
+	operation_id,
+	request,
+	function(current)
+		if type(current) ~= "table" then
+			error("PlayerData transaction received invalid current data")
+		end
+		local next_data = table.clone(current)
+		next_data.kills = (next_data.kills :: number) + 5
+		return next_data, { kills = next_data.kills }
+	end
+)
+
+if status == "unknown" then
+	-- Reconcile with the same operation_id and request; do not issue a new ID.
+	local receipt = PlayerData.GetTransactionStatus(player, operation_id, request)
+end
+```
+
+The wrapper validates returned data against the configured PlayerData fields, flushes accepted
+buffered mutations before starting a transaction, and refreshes the live value instances after a
+confirmed commit or duplicate receipt. Reducers may not perform gameplay effects, grant items, send
+messages, yield, or mutate external state. Apply such effects only after the transaction outcome is
+confirmed and make the effects independently idempotent. A transaction must not be used to bypass
+server-side authorization or domain-level purchase/entitlement ledgers.
+
 ### Reset-on-join data fields
 
 Pass `"ResetOnJoin"` as the third argument to `define_data_field` to restore that field to its configured default whenever its record is successfully loaded:
