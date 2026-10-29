@@ -46,6 +46,7 @@ assert(first_status == "unknown",
 		first_status,
 		tostring(first_message)
 	))
+assert(first_result == nil, "unverified transaction must not expose a confirmed result")
 assert(record.State == "unknown", "unverified transaction must retain the unknown state")
 
 local durable = RecordStore.Mock.get_record_raw(store_name, scope, profile_key) :: { [string]: any }
