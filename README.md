@@ -176,10 +176,16 @@ local result, status, message = PlayerData.Transact(
 )
 
 if status == "unknown" then
-	-- Reconcile with the same operation_id and request; do not issue a new ID.
+	-- This lookup is read-only and does not refresh the local session.
 	local receipt = PlayerData.GetTransactionStatus(player, operation_id, request)
+	-- Reconcile by retrying Transact with the same operation_id, request, and reducer.
+	-- Never generate a new ID for the same logical transaction.
 end
 ```
+
+The status lookup is read-only. If a transaction result is unknown, retry `Transact` using the
+same operation ID, identical request, and same reducer to reconcile the durable receipt and refresh
+local session state; a new ID could apply the logical operation twice.
 
 The wrapper validates returned data against the configured PlayerData fields, flushes accepted
 buffered mutations before starting a transaction, and refreshes the live value instances after a
