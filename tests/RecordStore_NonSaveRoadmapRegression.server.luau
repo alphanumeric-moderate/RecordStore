@@ -11,10 +11,9 @@ end
 local Shim = require("./RobloxShim")
 local RecordStore = Shim.load()
 local Mock = RecordStore.Mock
-local MailboxV2 = RecordStore.MailboxV2
 
 assert(type(Mock.get_session_status_async) == "function", "session status diagnostic API is missing")
-assert(type(MailboxV2.MaintenanceAsync) == "function", "mailbox maintenance API is missing")
+assert(RecordStore.MailboxV2 == nil, "obsolete Mailbox V2 runtime must not be exported")
 assert(type(RecordStore.inspect_profile_async) == "function", "Profile Doctor inspection API is missing")
 assert(type(Mock.inspect_profile_async) == "function", "mock Profile Doctor inspection API is missing")
 assert(type(RecordStore.diff_profile_versions_async) == "function", "Profile Doctor version diff API is missing")
@@ -145,26 +144,6 @@ assert(invalid == nil and invalid_result == "invalid")
 Mock.set_get_failures(1, "injected read failure")
 local unreadable, unreadable_result = Mock.get_session_status_async("SessionStatusTest", "global", "active")
 assert(unreadable == nil and unreadable_result == "unknown", "read failures must not look like an unowned profile")
-
-local store = MailboxV2.MockStore()
-local mailbox = MailboxV2.new(store, {
-	store_name = "PlayerData",
-	scope = "global",
-	profile_key = "maintenance-owner",
-}, {
-	encode = function(value)
-		return game:GetService("HttpService"):JSONEncode(value)
-	end,
-	activation_guard = function()
-		return true, nil
-	end,
-})
-local report, maintenance_result = mailbox:MaintenanceAsync()
-assert(maintenance_result.code == "success", tostring(maintenance_result.error))
-assert(report.recovery.code == "success")
-assert(report.reclaim.code == "empty")
-assert(report.stats.ready == 0)
-assert(report.consistency == "bounded_non_linearizable")
 
 local inspection, inspection_result, inspection_message =
 	Mock.inspect_profile_async("SessionStatusTest", "global", "active")
@@ -538,7 +517,7 @@ local outbox_delivered_count, outbox_dispatch_status, outbox_dispatch_message =
 		outbox_dispatch_calls += 1
 		assert(event.EventId == pending_outbox_event.EventId, "dispatcher received a different event ID")
 		assert(event.EventType == "CoinGift")
-		return true, "mailbox-receipt:" .. event.EventId
+		return true, "destination-receipt:" .. event.EventId
 	end)
 assert(outbox_dispatch_status == "success", "DispatchOutboxAsync status="
 	.. tostring(outbox_dispatch_status) .. " message=" .. tostring(outbox_dispatch_message))
@@ -548,7 +527,7 @@ local after_outbox_dispatch = Mock.get_record_raw("TransactionTest", "global", "
 local delivered_outbox_event = after_outbox_dispatch.sidecars.outbox_events[pending_outbox_event.EventId]
 assert(delivered_outbox_event.state == "delivered")
 assert(delivered_outbox_event.attempts == 1)
-assert(delivered_outbox_event.destination_receipt_id == "mailbox-receipt:" .. pending_outbox_event.EventId)
+assert(delivered_outbox_event.destination_receipt_id == "destination-receipt:" .. pending_outbox_event.EventId)
 assert(type(delivered_outbox_event.delivered_at) == "number")
 assert(after_outbox_dispatch.revision == before_outbox_dispatch.revision,
 	"sidecar delivery metadata must not increment the profile data revision")

@@ -4,8 +4,6 @@
 
 local ServerScriptService = game:GetService("ServerScriptService")
 local RecordStore = require(ServerScriptService.RecordStore)
-local MailboxV2 = RecordStore.MailboxV2
-local serde = require("@lune/serde")
 
 RecordStore.Mock.reset()
 do
@@ -299,19 +297,19 @@ do
 	local process_message: string? = nil
 
 	record = RecordStore.Mock.new(
-		"RecordStore_V2QueueMutationInterleavingRegression",
+		"RecordStore_QueueMutationInterleavingRegression",
 		"global",
 		"v2-queue-handler-update",
 		{
 			schema_version = 1,
 			durable_queue_enabled = true,
-			queue_store_name = "RecordStore_V2QueueMutationInterleavingQueue",
+			queue_store_name = "RecordStore_QueueMutationInterleavingQueue",
 			autosave_interval = 1000,
 			lease_duration = 180,
 			lease_renewal = 60,
-			on_queue_message_async = function(message_type)
+			on_queue_message = function(message_type)
 				if message_type ~= "mutate" or record == nil then
-					return false, "unexpected V2 queue message"
+					return false, "unexpected queue message"
 				end
 				local active_record = record
 				handler_update_result = active_record:Update(function(data)
@@ -325,7 +323,7 @@ do
 					task.wait()
 				end
 				handler_finished = true
-				return handler_update_result == "success", "V2 handler mutation was rejected"
+				return handler_update_result == "success", "queue handler mutation was rejected"
 			end,
 		}
 	)
@@ -333,25 +331,7 @@ do
 	local open_result, open_message = active_record:Open({ Processed = 0, Interleaved = 0 })
 	assert(open_result == "created" or open_result == "loaded", open_message)
 
-	local adapter, adapter_result, adapter_message = active_record:CreateMailboxStoreAdapter()
-	assert(adapter_result == "success" and type(adapter) == "table", adapter_message)
-	local mailbox = MailboxV2.new(adapter, active_record:GetMailboxOwner(), {
-		active_record = active_record,
-		encode = function(value) return serde.encode("json", value) end,
-		activation_guard = function() return true end,
-		strict_ordering_enabled = true,
-		lease_ms = 10000,
-		lease_renewal_horizon_ms = 40000,
-	})
-	local scheduler_enabled, scheduler_message = RecordStore.set_scheduler_enabled(true)
-	assert(scheduler_enabled, scheduler_message)
-	local bind_result, bind_message = active_record:BindMailboxV2Async(mailbox)
-	assert(bind_result == "success", bind_message)
-	local enqueue_result, enqueue_message = active_record:EnqueueAsync("mutate", { value = 1 }, {
-		idempotency_key = "v2-queue-interleave",
-		ordering_key = "v2-profile",
-		priority = "high",
-	})
+	local enqueue_result, enqueue_message = active_record:EnqueueAsync("mutate", { value = 1 })
 	assert(enqueue_result == "enqueued", enqueue_message)
 
 	task.spawn(function()
@@ -364,16 +344,16 @@ do
 		end
 		task.wait()
 	end
-	assert(handler_started, "V2 handler did not reach its yield point")
-	assert(handler_update_result == "success", "V2 handler's synchronous Record update was rejected")
-	assert(nested_save_result == "busy", "Save during V2 queue processing was not rejected as busy")
+	assert(handler_started, "queue handler did not reach its yield point")
+	assert(handler_update_result == "success", "queue handler's synchronous Record update was rejected")
+	assert(nested_save_result == "busy", "Save during queue processing was not rejected as busy")
 
 	interleaved_update_result = active_record:Update(function(data)
 		local next_data = data :: { [string]: RecordStore.JsonValue }
 		next_data["Interleaved"] = (next_data["Interleaved"] :: number) + 1
 		return next_data
 	end)
-	assert(interleaved_update_result == "success", "concurrent local update was rejected while the V2 handler yielded")
+	assert(interleaved_update_result == "success", "concurrent local update was rejected while the queue handler yielded")
 	release_handler = true
 	for _ = 1, 500 do
 		if process_finished then
@@ -381,16 +361,14 @@ do
 		end
 		task.wait(0.01)
 	end
-	assert(process_finished, "V2 queue processing did not resume after the handler was released")
+	assert(process_finished, "queue processing did not resume after the handler was released")
 	assert(handler_finished, "V2 handler did not finish after its yield")
 	assert(process_result == "processed", process_message)
 	local data = active_record:Get() :: { [string]: RecordStore.JsonValue }
-	assert(data["Processed"] == 1 and data["Interleaved"] == 1, "V2 interleaved mutations were not retained")
+	assert(data["Processed"] == 1 and data["Interleaved"] == 1, "interleaved queue mutations were not retained")
 	local save_result, save_message = active_record:Save()
 	assert(save_result == "saved", save_message)
-	local scheduler_disabled, disable_message = RecordStore.set_scheduler_enabled(false)
-	assert(scheduler_disabled, disable_message)
-	assert(active_record:Close() == "closed", "V2 queue interleaving record did not close")
+	assert(active_record:Close() == "closed", "queue interleaving record did not close")
 end
 
 RecordStore.Mock.reset()

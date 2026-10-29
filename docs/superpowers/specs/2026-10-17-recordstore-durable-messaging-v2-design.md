@@ -1,7 +1,7 @@
 # RecordStore durable messaging v2: correctness-first architecture
 
 - Date: 2026-10-17
-- Status: Revised design; supersedes the earlier design wherever they conflict
+- Status: Archived historical design. The Mailbox V2 runtime and its adapters were removed on 2026-10-29; this document does not describe the shipped runtime.
 - Audit date: 2026-10-17; cross-key fencing, bounded preparation recovery, tombstone-safe deletion, RTBF routing, metadata preservation, and ordering gates are explicit release requirements
 - Scope: durable mailbox, message processing, transactional outbox/inbox, recoverable workflows, server-local dynamic configuration and measured acceleration
 - Related PRs: #31 (configuration/observer design), #32 (initial durable-messaging design)
