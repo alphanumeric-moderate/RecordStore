@@ -2057,10 +2057,7 @@ local function new(dependencies: Dependencies?): Controller
 						end)
 					elseif event == "reconcile" and result == "success" and observed_record ~= nil then
 						scheduler.defer(function()
-							local pending = pending_changes[observed_record]
-						if pending ~= nil and next(pending) ~= nil then
 							request_recovery_flush(observed_record)
-						end
 						end)
 					end
 					if should_warn_result(result) then
