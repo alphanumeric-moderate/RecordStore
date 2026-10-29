@@ -17978,8 +17978,10 @@ RecordStore._internals.transact = (function()
 		end
 
 		if final_status == "duplicate" then
-			local raw_after, info_after, read_code, read_message = backend_get(state.backend, false, deadline, state)
-			if read_code ~= nil or raw_after == nil then
+			local function retain_unresolved_transaction(
+				message: string,
+				status: TransactionStatus
+			): (JsonValue?, TransactionStatus, string?)
 				state.busy = false
 				state.state = "unknown"
 				state.current_operation_id = nil
@@ -17990,63 +17992,37 @@ RecordStore._internals.transact = (function()
 				}
 				state.next_reconciliation = now_local() + 0.25
 				state.last_reconciliation_category = "transaction_outcome_unknown"
-				return nil, "unknown", read_message or "duplicate transaction was observed but its durable state could not be refreshed"
+				return nil, status, message
+			end
+
+			local raw_after, info_after, read_code, read_message = backend_get(state.backend, false, deadline, state)
+			if read_code ~= nil or raw_after == nil then
+				return retain_unresolved_transaction(
+					read_message or "duplicate transaction was observed but its durable state could not be refreshed",
+					"unknown"
+				)
 			end
 
 			local latest, parse_error, current_format = parse_envelope(raw_after)
 			if not current_format or latest == nil then
-				state.busy = false
-				state.state = "unknown"
-				state.current_operation_id = nil
-				state.pending_transaction = {
-					operation_id = operation_id,
-					kind = kind :: string,
-					request_identity = request_identity,
-				}
-				state.next_reconciliation = now_local() + 0.25
-				state.last_reconciliation_category = "transaction_outcome_unknown"
-				return nil, "unknown", parse_error or "duplicate transaction state could not be parsed"
+				return retain_unresolved_transaction(
+					parse_error or "duplicate transaction state could not be parsed",
+					"unknown"
+				)
 			end
 
 			local receipt = read_receipt(latest, kind, operation_id)
 			if receipt == nil then
-				state.busy = false
-				state.state = "unknown"
-				state.current_operation_id = nil
-				state.pending_transaction = {
-					operation_id = operation_id,
-					kind = kind :: string,
-					request_identity = request_identity,
-				}
-				state.next_reconciliation = now_local() + 0.25
-				state.last_reconciliation_category = "transaction_outcome_unknown"
-				return nil, "unknown", "duplicate transaction response did not have a durable receipt"
+				return retain_unresolved_transaction("duplicate transaction response did not have a durable receipt", "unknown")
 			end
 			if receipt.request_identity ~= request_identity then
-				state.busy = false
-				state.state = "unknown"
-				state.current_operation_id = nil
-				state.pending_transaction = {
-					operation_id = operation_id,
-					kind = kind :: string,
-					request_identity = request_identity,
-				}
-				state.next_reconciliation = now_local() + 0.25
-				state.last_reconciliation_category = "transaction_outcome_unknown"
-				return nil, "conflict", "operation_id is bound to a different durable request"
+				return retain_unresolved_transaction("operation_id is bound to a different durable request", "conflict")
 			end
 			if receipt.expires_at <= session_now_unix(state.backend.mock) then
-				state.busy = false
-				state.state = "unknown"
-				state.current_operation_id = nil
-				state.pending_transaction = {
-					operation_id = operation_id,
-					kind = kind :: string,
-					request_identity = request_identity,
-				}
-				state.next_reconciliation = now_local() + 0.25
-				state.last_reconciliation_category = "transaction_outcome_unknown"
-				return nil, "unknown", "transaction receipt expired before duplicate state could be reconciled"
+				return retain_unresolved_transaction(
+					"transaction receipt expired before duplicate state could be reconciled",
+					"unknown"
+				)
 			end
 
 			local latest_session = latest.session
@@ -18061,17 +18037,7 @@ RecordStore._internals.transact = (function()
 				return nil, "fenced", "transaction receipt exists but the active session fence no longer matches"
 			end
 			if receipt.committed_revision > latest.revision then
-				state.busy = false
-				state.state = "unknown"
-				state.current_operation_id = nil
-				state.pending_transaction = {
-					operation_id = operation_id,
-					kind = kind :: string,
-					request_identity = request_identity,
-				}
-				state.next_reconciliation = now_local() + 0.25
-				state.last_reconciliation_category = "transaction_outcome_unknown"
-				return nil, "unknown", "transaction receipt refers to a future revision"
+				return retain_unresolved_transaction("transaction receipt refers to a future revision", "unknown")
 			end
 
 			update_local_from_envelope(state, latest, info_after)
@@ -18088,7 +18054,9 @@ RecordStore._internals.transact = (function()
 			state.current_operation_id = nil
 			state.last_error = nil
 			final_result = if receipt.result_present then copy_value(receipt.result) else nil
-			enqueue_change_observation(state, old_data, state.data, write_id, kind)
+			if was_unknown then
+				enqueue_change_observation(state, old_data, state.data, write_id, kind)
+			end
 			complete_deferred_takeover(state)
 			return final_result, "duplicate", final_message
 		end
