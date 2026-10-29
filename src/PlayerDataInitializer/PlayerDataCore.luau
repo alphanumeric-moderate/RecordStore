@@ -1083,7 +1083,7 @@ local function new(dependencies: Dependencies?): Controller
 					field,
 					new_value :: DataValue,
 					integer_infinity_value_factory,
-					infinemath_value_factory
+					infinitemath_value_factory
 				)
 				if normalized_sync_value ~= nil and data_values_equal(normalized_sync_value, expected_sync_value) then
 					last_valid_value = normalized_sync_value
@@ -1169,7 +1169,7 @@ local function new(dependencies: Dependencies?): Controller
 			local sync_targets = transaction_sync_targets[record]
 			local expected_sync_value = if sync_targets ~= nil then sync_targets[key] else nil
 			if expected_sync_value ~= nil then
-				local normalized_sync_value = normalize_serialized_infinemath(infinemath_value_factory, serialized_value)
+				local normalized_sync_value = normalize_serialized_infinemath(infinitemath_value_factory, serialized_value)
 				if normalized_sync_value ~= nil and normalized_sync_value == expected_sync_value then
 					last_valid_serialized = normalized_sync_value
 					sync_targets[key] = nil
@@ -1701,7 +1701,7 @@ local function new(dependencies: Dependencies?): Controller
 		if type(value) ~= "table" then
 			return nil, "transaction reducer must return a PlayerData table"
 		end
-		local valid, validation_message = validate_player_data(value, infinimath_value_factory)
+		local valid, validation_message = validate_player_data(value, infinitemath_value_factory)
 		if not valid then
 			return nil, validation_message or "transaction returned invalid PlayerData"
 		end
@@ -1716,7 +1716,7 @@ local function new(dependencies: Dependencies?): Controller
 				field,
 				stored_value,
 				integer_infinity_value_factory,
-				infinimath_value_factory
+				infinitemath_value_factory
 			)
 			if normalized == nil then
 				return nil, ("transaction returned an invalid value for PlayerData field %q"):format(key)
@@ -1725,7 +1725,7 @@ local function new(dependencies: Dependencies?): Controller
 				field,
 				normalized,
 				integer_infinity_value_factory,
-				infinimath_value_factory
+				infinitemath_value_factory
 			)
 		end
 		return data, nil
@@ -1755,7 +1755,7 @@ local function new(dependencies: Dependencies?): Controller
 				field,
 				stored_value,
 				integer_infinity_value_factory,
-				infinimath_value_factory
+				infinitemath_value_factory
 			)
 			if normalized == nil then
 				warn("[PlayerData]", record.Key, "transaction committed but a configured field could not be decoded", key)
