@@ -63,6 +63,9 @@ benchmarks:
   - name: "PlayerData startup with lazy optional InfiniteMathValue load"
     exec: lune run bench/playerdata_startup_lazy.bench.luau
 
+  - name: "PlayerData opt-in transaction wrapper"
+    exec: lune run bench/playerdata_transactions.bench.luau
+
   - name: "PlayerData.Set path lookup"
     exec: lune run bench/playerdata_set_paths.bench.luau
 
