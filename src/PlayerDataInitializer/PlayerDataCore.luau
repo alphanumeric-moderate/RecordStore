@@ -1732,6 +1732,12 @@ local function new(dependencies: Dependencies?): Controller
 	end
 
 	local function sync_transaction_values(player: Player, record: PlayerRecord)
+		if sessions[player] ~= record or departed_players[player] or removing[player]
+			or closing_records[record] or record.State ~= "active"
+		then
+			return
+		end
+
 		local read_ok, raw_data = pcall(function()
 			return record:Get()
 		end)
