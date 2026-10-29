@@ -3896,10 +3896,9 @@ local function new_maintenance()
 	return service
 end
 
-function V2.new(record_store, mailbox_module, options)
+function V2.new(record_store, options)
 	options = options or {}
 	if type(record_store) ~= "table" or type(record_store.new) ~= "function" then error("RecordStoreV2 requires RecordStore", 2) end
-	if type(mailbox_module) ~= "table" or type(mailbox_module.new) ~= "function" then error("RecordStoreV2 requires RecordStoreMailboxV2", 2) end
 	local runtime_governor = shared_runtime_governor(record_store, options.runtime)
 	local runtime_policy = { revision = 1, max_dirty_age_seconds = 60, mode = "normal" }
 	local scheduler_policy_fields = {
@@ -3917,39 +3916,11 @@ function V2.new(record_store, mailbox_module, options)
 	}
 	local api = {
 		Version = 2,
-		DeliveryGuarantee = "at-least-once",
-		OrderingContract = "strict ordering_key is not enabled; priority is a hint among eligible messages",
 		Canonicalize = canonical,
 		Fingerprint = function(value)
 			local ok, material = pcall(canonical, value)
 			return if ok then digest(material) else nil
 		end,
-		Mailbox = {
-			new = function(store, owner, mailbox_options)
-				local merged_options = {}
-				if mailbox_options ~= nil then
-					if type(mailbox_options) ~= "table" then error("mailbox_options must be a table", 2) end
-					merged_options = table.clone(mailbox_options)
-				end
-				if merged_options.encode == nil then
-					merged_options.encode = function(value) return game:GetService("HttpService"):JSONEncode(value) end
-				end
-				if merged_options.activation_guard == nil and merged_options.allow_unattested_activation ~= true then
-					local guard = options.mailbox_activation_guard
-					if type(guard) == "function" then
-						merged_options.activation_guard = function(operation)
-							return guard(merged_options.active_record, operation)
-						end
-				else
-						merged_options.activation_guard = function()
-							return false, "Mailbox V2 activation requires an application-supplied guard"
-						end
-					end
-				end
-				if options.allow_unattested_activation == true then merged_options.allow_unattested_activation = true end
-				return mailbox_module.new(store, owner, merged_options)
-			end,
-		},
 		Transactions = {},
 		Inbox = new_inbox(),
 		Outbox = new_outbox(),
@@ -4056,27 +4027,6 @@ function V2.new(record_store, mailbox_module, options)
 	end
 	api.ShouldSave = function(record) return new_maintenance().ShouldSave(record_stats(record)) end
 	api.RenderErasureTemplate = render_template
-	api.Acceleration = options.acceleration_module
-	api.BindMailboxWakeups = function(accelerator, owner, mailbox, handler, max_messages_per_wake)
-		if type(accelerator) ~= "table" or type(accelerator.Register) ~= "function" then
-			return false, "an initialized RecordStoreV2Acceleration instance is required"
-		end
-		if type(mailbox) ~= "table" or type(mailbox.ProcessNextAsync) ~= "function" or type(mailbox.BindWakeups) ~= "function" then
-			return false, "mailbox must expose ProcessNextAsync and BindWakeups"
-		end
-		if type(handler) ~= "function" then return false, "handler must be a function" end
-		local owner_text, owner_error = request_material(owner)
-		if owner_text == nil then return false, owner_error or "mailbox owner is not canonicalizable" end
-		local limit = math.clamp(math.floor(max_messages_per_wake or 4), 1, 32)
-		local bound, bind_error = mailbox:BindWakeups(accelerator)
-		if not bound then return false, bind_error end
-		return accelerator:Register(owner_text, function()
-			for _ = 1, limit do
-				local result = mailbox:ProcessNextAsync(handler)
-				if type(result) ~= "table" or result.code ~= "processed" then break end
-			end
-		end)
-	end
 	return api
 end
 
