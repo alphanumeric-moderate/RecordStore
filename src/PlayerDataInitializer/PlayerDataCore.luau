@@ -764,8 +764,19 @@ local function new(dependencies: Dependencies?): Controller
 		end
 
 		local verify_ok, verified = pcall(get_snapshot)
-		if not verify_ok or type(verified) ~= "table" or verified.enabled ~= true then
-			warn("[PlayerData] advanced scheduler activation could not be confirmed")
+		if not verify_ok or type(verified) ~= "table"
+			or verified.enabled ~= true
+			or type(verified.policy) ~= "table"
+			or verified.policy.algorithm ~= config.algorithm
+			or verified.policy.shadow_algorithm ~= config.shadow_algorithm
+			or verified.policy.shadow_enabled ~= config.shadow_enabled
+			or verified.policy.shadow_sample_rate ~= config.shadow_sample_rate
+			or type(verified.rollout) ~= "table"
+			or verified.rollout.percent ~= config.rollout_percent
+			or verified.rollout.salt ~= config.rollout_salt
+			or verified.rollout.cohort_included ~= true
+		then
+			warn("[PlayerData] advanced scheduler activation or configuration could not be confirmed")
 			return false
 		end
 		return true
