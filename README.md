@@ -912,7 +912,7 @@ These checks do **not** establish complete RTBF for an application until its rea
 | Cross-server session messaging | `messaging_enabled = true` | Enabled |
 | Session takeover requests | `takeover_enabled = true` | Enabled |
 | Durable legacy queue | `durable_queue_enabled = false` | Disabled until an application message handler is supplied |
-| Transactional operations | `transactional_operations_enabled = false` | Opt-in only; keep disabled until the PlayerDataCore reconciliation race is resolved |
+| Transactional operations | `transactional_operations_enabled = false` | Opt-in only; keep disabled until transaction/reconciliation acceptance passes |
 | Expired-lease recovery | `lease_recovery_enabled = false` | Opt-in only; requires live-service recovery acceptance |
 | Durability | `durability_mode = "balanced"`, `max_dirty_age_seconds = 180` | Enabled with bounded dirty-age tracking |
 | Advanced scheduler | DRR selector with weighted shadow comparison, 100% cohort rollout | Enabled on controller start |
