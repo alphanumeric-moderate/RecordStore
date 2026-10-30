@@ -13373,10 +13373,11 @@ end
 
 local function update(self: Record, callback: (JsonValue?) -> JsonValue?): (ResultCode, string?)
 	local state = private[self]
+	local transaction_recovery = state ~= nil and state.state == "unknown" and state.pending_transaction ~= nil
 	if state ~= nil then
 		track_external_data_mutation(state)
 	end
-	if state == nil or state.state ~= "active" then
+	if state == nil or (state.state ~= "active" and not transaction_recovery) then
 		return "fenced", "record is not actively owned"
 	end
 	local backpressure = scheduler_activation.mutation_backpressure_reason(state)

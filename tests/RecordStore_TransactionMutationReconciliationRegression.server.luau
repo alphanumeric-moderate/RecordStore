@@ -295,7 +295,16 @@ local unresolved_durable_data = unresolved_durable.data :: { [string]: any }
 assert(unresolved_durable_data.a == 1 and unresolved_durable_data.b == 8,
 	"validator-rejected reconciliation must retain the committed durable transaction")
 
-unresolved_local.a = 2
+local repair_status, repair_message = constrained:Update(function(current)
+	if type(current) ~= "table" then return nil end
+	local repaired = table.clone(current :: { [string]: RecordStore.JsonValue })
+	repaired.a = 2
+	return repaired
+end)
+assert(repair_status == "success", repair_message)
+local repaired_data = constrained:Get() :: { [string]: any }
+assert(repaired_data.a == 2 and repaired_data.b == 1,
+	"pending-transaction Update did not apply the validated local correction")
 local recovered_result, recovered_status, recovered_message = constrained:TransactAsync(
 	"validator-rejected-merge",
 	set_b_to_eight,
