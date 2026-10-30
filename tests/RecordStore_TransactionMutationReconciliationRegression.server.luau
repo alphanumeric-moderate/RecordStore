@@ -75,7 +75,8 @@ RecordStore.Mock.reset()
 
 local preflush = new_record("direct-edit-before-transaction")
 local preflush_revision = preflush:GetRevision()
-(preflush.Data :: { [string]: any }).settings.label = "before-transaction"
+local preflush_data_ref = preflush.Data :: { [string]: any }
+preflush_data_ref.settings.label = "before-transaction"
 local preflush_result, preflush_status, preflush_message = preflush:TransactAsync(
 	"flush-direct-edit-before-transaction",
 	increment_coins,
