@@ -210,7 +210,13 @@ end
 		saved_records[seeded_key] = clone_data(initial_saved_data)
 	end
 
-	local RecordStore = {}
+	local RecordStore = {
+	MailboxV2 = {
+		new = function()
+			error("the mailbox module stub must not be constructed by the PlayerDataCore test harness")
+		end,
+	},
+}
 	function RecordStore.is_retryable_result()
 		return false
 	end
@@ -266,6 +272,27 @@ end
 			return "success", nil
 		end
 	
+		function record:GetMailboxOwner()
+			return {
+				store_name = name,
+				scope = scope,
+				profile_key = key,
+				user_id = if options.user_ids ~= nil then options.user_ids[1] else nil,
+			}
+		end
+
+		function record:CreateMailboxStoreAdapter()
+			return {}, "success", nil
+		end
+
+		function record:BindMailboxV2Async(mailbox)
+			if self.State ~= "active" then
+				return "fenced", "record is not active"
+			end
+			self._mailbox_v2 = mailbox
+			return "success", nil
+		end
+
 		function record:Stats()
 			return { busy = 0 }
 		end

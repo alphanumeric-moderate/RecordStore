@@ -119,6 +119,16 @@ end
 
 
 type DurabilityMode = "balanced" | "durability_first" | "read_only_on_risk"
+export type QueueMessageHandler = (
+	player: Player,
+	message_type: string,
+	payload: RecordStore.JsonValue?,
+	attempts: number,
+	message_id: string,
+	sender_job_id: string,
+	created_at: number,
+	context: unknown?
+) -> (boolean, string?)
 
 export type Dependencies = {
 	Players: typeof(Players)?,
@@ -135,6 +145,15 @@ export type Dependencies = {
 	TakeoverEnabled: boolean?,
 	DurableQueueEnabled: boolean?,
 	TransactionalOperationsEnabled: boolean?,
+	MailboxWakeupsEnabled: boolean?,
+	MemoryStoreAccelerationHintsEnabled: boolean?,
+	QueueMessageHandler: QueueMessageHandler?,
+	RecordStoreV2: any?,
+	RecordStoreV2Acceleration: any?,
+	MessagingService: any?,
+	MemoryStoreService: any?,
+	HttpService: any?,
+	ServerId: string?,
 }
 
 type PlayerRecord = RecordStore.Record
@@ -258,6 +277,7 @@ local CONFIG = {
 		shadow_sample_rate = 0.1,
 	},
 	operation_deadline = 20,
+	mailbox_max_messages_per_wake = 4,
 	load_retry_attempts = 4,
 	load_retry_window = 45,
 	load_retry_base_delay = 0.5,
@@ -634,8 +654,15 @@ local function new(dependencies: Dependencies?): Controller
 		then injected.MessagingEnabled else CONFIG.messaging_enabled
 	local takeover_enabled: boolean = if injected.TakeoverEnabled ~= nil
 		then injected.TakeoverEnabled else CONFIG.takeover_enabled
+	local mailbox_wakeups_enabled: boolean = if injected.MailboxWakeupsEnabled ~= nil
+		then injected.MailboxWakeupsEnabled else false
+	local memory_store_acceleration_hints_enabled: boolean = if injected.MemoryStoreAccelerationHintsEnabled ~= nil
+		then injected.MemoryStoreAccelerationHintsEnabled else false
+	local queue_message_handler: QueueMessageHandler? = injected.QueueMessageHandler
 	local durable_queue_enabled: boolean = if injected.DurableQueueEnabled ~= nil
-		then injected.DurableQueueEnabled else CONFIG.durable_queue_enabled
+		then injected.DurableQueueEnabled
+		elseif mailbox_wakeups_enabled then true
+		else CONFIG.durable_queue_enabled
 	local transactional_operations_enabled: boolean = if injected.TransactionalOperationsEnabled ~= nil
 		then injected.TransactionalOperationsEnabled else CONFIG.transactional_operations_enabled
 	if type(messaging_enabled) ~= "boolean" then
@@ -646,6 +673,24 @@ local function new(dependencies: Dependencies?): Controller
 	end
 	if type(durable_queue_enabled) ~= "boolean" then
 		error("DurableQueueEnabled must be a boolean")
+	end
+	if type(mailbox_wakeups_enabled) ~= "boolean" then
+		error("MailboxWakeupsEnabled must be a boolean")
+	end
+	if type(memory_store_acceleration_hints_enabled) ~= "boolean" then
+		error("MemoryStoreAccelerationHintsEnabled must be a boolean")
+	end
+	if queue_message_handler ~= nil and type(queue_message_handler) ~= "function" then
+		error("QueueMessageHandler must be a function")
+	end
+	if mailbox_wakeups_enabled and queue_message_handler == nil then
+		error("MailboxWakeupsEnabled requires an application-owned QueueMessageHandler")
+	end
+	if memory_store_acceleration_hints_enabled and not mailbox_wakeups_enabled then
+		error("MemoryStoreAccelerationHintsEnabled requires MailboxWakeupsEnabled")
+	end
+	if mailbox_wakeups_enabled and not durable_queue_enabled then
+		error("MailboxWakeupsEnabled requires DurableQueueEnabled")
 	end
 	if type(transactional_operations_enabled) ~= "boolean" then
 		error("TransactionalOperationsEnabled must be a boolean")
@@ -961,6 +1006,238 @@ local function new(dependencies: Dependencies?): Controller
 	local deferred_close_running: {[PlayerRecord]: boolean} = {}
 	local deferred_close_requested: {[PlayerRecord]: boolean} = {}
 	local start_deferred_close: (PlayerRecord) -> ()
+	local recordstore_v2: any? = nil
+	local wakeup_acceleration: any? = nil
+	local wakeup_registrations: {[PlayerRecord]: any} = {}
+
+	local function initialize_mailbox_wakeups()
+		if not mailbox_wakeups_enabled then
+			return
+		end
+
+		local initialized, initialize_error = pcall(function()
+			local v2_factory = injected.RecordStoreV2 or require(script.Parent.RecordStoreV2)
+			local acceleration_factory = injected.RecordStoreV2Acceleration
+				or require(script.Parent.RecordStoreV2Acceleration)
+			local mailbox_module = (record_store :: any).MailboxV2
+			if type(v2_factory) ~= "table" or type(v2_factory.new) ~= "function" then
+				error("RecordStoreV2 must expose new")
+			end
+			if type(acceleration_factory) ~= "table" or type(acceleration_factory.new) ~= "function" then
+				error("RecordStoreV2Acceleration must expose new")
+			end
+			if type(mailbox_module) ~= "table" or type(mailbox_module.new) ~= "function" then
+				error("RecordStore must expose its embedded MailboxV2 implementation")
+			end
+
+			local v2_api = v2_factory.new(record_store, mailbox_module, {
+				acceleration_module = acceleration_factory,
+			})
+			if type(v2_api) ~= "table"
+				or type(v2_api.Mailbox) ~= "table"
+				or type(v2_api.Mailbox.new) ~= "function"
+				or type(v2_api.BindMailboxWakeups) ~= "function"
+			then
+				error("RecordStoreV2 returned an incomplete mailbox wake-up API")
+			end
+			recordstore_v2 = v2_api
+
+			local messaging_service = injected.MessagingService or game:GetService("MessagingService")
+			local http_service = injected.HttpService or game:GetService("HttpService")
+			local acceleration_options: {[string]: any} = {
+				messaging_service = messaging_service,
+				http_service = http_service,
+				server_id = injected.ServerId,
+				enabled = true,
+				enable_memory_store = memory_store_acceleration_hints_enabled,
+				task = scheduler,
+			}
+			if memory_store_acceleration_hints_enabled then
+				acceleration_options.memory_store_service = injected.MemoryStoreService
+					or game:GetService("MemoryStoreService")
+			end
+
+			local acceleration = acceleration_factory.new(acceleration_options)
+			local start_call_ok, start_result, start_message = pcall(function()
+				return acceleration:Start()
+			end)
+			if not start_call_ok or start_result ~= true then
+				if type(acceleration.Stop) == "function" then
+					pcall(function()
+						acceleration:Stop()
+					end)
+				end
+				warn("[PlayerData] V2 mailbox acceleration could not start; durable queue polling remains enabled",
+					if start_call_ok then tostring(start_message or start_result) else tostring(start_result))
+				return
+			end
+			wakeup_acceleration = acceleration
+		end)
+		if not initialized then
+			warn("[PlayerData] V2 mailbox integration initialization failed; durable queue polling remains enabled",
+				tostring(initialize_error))
+		end
+	end
+
+	local function disconnect_mailbox_wakeup(record: PlayerRecord)
+		local registration = wakeup_registrations[record]
+		if registration == nil then
+			return
+		end
+		wakeup_registrations[record] = nil
+		local disconnected, disconnect_error = pcall(function()
+			registration:Disconnect()
+		end)
+		if not disconnected then
+			warn("[PlayerData]", record.Key, "could not disconnect its mailbox wake-up registration",
+				tostring(disconnect_error))
+		end
+	end
+
+	local function dispatch_queue_message(
+		player: Player,
+		record: PlayerRecord,
+		message_type: string,
+		payload: unknown,
+		attempts: number,
+		message_id: string,
+		sender_job_id: string,
+		created_at: number,
+		context: unknown?
+	): (boolean, string?)
+		if shutting_down or departed_players[player] or sessions[player] ~= record
+			or closing_records[record] or not record_is_open(record)
+		then
+			return false, "PlayerData session is no longer active"
+		end
+		local handler = queue_message_handler
+		if handler == nil then
+			return false, "QueueMessageHandler is not configured"
+		end
+		local call_ok, accepted, message = pcall(
+			handler,
+			player,
+			message_type,
+			payload :: RecordStore.JsonValue?,
+			attempts,
+			message_id,
+			sender_job_id,
+			created_at,
+			context
+		)
+		if not call_ok then
+			warn("[PlayerData]", player.Name, "queue message handler raised", tostring(accepted))
+			return false, "QueueMessageHandler raised an error"
+		end
+		if accepted ~= true then
+			return false, if type(message) == "string" and message ~= ""
+				then message else "QueueMessageHandler rejected the message"
+		end
+		return true, nil
+	end
+
+	local function bind_player_mailbox(player: Player, record: PlayerRecord)
+		if not mailbox_wakeups_enabled or recordstore_v2 == nil then
+			return
+		end
+		if sessions[player] ~= record or closing_records[record] or departed_players[player] then
+			return
+		end
+
+		local adapter_call_ok, store, store_result, store_message = pcall(function()
+			return record:CreateMailboxStoreAdapter()
+		end)
+		if not adapter_call_ok or store == nil then
+			warn("[PlayerData]", player.Name, "could not create its V2 mailbox store adapter",
+				if adapter_call_ok then tostring(store_message or store_result) else tostring(store))
+			return
+		end
+
+		local owner_call_ok, owner = pcall(function()
+			return record:GetMailboxOwner()
+		end)
+		if not owner_call_ok or type(owner) ~= "table" then
+			warn("[PlayerData]", player.Name, "could not resolve its V2 mailbox owner",
+				if owner_call_ok then "invalid mailbox owner" else tostring(owner))
+			return
+		end
+
+		local mailbox_call_ok, mailbox = pcall(function()
+			return recordstore_v2.Mailbox.new(store, owner, {
+				active_record = record,
+				activation_guard = function(_operation: string)
+					local allowed = sessions[player] == record
+						and not closing_records[record]
+						and not departed_players[player]
+						and not shutting_down
+						and record_is_open(record)
+					return allowed, if allowed then nil else "PlayerData session is not active"
+				end,
+			})
+		end)
+		if not mailbox_call_ok or type(mailbox) ~= "table" then
+			warn("[PlayerData]", player.Name, "could not construct its V2 mailbox",
+				if mailbox_call_ok then "mailbox constructor returned no instance" else tostring(mailbox))
+			return
+		end
+
+		local bind_call_ok, bind_result, bind_message = pcall(function()
+			return record:BindMailboxV2Async(mailbox)
+		end)
+		if not bind_call_ok or bind_result ~= "success" then
+			warn("[PlayerData]", player.Name, "V2 mailbox binding was not confirmed",
+				if bind_call_ok then tostring(bind_message or bind_result) else tostring(bind_result))
+			return
+		end
+
+		if wakeup_acceleration == nil then
+			return
+		end
+
+		local function process_mailbox_message(payload: unknown, message_value: any, context: unknown)
+			if type(message_value) ~= "table"
+				or type(message_value.Type) ~= "string"
+				or type(message_value.Id) ~= "string"
+				or type(message_value.Attempts) ~= "number"
+				or type(message_value.CreatedAt) ~= "number"
+			then
+				return false, "V2 mailbox returned a malformed message snapshot"
+			end
+			return dispatch_queue_message(
+				player,
+				record,
+				message_value.Type,
+				payload,
+				message_value.Attempts,
+				message_value.Id,
+				if type(message_value.SenderJobId) == "string" then message_value.SenderJobId else "",
+				message_value.CreatedAt,
+				context
+			)
+		end
+
+		local registration_call_ok, registered, registration_or_error = pcall(function()
+			return recordstore_v2.BindMailboxWakeups(
+				wakeup_acceleration,
+				owner,
+				mailbox,
+				process_mailbox_message,
+				CONFIG.mailbox_max_messages_per_wake
+			)
+		end)
+		if not registration_call_ok or registered ~= true then
+			warn("[PlayerData]", player.Name, "V2 mailbox wake-up registration failed",
+				if registration_call_ok then tostring(registration_or_error) else tostring(registered))
+			return
+		end
+		if type(registration_or_error) ~= "table"
+			or type(registration_or_error.Disconnect) ~= "function"
+		then
+			warn("[PlayerData]", player.Name, "V2 mailbox wake-up registration returned no disconnect handle")
+			return
+		end
+		wakeup_registrations[record] = registration_or_error
+	end
 
 	local function merge_pending(record: PlayerRecord, changes: {[string]: DataValue})
 		local pending = pending_changes[record]
@@ -2032,6 +2309,7 @@ local function new(dependencies: Dependencies?): Controller
 	end
 
 	local function close_record(player: Player, record: PlayerRecord)
+		disconnect_mailbox_wakeup(record)
 		local call_ok, result, message = pcall(function()
 			return record:Close()
 		end)
@@ -2181,6 +2459,28 @@ local function new(dependencies: Dependencies?): Controller
 				takeover_enabled = takeover_enabled,
 				durable_queue_enabled = durable_queue_enabled,
 				transactional_operations_enabled = transactional_operations_enabled,
+				on_queue_message = if mailbox_wakeups_enabled then function(
+					message_type, payload, attempts, message_id, sender_job_id, created_at
+				)
+					if event_record == nil then
+						return false, "PlayerData Record is not initialized"
+					end
+					return dispatch_queue_message(
+						player, event_record, message_type, payload, attempts,
+						message_id, sender_job_id, created_at, nil
+					)
+				end else nil,
+				on_queue_message_async = if mailbox_wakeups_enabled then function(
+					message_type, payload, attempts, message_id, sender_job_id, created_at, context
+				)
+					if event_record == nil then
+						return false, "PlayerData Record is not initialized"
+					end
+					return dispatch_queue_message(
+						player, event_record, message_type, payload, attempts,
+						message_id, sender_job_id, created_at, context
+					)
+				end else nil,
 				lease_duration = CONFIG.lease_duration,
 				lease_renewal = CONFIG.lease_renewal,
 				retry_attempts = CONFIG.retry_attempts,
@@ -2413,6 +2713,7 @@ local function new(dependencies: Dependencies?): Controller
 			return
 		end
 
+		bind_player_mailbox(player, record)
 		set_load_status(player, "Loaded")
 	end
 
@@ -2439,6 +2740,7 @@ local function new(dependencies: Dependencies?): Controller
 			return
 		end
 
+		disconnect_mailbox_wakeup(record)
 		closing_records[record] = true
 		local deadline = shared_deadline or (os.clock() + CONFIG.shutdown_deadline)
 		while flush_running[record] and os.clock() < deadline do
@@ -2490,6 +2792,7 @@ local function new(dependencies: Dependencies?): Controller
 		end
 		started = true
 		configure_advanced_scheduler()
+		initialize_mailbox_wakeups()
 
 		player_added_connection = players.PlayerAdded:Connect(function(player)
 			if not shutting_down then
@@ -2564,6 +2867,20 @@ local function new(dependencies: Dependencies?): Controller
 				break
 			end
 			scheduler.wait(0.05)
+		end
+
+		for record in pairs(wakeup_registrations) do
+			disconnect_mailbox_wakeup(record)
+		end
+		if wakeup_acceleration ~= nil then
+			local acceleration = wakeup_acceleration
+			wakeup_acceleration = nil
+			local stop_ok, stop_error = pcall(function()
+				acceleration:Stop()
+			end)
+			if not stop_ok then
+				warn("[PlayerData] V2 mailbox acceleration shutdown failed", tostring(stop_error))
+			end
 		end
 		return true
 	end
