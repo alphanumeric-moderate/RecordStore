@@ -1226,14 +1226,11 @@ local function new(dependencies: Dependencies?): Controller
 				if not process_call_ok then
 					warn("[PlayerData]", player.Name, "V2 mailbox wake-up processing raised",
 						tostring(process_result))
-				else
-					local process_code = process_result :: RecordStore.ResultCode
-					if process_code ~= "processed" and process_code ~= "empty"
-						and process_code ~= "busy" and should_warn_result(process_code)
-					then
-						warn("[PlayerData]", player.Name, "V2 mailbox wake-up processing failed",
-							process_code, process_message or "")
-					end
+				elseif process_result ~= "processed" and process_result ~= "empty"
+					and process_result ~= "busy"
+				then
+					warn("[PlayerData]", player.Name, "V2 mailbox wake-up processing failed",
+						tostring(process_result), process_message or "")
 				end
 			end)
 		end)
