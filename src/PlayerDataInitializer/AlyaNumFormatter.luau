@@ -19,6 +19,7 @@ local function resolve_api()
 		or type(loaded.new) ~= "function"
 		or type(loaded.fix) ~= "function"
 		or type(loaded.toString) ~= "function"
+		or type(loaded.fromString) ~= "function"
 		or type(loaded.changeDecimalPoints) ~= "function"
 	then
 		error("ReplicatedStorage.AlyaNum does not expose the required API", 2)
@@ -188,6 +189,20 @@ function Formatter.format(value, options)
 	local ok, formatted = pcall(function() return api.toString(number) end)
 	api.changeDecimalPoints(previous_decimals)
 	if not ok then error("AlyaNum formatting failed: " .. tostring(formatted), 2) end
+
+	local coefficient, suffix = string.match(formatted, "^([+-]?[%d%.]+)([%a][%w]*)$")
+	if coefficient ~= nil and suffix ~= nil
+		and string.lower(string.sub(suffix, 1, 1)) ~= "e"
+		and math.abs(tonumber(coefficient) or 0) >= 1000
+	then
+		local normalized_ok, normalized = pcall(function()
+			return api.toString(api.fromString(formatted))
+		end)
+		if normalized_ok and type(normalized) == "string" then
+			formatted = normalized
+		end
+	end
+
 	if trim == false and decimals > 0 then
 		formatted = pad_fraction(formatted, decimals)
 	end

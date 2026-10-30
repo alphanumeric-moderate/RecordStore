@@ -81,14 +81,13 @@ jobs:
               r"require\s*\(\s*script\.Parent\.RecordStoreScheduler\s*\)",
               r"require\s*\(\s*script\.Parent\.MailboxV2\s*\)",
           ]
-          required_markers = [
-              "-- BEGIN EMBEDDED SCHEDULER MODULE",
-              "-- END EMBEDDED SCHEDULER MODULE",
-              "-- BEGIN EMBEDDED MAILBOX V2 MODULE",
-              "-- END EMBEDDED MAILBOX V2 MODULE",
+          required_declarations = [
+              "local RecordStoreScheduler: EmbeddedSchedulerModule = {} :: EmbeddedSchedulerModule",
+              "local MailboxV2 = {}",
+              "function MailboxV2.new(",
           ]
           violations = [pattern for pattern in forbidden if re.search(pattern, source)]
-          missing = [marker for marker in required_markers if source.count(marker) != 1]
+          missing = [declaration for declaration in required_declarations if source.count(declaration) != 1]
           separate = [
               str(path) for path in (
                   root / "RecordStoreScheduler.luau",
@@ -100,7 +99,7 @@ jobs:
                   print("RecordStore must not require separate scheduler/mailbox implementations:")
                   print("\n".join(violations))
               if missing:
-                  print("Missing or duplicated embedded implementation markers:")
+                  print("Missing or duplicated embedded scheduler/mailbox declarations:")
                   print("\n".join(missing))
               if separate:
                   print("Separate implementation files must not remain:")
