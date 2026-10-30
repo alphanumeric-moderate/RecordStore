@@ -17661,11 +17661,17 @@ end
 
 		local deadline, deadline_error = resolve_operation_deadline(state.options.operation_deadline)
 		if deadline == nil then return nil, "invalid", deadline_error end
-		if not was_unknown and state.change_sequence ~= state.saved_change_sequence then
-			local flush_code, flush_message = save_internal(state, "transaction-prerequisite", deadline, nil)
-			if flush_code ~= "saved" then
-				local status: TransactionStatus = if flush_code == "unknown" then "unknown" else "retryable"
-				return nil, status, flush_message or "dirty profile data could not be flushed before transaction"
+		if not was_unknown then
+			while state.change_sequence ~= state.saved_change_sequence do
+				local flush_code, flush_message = save_internal(state, "transaction-prerequisite", deadline, nil)
+				if flush_code ~= "saved" then
+					local status: TransactionStatus = if flush_code == "unknown" then "unknown" else "retryable"
+					return nil, status, flush_message or "dirty profile data could not be flushed before transaction"
+				end
+				track_external_data_mutation(state)
+				if state.change_sequence ~= state.saved_change_sequence and now_local() >= deadline then
+					return nil, "retryable", "profile data kept changing during the transaction prerequisite flush"
+				end
 			end
 		end
 		if state.state ~= "active" and not was_unknown then return nil, "fenced", "record is no longer active" end
