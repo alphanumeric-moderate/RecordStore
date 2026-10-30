@@ -264,7 +264,6 @@ do
 
 	local received = {}
 	local acceleration_options = nil
-	local wakeup_handler = nil
 	local registration_callback = nil
 	local registration = nil
 	local stop_calls = 0
@@ -301,7 +300,11 @@ do
 				"PlayerDataCore did not supply the embedded Mailbox V2 module")
 			assert(options.acceleration_module == fake_acceleration_factory,
 				"PlayerDataCore did not pass the acceleration adapter to RecordStoreV2")
-			local api = {}
+			local api = {
+				Canonicalize = function(owner)
+					return owner.profile_key
+				end,
+			}
 			api.Mailbox = {
 				new = function(store, owner, mailbox_options)
 					assert(store ~= nil, "PlayerDataCore did not create a mailbox storage adapter")
@@ -311,33 +314,10 @@ do
 						self.wakeups = adapter
 						return true, nil
 					end
-					function mailbox:ProcessNextAsync(handler)
-						return handler(
-							{ amount = 1 },
-							{
-								Type = "AwardKill",
-								Id = "mailbox-message-1",
-								Attempts = 1,
-								SenderJobId = "remote-server",
-								CreatedAt = 12345,
-							},
-							{ lease = "test-context" }
-						)
-					end
 					mailbox._owner = owner
 					return mailbox
 				end,
 			}
-			function api.BindMailboxWakeups(acceleration, owner, mailbox, handler, max_messages_per_wake)
-				assert(acceleration == fake_acceleration, "wrong acceleration instance was bound")
-				assert(owner == mailbox._owner, "mailbox wake-ups used a different owner identity")
-				assert(max_messages_per_wake == 4, "unexpected per-wake message cap")
-				assert(mailbox:BindWakeups(acceleration), "mailbox rejected its wake-up adapter")
-				wakeup_handler = handler
-				return acceleration:Register(owner, function()
-					return mailbox:ProcessNextAsync(handler)
-				end)
-			end
 			return api
 		end,
 	}
@@ -404,8 +384,10 @@ do
 		"PlayerDataCore did not bind the mailbox to the exact active Record")
 	local active_allowed, active_guard_error = captured_mailbox_options.activation_guard("enqueue")
 	assert(active_allowed == true, active_guard_error)
-	assert(type(wakeup_handler) == "function" and registration ~= nil and registration.Connected,
-		"PlayerDataCore did not register the V2 mailbox wake-up handler")
+	assert(wakeup_harness.record._mailbox_v2.wakeups == fake_acceleration,
+		"PlayerDataCore did not bind the wake-up adapter to Mailbox V2")
+	assert(registration ~= nil and registration.Connected,
+		"PlayerDataCore did not register the V2 mailbox wake-up callback")
 
 	local legacy_ok, legacy_error = wakeup_record_options.on_queue_message(
 		"AwardKill", { amount = 2 }, 1, "legacy-message-1", "legacy-server", 123
@@ -416,26 +398,17 @@ do
 		"AwardKill", { amount = 3 }, 2, "legacy-message-2", "legacy-server", 124, async_context
 	)
 	assert(async_ok, async_error)
-	local wake_context = { source = "v2-wakeup" }
-	local wake_ok, wake_error = wakeup_handler(
-		{ amount = 4 },
-		{
-			Type = "AwardKill",
-			Id = "mailbox-message-2",
-			Attempts = 3,
-			SenderJobId = "remote-server",
-			CreatedAt = 125,
-		},
-		wake_context
-	)
-	assert(wake_ok, wake_error)
-	assert(#received == 3, "queue messages were not routed through the application handler")
-	assert(received[1].player == wakeup_harness.player and received[3].context == wake_context,
-		"queue handler did not receive the player and V2 delivery context")
+	assert(#received == 2, "legacy queue messages were not routed through the application handler")
+	assert(received[1].player == wakeup_harness.player and received[2].context == async_context,
+		"legacy queue handler did not receive the player and delivery context")
 
 	registration_callback()
-	assert(#received == 4 and received[4].message_id == "mailbox-message-1",
-		"registered wake-up callback did not drain the mailbox through the application handler")
+	assert(wakeup_harness.record._queue_process_calls == 1
+		and wakeup_harness.record._queue_process_limit == 4,
+		"wake-up callback did not enter Record:ProcessQueueAsync with the configured batch cap")
+	assert(#received == 3 and received[3].message_id == "mailbox-message-1"
+		and received[3].context.source == "record-process",
+		"wake-up callback did not drain through RecordStore's queue processing path")
 
 	wakeup_harness.players.PlayerRemoving:Fire(wakeup_harness.player)
 	task.wait(0.1)

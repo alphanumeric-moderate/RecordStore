@@ -293,6 +293,28 @@ end
 			return "success", nil
 		end
 
+		function record:ProcessQueueAsync(max_messages)
+			self._queue_process_calls = (self._queue_process_calls or 0) + 1
+			self._queue_process_limit = max_messages
+			local handler = self._options.on_queue_message_async
+			if type(handler) ~= "function" then
+				return "invalid", "asynchronous queue handler is not configured"
+			end
+			local accepted, message = handler(
+				"AwardKill",
+				{ amount = 1 },
+				1,
+				"mailbox-message-1",
+				"remote-server",
+				12345,
+				{ source = "record-process" }
+			)
+			if not accepted then
+				return "budget", message
+			end
+			return "processed", "1"
+		end
+
 		function record:Stats()
 			return { busy = 0 }
 		end

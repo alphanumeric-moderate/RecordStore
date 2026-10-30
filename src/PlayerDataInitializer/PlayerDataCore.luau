@@ -1036,7 +1036,7 @@ local function new(dependencies: Dependencies?): Controller
 			if type(v2_api) ~= "table"
 				or type(v2_api.Mailbox) ~= "table"
 				or type(v2_api.Mailbox.new) ~= "function"
-				or type(v2_api.BindMailboxWakeups) ~= "function"
+				or type(v2_api.Canonicalize) ~= "function"
 			then
 				error("RecordStoreV2 returned an incomplete mailbox wake-up API")
 			end
@@ -1195,46 +1195,44 @@ local function new(dependencies: Dependencies?): Controller
 			return
 		end
 
-		local function process_mailbox_message(payload: unknown, message_value: any, context: unknown)
-			if type(message_value) ~= "table" then
-				return false, "V2 mailbox returned a malformed message snapshot"
-			end
-			local message_type = message_value.Type
-			local message_id = message_value.Id
-			local attempts = message_value.Attempts
-			local created_at = message_value.CreatedAt
-			local sender_job_id: string = if type(message_value.SenderJobId) == "string"
-				then message_value.SenderJobId :: string
-				else ""
-			if type(message_type) ~= "string"
-				or type(message_id) ~= "string"
-				or type(attempts) ~= "number"
-				or type(created_at) ~= "number"
-			then
-				return false, "V2 mailbox returned a malformed message snapshot"
-			end
-			local accepted, message = dispatch_queue_message(
-				player,
-				record,
-				message_type,
-				payload,
-				attempts,
-				message_id,
-				sender_job_id,
-				created_at,
-				context
-			)
-			return accepted, message or ""
+		local wakeups_bound_call_ok, wakeups_bound, wakeups_bind_error = pcall(function()
+			return mailbox:BindWakeups(wakeup_acceleration)
+		end)
+		if not wakeups_bound_call_ok or wakeups_bound ~= true then
+			warn("[PlayerData]", player.Name, "could not bind the V2 mailbox wake-up adapter",
+				if wakeups_bound_call_ok then tostring(wakeups_bind_error) else tostring(wakeups_bound))
+			return
+		end
+
+		local owner_text_call_ok, owner_text = pcall(function()
+			return recordstore_v2.Canonicalize(owner)
+		end)
+		if not owner_text_call_ok or type(owner_text) ~= "string" then
+			warn("[PlayerData]", player.Name, "could not canonicalize its V2 mailbox owner",
+				if owner_text_call_ok then "canonical owner identity is invalid" else tostring(owner_text))
+			return
 		end
 
 		local registration_call_ok, registered, registration_or_error = pcall(function()
-			return recordstore_v2.BindMailboxWakeups(
-				wakeup_acceleration,
-				owner,
-				mailbox,
-				process_mailbox_message,
-				CONFIG.mailbox_max_messages_per_wake
-			)
+			return wakeup_acceleration:Register(owner_text, function()
+				if sessions[player] ~= record or closing_records[record]
+					or departed_players[player] or shutting_down
+				then
+					return
+				end
+				local process_call_ok, process_result, process_message = pcall(function()
+					return record:ProcessQueueAsync(CONFIG.mailbox_max_messages_per_wake)
+				end)
+				if not process_call_ok then
+					warn("[PlayerData]", player.Name, "V2 mailbox wake-up processing raised",
+						tostring(process_result))
+				elseif process_result ~= "processed" and process_result ~= "empty"
+					and process_result ~= "busy" and should_warn_result(process_result)
+				then
+					warn("[PlayerData]", player.Name, "V2 mailbox wake-up processing failed",
+						process_result, process_message or "")
+				end
+			end)
 		end)
 		if not registration_call_ok or registered ~= true then
 			warn("[PlayerData]", player.Name, "V2 mailbox wake-up registration failed",
