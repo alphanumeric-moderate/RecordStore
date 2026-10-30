@@ -77,6 +77,10 @@ local preflush = new_record("direct-edit-before-transaction")
 local preflush_revision = preflush:GetRevision()
 local preflush_data_ref = preflush.Data :: { [string]: any }
 preflush_data_ref.settings.label = "before-transaction"
+RecordStore.Mock.set_before_next_update(function()
+	local data = preflush.Data :: { [string]: any }
+	data.settings.label = "during-prerequisite-flush"
+end)
 local preflush_result, preflush_status, preflush_message = preflush:TransactAsync(
 	"flush-direct-edit-before-transaction",
 	increment_coins,
@@ -87,13 +91,13 @@ assert(type(preflush_result) == "table", "pre-flush transaction did not return i
 local preflush_data = preflush:Get() :: { [string]: any }
 assert(preflush_data.coins == 20 and preflush_data.transaction_marker == true,
 	"transaction did not apply after the direct-edit prerequisite flush")
-assert(preflush_data.settings.label == "before-transaction",
+assert(preflush_data.settings.label == "during-prerequisite-flush",
 	"direct record.Data edit made before TransactAsync was not flushed")
 assert(not preflush:IsDirty(), "prerequisite direct edit should be included in the transaction's clean baseline")
 local preflush_durable = RecordStore.Mock.get_record_raw(store_name, scope, "direct-edit-before-transaction") :: { [string]: any }
-assert(preflush_durable.revision == preflush_revision + 2,
+assert(preflush_durable.revision == preflush_revision + 3,
 	"direct edit should flush once before the transaction commit")
-assert(((preflush_durable.data :: { [string]: any }).settings :: { [string]: any }).label == "before-transaction",
+assert(((preflush_durable.data :: { [string]: any }).settings :: { [string]: any }).label == "during-prerequisite-flush",
 	"prerequisite flush did not persist the direct edit")
 local preflush_close, preflush_close_message = preflush:Close()
 assert(preflush_close == "closed" or preflush_close == "fenced", preflush_close_message)
