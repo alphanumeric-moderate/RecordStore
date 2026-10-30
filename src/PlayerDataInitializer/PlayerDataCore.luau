@@ -401,7 +401,7 @@ local function normalize_runtime_field_value(
 	return nil
 end
 
-local function encode_player_data(
+local function _encode_player_data(
 	data: PlayerData,
 	integer_infinity_factory: typeof(IntegerInfinityValueFactory)?,
 	alyanum_factory: AlyaNumValueFactoryAPI?

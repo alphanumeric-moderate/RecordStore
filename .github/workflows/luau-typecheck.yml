@@ -136,7 +136,9 @@ jobs:
       - name: Type-check all source modules using their declared modes
         run: |
           set -euo pipefail
-          mapfile -t modules < <(find src -type f -name '*.luau' -print | sort)
+          # AlyaNum is pinned upstream source. Its runtime syntax is exercised by the Lune
+          # regressions; its generic metatable annotations are not supported by this LSP version.
+          mapfile -t modules < <(find src -type f -name '*.luau' ! -path 'src/AlyaNum/*' -print | sort)
           test "${#modules[@]}" -gt 0
           printf 'Analyzing %s Luau source modules using declared modes\n' "${#modules[@]}"
           luau-lsp analyze --platform=roblox --definitions=/tmp/globalTypes.d.luau --sourcemap=/tmp/sourcemap.json "${modules[@]}"

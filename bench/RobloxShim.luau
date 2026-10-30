@@ -188,15 +188,13 @@ local script = {
 local function load_scheduler(): any
 	if loaded_scheduler_module ~= nil then return loaded_scheduler_module end
 	local source = fs.readFile(SOURCE_PATH)
-	local begin_marker = "-- BEGIN EMBEDDED SCHEDULER MODULE"
-	local end_marker = "-- END EMBEDDED SCHEDULER MODULE"
-	local begin_position = string.find(source, begin_marker, 1, true)
-	local end_position = if begin_position ~= nil
-		then string.find(source, end_marker, begin_position + #begin_marker, true)
-		else nil
-	assert(begin_position ~= nil and end_position ~= nil and end_position > begin_position,
-		"embedded scheduler implementation markers are missing or out of order")
-	local embedded_source = string.sub(source, begin_position, end_position - 1)
+	local scheduler_declaration = "local RecordStoreScheduler: EmbeddedSchedulerModule = {} :: EmbeddedSchedulerModule"
+	local mailbox_declaration = "local MailboxV2 = {}"
+	local scheduler_position = string.find(source, scheduler_declaration, 1, true)
+	local mailbox_position = string.find(source, mailbox_declaration, 1, true)
+	assert(scheduler_position ~= nil and mailbox_position ~= nil and mailbox_position > scheduler_position,
+		"embedded scheduler and mailbox declarations are missing or out of order")
+	local embedded_source = string.sub(source, 1, mailbox_position - 1)
 	local chunk = luau.load(embedded_source .. "\nreturn RecordStoreScheduler\n", {
 		debugName = "RecordStoreScheduler",
 		environment = Shim.environment,

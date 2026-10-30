@@ -183,7 +183,6 @@ local function serialize_value(value)
 	if is_special(value) then
 		stored_value = { kind = "special", name = value.name }
 	else
-		local api = resolve_api()
 		local serialized_base = {
 			sign = value.sign,
 			multiplicand = value.multiplicand,
