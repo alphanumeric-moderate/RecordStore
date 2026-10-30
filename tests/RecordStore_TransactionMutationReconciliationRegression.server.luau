@@ -8,7 +8,7 @@ RecordStore.Mock.reset()
 local store_name = "RecordStore_TransactionMutationReconciliation"
 local scope = "global"
 
-local function new_record(key: string)
+local function new_record(key: string, initial_data: RecordStore.JsonValue?)
 	local record = RecordStore.Mock.new(store_name, scope, key, {
 		schema_version = 1,
 		autosave_interval = 1000,
@@ -18,7 +18,7 @@ local function new_record(key: string)
 		retry_attempts = 1,
 		transactional_operations_enabled = true,
 	})
-	local opened, message = record:Open({
+	local opened, message = record:Open(initial_data or {
 		coins = 10,
 		settings = { label = "initial" },
 	})
@@ -70,6 +70,76 @@ assert(((committed_durable.data :: { [string]: any }).settings :: { [string]: an
 	"later save did not persist the concurrent local mutation")
 local committed_close, committed_close_message = committed:Close()
 assert(committed_close == "closed" or committed_close == "fenced", committed_close_message)
+
+RecordStore.Mock.reset()
+
+local preflush = new_record("direct-edit-before-transaction")
+local preflush_revision = preflush:GetRevision()
+(preflush.Data :: { [string]: any }).settings.label = "before-transaction"
+local preflush_result, preflush_status, preflush_message = preflush:TransactAsync(
+	"flush-direct-edit-before-transaction",
+	increment_coins,
+	{ request = { kind = "increment-coins", amount = 10 } }
+)
+assert(preflush_status == "committed", preflush_message)
+assert(type(preflush_result) == "table", "pre-flush transaction did not return its result")
+local preflush_data = preflush:Get() :: { [string]: any }
+assert(preflush_data.coins == 20 and preflush_data.transaction_marker == true,
+	"transaction did not apply after the direct-edit prerequisite flush")
+assert(preflush_data.settings.label == "before-transaction",
+	"direct record.Data edit made before TransactAsync was not flushed")
+assert(not preflush:IsDirty(), "prerequisite direct edit should be included in the transaction's clean baseline")
+local preflush_durable = RecordStore.Mock.get_record_raw(store_name, scope, "direct-edit-before-transaction") :: { [string]: any }
+assert(preflush_durable.revision == preflush_revision + 2,
+	"direct edit should flush once before the transaction commit")
+assert(((preflush_durable.data :: { [string]: any }).settings :: { [string]: any }).label == "before-transaction",
+	"prerequisite flush did not persist the direct edit")
+local preflush_close, preflush_close_message = preflush:Close()
+assert(preflush_close == "closed" or preflush_close == "fenced", preflush_close_message)
+
+RecordStore.Mock.reset()
+
+local array_record = new_record("array-mutation-during-commit", {
+	coins = 10,
+	inventory = { "first", "second" },
+	settings = { label = "initial" },
+})
+local function append_transaction_item(
+	current: RecordStore.JsonValue?,
+	_input: RecordStore.JsonValue?
+): (RecordStore.JsonValue?, RecordStore.JsonValue?)
+	if type(current) ~= "table" then return nil, nil end
+	local data = table.clone(current :: { [string]: RecordStore.JsonValue })
+	local inventory = table.clone(data.inventory :: { RecordStore.JsonValue })
+	table.insert(inventory, "transaction-item")
+	data.inventory = inventory
+	data.coins = (data.coins :: number) + 10
+	return data, { coins = data.coins }
+end
+RecordStore.Mock.set_before_next_update(function()
+	local data = array_record.Data :: { [string]: any }
+	table.remove(data.inventory, 1)
+end)
+local array_result, array_status, array_message = array_record:TransactAsync(
+	"array-merge-is-atomic",
+	append_transaction_item,
+	{ request = { kind = "array-update", amount = 10 } }
+)
+assert(array_status == "committed", array_message)
+assert(type(array_result) == "table", "array transaction did not return its result")
+local array_data = array_record:Get() :: { [string]: any }
+assert(array_data.coins == 20, "array reconciliation lost the non-array transaction update")
+assert(#array_data.inventory == 1 and array_data.inventory[1] == "second",
+	"array reconciliation must preserve the newer local array atomically without creating holes")
+assert(array_record:IsDirty(), "concurrent array mutation must remain dirty")
+local array_save, array_save_message = array_record:Save("transaction-array-atomic")
+assert(array_save == "saved", array_save_message)
+local array_durable = RecordStore.Mock.get_record_raw(store_name, scope, "array-mutation-during-commit") :: { [string]: any }
+local durable_inventory = (array_durable.data :: { [string]: any }).inventory :: { string }
+assert(#durable_inventory == 1 and durable_inventory[1] == "second",
+	"array save produced a sparse or incorrectly merged durable array")
+local array_close, array_close_message = array_record:Close()
+assert(array_close == "closed" or array_close == "fenced", array_close_message)
 
 RecordStore.Mock.reset()
 
