@@ -52,6 +52,7 @@ for _, path in {
 	"tests/PlayerDataSetRegression.server.luau",
 	"tests/IntegerInfinityValueRegression.server.luau",
 	"tests/RecordStore_EventQueueRegression.server.luau",
+	"tests/RecordStore_TransactionMutationReconciliationRegression.server.luau",
 	"tests/PurchaseReceiptProcessorRegression.server.luau",
 	"bench/playerdata_set_harness.luau",
 	"bench/playerdata_set_paths.bench.luau",
@@ -98,6 +99,7 @@ Shim.run_script("bench/run_services_regression.luau")
 Shim.run_script("bench/run_outbox_adapter_unit_regression.luau")
 Shim.run_script("tests/RecordStore_OpenCorrupt_CompatibilityRegression.server.luau")
 Shim.run_script("tests/RecordStore_EventQueueRegression.server.luau")
+Shim.run_script("tests/RecordStore_TransactionMutationReconciliationRegression.server.luau")
 Shim.run_script("tests/RecordStore_NonFiniteNumbersRegression.server.luau")
 Shim.run_script("tests/RecordStore_LegacyPayloadRegression.server.luau")
 Shim.run_script("tests/RecordStore_UnknownSaveRecoveryRegression.server.luau")

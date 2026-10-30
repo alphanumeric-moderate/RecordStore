@@ -6970,7 +6970,13 @@ type InternalState = {
 	saved_change_sequence: number,
 	durable_lease_until: number,
 	pending_operation: PendingDurableOperation?,
-	pending_transaction: { operation_id: string, kind: string, request_identity: string }?,
+	pending_transaction: {
+		operation_id: string,
+		kind: string,
+		request_identity: string,
+		captured_change_sequence: number?,
+		base_data: JsonValue?,
+	}?,
 	next_reconciliation: number,
 	last_reconciliation_category: string?,
 	durability_risk_active: boolean?,
@@ -13367,10 +13373,11 @@ end
 
 local function update(self: Record, callback: (JsonValue?) -> JsonValue?): (ResultCode, string?)
 	local state = private[self]
+	local transaction_recovery = state ~= nil and state.state == "unknown" and state.pending_transaction ~= nil
 	if state ~= nil then
 		track_external_data_mutation(state)
 	end
-	if state == nil or state.state ~= "active" then
+	if state == nil or (state.state ~= "active" and not transaction_recovery) then
 		return "fenced", "record is not actively owned"
 	end
 	local backpressure = scheduler_activation.mutation_backpressure_reason(state)
@@ -17493,6 +17500,56 @@ RecordStore._internals.transact = (function()
 		return prepared, nil
 	end
 
+local function is_dense_transaction_array(value: any): boolean
+	if type(value) ~= "table" then return false end
+	local count = 0
+	local maximum = 0
+	for key in pairs(value) do
+		if type(key) ~= "number" or not math.isfinite(key) or math.floor(key) ~= key or key < 1 then
+			return false
+		end
+		count += 1
+		maximum = math.max(maximum, key)
+	end
+	return count > 0 and count == maximum
+end
+
+local function merge_transaction_local_changes(
+	base: JsonValue,
+	local_value: JsonValue,
+	durable_value: JsonValue
+): JsonValue
+	if data_values_equal(local_value, base) then
+		return copy_value(durable_value) :: JsonValue
+	end
+	if is_dense_transaction_array(base) or is_dense_transaction_array(local_value) or is_dense_transaction_array(durable_value) then
+		return copy_value(local_value) :: JsonValue
+	end
+	if type(base) == "table" and type(local_value) == "table" and type(durable_value) == "table" then
+		local base_table: any = base
+		local local_table: any = local_value
+		local merged: any = copy_value(durable_value)
+		for key, base_child in pairs(base_table) do
+			local local_child = local_table[key]
+			if not data_values_equal(local_child, base_child) then
+				local durable_child = merged[key]
+				if type(base_child) == "table" and type(local_child) == "table" and type(durable_child) == "table" then
+					merged[key] = merge_transaction_local_changes(base_child, local_child, durable_child)
+				else
+					merged[key] = copy_value(local_child)
+				end
+			end
+		end
+		for key, local_child in pairs(local_table) do
+			if base_table[key] == nil then
+				merged[key] = copy_value(local_child)
+			end
+		end
+		return merged :: JsonValue
+	end
+	return copy_value(local_value) :: JsonValue
+end
+
 	return function(
 		self: Record,
 		kind: string,
@@ -17584,8 +17641,9 @@ RecordStore._internals.transact = (function()
 		if state.pending_operation ~= nil then
 			return nil, "unknown", "a durable save/renew/release outcome is still unresolved"
 		end
+		local pending_transaction = if was_unknown then state.pending_transaction else nil
 		if was_unknown then
-			local pending = state.pending_transaction
+			local pending = pending_transaction
 			if pending == nil then return nil, "unknown", "record has an unrelated unresolved durable outcome" end
 			if pending.operation_id ~= operation_id or pending.kind ~= kind then
 				return nil, "unknown", "resolve the outstanding transaction before starting another operation"
@@ -17597,15 +17655,28 @@ RecordStore._internals.transact = (function()
 			return nil, "fenced", "record must have an active session"
 		end
 		if state.busy or state.queue_busy then return nil, "retryable", "record is busy" end
+		if not was_unknown then
+			track_external_data_mutation(state)
+		end
 		if state.token == nil then return nil, "fenced", "record has no active session token" end
 
 		local deadline, deadline_error = resolve_operation_deadline(state.options.operation_deadline)
 		if deadline == nil then return nil, "invalid", deadline_error end
-		if not was_unknown and state.change_sequence ~= state.saved_change_sequence then
-			local flush_code, flush_message = save_internal(state, "transaction-prerequisite", deadline, nil)
-			if flush_code ~= "saved" then
-				local status: TransactionStatus = if flush_code == "unknown" then "unknown" else "retryable"
-				return nil, status, flush_message or "dirty profile data could not be flushed before transaction"
+		if not was_unknown then
+			while state.change_sequence ~= state.saved_change_sequence do
+				local remaining = math.max(0, deadline - now_local())
+				if remaining <= 0 then
+					return nil, "retryable", "transaction deadline exceeded before prerequisite flush"
+				end
+				local flush_code, flush_message = save_internal(state, "transaction-prerequisite", remaining, nil)
+				if flush_code ~= "saved" then
+					local status: TransactionStatus = if flush_code == "unknown" then "unknown" else "retryable"
+					return nil, status, flush_message or "dirty profile data could not be flushed before transaction"
+				end
+				track_external_data_mutation(state)
+				if state.change_sequence ~= state.saved_change_sequence and now_local() >= deadline then
+					return nil, "retryable", "profile data kept changing during the transaction prerequisite flush"
+				end
 			end
 		end
 		if state.state ~= "active" and not was_unknown then return nil, "fenced", "record is no longer active" end
@@ -17613,8 +17684,12 @@ RecordStore._internals.transact = (function()
 		if token == nil then return nil, "fenced", "record has no active session token" end
 		local generation = state.generation
 		local expected_revision = state.revision
+		local captured_change_sequence = if pending_transaction ~= nil and pending_transaction.captured_change_sequence ~= nil
+			then pending_transaction.captured_change_sequence else state.change_sequence
 		local write_id = HttpService:GenerateGUID(false)
-		local old_data = copy_value(state.data)
+		local old_data = if pending_transaction ~= nil and pending_transaction.base_data ~= nil
+			then copy_value(pending_transaction.base_data) else copy_value(state.data)
+		if old_data == nil then return nil, "corrupt", "local profile data could not be copied before transaction" end
 		state.busy = true
 		state.state = "saving"
 		state.current_operation_id = write_id
@@ -17861,7 +17936,7 @@ RecordStore._internals.transact = (function()
 				final_message = update_message
 				if final_status ~= nil then break end
 			end
-			if decision == "duplicate" or decision == "conflict" or decision == "capacity" or decision == "fenced"
+			if decision == "conflict" or decision == "capacity" or decision == "fenced"
 				or decision == "corrupt" or decision == "retryable" or decision == "validation"
 			then
 				final_status = decision :: TransactionStatus
@@ -17902,16 +17977,10 @@ RecordStore._internals.transact = (function()
 				return true, nil
 			end
 
-			if decision == "duplicate" then
-				final_status = "duplicate"
-				final_result = decision_result
-				final_message = nil
-				break
-			end
 			if returned ~= nil then
 				local verified, verification_status = verify_committed(returned, info)
 				if verified then
-					final_status = "committed"
+					final_status = if decision == "duplicate" then "duplicate" else "committed"
 					break
 				end
 				if verification_status ~= nil then
@@ -17924,7 +17993,7 @@ RecordStore._internals.transact = (function()
 			if read_code == nil and raw_after ~= nil then
 				local verified, verification_status = verify_committed(raw_after, info_after)
 				if verified then
-					final_status = "committed"
+					final_status = if decision == "duplicate" then "duplicate" else "committed"
 					break
 				end
 				if verification_status ~= nil then
@@ -17951,18 +18020,80 @@ RecordStore._internals.transact = (function()
 		if confirmed ~= nil then
 			local confirmed_receipt = read_receipt(confirmed, kind, operation_id)
 			if confirmed_receipt == nil or confirmed_receipt.request_identity ~= request_identity then
+				track_external_data_mutation(state)
 				state.busy = false
 				state.state = "unknown"
-				state.pending_transaction = { operation_id = operation_id, kind = kind :: string, request_identity = request_identity }
+				state.pending_transaction = {
+					operation_id = operation_id,
+					kind = kind :: string,
+					request_identity = request_identity,
+					captured_change_sequence = captured_change_sequence,
+					base_data = copy_value(old_data),
+				}
 				state.next_reconciliation = now_local() + 0.25
 				return nil, "unknown", "transaction write was observed without a matching durable receipt"
 			end
+			track_external_data_mutation(state)
+			local local_changed_during_transaction = state.change_sequence ~= captured_change_sequence
+			local merged_data: JsonValue? = nil
+			if local_changed_during_transaction then
+				local local_data = copy_value(state.data)
+				if local_data == nil then
+					state.busy = false
+					state.state = "unknown"
+					state.pending_transaction = {
+						operation_id = operation_id,
+						kind = kind :: string,
+						request_identity = request_identity,
+						captured_change_sequence = captured_change_sequence,
+						base_data = copy_value(old_data),
+					}
+					state.next_reconciliation = now_local() + 0.25
+					return nil, "unknown", "newer local profile data could not be copied during transaction reconciliation"
+				end
+				merged_data = merge_transaction_local_changes(old_data :: JsonValue, local_data, confirmed.data :: JsonValue)
+			end
+			if merged_data ~= nil then
+				local merged_valid, merged_validation_message = validate_value(merged_data, state.options.validator)
+				if not merged_valid then
+					local reconciliation_message = "transaction is committed, but concurrent local changes could not be reconciled: "
+						.. (merged_validation_message or "merged data failed validation")
+					state.busy = false
+					state.state = "unknown"
+					state.current_operation_id = nil
+					state.pending_transaction = {
+						operation_id = operation_id,
+						kind = kind :: string,
+						request_identity = request_identity,
+						captured_change_sequence = captured_change_sequence,
+						base_data = copy_value(old_data),
+					}
+					state.next_reconciliation = now_local() + 0.25
+					state.last_reconciliation_category = "transaction_merge_validation"
+					state.last_error = reconciliation_message
+					return nil, "unknown", reconciliation_message
+				end
+			end
 			update_local_from_envelope(state, confirmed, confirmed_info)
-			state.saved_change_sequence = state.change_sequence
-			state.dirty_since_local = nil
+			if merged_data ~= nil then
+				state.data = merged_data
+				state.public_data_source = copy_value(merged_data)
+				if state.public_record ~= nil then
+					local public_record: any = state.public_record
+					public_record.Data = merged_data
+				end
+				state.saved_change_sequence = math.max(state.saved_change_sequence, captured_change_sequence)
+				mark_dirty(state)
+				state.save_requested = true
+				state.next_autosave = now_local()
+			else
+				state.saved_change_sequence = state.change_sequence
+				state.dirty_since_local = nil
+				state.dirty_age_is_lower_bound = false
+				state.next_autosave = now_local() + (state.options.autosave_interval or DEFAULT_AUTOSAVE_INTERVAL)
+			end
 			state.last_saved = make_durable_snapshot(confirmed, confirmed_info, "transaction:" .. kind)
 			state.last_successful_write_local = now_local()
-			state.next_autosave = now_local() + (state.options.autosave_interval or DEFAULT_AUTOSAVE_INTERVAL)
 			state.pending_transaction = nil
 			state.next_reconciliation = math.huge
 			state.last_reconciliation_category = nil
@@ -17977,20 +18108,21 @@ RecordStore._internals.transact = (function()
 			return final_result, final_status or "committed", nil
 		end
 
-		if final_status == "duplicate" then
-			state.busy = false
-			state.state = "active"
-			state.current_operation_id = nil
-			state.pending_transaction = nil
-			complete_deferred_takeover(state)
-			return final_result, "duplicate", final_message
-		end
 		local status: TransactionStatus = final_status or "unknown"
+		if was_unknown or status == "unknown" then
+			track_external_data_mutation(state)
+		end
 		state.busy = false
 		state.current_operation_id = nil
 		if was_unknown or status == "unknown" then
 			state.state = "unknown"
-			state.pending_transaction = { operation_id = operation_id, kind = kind :: string, request_identity = request_identity }
+			state.pending_transaction = {
+				operation_id = operation_id,
+				kind = kind :: string,
+				request_identity = request_identity,
+				captured_change_sequence = captured_change_sequence,
+				base_data = copy_value(old_data),
+			}
 			state.next_reconciliation = now_local() + 0.25
 			state.last_reconciliation_category = "transaction_outcome_unknown"
 		else
