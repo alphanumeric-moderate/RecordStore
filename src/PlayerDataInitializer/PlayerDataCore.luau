@@ -131,6 +131,9 @@ export type Dependencies = {
 	DurabilityMode: DurabilityMode?,
 	MaxDirtyAgeSeconds: number?,
 	LeaseRecoveryEnabled: boolean?,
+	MessagingEnabled: boolean?,
+	TakeoverEnabled: boolean?,
+	DurableQueueEnabled: boolean?,
 	TransactionalOperationsEnabled: boolean?,
 }
 
@@ -241,6 +244,19 @@ local CONFIG = {
 	durability_mode = ("balanced" :: DurabilityMode),
 	max_dirty_age_seconds = 180,
 	lease_recovery_enabled = false,
+	messaging_enabled = true,
+	takeover_enabled = true,
+	durable_queue_enabled = false,
+	transactional_operations_enabled = false,
+	advanced_scheduler = {
+		enabled = true,
+		rollout_percent = 100,
+		rollout_salt = "playerdatacore-scheduler-v1",
+		algorithm = "drr",
+		shadow_algorithm = "weighted",
+		shadow_enabled = true,
+		shadow_sample_rate = 0.1,
+	},
 	operation_deadline = 20,
 	load_retry_attempts = 4,
 	load_retry_window = 45,
@@ -614,8 +630,23 @@ local function new(dependencies: Dependencies?): Controller
 	local max_dirty_age_seconds: number = injected.MaxDirtyAgeSeconds or CONFIG.max_dirty_age_seconds
 	local lease_recovery_enabled: boolean = if injected.LeaseRecoveryEnabled ~= nil
 		then injected.LeaseRecoveryEnabled else CONFIG.lease_recovery_enabled
+	local messaging_enabled: boolean = if injected.MessagingEnabled ~= nil
+		then injected.MessagingEnabled else CONFIG.messaging_enabled
+	local takeover_enabled: boolean = if injected.TakeoverEnabled ~= nil
+		then injected.TakeoverEnabled else CONFIG.takeover_enabled
+	local durable_queue_enabled: boolean = if injected.DurableQueueEnabled ~= nil
+		then injected.DurableQueueEnabled else CONFIG.durable_queue_enabled
 	local transactional_operations_enabled: boolean = if injected.TransactionalOperationsEnabled ~= nil
-		then injected.TransactionalOperationsEnabled else false
+		then injected.TransactionalOperationsEnabled else CONFIG.transactional_operations_enabled
+	if type(messaging_enabled) ~= "boolean" then
+		error("MessagingEnabled must be a boolean")
+	end
+	if type(takeover_enabled) ~= "boolean" then
+		error("TakeoverEnabled must be a boolean")
+	end
+	if type(durable_queue_enabled) ~= "boolean" then
+		error("DurableQueueEnabled must be a boolean")
+	end
 	if type(transactional_operations_enabled) ~= "boolean" then
 		error("TransactionalOperationsEnabled must be a boolean")
 	end
@@ -644,6 +675,112 @@ local function new(dependencies: Dependencies?): Controller
 		return Instance.new(class_name)
 	end
 	local scheduler = injected.task or task
+
+	local function configure_advanced_scheduler(): boolean
+		local config = CONFIG.advanced_scheduler
+		if not config.enabled then return false end
+
+		local api = record_store :: any
+		local get_snapshot = api.get_scheduler_snapshot
+		local configure_policy = api.configure_scheduler_policy
+		local configure_rollout = api.configure_scheduler_rollout
+		local set_enabled = api.set_scheduler_enabled
+		if type(get_snapshot) ~= "function"
+			or type(configure_policy) ~= "function"
+			or type(configure_rollout) ~= "function"
+			or type(set_enabled) ~= "function"
+		then
+			if injected.RecordStore == nil then
+				warn("[PlayerData] advanced scheduler APIs are unavailable; retaining RecordStore's default scheduler")
+			end
+			return false
+		end
+
+		local snapshot_ok, snapshot = pcall(get_snapshot)
+		if not snapshot_ok or type(snapshot) ~= "table"
+			or type(snapshot.policy) ~= "table"
+			or type(snapshot.rollout) ~= "table"
+		then
+			warn("[PlayerData] advanced scheduler state could not be inspected; retaining the current scheduler state")
+			return false
+		end
+
+		local current_policy = snapshot.policy
+		if current_policy.algorithm ~= config.algorithm
+			or current_policy.shadow_algorithm ~= config.shadow_algorithm
+			or current_policy.shadow_enabled ~= config.shadow_enabled
+			or current_policy.shadow_sample_rate ~= config.shadow_sample_rate
+		then
+			local revision = current_policy.revision
+			if type(revision) ~= "number" or not math.isfinite(revision) then
+				warn("[PlayerData] advanced scheduler policy revision is invalid")
+				return false
+			end
+			local policy_result: string? = nil
+			local policy_message: string? = nil
+			local policy_call_ok = pcall(function()
+				policy_result, policy_message = configure_policy({
+					revision = revision + 1,
+					algorithm = config.algorithm,
+					shadow_algorithm = config.shadow_algorithm,
+					shadow_enabled = config.shadow_enabled,
+					shadow_sample_rate = config.shadow_sample_rate,
+				})
+			end)
+			if not policy_call_ok or policy_result ~= "success" then
+				warn("[PlayerData] advanced scheduler policy was not applied", policy_message or policy_result or "unknown error")
+				return false
+			end
+		end
+
+		local current_rollout = snapshot.rollout
+		if current_rollout.percent ~= config.rollout_percent
+			or current_rollout.salt ~= config.rollout_salt
+		then
+			local revision = current_rollout.revision
+			if type(revision) ~= "number" or not math.isfinite(revision) then
+				warn("[PlayerData] advanced scheduler rollout revision is invalid")
+				return false
+			end
+			local rollout_result: string? = nil
+			local rollout_message: string? = nil
+			local rollout_call_ok = pcall(function()
+				rollout_result, rollout_message = configure_rollout({
+					revision = revision + 1,
+					percent = config.rollout_percent,
+					salt = config.rollout_salt,
+				})
+			end)
+			if not rollout_call_ok or rollout_result ~= "success" then
+				warn("[PlayerData] advanced scheduler rollout was not applied", rollout_message or rollout_result or "unknown error")
+				return false
+			end
+		end
+
+		local enable_call_ok, enabled_result = pcall(set_enabled, true)
+		if not enable_call_ok or enabled_result ~= true then
+			warn("[PlayerData] advanced scheduler activation failed", enabled_result or "unknown error")
+			return false
+		end
+
+		local verify_ok, verified = pcall(get_snapshot)
+		if not verify_ok or type(verified) ~= "table"
+			or verified.enabled ~= true
+			or type(verified.policy) ~= "table"
+			or verified.policy.algorithm ~= config.algorithm
+			or verified.policy.shadow_algorithm ~= config.shadow_algorithm
+			or verified.policy.shadow_enabled ~= config.shadow_enabled
+			or verified.policy.shadow_sample_rate ~= config.shadow_sample_rate
+			or type(verified.rollout) ~= "table"
+			or verified.rollout.percent ~= config.rollout_percent
+			or verified.rollout.salt ~= config.rollout_salt
+			or verified.rollout.cohort_included ~= true
+		then
+			warn("[PlayerData] advanced scheduler activation or configuration could not be confirmed")
+			return false
+		end
+		return true
+	end
 
 	local function new_int_value(): IntValue
 		local value = new_instance("IntValue")
@@ -2040,6 +2177,9 @@ local function new(dependencies: Dependencies?): Controller
 				durability_mode = durability_mode,
 				max_dirty_age_seconds = max_dirty_age_seconds,
 				lease_recovery_enabled = lease_recovery_enabled,
+				messaging_enabled = messaging_enabled,
+				takeover_enabled = takeover_enabled,
+				durable_queue_enabled = durable_queue_enabled,
 				transactional_operations_enabled = transactional_operations_enabled,
 				lease_duration = CONFIG.lease_duration,
 				lease_renewal = CONFIG.lease_renewal,
@@ -2349,6 +2489,7 @@ local function new(dependencies: Dependencies?): Controller
 			return false
 		end
 		started = true
+		configure_advanced_scheduler()
 
 		player_added_connection = players.PlayerAdded:Connect(function(player)
 			if not shutting_down then

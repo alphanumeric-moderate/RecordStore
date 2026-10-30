@@ -903,6 +903,26 @@ These checks do **not** establish complete RTBF for an application until its rea
 
 ### PlayerDataCore integration
 
+#### Runtime feature configuration
+
+`PlayerDataCore` explicitly configures the features that fit its player-session lifecycle:
+
+| Feature | Configuration | Status |
+| --- | --- | --- |
+| Cross-server session messaging | `messaging_enabled = true` | Enabled |
+| Session takeover requests | `takeover_enabled = true` | Enabled |
+| Durable legacy queue | `durable_queue_enabled = false` | Disabled until an application message handler is supplied |
+| Transactional operations | `transactional_operations_enabled = false` | Opt-in only; keep disabled until transaction/reconciliation acceptance passes |
+| Expired-lease recovery | `lease_recovery_enabled = false` | Opt-in only; requires live-service recovery acceptance |
+| Durability | `durability_mode = "balanced"`, `max_dirty_age_seconds = 180` | Enabled with bounded dirty-age tracking |
+| Advanced scheduler | DRR selector with weighted shadow comparison, 100% cohort rollout | Enabled on controller start |
+
+The advanced scheduler is configured through RecordStore's revisioned policy and rollout APIs. PlayerDataCore keeps DRR as the active selection algorithm and samples the weighted alternative at a 10% shadow rate. Shadow comparison does not change the active algorithm. The scheduler continues to use RecordStore's shared request-budget governor and protected internal capacity for lease renewal, profile saves, and releases. If scheduler configuration cannot be applied or verified, PlayerDataCore warns and leaves the current scheduler state unchanged rather than preventing player loading.
+
+Mailbox V2 and `RecordStoreV2Acceleration` are not started automatically by PlayerDataCore. Acceleration requires a real mailbox, its authoritative activation guard, an application-owned message handler, and an explicit `Start()` / `BindMailboxWakeups(...)` lifecycle. MessagingService notifications and optional MemoryStore hints are advisory only; durable mailbox polling and reconciliation remain authoritative. Do not enable MemoryStore hints solely because the module is available.
+
+Purchases, receipt authorities, inbox/outbox consumers, maintenance, projections, and user-data erasure remain separate application services. They require application-specific handlers, stores, migration inventories, writer fences, or destructive-operation authorization and should not be enabled as generic per-player session defaults.
+
 `src/PlayerDataInitializer/PlayerDataErasure.luau` is an opt-in family adapter for the current `PlayerDataCore` layout (`PlayerData_Test1`, scope `global`, key `Player_{user_id}`). It supplies a bounded exact-key inventory, an active-player kick hook, a same-key generation-aware erasure fence, and resumable historical-version retention verification. The fence replaces the profile envelope with an intentionally unsupported future implementation marker, so older RecordStore versions fail closed rather than recreating the profile. The same marker remains authoritative for new RecordStore code. Erasure status is read through `RecordStore.get_erasure_status_async`; `RecordStore.erase_user_data_async` installs/reconciles the fence; `RecordStore.purge_erased_versions_async` checks the exact fence version and verifies historical-version expiry in bounded scans. It no longer calls deprecated `DataStore:RemoveVersionAsync` and no longer has an opt-in to call it. Roblox documents that superseded versioned backups expire after 30 days; while historical versions remain, purge reports `Complete = false`, exposes `RetentionUntil`, and keeps the writer fence installed. After the retention deadline, the call re-enumerates versions and only reports completion if the fence is the sole remaining version. If history remains after the documented expiry, the operation fails closed and requires live-platform investigation. Mock-backed regression does not validate live Roblox retention behavior. The default 1,024-version scan is bounded, so callers must resume until `Complete == true`.
 
 The manifest store is injected rather than silently constructed by this adapter. It must provide `GetAsyncFresh` that bypasses Roblox's cached read view and an atomic `UpdateAsync` adapter suitable for the coordinator's compare-and-update manifests. Do not substitute cached reads or a non-atomic read/write pair.

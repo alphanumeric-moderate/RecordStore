@@ -15,12 +15,68 @@ local zero_dirty_age_ok = pcall(function()
 end)
 assert(not zero_dirty_age_ok,
 	"PlayerDataCore must reject MaxDirtyAgeSeconds = 0 instead of silently using its default")
+local mock_record_store: any = table.clone(RecordStore.Mock)
+local mock_record_store_new = RecordStore.Mock.new
+local captured_record_options: { [string]: any }? = nil
+local scheduler_enabled = false
+local scheduler_policy: { [string]: any } = {
+	revision = 1,
+	algorithm = "drr",
+	shadow_algorithm = "weighted",
+	shadow_enabled = false,
+	shadow_sample_rate = 0,
+}
+local scheduler_rollout: { [string]: any } = {
+	revision = 1,
+	percent = 100,
+	salt = "recordstore-scheduler-v1",
+}
+
+mock_record_store.new = function(name: string, scope: string, key: string, options: { [string]: any })
+	captured_record_options = table.clone(options)
+	return mock_record_store_new(name, scope, key, options)
+end
+mock_record_store.get_scheduler_snapshot = function()
+	local rollout_snapshot = table.clone(scheduler_rollout)
+	rollout_snapshot.cohort_included = rollout_snapshot.percent == 100
+	return {
+		enabled = scheduler_enabled,
+		policy = table.clone(scheduler_policy),
+		rollout = rollout_snapshot,
+	}
+end
+mock_record_store.configure_scheduler_policy = function(patch: { [string]: any })
+	assert(type(patch.revision) == "number" and patch.revision > scheduler_policy.revision)
+	for key, value in pairs(patch) do
+		scheduler_policy[key] = value
+	end
+	return "success", nil
+end
+mock_record_store.configure_scheduler_rollout = function(patch: { [string]: any })
+	assert(patch.revision == scheduler_rollout.revision + 1)
+	for key, value in pairs(patch) do
+		scheduler_rollout[key] = value
+	end
+	return "success", nil
+end
+mock_record_store.set_scheduler_enabled = function(enabled: boolean)
+	scheduler_enabled = enabled
+	return true, nil
+end
+
 local controller = PlayerDataCore.new({
-	RecordStore = RecordStore.Mock,
+	RecordStore = mock_record_store,
 })
 
 local test_ok, test_error = pcall(function()
 	assert(controller:Start(), "PlayerData controller failed to start")
+	assert(scheduler_enabled, "PlayerDataCore did not enable the advanced scheduler")
+	assert(scheduler_policy.algorithm == "drr", "PlayerDataCore did not configure DRR scheduling")
+	assert(scheduler_policy.shadow_algorithm == "weighted", "PlayerDataCore did not configure weighted shadow scheduling")
+	assert(scheduler_policy.shadow_enabled == true and scheduler_policy.shadow_sample_rate == 0.1,
+		"PlayerDataCore did not enable 10% scheduler shadow comparisons")
+	assert(scheduler_rollout.percent == 100 and scheduler_rollout.salt == "playerdatacore-scheduler-v1",
+		"PlayerDataCore did not configure its scheduler rollout")
 
 	local player = Players:GetPlayers()[1]
 	if player == nil then
@@ -41,6 +97,14 @@ local test_ok, test_error = pcall(function()
 		player:GetAttribute("PlayerDataLoadStatus") == "Loaded",
 		"timed out waiting for PlayerData to load"
 	)
+	local record_options = captured_record_options
+	assert(record_options ~= nil, "PlayerDataCore did not create a RecordStore session")
+	assert(record_options.messaging_enabled == true, "RecordStore session messaging must be enabled")
+	assert(record_options.takeover_enabled == true, "RecordStore session takeover must be enabled")
+	assert(record_options.durable_queue_enabled == false,
+		"the legacy queue must remain disabled without a PlayerDataCore queue handler")
+	assert(record_options.transactional_operations_enabled == false,
+		"transactions must remain disabled pending transaction/reconciliation acceptance")
 
 	local set_kills, kills_error = controller.Set(player, "kills", 12500124)
 	assert(set_kills, kills_error)
