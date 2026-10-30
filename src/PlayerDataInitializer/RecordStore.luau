@@ -17499,6 +17499,20 @@ RecordStore._internals.transact = (function()
 		return prepared, nil
 	end
 
+local function is_dense_transaction_array(value: any): boolean
+	if type(value) ~= "table" then return false end
+	local count = 0
+	local maximum = 0
+	for key in pairs(value) do
+		if type(key) ~= "number" or not math.isfinite(key) or math.floor(key) ~= key or key < 1 then
+			return false
+		end
+		count += 1
+		maximum = math.max(maximum, key)
+	end
+	return count > 0 and count == maximum
+end
+
 local function merge_transaction_local_changes(
 	base: JsonValue,
 	local_value: JsonValue,
@@ -17506,6 +17520,9 @@ local function merge_transaction_local_changes(
 ): JsonValue
 	if data_values_equal(local_value, base) then
 		return copy_value(durable_value) :: JsonValue
+	end
+	if is_dense_transaction_array(base) or is_dense_transaction_array(local_value) or is_dense_transaction_array(durable_value) then
+		return copy_value(local_value) :: JsonValue
 	end
 	if type(base) == "table" and type(local_value) == "table" and type(durable_value) == "table" then
 		local base_table: any = base
@@ -17637,6 +17654,9 @@ end
 			return nil, "fenced", "record must have an active session"
 		end
 		if state.busy or state.queue_busy then return nil, "retryable", "record is busy" end
+		if not was_unknown then
+			track_external_data_mutation(state)
+		end
 		if state.token == nil then return nil, "fenced", "record has no active session token" end
 
 		local deadline, deadline_error = resolve_operation_deadline(state.options.operation_deadline)
