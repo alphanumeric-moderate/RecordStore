@@ -75,14 +75,6 @@ local test_ok, test_error = pcall(function()
 		"PlayerDataCore did not enable 10% scheduler shadow comparisons")
 	assert(scheduler_rollout.percent == 100 and scheduler_rollout.salt == "playerdatacore-scheduler-v1",
 		"PlayerDataCore did not configure its scheduler rollout")
-	local record_options = captured_record_options
-	assert(record_options ~= nil, "PlayerDataCore did not create a RecordStore session")
-	assert(record_options.messaging_enabled == true, "RecordStore session messaging must be enabled")
-	assert(record_options.takeover_enabled == true, "RecordStore session takeover must be enabled")
-	assert(record_options.durable_queue_enabled == false,
-		"the legacy queue must remain disabled without a PlayerDataCore queue handler")
-	assert(record_options.transactional_operations_enabled == false,
-		"transactions must remain disabled until the reconciliation race is fixed")
 
 	local player = Players:GetPlayers()[1]
 	if player == nil then
@@ -103,6 +95,14 @@ local test_ok, test_error = pcall(function()
 		player:GetAttribute("PlayerDataLoadStatus") == "Loaded",
 		"timed out waiting for PlayerData to load"
 	)
+	local record_options = captured_record_options
+	assert(record_options ~= nil, "PlayerDataCore did not create a RecordStore session")
+	assert(record_options.messaging_enabled == true, "RecordStore session messaging must be enabled")
+	assert(record_options.takeover_enabled == true, "RecordStore session takeover must be enabled")
+	assert(record_options.durable_queue_enabled == false,
+		"the legacy queue must remain disabled without a PlayerDataCore queue handler")
+	assert(record_options.transactional_operations_enabled == false,
+		"transactions must remain disabled pending transaction/reconciliation acceptance")
 
 	local set_kills, kills_error = controller.Set(player, "kills", 12500124)
 	assert(set_kills, kills_error)
