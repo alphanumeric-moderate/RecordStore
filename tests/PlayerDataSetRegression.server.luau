@@ -37,10 +37,12 @@ mock_record_store.new = function(name: string, scope: string, key: string, optio
 	return mock_record_store_new(name, scope, key, options)
 end
 mock_record_store.get_scheduler_snapshot = function()
+	local rollout_snapshot = table.clone(scheduler_rollout)
+	rollout_snapshot.cohort_included = rollout_snapshot.percent == 100
 	return {
 		enabled = scheduler_enabled,
 		policy = table.clone(scheduler_policy),
-		rollout = table.clone(scheduler_rollout),
+		rollout = rollout_snapshot,
 	}
 end
 mock_record_store.configure_scheduler_policy = function(patch: { [string]: any })
