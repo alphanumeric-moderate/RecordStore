@@ -78,6 +78,10 @@ local duplicate_revision = duplicate:GetRevision()
 local request: RecordStore.JsonValue = { kind = "increment-coins", amount = 10 }
 RecordStore.Mock.set_update_commit_then_failures(1)
 RecordStore.Mock.set_get_failures(100, "hold verification after transaction commit")
+RecordStore.Mock.set_before_next_update(function()
+	local data = duplicate.Data :: { [string]: any }
+	data.settings.label = "during-first-attempt"
+end)
 local first_result, first_status, first_message = duplicate:TransactAsync(
 	"commit-then-reconcile-with-mutation",
 	increment_coins,
@@ -91,10 +95,6 @@ assert((first_durable.data :: { [string]: any }).coins == 20, "fault injection d
 assert(first_durable.revision == duplicate_revision + 1, "uncertain transaction did not commit exactly one revision")
 
 RecordStore.Mock.set_get_failures(0)
-RecordStore.Mock.set_before_next_update(function()
-	local data = duplicate.Data :: { [string]: any }
-	data.settings.label = "during-duplicate-reconciliation"
-end)
 local retry_result, retry_status, retry_message = duplicate:TransactAsync(
 	"commit-then-reconcile-with-mutation",
 	increment_coins,
@@ -102,7 +102,7 @@ local retry_result, retry_status, retry_message = duplicate:TransactAsync(
 )
 assert(retry_status == "duplicate", retry_message)
 assert(type(retry_result) == "table", "verified duplicate did not return its original result")
-assert_merged_data(duplicate, "during-duplicate-reconciliation")
+assert_merged_data(duplicate, "during-first-attempt")
 assert(duplicate:IsDirty(), "post-flush mutation must remain dirty after duplicate reconciliation")
 local duplicate_save, duplicate_save_message = duplicate:Save("transaction-duplicate-concurrent-mutation")
 assert(duplicate_save == "saved", duplicate_save_message)
@@ -112,7 +112,7 @@ assert(duplicate_durable.revision == duplicate_revision + 2,
 assert((duplicate_durable.data :: { [string]: any }).coins == 20,
 	"duplicate reconciliation caused the transaction mutation to be applied more than once")
 assert(((duplicate_durable.data :: { [string]: any }).settings :: { [string]: any }).label
-	== "during-duplicate-reconciliation", "duplicate reconciliation lost the newer local mutation")
+	== "during-first-attempt", "duplicate reconciliation lost the newer local mutation")
 local duplicate_close, duplicate_close_message = duplicate:Close()
 assert(duplicate_close == "closed" or duplicate_close == "fenced", duplicate_close_message)
 

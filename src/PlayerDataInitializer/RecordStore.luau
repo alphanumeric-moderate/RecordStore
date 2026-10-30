@@ -6970,7 +6970,13 @@ type InternalState = {
 	saved_change_sequence: number,
 	durable_lease_until: number,
 	pending_operation: PendingDurableOperation?,
-	pending_transaction: { operation_id: string, kind: string, request_identity: string }?,
+	pending_transaction: {
+		operation_id: string,
+		kind: string,
+		request_identity: string,
+		captured_change_sequence: number?,
+		base_data: JsonValue?,
+	}?,
 	next_reconciliation: number,
 	last_reconciliation_category: string?,
 	durability_risk_active: boolean?,
@@ -17617,8 +17623,9 @@ end
 		if state.pending_operation ~= nil then
 			return nil, "unknown", "a durable save/renew/release outcome is still unresolved"
 		end
+		local pending_transaction = if was_unknown then state.pending_transaction else nil
 		if was_unknown then
-			local pending = state.pending_transaction
+			local pending = pending_transaction
 			if pending == nil then return nil, "unknown", "record has an unrelated unresolved durable outcome" end
 			if pending.operation_id ~= operation_id or pending.kind ~= kind then
 				return nil, "unknown", "resolve the outstanding transaction before starting another operation"
@@ -17646,9 +17653,11 @@ end
 		if token == nil then return nil, "fenced", "record has no active session token" end
 		local generation = state.generation
 		local expected_revision = state.revision
-		local captured_change_sequence = state.change_sequence
+		local captured_change_sequence = if pending_transaction ~= nil and pending_transaction.captured_change_sequence ~= nil
+			then pending_transaction.captured_change_sequence else state.change_sequence
 		local write_id = HttpService:GenerateGUID(false)
-		local old_data = copy_value(state.data)
+		local old_data = if pending_transaction ~= nil and pending_transaction.base_data ~= nil
+			then copy_value(pending_transaction.base_data) else copy_value(state.data)
 		if old_data == nil then return nil, "corrupt", "local profile data could not be copied before transaction" end
 		state.busy = true
 		state.state = "saving"
@@ -17980,9 +17989,16 @@ end
 		if confirmed ~= nil then
 			local confirmed_receipt = read_receipt(confirmed, kind, operation_id)
 			if confirmed_receipt == nil or confirmed_receipt.request_identity ~= request_identity then
+				track_external_data_mutation(state)
 				state.busy = false
 				state.state = "unknown"
-				state.pending_transaction = { operation_id = operation_id, kind = kind :: string, request_identity = request_identity }
+				state.pending_transaction = {
+					operation_id = operation_id,
+					kind = kind :: string,
+					request_identity = request_identity,
+					captured_change_sequence = captured_change_sequence,
+					base_data = copy_value(old_data),
+				}
 				state.next_reconciliation = now_local() + 0.25
 				return nil, "unknown", "transaction write was observed without a matching durable receipt"
 			end
@@ -18035,11 +18051,20 @@ end
 		end
 
 		local status: TransactionStatus = final_status or "unknown"
+		if was_unknown or status == "unknown" then
+			track_external_data_mutation(state)
+		end
 		state.busy = false
 		state.current_operation_id = nil
 		if was_unknown or status == "unknown" then
 			state.state = "unknown"
-			state.pending_transaction = { operation_id = operation_id, kind = kind :: string, request_identity = request_identity }
+			state.pending_transaction = {
+				operation_id = operation_id,
+				kind = kind :: string,
+				request_identity = request_identity,
+				captured_change_sequence = captured_change_sequence,
+				base_data = copy_value(old_data),
+			}
 			state.next_reconciliation = now_local() + 0.25
 			state.last_reconciliation_category = "transaction_outcome_unknown"
 		else
