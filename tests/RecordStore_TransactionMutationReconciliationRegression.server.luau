@@ -15,7 +15,7 @@ local function new_record(key: string)
 		lease_duration = 180,
 		lease_renewal = 60,
 		operation_deadline = 20,
-		retry_attempts = 3,
+		retry_attempts = 1,
 		transactional_operations_enabled = true,
 	})
 	local opened, message = record:Open({
