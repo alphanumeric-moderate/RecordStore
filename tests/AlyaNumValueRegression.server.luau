@@ -5,8 +5,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerScriptService = game:GetService("ServerScriptService")
 
 local AlyaNum = require(ReplicatedStorage:WaitForChild("AlyaNum"))
-local initializer = ServerScriptService:WaitForChild("PlayerDataInitializer")
-local AlyaNumValue = require(initializer:WaitForChild("AlyaNumValue"))
+local AlyaNumValue = require(ServerScriptService:WaitForChild("AlyaNumValue"))
 
 local large = AlyaNum.new(10):pow(1000)
 local payload = AlyaNumValue.encode(large)

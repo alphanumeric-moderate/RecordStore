@@ -1732,12 +1732,13 @@ function toSerika(self: AlyaNum): (number, number)
 end
 
 -- imported from serikanum
-function serikaNumEnforceDP(mantissa: number, exponent: number): string
+function serikaNumEnforceDP(mantissa: number, exponent: number, offset: number?): string
 	local power = math.pow(10, exponent)
-	if DECIMAL_POINTS <= 0 then
+	local precision = offset or DP_OFFSET
+	if precision <= 1 then
 		return tostring(math.round(mantissa * power))
 	else
-		return tostring(math.round(mantissa * power * DP_OFFSET) / DP_OFFSET)
+		return tostring(math.round(mantissa * power * precision) / precision)
 	end
 end
 
@@ -1814,35 +1815,35 @@ function getTier2Suffix(exponent: number): string?
 	return suffix
 end
 
-function serikaNumToSuffix(mantissa: number, exponent: number): string
+function serikaNumToSuffix(mantissa: number, exponent: number, offset: number?): string
 	if exponent < 3 then
-		return serikaNumEnforceDP(mantissa, exponent)
+		return serikaNumEnforceDP(mantissa, exponent, offset)
 	end
 	local suffix = exponent > 3002 and getTier2Suffix(exponent) or getTier1Suffix(exponent, true)
 	if suffix == nil then
-		return serikaNumToScientific(mantissa, exponent)
+		return serikaNumToScientific(mantissa, exponent, offset)
 	end
-	return serikaNumEnforceDP(mantissa, exponent % 3) .. suffix
+	return serikaNumEnforceDP(mantissa, exponent % 3, offset) .. suffix
 end
 
-function numberToSuffix(number: number): string
+function numberToSuffix(number: number, offset: number?): string
 	if number == 0 then
 		return "0"
 	end
 	local exponent = math.floor(math.log10(math.abs(number)))
-	return serikaNumToSuffix(number / (math.pow(10, exponent)), exponent)
+	return serikaNumToSuffix(number / (math.pow(10, exponent)), exponent, offset)
 end
 
-function serikaNumToScientific(mantissa: number, exponent: number): string
+function serikaNumToScientific(mantissa: number, exponent: number, offset: number?): string
 	local e: string?
 	if exponent == 0 then
 		e = "0"
 	else
-		e = numberToSuffix(exponent)
+		e = numberToSuffix(exponent, offset)
 	end
-	return tostring(math.floor(mantissa * DP_OFFSET) / DP_OFFSET)
+	return tostring(math.floor(mantissa * (offset or DP_OFFSET)) / (offset or DP_OFFSET))
 		.. "e"
-		.. (e == nil and tostring(math.floor(exponent * DP_OFFSET) / DP_OFFSET) or e)
+		.. (e == nil and tostring(math.floor(exponent * (offset or DP_OFFSET)) / (offset or DP_OFFSET)) or e)
 end
 
 --- Converts the AlyaNum into a string with a number and suffix.
@@ -1850,28 +1851,28 @@ end
 --- If a suffix for the specified AlyaNum is not found, scientific notation is used.
 --- @param self AlyaNum
 --- @returns string
-function toSuffix(self: AlyaNum): string
+function toSuffix(self: AlyaNum, offset: number?): string
 	if self.tetrate > 0 or self.pentate > 0 or self.hexate > 0 or self.heptate > 0 or self.exponent > 1 then
-		return toScientific(self)
+		return toScientific(self, offset)
 	end
 	local mantissa, exponent = toSerika(self)
-	return serikaNumToSuffix(mantissa, exponent) or serikaNumToScientific(mantissa, exponent)
+	return serikaNumToSuffix(mantissa, exponent, offset) or serikaNumToScientific(mantissa, exponent, offset)
 end
 
 --- Converts the AlyaNum object into a string in scientific notation format.
 --- @param self AlyaNum
 --- @returns string
-function toScientific(self: AlyaNum): string
+function toScientific(self: AlyaNum, offset: number?): string
 	if self.sign == 0 then
 		return "0"
 	elseif self.sign == -1 then
-		return "-" .. toScientific(abs(self))
+		return "-" .. toScientific(abs(self), offset)
 	elseif self.heptate > 0 or self.hexate > 0 or self.pentate > 0 or self.tetrate > 0 or self.exponent > 2 then
-		return toEChain(self)
+		return toEChain(self, offset)
 	end
 
 	local mantissa, exponent = toSerika(self)
-	return serikaNumToScientific(mantissa, exponent)
+	return serikaNumToScientific(mantissa, exponent, offset)
 end
 
 --- Converts the AlyaNum into a string in an E chain.
@@ -1879,14 +1880,14 @@ end
 --- E chains place all Es at the start, and have a maximum chain of 10 Es.
 --- @param self AlyaNum
 --- @returns string
-function toEChain(self: AlyaNum): string
+function toEChain(self: AlyaNum, offset: number?): string
 	if self.sign == -1 then
-		return "-" .. toEChain(abs(self))
+		return "-" .. toEChain(abs(self), offset)
 	end
 	if self.heptate > 0 or self.hexate > 0 or self.pentate > 0 or self.tetrate > 0 or self.exponent > 10 then
-		return toEnt(self)
+		return toEnt(self, offset)
 	end
-	return string.rep("e", self.exponent) .. tostring(math.floor(self.multiplicand * DP_OFFSET) / DP_OFFSET)
+	return string.rep("e", self.exponent) .. tostring(math.floor(self.multiplicand * (offset or DP_OFFSET)) / (offset or DP_OFFSET))
 end
 
 --- Converts the AlyaNum into a format E(y)x.
@@ -1894,9 +1895,9 @@ end
 --- @see https://googology.fandom.com/wiki/Nihilustheabsolutists_E_function
 --- @param self AlyaNum
 --- @returns string
-function toEnt(self: AlyaNum): string
+function toEnt(self: AlyaNum, offset: number?): string
 	if self.heptate > 0 or self.hexate > 0 or self.pentate > 0 then
-		return toHyperE(self)
+		return toHyperE(self, offset)
 	end
 
 	local multiplicand = self.multiplicand
@@ -1909,15 +1910,15 @@ function toEnt(self: AlyaNum): string
 			or multiplicand > 308
 			or self.exponent > 1
 		then
-			return toHyperE(self)
+			return toHyperE(self, offset)
 		end
 		multiplicand = math.pow(10, multiplicand)
 	end
-	local part = "E(" .. numberToSuffix(self.exponent) .. ")"
+	local part = "E(" .. numberToSuffix(self.exponent, offset) .. ")"
 	if self.sign == -1 then
 		part = "-" .. part
 	end
-	return part .. numberToSuffix(self.multiplicand)
+	return part .. numberToSuffix(self.multiplicand, offset)
 end
 
 --- Converts the AlyaNum into Hyper-E notation, Ex#a#b#c#d#e.
@@ -1925,38 +1926,38 @@ end
 --- @see https://googology.fandom.com/wiki/Hyper-E_notation
 --- @param self AlyaNum
 --- @returns string
-function toHyperE(self: AlyaNum): string
+function toHyperE(self: AlyaNum, offset: number?): string
 	if self.sign == -1 then
-		return "-" .. toHyperE(abs(self))
+		return "-" .. toHyperE(abs(self), offset)
 	end
 	if lessThan(self, MAX_SAFE) then
-		return toSuffix(self)
+		return toSuffix(self, offset)
 	end
-	local suffixed = numberToSuffix(self.multiplicand)
-	local str = "E" .. (suffixed == nil and tostring(math.floor(self.multiplicand * DP_OFFSET) / DP_OFFSET) or suffixed)
+	local suffixed = numberToSuffix(self.multiplicand, offset)
+	local str = "E" .. (suffixed == nil and tostring(math.floor(self.multiplicand * (offset or DP_OFFSET)) / (offset or DP_OFFSET)) or suffixed)
 	if self.exponent > 0 then
-		str ..= "#" .. numberToSuffix(self.exponent)
+		str ..= "#" .. numberToSuffix(self.exponent, offset)
 	end
 	if self.tetrate > 0 then
-		str ..= "#" .. numberToSuffix(self.tetrate + 1)
+		str ..= "#" .. numberToSuffix(self.tetrate + 1, offset)
 	end
 	if self.pentate > 0 then
-		str ..= "#" .. numberToSuffix(self.pentate + 1)
+		str ..= "#" .. numberToSuffix(self.pentate + 1, offset)
 	end
 	if self.hexate > 0 then
-		str ..= "#" .. numberToSuffix(self.hexate + 1)
+		str ..= "#" .. numberToSuffix(self.hexate + 1, offset)
 	end
 	if self.heptate > 0 then
-		str ..= "#" .. numberToSuffix(self.heptate + 1)
+		str ..= "#" .. numberToSuffix(self.heptate + 1, offset)
 	end
 	return str
 end
 
-function toString(self: AlyaNum): string
+function toString(self: AlyaNum, offset: number?): string
 	if self.sign == 0 then
 		return "0"
 	elseif self.sign == -1 then
-		return "-" .. toString(abs(self))
+		return "-" .. toString(abs(self), offset)
 	elseif
 		self.exponent == 0
 		and self.tetrate == 0
@@ -1965,7 +1966,7 @@ function toString(self: AlyaNum): string
 		and self.heptate == 0
 		and self.multiplicand < MAX_FRACTIONAL.multiplicand
 	then
-		return "1 / " .. toSuffix(div(ONE, self))
+		return "1 / " .. toSuffix(div(ONE, self), offset)
 	elseif
 		DEFAULT_ABBREVIATION == "suffix"
 		and self.tetrate == 0
@@ -1983,15 +1984,15 @@ function toString(self: AlyaNum): string
 			exponent = math.floor(self.multiplicand)
 			mantissa = math.pow(10, self.multiplicand - exponent)
 		end
-		return serikaNumToSuffix(mantissa, exponent)
+		return serikaNumToSuffix(mantissa, exponent, offset)
 	elseif absLessThan(self, MAX_SCIENTIFIC) then
-		return toScientific(self)
+		return toScientific(self, offset)
 	elseif absLessThan(self, MAX_E_CHAIN) then
-		return toEChain(self)
+		return toEChain(self, offset)
 	elseif absLessThan(self, MAX_ENT) then
-		return toEnt(self)
+		return toEnt(self, offset)
 	else
-		return toHyperE(self)
+		return toHyperE(self, offset)
 	end
 end
 
@@ -2639,6 +2640,11 @@ end
 --- Converts the AlyaNum object into a displayable string.
 AlyaNum.toString = function(self: Number)
 	return toString(AlyaNum.new(self))
+end
+
+-- Local extension: render at a fixed precision without changing shared settings.
+AlyaNum.toStringWithPrecision = function(self: Number, decimalPoints: number)
+	return toString(AlyaNum.new(self :: any), math.pow(10, decimalPoints))
 end
 
 --- Converts the AlyaNum into a string with a number and suffix.

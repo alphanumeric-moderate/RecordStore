@@ -88,6 +88,21 @@ local function number_as_native(value)
 	return nil
 end
 
+local function legacy_integer_to_value(sign, digits)
+	digits = string.gsub(digits, "^0+", "")
+	if digits == "" then return resolve_api().new(0) end
+	if #digits <= 308 then
+		local native = tonumber(digits)
+		if is_finite(native) then return resolve_api().new(sign * native) end
+		return nil
+	end
+	local leading = string.sub(digits, 1, 17)
+	local leading_number = tonumber(leading)
+	if not is_finite(leading_number) then return nil end
+	local mantissa = leading_number / math.pow(10, #leading - 1)
+	return from_pair(sign * mantissa, #digits - 1)
+end
+
 local function legacy_node_to_value(node, depth)
 	if type(node) ~= "table" or depth > 128 then return nil end
 	local kind = node.kind
@@ -101,13 +116,7 @@ local function legacy_node_to_value(node, depth)
 		then
 			return nil
 		end
-		local digits = string.gsub(node.digits, "^0+", "")
-		if digits == "" then return api.new(0) end
-		local leading = string.sub(digits, 1, math.min(15, #digits))
-		local leading_number = tonumber(leading)
-		if leading_number == nil then return nil end
-		local mantissa = leading_number / math.pow(10, #leading - 1)
-		return from_pair(node.sign * mantissa, #digits - 1)
+		return legacy_integer_to_value(node.sign, node.digits)
 	elseif kind == "scientific" then
 		if (node.sign ~= 1 and node.sign ~= -1)
 			or not is_finite(node.mantissa) or node.mantissa <= 0
@@ -271,6 +280,9 @@ function AlyaNumValue.is_unsupported_version(value)
 	if envelope.schema == SCHEMA or envelope.schema == LEGACY_INFINITEMATH_SCHEMA then
 		return envelope.version ~= AlyaNumValue.FORMAT_VERSION
 	end
+	if envelope.schema == LEGACY_CODE_SCHEMA then
+		return envelope.version ~= 2
+	end
 	return false
 end
 
@@ -343,11 +355,8 @@ local function format_legacy_node(node, options, depth)
 	elseif kind == "integer" and (node.sign == 1 or node.sign == -1)
 		and type(node.digits) == "string" and string.match(node.digits, "^%d+$")
 	then
-		local digits = string.gsub(node.digits, "^0+", "")
-		if digits == "" then return "0" end
-		local leading = string.sub(digits, 1, math.min(15, #digits))
-		local mantissa = (tonumber(leading) or 0) / math.pow(10, #leading - 1)
-		local value = from_pair(node.sign * mantissa, #digits - 1)
+		if string.match(node.digits, "^0+$") then return "0" end
+		local value = legacy_integer_to_value(node.sign, node.digits)
 		return if value ~= nil then resolve_formatter().format(value, options) else "[legacy integer]"
 	elseif kind == "scientific" and (node.sign == 1 or node.sign == -1)
 		and is_finite(node.mantissa) and type(node.exponent) == "string"

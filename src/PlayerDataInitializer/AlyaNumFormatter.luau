@@ -6,6 +6,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Formatter = {}
 local cached_api = nil
 local DEFAULT_DECIMAL_POINTS = 2
+local INTERNAL_DECIMAL_POINTS = 12
 
 local function resolve_api()
 	if cached_api ~= nil then return cached_api end
@@ -18,9 +19,8 @@ local function resolve_api()
 	if type(loaded) ~= "table"
 		or type(loaded.new) ~= "function"
 		or type(loaded.fix) ~= "function"
-		or type(loaded.toString) ~= "function"
+		or type(loaded.toStringWithPrecision) ~= "function"
 		or type(loaded.fromString) ~= "function"
-		or type(loaded.changeDecimalPoints) ~= "function"
 	then
 		error("ReplicatedStorage.AlyaNum does not expose the required API", 2)
 	end
@@ -166,6 +166,19 @@ local function validate_options(options)
 	return decimals, trim ~= false
 end
 
+local function round_fractional_parts(formatted, decimals)
+	local scale = math.pow(10, decimals)
+	return (string.gsub(formatted, "%d+%.%d+", function(part)
+		local rounded = math.round(tonumber(part) * scale) / scale
+		local result = string.format("%." .. tostring(decimals) .. "f", rounded)
+		if decimals > 0 then
+			result = string.gsub(result, "0+$", "")
+			result = string.gsub(result, "%.$", "")
+		end
+		return result
+	end))
+end
+
 local function pad_fraction(formatted, decimals)
 	local prefix, suffix = string.match(formatted, "^([+-]?%d+%.?%d*)(.*)$")
 	if prefix == nil then return formatted end
@@ -184,11 +197,11 @@ function Formatter.format(value, options)
 	local decimals, trim = validate_options(options)
 	local api = resolve_api()
 	local number = to_value(value)
-	local previous_decimals = DEFAULT_DECIMAL_POINTS
-	api.changeDecimalPoints(decimals)
-	local ok, formatted = pcall(function() return api.toString(number) end)
-	api.changeDecimalPoints(previous_decimals)
+	local ok, formatted = pcall(function()
+		return api.toStringWithPrecision(number, INTERNAL_DECIMAL_POINTS)
+	end)
 	if not ok then error("AlyaNum formatting failed: " .. tostring(formatted), 2) end
+	formatted = round_fractional_parts(formatted, decimals)
 
 	local coefficient, suffix = string.match(formatted, "^([+-]?[%d%.]+)([%a][%w]*)$")
 	if coefficient ~= nil and suffix ~= nil
@@ -196,10 +209,10 @@ function Formatter.format(value, options)
 		and math.abs(tonumber(coefficient) or 0) >= 1000
 	then
 		local normalized_ok, normalized = pcall(function()
-			return api.toString(api.fromString(formatted))
+			return api.toStringWithPrecision(api.fromString(formatted), INTERNAL_DECIMAL_POINTS)
 		end)
 		if normalized_ok and type(normalized) == "string" then
-			formatted = normalized
+			formatted = round_fractional_parts(normalized, decimals)
 		end
 	end
 
