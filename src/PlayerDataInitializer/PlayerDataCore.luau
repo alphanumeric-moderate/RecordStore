@@ -255,7 +255,7 @@ local CONFIG = {
 		algorithm = "drr",
 		shadow_algorithm = "weighted",
 		shadow_enabled = true,
-		shadow_sample_rate = 1,
+		shadow_sample_rate = 0.1,
 	},
 	operation_deadline = 20,
 	load_retry_attempts = 4,
