@@ -18010,7 +18010,13 @@ end
 				if local_data == nil then
 					state.busy = false
 					state.state = "unknown"
-					state.pending_transaction = { operation_id = operation_id, kind = kind :: string, request_identity = request_identity }
+					state.pending_transaction = {
+						operation_id = operation_id,
+						kind = kind :: string,
+						request_identity = request_identity,
+						captured_change_sequence = captured_change_sequence,
+						base_data = copy_value(old_data),
+					}
 					state.next_reconciliation = now_local() + 0.25
 					return nil, "unknown", "newer local profile data could not be copied during transaction reconciliation"
 				end
