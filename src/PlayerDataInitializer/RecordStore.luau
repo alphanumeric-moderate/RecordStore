@@ -12709,39 +12709,6 @@ local function data_values_equal(left: JsonValue?, right: JsonValue?, depth: num
 	return true
 end
 
-local function merge_transaction_local_changes(
-	base: JsonValue,
-	local_value: JsonValue,
-	durable_value: JsonValue
-): JsonValue
-	if data_values_equal(local_value, base) then
-		return copy_value(durable_value) :: JsonValue
-	end
-	if type(base) == "table" and type(local_value) == "table" and type(durable_value) == "table" then
-		local base_table: any = base
-		local local_table: any = local_value
-		local merged: any = copy_value(durable_value)
-		for key, base_child in pairs(base_table) do
-			local local_child = local_table[key]
-			if not data_values_equal(local_child, base_child) then
-				local durable_child = merged[key]
-				if type(base_child) == "table" and type(local_child) == "table" and type(durable_child) == "table" then
-					merged[key] = merge_transaction_local_changes(base_child, local_child, durable_child)
-				else
-					merged[key] = copy_value(local_child)
-				end
-			end
-		end
-		for key, local_child in pairs(local_table) do
-			if base_table[key] == nil then
-				merged[key] = copy_value(local_child)
-			end
-		end
-		return merged :: JsonValue
-	end
-	return copy_value(local_value) :: JsonValue
-end
-
 local function mark_dirty(state: InternalState)
 	if state.dirty_since_local == nil then
 		state.dirty_since_local = now_local()
@@ -17525,6 +17492,39 @@ RecordStore._internals.transact = (function()
 		end
 		return prepared, nil
 	end
+
+local function merge_transaction_local_changes(
+	base: JsonValue,
+	local_value: JsonValue,
+	durable_value: JsonValue
+): JsonValue
+	if data_values_equal(local_value, base) then
+		return copy_value(durable_value) :: JsonValue
+	end
+	if type(base) == "table" and type(local_value) == "table" and type(durable_value) == "table" then
+		local base_table: any = base
+		local local_table: any = local_value
+		local merged: any = copy_value(durable_value)
+		for key, base_child in pairs(base_table) do
+			local local_child = local_table[key]
+			if not data_values_equal(local_child, base_child) then
+				local durable_child = merged[key]
+				if type(base_child) == "table" and type(local_child) == "table" and type(durable_child) == "table" then
+					merged[key] = merge_transaction_local_changes(base_child, local_child, durable_child)
+				else
+					merged[key] = copy_value(local_child)
+				end
+			end
+		end
+		for key, local_child in pairs(local_table) do
+			if base_table[key] == nil then
+				merged[key] = copy_value(local_child)
+			end
+		end
+		return merged :: JsonValue
+	end
+	return copy_value(local_value) :: JsonValue
+end
 
 	return function(
 		self: Record,
