@@ -20,7 +20,7 @@ type ValueClass =
 	| "StringValue"
 	| "BoolValue"
 	| "IntegerInfinityValue"
-	| "InfiniteMathValue"
+	| "AlyaNumValue"
 
 type DataField = {
 	class_name: ValueClass,
@@ -34,7 +34,7 @@ type NumberFormatOptions = {
 	trim_trailing_zeros: boolean?,
 }
 
-type InfiniteMathFormatterAPI = {
+type AlyaNumFormatterAPI = {
 	format: (value: number, options: NumberFormatOptions?) -> string,
 }
 
@@ -44,48 +44,48 @@ type Leaderstat = {
 	number_format: NumberFormatOptions?,
 }
 
-type InfiniteMathValueNode = { kind: string }
-type InfiniteMathValueFactoryAPI = {
+type AlyaNumValueNode = { kind: string }
+type AlyaNumValueFactoryAPI = {
 	is_value: (value: unknown) -> boolean,
 	normalize: (value: unknown) -> string,
 	is_serialized: (value: unknown) -> boolean,
 	format: (value: unknown, options: NumberFormatOptions?) -> string,
 	new: (name: string, initial_value: unknown) -> StringValue,
-	normalize_serialized: ((value: unknown) -> (string?, InfiniteMathValueNode?))?,
+	normalize_serialized: ((value: unknown) -> (string?, AlyaNumValueNode?))?,
 	is_unsupported_version: ((value: unknown) -> boolean)?,
 }
 
-local cached_infinitemath_value_factory: InfiniteMathValueFactoryAPI? = nil
+local cached_alyanum_value_factory: AlyaNumValueFactoryAPI? = nil
 
-local function get_infinitemath_value_factory(): InfiniteMathValueFactoryAPI
-	if cached_infinitemath_value_factory == nil then
-		cached_infinitemath_value_factory = require(script.Parent.InfiniteMathValue) :: InfiniteMathValueFactoryAPI
+local function get_alyanum_value_factory(): AlyaNumValueFactoryAPI
+	if cached_alyanum_value_factory == nil then
+		cached_alyanum_value_factory = require(script.Parent.AlyaNumValue) :: AlyaNumValueFactoryAPI
 	end
-	return cached_infinitemath_value_factory :: InfiniteMathValueFactoryAPI
+	return cached_alyanum_value_factory :: AlyaNumValueFactoryAPI
 end
 
-local InfiniteMathValueFactory: InfiniteMathValueFactoryAPI = table.freeze({
+local AlyaNumValueFactory: AlyaNumValueFactoryAPI = table.freeze({
 	is_value = function(value: unknown): boolean
-		return get_infinitemath_value_factory().is_value(value)
+		return get_alyanum_value_factory().is_value(value)
 	end,
 	normalize = function(value: unknown): string
-		return get_infinitemath_value_factory().normalize(value)
+		return get_alyanum_value_factory().normalize(value)
 	end,
 	is_serialized = function(value: unknown): boolean
-		return get_infinitemath_value_factory().is_serialized(value)
+		return get_alyanum_value_factory().is_serialized(value)
 	end,
 	format = function(value: unknown, options: NumberFormatOptions?): string
-		return get_infinitemath_value_factory().format(value, options)
+		return get_alyanum_value_factory().format(value, options)
 	end,
 	new = function(name: string, initial_value: unknown): StringValue
-		return get_infinitemath_value_factory().new(name, initial_value)
+		return get_alyanum_value_factory().new(name, initial_value)
 	end,
 	is_unsupported_version = function(value: unknown): boolean
-		local check = get_infinitemath_value_factory().is_unsupported_version
+		local check = get_alyanum_value_factory().is_unsupported_version
 		return if check ~= nil then check(value) else false
 	end,
-	normalize_serialized = function(value: unknown): (string?, InfiniteMathValueNode?)
-		local factory = get_infinitemath_value_factory()
+	normalize_serialized = function(value: unknown): (string?, AlyaNumValueNode?)
+		local factory = get_alyanum_value_factory()
 		local normalize = factory.normalize_serialized
 		if normalize ~= nil then
 			return normalize(value)
@@ -97,29 +97,23 @@ local InfiniteMathValueFactory: InfiniteMathValueFactoryAPI = table.freeze({
 	end,
 })
 
-local cached_infinemath_formatter: InfiniteMathFormatterAPI? = nil
+local cached_alyanum_formatter: AlyaNumFormatterAPI? = nil
 
-local function get_infinemath_formatter(): InfiniteMathFormatterAPI
-	if cached_infinemath_formatter ~= nil then
-		return cached_infinemath_formatter
+local function get_alyanum_formatter(): AlyaNumFormatterAPI
+	if cached_alyanum_formatter ~= nil then
+		return cached_alyanum_formatter
 	end
 
-	local replicated_storage = game:GetService("ReplicatedStorage")
-	local module_script = replicated_storage:FindFirstChild("InfiniteMath")
-	if module_script == nil or not module_script:IsA("ModuleScript") then
-		error("formatted leaderstats require ReplicatedStorage.InfiniteMath", 2)
-	end
-
-	local ok, loaded = pcall(require, module_script)
+	local ok, loaded = pcall(require, script.Parent.AlyaNumFormatter)
 	if not ok then
-		error("failed to require InfiniteMath formatter: " .. tostring(loaded), 2)
+		error("failed to require AlyaNumFormatter: " .. tostring(loaded), 2)
 	end
 	if type(loaded) ~= "table" or type(loaded.format) ~= "function" then
-		error("ReplicatedStorage.InfiniteMath must expose format", 2)
+		error("PlayerDataInitializer.AlyaNumFormatter must expose format", 2)
 	end
 
-	local formatter = loaded :: InfiniteMathFormatterAPI
-	cached_infinemath_formatter = formatter
+	local formatter = loaded :: AlyaNumFormatterAPI
+	cached_alyanum_formatter = formatter
 	return formatter
 end
 
@@ -130,8 +124,8 @@ export type Dependencies = {
 	Players: typeof(Players)?,
 	RecordStore: typeof(RecordStore)?,
 	IntegerInfinityValue: typeof(IntegerInfinityValueFactory)?,
-	InfiniteMathValue: InfiniteMathValueFactoryAPI?,
-	InfiniteMathFormatter: InfiniteMathFormatterAPI?,
+	AlyaNumValue: AlyaNumValueFactoryAPI?,
+	AlyaNumFormatter: AlyaNumFormatterAPI?,
 	new_instance: ((string) -> Instance)?,
 	task: typeof(task)?,
 	DurabilityMode: DurabilityMode?,
@@ -273,10 +267,10 @@ local CONFIG = {
 	},
 }
 
-local uses_infinitemath_values = false
+local uses_alyanum_values = false
 for _, field in pairs(CONFIG.data) do
-	if field.class_name == "InfiniteMathValue" then
-		uses_infinitemath_values = true
+	if field.class_name == "AlyaNumValue" then
+		uses_alyanum_values = true
 		break
 	end
 end
@@ -315,7 +309,7 @@ end
 local function field_value_is_valid(
 	field: DataField,
 	value: DataValue?,
-	infinitemath_factory: InfiniteMathValueFactoryAPI?
+	alyanum_factory: AlyaNumValueFactoryAPI?
 ): boolean
 	if field.class_name == "IntValue" then
 		return type(value) == "number" and math.isfinite(value) and math.floor(value) == value
@@ -327,8 +321,8 @@ local function field_value_is_valid(
 		return type(value) == "boolean"
 	elseif field.class_name == "IntegerInfinityValue" then
 		return type(value) == "number" and (math.isnan(value) or math.isinf(value) or math.floor(value) == value)
-	elseif field.class_name == "InfiniteMathValue" then
-		return (infinitemath_factory or InfiniteMathValueFactory).is_value(value)
+	elseif field.class_name == "AlyaNumValue" then
+		return (alyanum_factory or AlyaNumValueFactory).is_value(value)
 	end
 	return false
 end
@@ -337,18 +331,18 @@ local function encode_field_value(
 	field: DataField,
 	value: DataValue,
 	integer_infinity_factory: typeof(IntegerInfinityValueFactory)?,
-	infinitemath_factory: InfiniteMathValueFactoryAPI?
+	alyanum_factory: AlyaNumValueFactoryAPI?
 ): DataValue
 	if field.class_name == "IntegerInfinityValue" and type(value) == "number" then
 		return normalize_integer_infinity(value, field.rounding or "nearest", integer_infinity_factory)
-	elseif field.class_name == "InfiniteMathValue" then
-		return (infinitemath_factory or InfiniteMathValueFactory).normalize(value)
+	elseif field.class_name == "AlyaNumValue" then
+		return (alyanum_factory or AlyaNumValueFactory).normalize(value)
 	end
 	return value
 end
 
-local function normalize_serialized_infinitemath(
-    factory: InfiniteMathValueFactoryAPI,
+local function normalize_serialized_alyanum(
+    factory: AlyaNumValueFactoryAPI,
     value: string
 ): string?
     local normalizer = factory.normalize_serialized
@@ -366,15 +360,15 @@ local function decode_stored_field_value(
 	field: DataField,
 	value: DataValue?,
 	integer_infinity_factory: typeof(IntegerInfinityValueFactory)?,
-	infinitemath_factory: InfiniteMathValueFactoryAPI?
+	alyanum_factory: AlyaNumValueFactoryAPI?
 ): (DataValue?, boolean)
-	if field.class_name == "InfiniteMathValue" then
-		local factory = infinitemath_factory or InfiniteMathValueFactory
+	if field.class_name == "AlyaNumValue" then
+		local factory = alyanum_factory or AlyaNumValueFactory
 		if type(value) ~= "string" then return nil, false end
 		if factory.is_unsupported_version ~= nil and factory.is_unsupported_version(value) then
-			error("stored InfiniteMathValue uses an unsupported codec version; refusing to overwrite it with a default", 2)
+			error("stored AlyaNumValue uses an unsupported codec version; refusing to overwrite it with a default", 2)
 		end
-		local normalized = normalize_serialized_infinitemath(factory, value)
+		local normalized = normalize_serialized_alyanum(factory, value)
 		if normalized == nil then return nil, false end
 		return normalized, normalized ~= value
 	end
@@ -392,12 +386,12 @@ local function normalize_runtime_field_value(
 	field: DataField,
 	value: DataValue?,
 	integer_infinity_factory: typeof(IntegerInfinityValueFactory)?,
-	infinitemath_factory: InfiniteMathValueFactoryAPI?
+	alyanum_factory: AlyaNumValueFactoryAPI?
 ): DataValue?
-	if field.class_name == "InfiniteMathValue" then
-		local factory = infinitemath_factory or InfiniteMathValueFactory
+	if field.class_name == "AlyaNumValue" then
+		local factory = alyanum_factory or AlyaNumValueFactory
 		if type(value) ~= "string" then return nil end
-		return normalize_serialized_infinitemath(factory, value)
+		return normalize_serialized_alyanum(factory, value)
 	end
 	if field.class_name == "IntegerInfinityValue" then
 		if type(value) ~= "number" then return nil end
@@ -407,17 +401,17 @@ local function normalize_runtime_field_value(
 	return nil
 end
 
-local function encode_player_data(
+local function _encode_player_data(
 	data: PlayerData,
 	integer_infinity_factory: typeof(IntegerInfinityValueFactory)?,
-	infinitemath_factory: InfiniteMathValueFactoryAPI?
+	alyanum_factory: AlyaNumValueFactoryAPI?
 ): PlayerData
 	local result: PlayerData = table.clone(data)
 
 	for key, field in pairs(CONFIG.data) do
 		local value = result[key]
 		if value ~= nil then
-			result[key] = encode_field_value(field, value, integer_infinity_factory, infinitemath_factory)
+			result[key] = encode_field_value(field, value, integer_infinity_factory, alyanum_factory)
 		end
 	end
 
@@ -479,7 +473,7 @@ for _, leaderstat in ipairs(CONFIG.leaderstats.values) do
 		if field.class_name ~= "IntValue"
 			and field.class_name ~= "NumberValue"
 			and field.class_name ~= "IntegerInfinityValue"
-			and field.class_name ~= "InfiniteMathValue"
+			and field.class_name ~= "AlyaNumValue"
 		then
 			error(
 				("leaderstats value %q requests number formatting but is not numeric"):format(
@@ -521,7 +515,7 @@ end
 
 local function validate_player_data(
 	value: RecordStore.JsonValue,
-	infinitemath_factory: InfiniteMathValueFactoryAPI?
+	alyanum_factory: AlyaNumValueFactoryAPI?
 ): (boolean, string?)
 	if type(value) ~= "table" then return false, "player data must be an object" end
 	for key, item in pairs(value) do
@@ -531,13 +525,13 @@ local function validate_player_data(
 			return false, ("player data.%s has an unsupported type"):format(key)
 		end
 		local field = CONFIG.data[key]
-		if field ~= nil and field.class_name == "InfiniteMathValue" then
-			local factory = infinitemath_factory or InfiniteMathValueFactory
+		if field ~= nil and field.class_name == "AlyaNumValue" then
+			local factory = alyanum_factory or AlyaNumValueFactory
 			local supported = item_type == "string" and factory.is_serialized(item)
 			local unsupported = item_type == "string" and factory.is_unsupported_version ~= nil
 				and factory.is_unsupported_version(item)
 			if not supported and not unsupported then
-				return false, ("player data.%s must contain a valid serialized InfiniteMath value"):format(key)
+				return false, ("player data.%s must contain a valid serialized AlyaNum value"):format(key)
 			end
 		end
 	end
@@ -547,7 +541,7 @@ end
 local function normalize_player_data(
 	value: RecordStore.JsonValue?,
 	integer_infinity_factory: typeof(IntegerInfinityValueFactory)?,
-	infinitemath_factory: InfiniteMathValueFactoryAPI?
+	alyanum_factory: AlyaNumValueFactoryAPI?
 ): (PlayerData?, boolean)
 	if type(value) ~= "table" then return nil, false end
 	local result: PlayerData = {}
@@ -564,14 +558,14 @@ local function normalize_player_data(
 			field,
 			result[key],
 			integer_infinity_factory,
-			infinitemath_factory
+			alyanum_factory
 		)
 		if field.reset_on_join then
 			local reset_value = encode_field_value(
 				field,
 				field.default,
 				integer_infinity_factory,
-				infinitemath_factory
+				alyanum_factory
 			)
 			if normalized_value == nil
 				or value_changed
@@ -581,7 +575,7 @@ local function normalize_player_data(
 			end
 			result[key] = reset_value
 		elseif normalized_value == nil then
-			result[key] = encode_field_value(field, field.default, integer_infinity_factory, infinitemath_factory)
+			result[key] = encode_field_value(field, field.default, integer_infinity_factory, alyanum_factory)
 			changed = true
 		else
 			result[key] = normalized_value
@@ -614,8 +608,8 @@ local function new(dependencies: Dependencies?): Controller
 	local players = injected.Players or Players
 	local record_store = injected.RecordStore or RecordStore
 	local integer_infinity_value_factory = injected.IntegerInfinityValue or IntegerInfinityValueFactory
-	local infinitemath_value_factory = injected.InfiniteMathValue or InfiniteMathValueFactory
-	local infinimath_formatter = injected.InfiniteMathFormatter
+	local alyanum_value_factory = injected.AlyaNumValue or AlyaNumValueFactory
+	local alyanum_formatter = injected.AlyaNumFormatter
 	local durability_mode: DurabilityMode = injected.DurabilityMode or CONFIG.durability_mode
 	local max_dirty_age_seconds: number = injected.MaxDirtyAgeSeconds or CONFIG.max_dirty_age_seconds
 	local lease_recovery_enabled: boolean = if injected.LeaseRecoveryEnabled ~= nil
@@ -642,7 +636,7 @@ local function new(dependencies: Dependencies?): Controller
 	end
 
 	local function format_native_number(value: number, options: NumberFormatOptions?): string
-		local formatter = infinimath_formatter or get_infinemath_formatter()
+		local formatter = alyanum_formatter or get_alyanum_formatter()
 		return formatter.format(value, options)
 	end
 
@@ -1021,10 +1015,10 @@ local function new(dependencies: Dependencies?): Controller
 		end
 
 		local normalized_value = if already_normalized == true
-			and field.class_name == "InfiniteMathValue"
+			and field.class_name == "AlyaNumValue"
 			and type(value) == "string"
 			then value
-			else normalize_runtime_field_value(field, value, integer_infinity_value_factory, infinitemath_value_factory)
+			else normalize_runtime_field_value(field, value, integer_infinity_value_factory, alyanum_value_factory)
 		if normalized_value == nil then
 			warn("[PlayerData]", record.Key, "rejected an invalid value change", key)
 			return
@@ -1083,7 +1077,7 @@ local function new(dependencies: Dependencies?): Controller
 					field,
 					new_value :: DataValue,
 					integer_infinity_value_factory,
-					infinitemath_value_factory
+					alyanum_value_factory
 				)
 				if normalized_sync_value ~= nil and data_values_equal(normalized_sync_value, expected_sync_value) then
 					last_valid_value = normalized_sync_value
@@ -1119,7 +1113,7 @@ local function new(dependencies: Dependencies?): Controller
 				field,
 				new_value :: DataValue,
 				integer_infinity_value_factory,
-				infinitemath_value_factory
+				alyanum_value_factory
 			)
 			if normalized_value == nil then
 				restoring = true
@@ -1155,13 +1149,13 @@ local function new(dependencies: Dependencies?): Controller
 		end)
 	end
 
-	local function create_infinitemath_backing_value(
+	local function create_alyanum_backing_value(
 		player: Player,
 		record: PlayerRecord,
 		key: string,
 		initial_value: string
 	): StringValue
-		local backing_value = infinitemath_value_factory.new(key, initial_value)
+		local backing_value = alyanum_value_factory.new(key, initial_value)
 		local last_valid_serialized = initial_value
 		local restoring = false
 		backing_value.Changed:Connect(function(serialized_value: string)
@@ -1169,7 +1163,7 @@ local function new(dependencies: Dependencies?): Controller
 			local sync_targets = transaction_sync_targets[record]
 			local expected_sync_value = if sync_targets ~= nil then sync_targets[key] else nil
 			if expected_sync_value ~= nil then
-				local normalized_sync_value = normalize_serialized_infinitemath(infinitemath_value_factory, serialized_value)
+				local normalized_sync_value = normalize_serialized_alyanum(alyanum_value_factory, serialized_value)
 				if normalized_sync_value ~= nil and normalized_sync_value == expected_sync_value then
 					last_valid_serialized = normalized_sync_value
 					sync_targets[key] = nil
@@ -1179,12 +1173,12 @@ local function new(dependencies: Dependencies?): Controller
 				sync_targets[key] = nil
 				if next(sync_targets) == nil then transaction_sync_targets[record] = nil end
 			end
-			local normalized = normalize_serialized_infinitemath(infinitemath_value_factory, serialized_value)
+			local normalized = normalize_serialized_alyanum(alyanum_value_factory, serialized_value)
 			if normalized == nil then
 				restoring = true
 				backing_value.Value = last_valid_serialized
 				restoring = false
-				warn("[PlayerData]", player.Name, "rejected invalid InfiniteMath value for", key)
+				warn("[PlayerData]", player.Name, "rejected invalid AlyaNum value for", key)
 				return
 			end
 			if record.State ~= "active" or closing_records[record] then
@@ -1221,7 +1215,7 @@ local function new(dependencies: Dependencies?): Controller
 			existing:Destroy()
 		end
 
-		local has_player_data_values = uses_infinitemath_values
+		local has_player_data_values = uses_alyanum_values
 		for _, definition in ipairs(CONFIG.leaderstats.values) do
 			if definition.number_format ~= nil then
 				has_player_data_values = true
@@ -1234,7 +1228,7 @@ local function new(dependencies: Dependencies?): Controller
 			local existing_values = player:FindFirstChild("PlayerDataValues")
 			if existing_values ~= nil then
 				if existing_values:GetAttribute("RecordStoreManaged") ~= true then
-					error("PlayerDataValues is reserved for RecordStore-managed formatted or InfiniteMath values")
+					error("PlayerDataValues is reserved for RecordStore-managed formatted or AlyaNum values")
 				end
 				existing_values:Destroy()
 			end
@@ -1255,30 +1249,30 @@ local function new(dependencies: Dependencies?): Controller
 			end
 
 			local stored_value = data[definition.key]
-			if field.class_name == "InfiniteMathValue" then
-				if type(stored_value) ~= "string" or not infinitemath_value_factory.is_serialized(stored_value) then
+			if field.class_name == "AlyaNumValue" then
+				if type(stored_value) ~= "string" or not alyanum_value_factory.is_serialized(stored_value) then
 					continue
 				end
-			elseif not field_value_is_valid(field, stored_value, infinitemath_value_factory) then
+			elseif not field_value_is_valid(field, stored_value, alyanum_value_factory) then
 				continue
 			end
 
-			if field.class_name == "InfiniteMathValue" then
+			if field.class_name == "AlyaNumValue" then
 				local value_folder = player_data_values
-				if value_folder == nil then error("InfiniteMath leaderstats require the PlayerDataValues folder") end
-				local backing_value = create_infinitemath_backing_value(player, record, definition.key, stored_value :: string)
+				if value_folder == nil then error("AlyaNum leaderstats require the PlayerDataValues folder") end
+				local backing_value = create_alyanum_backing_value(player, record, definition.key, stored_value :: string)
 				local display_value = new_string_value()
 				display_value.Name = definition.name
-				display_value.Value = infinitemath_value_factory.format(stored_value, definition.number_format)
+				display_value.Value = alyanum_value_factory.format(stored_value, definition.number_format)
 				display_value.Changed:Connect(function()
 					local ok, expected = pcall(function(): string
-					return infinitemath_value_factory.format(backing_value.Value, definition.number_format)
+					return alyanum_value_factory.format(backing_value.Value, definition.number_format)
 				end)
 					if ok and display_value.Value ~= expected then display_value.Value = expected end
 				end)
 				backing_value.Changed:Connect(function(serialized_value: string)
-					if infinitemath_value_factory.is_serialized(serialized_value) then
-						display_value.Value = infinitemath_value_factory.format(serialized_value, definition.number_format)
+					if alyanum_value_factory.is_serialized(serialized_value) then
+						display_value.Value = alyanum_value_factory.format(serialized_value, definition.number_format)
 					end
 				end)
 				display_value.Parent = leaderstats
@@ -1401,19 +1395,19 @@ local function new(dependencies: Dependencies?): Controller
 		end
 
 		if player_data_values ~= nil then
-			local displayed_infinitemath_keys: {[string]: boolean} = {}
+			local displayed_alyanum_keys: {[string]: boolean} = {}
 			for _, definition in ipairs(CONFIG.leaderstats.values) do
 				local field = CONFIG.data[definition.key]
-				if field ~= nil and field.class_name == "InfiniteMathValue" then
-					displayed_infinitemath_keys[definition.key] = true
+				if field ~= nil and field.class_name == "AlyaNumValue" then
+					displayed_alyanum_keys[definition.key] = true
 				end
 			end
 
 			for key, field in pairs(CONFIG.data) do
-				if field.class_name == "InfiniteMathValue" and not displayed_infinitemath_keys[key] then
+				if field.class_name == "AlyaNumValue" and not displayed_alyanum_keys[key] then
 					local stored_value = data[key]
-					if type(stored_value) == "string" and infinitemath_value_factory.is_serialized(stored_value) then
-						local backing_value = create_infinitemath_backing_value(
+					if type(stored_value) == "string" and alyanum_value_factory.is_serialized(stored_value) then
+						local backing_value = create_alyanum_backing_value(
 							player,
 							record,
 							key,
@@ -1432,7 +1426,7 @@ local function new(dependencies: Dependencies?): Controller
 		for key, field in pairs(CONFIG.data) do
 			local definition = leaderstat_by_key[key]
 			local value_instance: Instance? = nil
-			if field.class_name == "InfiniteMathValue"
+			if field.class_name == "AlyaNumValue"
 				or (definition ~= nil and definition.number_format ~= nil)
 			then
 				if player_data_values ~= nil then
@@ -1496,7 +1490,7 @@ local function new(dependencies: Dependencies?): Controller
 		end
 
 		local definition = leaderstat_by_key[key]
-		if field.class_name == "InfiniteMathValue"
+		if field.class_name == "AlyaNumValue"
 			or (definition ~= nil and definition.number_format ~= nil)
 		then
 			return find_cached_player_child(player, "player_data_values", "PlayerDataValues", key, key)
@@ -1510,9 +1504,9 @@ local function new(dependencies: Dependencies?): Controller
 	end
 
 	local function normalize_set_value(field: DataField, value: unknown): DataValue?
-		if field.class_name == "InfiniteMathValue" then
+		if field.class_name == "AlyaNumValue" then
 			local normalize_ok, normalized = pcall(function(): string
-				return infinitemath_value_factory.normalize(value)
+				return alyanum_value_factory.normalize(value)
 			end)
 			if normalize_ok and type(normalized) == "string" then
 				return normalized
@@ -1528,7 +1522,7 @@ local function new(dependencies: Dependencies?): Controller
 			field,
 			value :: DataValue,
 			integer_infinity_value_factory,
-			infinitemath_value_factory
+			alyanum_value_factory
 		)
 	end
 
@@ -1599,7 +1593,7 @@ local function new(dependencies: Dependencies?): Controller
 		end
 
 		local requires_instance = CONFIG.leaderstats.enabled
-			and (leaderstat_by_key[key] ~= nil or field.class_name == "InfiniteMathValue")
+			and (leaderstat_by_key[key] ~= nil or field.class_name == "AlyaNumValue")
 		if requires_instance then
 			local instance = find_player_value_instance(player, key, field)
 			if instance == nil then
@@ -1701,7 +1695,7 @@ local function new(dependencies: Dependencies?): Controller
 		if type(value) ~= "table" then
 			return nil, "transaction reducer must return a PlayerData table"
 		end
-		local valid, validation_message = validate_player_data(value, infinitemath_value_factory)
+		local valid, validation_message = validate_player_data(value, alyanum_value_factory)
 		if not valid then
 			return nil, validation_message or "transaction returned invalid PlayerData"
 		end
@@ -1716,7 +1710,7 @@ local function new(dependencies: Dependencies?): Controller
 				field,
 				stored_value,
 				integer_infinity_value_factory,
-				infinitemath_value_factory
+				alyanum_value_factory
 			)
 			if normalized == nil then
 				return nil, ("transaction returned an invalid value for PlayerData field %q"):format(key)
@@ -1725,7 +1719,7 @@ local function new(dependencies: Dependencies?): Controller
 				field,
 				normalized,
 				integer_infinity_value_factory,
-				infinitemath_value_factory
+				alyanum_value_factory
 			)
 		end
 		return data, nil
@@ -1758,7 +1752,7 @@ local function new(dependencies: Dependencies?): Controller
 				field,
 				stored_value,
 				integer_infinity_value_factory,
-				infinitemath_value_factory
+				alyanum_value_factory
 			)
 			if normalized == nil then
 				warn("[PlayerData]", record.Key, "transaction committed but a configured field could not be decoded", key)
@@ -2056,7 +2050,7 @@ local function new(dependencies: Dependencies?): Controller
 				budget_wait = CONFIG.budget_wait,
 				user_ids = { player.UserId },
 				validator = function(value: RecordStore.JsonValue): (boolean, string?)
-					return validate_player_data(value, infinitemath_value_factory)
+					return validate_player_data(value, alyanum_value_factory)
 				end,
 				on_event = function(event, key, result, message)
 					local observed_record = event_record
@@ -2165,7 +2159,7 @@ local function new(dependencies: Dependencies?): Controller
 		end
 
 		local normalize_call_ok, normalized_or_error, changed_or_nil = pcall(function()
-			return normalize_player_data(record:Get(), integer_infinity_value_factory, infinitemath_value_factory)
+			return normalize_player_data(record:Get(), integer_infinity_value_factory, alyanum_value_factory)
 		end)
 		local normalized: PlayerData? = if normalize_call_ok then normalized_or_error :: PlayerData? else nil
 		local changed = normalize_call_ok and changed_or_nil == true

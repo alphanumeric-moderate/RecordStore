@@ -10,8 +10,8 @@
     },
     "ReplicatedStorage": {
       "$className": "ReplicatedStorage",
-      "InfiniteMath": {
-        "$path": "src/InfiniteMath"
+      "AlyaNum": {
+        "$path": "src/AlyaNum"
       }
     }
   }

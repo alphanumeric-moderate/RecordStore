@@ -6,9 +6,9 @@ RecordStore is a server-side Roblox Luau persistence module.
 
 ## Install in Roblox Studio
 
-The Rojo projects map `src/PlayerDataInitializer` to a Script named `ServerScriptService.PlayerDataInitializer`. Its child ModuleScripts include `PlayerData`, `PlayerDataCore`, `RecordStore`, `IntegerInfinityValue` and `InfiniteMathValue`. The scheduler and Mailbox V2 implementations are embedded in `RecordStore.luau`. InfiniteMath Revised is vendored at `src/InfiniteMath` and mapped to `ReplicatedStorage.InfiniteMath`.
+The Rojo projects map `src/PlayerDataInitializer` to a Script named `ServerScriptService.PlayerDataInitializer`. Its child ModuleScripts include `PlayerData`, `PlayerDataCore`, `RecordStore`, `IntegerInfinityValue`, `AlyaNumFormatter` and `AlyaNumValue`. The scheduler and Mailbox V2 implementations are embedded in `RecordStore.luau`. AlyaNum is vendored at `src/AlyaNum` and mapped to `ReplicatedStorage.AlyaNum`.
 
-**`InfiniteMath` must be a ModuleScript at `ReplicatedStorage.InfiniteMath`.** The vendored InfiniteMath Revised module is outside `PlayerDataInitializer` because `InfiniteMathValue` resolves it from `ReplicatedStorage`. Do not move `InfiniteMath` into `PlayerDataInitializer`.
+**`AlyaNum` must be a ModuleScript at `ReplicatedStorage.AlyaNum`.** The vendored AlyaNum module is outside `PlayerDataInitializer`; `AlyaNumFormatter` resolves it from `ReplicatedStorage`, while `AlyaNumValue` is a child of `PlayerDataInitializer`.
 
 Use `default.project.json` for the standard setup. The initializer starts the shared controller and registers `BindToClose` shutdown handling. Use exactly one initializer.
 
@@ -21,19 +21,16 @@ ServerScriptService
     ├── PlayerDataCore (ModuleScript; PlayerDataCore.luau)
     ├── RecordStore (ModuleScript; RecordStore.luau)
     ├── IntegerInfinityValue (ModuleScript; IntegerInfinityValue.luau)
-    └── InfiniteMathValue (ModuleScript; InfiniteMathValue.luau)
+    ├── AlyaNumFormatter (ModuleScript; AlyaNumFormatter.luau)
+    └── AlyaNumValue (ModuleScript; AlyaNumValue.luau)
 
 ReplicatedStorage
-└── InfiniteMath (ModuleScript; source: src/InfiniteMath/init.luau)
-    ├── Int (ModuleScript; Int.luau)
-    └── Values (Folder)
-        ├── FullNames (ModuleScript; FullNames.luau)
-        └── Suffixes (ModuleScript; Suffixes.luau)
+└── AlyaNum (ModuleScript; source: src/AlyaNum/init.luau)
 ```
 
-Do not put `InfiniteMath` inside `PlayerDataInitializer`. Its module must be named exactly `ReplicatedStorage.InfiniteMath`, including its `Int` and `Values` children. Use exactly one `PlayerDataInitializer` Script. Use a separate test place or Studio session for compatibility testing.
+Do not put `AlyaNum` inside `PlayerDataInitializer`. Its module must be named exactly `ReplicatedStorage.AlyaNum`. Keep `AlyaNumFormatter` and `AlyaNumValue` as children of the single `PlayerDataInitializer` Script. Use a separate test place or Studio session for compatibility testing.
 
-**Recommended setup with Rojo:** from the repository root, run `rojo serve default.project.json`, open the place in Studio, connect using the Rojo Studio plugin, and sync. The existing project file already maps `src/PlayerDataInitializer` and `src/InfiniteMath` into the hierarchy shown above. To produce a place/model file instead, run `rojo build default.project.json -o RecordStore.rbxlx`.
+**Recommended setup with Rojo:** from the repository root, run `rojo serve default.project.json`, open the place in Studio, connect using the Rojo Studio plugin, and sync. The existing project file maps `src/PlayerDataInitializer` and `src/AlyaNum` into the hierarchy shown above. To produce a place/model file instead, run `rojo build default.project.json -o RecordStore.rbxlx`.
 
 ## Non-finite numeric values
 
@@ -77,8 +74,9 @@ The repository also includes:
 - `src/PlayerDataInitializer/PurchaseAuthorityMigrationRunner.luau`: resumable, bounded import of an application-enumerated historical PurchaseId snapshot with uncached durable checkpoints, source count and rolling digest reconciliation; unresolved batches never advance the cursor.
 - `src/PlayerDataInitializer/RecordStoreMaintenanceRobloxAdapter.luau`: paged real DataStore key enumeration, uncached inspection, and revision-checked checkpoint adapters for the bounded maintenance runner. Generation-aware deletion remains explicitly application supplied.
 - `src/PlayerDataInitializer/IntegerInfinityValue.luau`: a `NumberValue` factory that rounds finite values to integers while preserving positive infinity, negative infinity, and NaN. The default `kills` field uses this type so non-finite values are not silently replaced with zero.
-- `InfiniteMath.format(value, options?)`: the shared abbreviation formatter for native and InfiniteMath numbers. Formatting never changes stored values.
-- `src/PlayerDataInitializer/InfiniteMathValue.luau`: an adapter for the vendored InfiniteMath Revised module. It persists the number's normalized `first`/`second` pair inside a versioned JSON envelope and provides `get`/`set` helpers for a replicated StringValue backing instance. With the default schema, this adapter is not required during startup; `PlayerDataCore` loads it only when an `InfiniteMathValue` field is configured or used.
+- `src/PlayerDataInitializer/AlyaNumFormatter.luau`: shared abbreviation formatting for native numbers and AlyaNum values. It renders positive infinity as `Infinity`, negative infinity as `-Infinity`, and NaN as `NaN`.
+- `src/PlayerDataInitializer/AlyaNumValue.luau`: an adapter for the vendored AlyaNum library. It persists AlyaNum's normalized base representation in a versioned JSON envelope and provides `get`/`set` helpers for a replicated StringValue backing instance. IEEE special values use explicit tagged sentinels because AlyaNum itself accepts finite numeric inputs. With the default schema, this adapter is not loaded during startup; `PlayerDataCore` requires it only when an `AlyaNumValue` field is configured or used.
+- `src/AlyaNum/init.luau`: vendored AlyaNum source from `evilbocchi/alyanum`, pinned to commit `331b5e56d3857b04a4899fa9e46d6d39670c368a`. Its MIT license is included in `THIRD_PARTY_NOTICES/AlyaNum-MIT.txt`.
 - `src/PlayerDataInitializer/init.server.luau`: a standard Script that starts the controller and shuts it down from `BindToClose`.
 
 ### PlayerData.Set API
@@ -124,11 +122,7 @@ DataStore write has completed synchronously.
 
 Numeric fields are normalized according to their configured Value type. For example, `kills` uses
 `IntegerInfinityValue`, so fractional input is rounded using the field's configured rounding rule.
-InfiniteMath fields accept an InfiniteMath value (or a supported input accepted by `InfiniteMathValue.normalize`)
-and serialize it without coercing it to a native `number`. To use InfiniteMath, enable a field in
-`CONFIG.data`, for example `cash = define_data_field("InfiniteMathValue", 0)`. InfiniteMath values retain
-their normalized `first`/`second` serialization in `PlayerDataValues`; the leaderboard remains a formatted,
-display-only `StringValue`.
+AlyaNum fields accept an AlyaNum value or a supported finite numeric input and serialize it without coercing high-range values to a native `number`. To use AlyaNum, configure a field in `CONFIG.data`, for example `cash = define_data_field("AlyaNumValue", 0)`. The adapter stores the AlyaNum base representation in a versioned JSON payload backed by a replicated `StringValue`; the leaderboard remains formatted, display-only text.
 
 `Set` is server-side. Do not use it as a client-authoritative economy or permission boundary; validate
 gameplay actions and authorization on the server before changing protected fields.
@@ -145,38 +139,44 @@ The reset is applied during post-load normalization and written through the acti
 
 ### Number formatting
 
-InfiniteMath owns the shared number-abbreviation path. Use its static formatter for native Luau numbers or pass a constructed value for ranges beyond native numbers:
+AlyaNumFormatter supplies the shared number-abbreviation path for native Luau numbers and AlyaNum objects:
 
 ```lua
-local InfiniteMath = require(game:GetService("ReplicatedStorage"):WaitForChild("InfiniteMath"))
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local ServerScriptService = game:GetService("ServerScriptService")
+local initializer = ServerScriptService:WaitForChild("PlayerDataInitializer")
+local AlyaNum = require(ReplicatedStorage:WaitForChild("AlyaNum"))
+local AlyaNumFormatter = require(initializer:WaitForChild("AlyaNumFormatter"))
 
-print(InfiniteMath.format(1_250)) -- 1.25K
-print(InfiniteMath.format(1_000_000_000_000)) -- 1T
-print(InfiniteMath.format(InfiniteMath.new("1,1000"))) -- InfiniteMath's extended suffix range
+print(AlyaNumFormatter.format(1_250)) -- 1.25K
+print(AlyaNumFormatter.format(1_000_000_000_000)) -- 1T
+print(AlyaNumFormatter.format(AlyaNum.new(10):pow(1000))) -- beyond native number range
+print(AlyaNumFormatter.format(math.huge)) -- Infinity
+print(AlyaNumFormatter.format(-math.huge)) -- -Infinity
+print(AlyaNumFormatter.format(0 / 0)) -- NaN
 ```
 
-The default `PlayerDataCore` configuration abbreviates `Kills` using `define_leaderstat("kills", "Kills", { decimals = 2 })`. Native numeric and `InfiniteMathValue` leaderstats share `InfiniteMath.format`, including InfiniteMath's suffix table and scientific-notation fallback. Explicit precision accepts integers from 0 through 6; `trim_trailing_zeros` controls whether fractional trailing zeros are kept. Formatting changes display text only, never persisted values.
+The default `PlayerDataCore` configuration abbreviates `Kills` using `define_leaderstat("kills", "Kills", { decimals = 2 })`. Native numeric and `AlyaNumValue` leaderstats use `AlyaNumFormatter.format`. Explicit precision accepts integers from 0 through 6; `trim_trailing_zeros` controls whether fractional trailing zeros are kept. Formatting changes display text only, never persisted values.
 
-### InfiniteMath support
+### AlyaNum support and persistence compatibility
 
-`ReplicatedStorage.InfiniteMath` exposes the vendored InfiniteMath Revised library. Configure large-number fields with `define_data_field("InfiniteMathValue", 0)`. The `InfiniteMathValue` adapter stores a versioned JSON envelope in the profile and a replicated `StringValue`, then reconstructs an InfiniteMath number when read.
+`ReplicatedStorage.AlyaNum` exposes the vendored AlyaNum library. Configure extended-range fields with `define_data_field("AlyaNumValue", 0)`. The `AlyaNumValue` adapter stores a versioned AlyaNum base representation in the profile and a replicated `StringValue`, then reconstructs an AlyaNum value when read.
 
 ```luau
 local ServerScriptService = game:GetService("ServerScriptService")
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local InfiniteMathValue = require(ServerScriptService:WaitForChild("PlayerDataInitializer"):WaitForChild("InfiniteMathValue"))
-local InfiniteMath = require(ReplicatedStorage:WaitForChild("InfiniteMath"))
+local AlyaNumValue = require(ServerScriptService:WaitForChild("PlayerDataInitializer"):WaitForChild("AlyaNumValue"))
+local AlyaNum = require(game:GetService("ReplicatedStorage"):WaitForChild("AlyaNum"))
 
 local cash = player.PlayerDataValues.cash
-local current = InfiniteMathValue.get(cash)
-InfiniteMathValue.set(cash, current + InfiniteMath.new("100"))
+local current = AlyaNumValue.get(cash)
+AlyaNumValue.set(cash, current + AlyaNum.new(100))
 ```
 
-InfiniteMath Revised represents values using IEEE-754 double-precision floating-point significands and exponents. It extends representable range far beyond native `1e308`, but it is not arbitrary-precision arithmetic: values retain roughly 15–17 significant decimal digits, exponent increments can become unresolvable once the exponent magnitude exceeds `2^53`, and addition/subtraction deliberately discard terms more than 16 decimal orders below the larger operand. These precision and range limits are covered by regression tests; exact large-integer arithmetic requires a separate arbitrary-precision representation. The decimal exponent component must be an integer. `Reverse()` converts to a native Luau number and can underflow or overflow by design. `floor`, `ceil`, `round`, `modf`, and logarithms have regression coverage for tiny values and invalid domains; `log(0)` explicitly errors because negative infinity is not representable. `Number:Reverse()` converts back to a native Luau number and can therefore underflow to zero or overflow to infinity outside the native range. Formatting avoids silently displaying such tiny nonzero values as zero. Leaderboard encodings clamp very small values to the negative cap and reject malformed or non-finite decode inputs.
+AlyaNum uses an extended-range floating representation rather than arbitrary-precision integer arithmetic. It retains finite precision and has its own representational limits; applications requiring exact unbounded integer arithmetic need a separate integer representation. IEEE positive infinity, negative infinity, and NaN are not passed to AlyaNum as ordinary values. `AlyaNumValue` stores those states as explicit tagged sentinels, and `AlyaNumFormatter` displays them as `Infinity`, `-Infinity`, and `NaN`.
 
-New values use the `InfiniteMathValue` JSON format version 1. InfiniteMath Revised is vendored from `imezx/InfiniteMath` at upstream commit `7a846efdd1f63c6f38ccf2cbd0afda382ffc5ccf`; its MIT license is included in `THIRD_PARTY_NOTICES/InfiniteMath-MIT.txt`. Existing version-2 CodeNum payloads that fit InfiniteMath are normalized into the new format. Legacy symbolic values that cannot be represented by InfiniteMath are preserved verbatim and remain displayable rather than being silently replaced with defaults. Such preserved legacy values cannot be used as ordinary InfiniteMath numbers until explicitly converted to a representable value.
+New values use the `AlyaNumValue` JSON format version 1. The adapter includes a compatibility decoder for saved `InfiniteMathValue` version-1 envelopes and version-2 CodeNum payloads. Values that AlyaNum can represent are normalized to the AlyaNumValue format; legacy symbolic CodeNum values outside AlyaNum's supported range are preserved verbatim and retain a safe legacy display instead of being replaced with defaults. The old `InfiniteMathValue` name is recognized only as a persisted legacy-format identifier; RecordStore no longer loads or depends on InfiniteMath at runtime.
 
-The StringValue transport retains a conservative 199,999-byte payload limit. InfiniteMath's built-in suffix formatting is used for its supported suffix range, with scientific notation for larger exponents.
+The StringValue transport retains a conservative 199,999-byte payload limit. AlyaNum's MIT license and pinned upstream commit are recorded in `THIRD_PARTY_NOTICES/AlyaNum-MIT.txt`.
 ## Rojo
 
 Build the standard production place, including `PlayerDataInitializer`:
@@ -197,7 +197,7 @@ To test default numeric leaderstats without the persistence adapter installed, b
 rojo build tests-native-formatting.project.json -o RecordStore-NativeFormattingRegression.rbxlx
 ```
 
-This project intentionally omits `ServerScriptService.InfiniteMathValue` while keeping the real `ReplicatedStorage.InfiniteMath` module. Open the resulting place in Roblox Studio and run a server playtest. The mapped `PlayerDataSetRegression` must initialize the player, update the formatted `Kills` display, and complete its persistence assertions without requiring `InfiniteMathValue`.
+This project intentionally omits `ServerScriptService.AlyaNumValue` while keeping the real `ReplicatedStorage.AlyaNum` module and `AlyaNumFormatter`. Open the resulting place in Roblox Studio and run a server playtest. The mapped `PlayerDataSetRegression` must initialize the player, update the formatted `Kills` display (including `Infinity`, `-Infinity`, and `NaN`), and complete its persistence assertions without requiring the optional AlyaNumValue persistence adapter.
 
 Regression scripts use `RecordStore.Mock`; they do not read or write live DataStore records.
 

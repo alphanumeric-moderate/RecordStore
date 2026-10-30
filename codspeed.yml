@@ -51,23 +51,23 @@ benchmarks:
   - name: "compatibility regression suite"
     exec: lune run bench/run_compatibility_regression_tests.luau
 
-  - name: "InfiniteMath high-range arithmetic and reconstruction"
-    exec: lune run bench/infinimath.bench.luau
+  - name: "AlyaNum high-range arithmetic and reconstruction"
+    exec: lune run bench/alyanum.bench.luau
 
-  - name: "InfiniteMathValue format and normalization"
-    exec: lune run bench/infinimathvalue.bench.luau
+  - name: "AlyaNumValue format and normalization"
+    exec: lune run bench/alyanumvalue.bench.luau
 
-  - name: "PlayerData startup with legacy eager InfiniteMathValue load"
+  - name: "PlayerData startup with legacy eager AlyaNumValue load"
     exec: lune run bench/playerdata_startup_eager.bench.luau
 
-  - name: "PlayerData startup with lazy optional InfiniteMathValue load"
+  - name: "PlayerData startup with lazy optional AlyaNumValue load"
     exec: lune run bench/playerdata_startup_lazy.bench.luau
 
   - name: "PlayerData.Set path lookup"
     exec: lune run bench/playerdata_set_paths.bench.luau
 
-  - name: "InfiniteMath range regressions"
-    exec: lune run bench/run_infinimath_regression_tests.luau
+  - name: "AlyaNum range regressions"
+    exec: lune run bench/run_alyanum_regression_tests.luau
 
-  - name: "InfiniteMathValue persistence regressions"
-    exec: lune run bench/run_infinimathvalue_regression_tests.luau
+  - name: "AlyaNumValue persistence regressions"
+    exec: lune run bench/run_alyanumvalue_regression_tests.luau

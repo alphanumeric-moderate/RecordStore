@@ -13,14 +13,17 @@
       "PlayerDataCore": {
         "$path": "src/PlayerDataInitializer/PlayerDataCore.luau"
       },
+      "AlyaNumFormatter": {
+        "$path": "src/PlayerDataInitializer/AlyaNumFormatter.luau"
+      },
       "PlayerDataSetRegression": {
         "$path": "tests/PlayerDataSetRegression.server.luau"
       }
     },
     "ReplicatedStorage": {
       "$className": "ReplicatedStorage",
-      "InfiniteMath": {
-        "$path": "src/InfiniteMath"
+      "AlyaNum": {
+        "$path": "src/AlyaNum"
       }
     }
   }

@@ -25,17 +25,20 @@
       "IntegerInfinityValueRegression": {
         "$path": "tests/IntegerInfinityValueRegression.server.luau"
       },
-      "InfiniteMathFormattingRegression": {
-        "$path": "tests/InfiniteMathFormattingRegression.server.luau"
+      "AlyaNumFormattingRegression": {
+        "$path": "tests/AlyaNumFormattingRegression.server.luau"
       },
       "PlayerDataSetRegression": {
         "$path": "tests/PlayerDataSetRegression.server.luau"
       },
-      "InfiniteMathValue": {
-        "$path": "src/PlayerDataInitializer/InfiniteMathValue.luau"
+      "AlyaNumValue": {
+        "$path": "src/PlayerDataInitializer/AlyaNumValue.luau"
       },
-      "InfiniteMathValueRegression": {
-        "$path": "tests/InfiniteMathValueRegression.server.luau"
+      "AlyaNumFormatter": {
+        "$path": "src/PlayerDataInitializer/AlyaNumFormatter.luau"
+      },
+      "AlyaNumValueRegression": {
+        "$path": "tests/AlyaNumValueRegression.server.luau"
       },
       "RecordStoreLegacyPayloadRegression": {
         "$path": "tests/RecordStore_LegacyPayloadRegression.server.luau"
@@ -43,8 +46,8 @@
     },
     "ReplicatedStorage": {
       "$className": "ReplicatedStorage",
-      "InfiniteMath": {
-        "$path": "src/InfiniteMath"
+      "AlyaNum": {
+        "$path": "src/AlyaNum"
       }
     }
   }
