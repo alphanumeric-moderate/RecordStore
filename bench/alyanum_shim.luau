@@ -1,9 +1,10 @@
---!nonstrict
+--!nocheck
 
 local fs = require("@lune/fs")
 local luau = require("@lune/luau")
 local serde = require("@lune/serde")
 local builtin_require = require
+local builtin_typeof = typeof
 
 local Shim = {}
 
@@ -14,41 +15,8 @@ local function load_module(path, name, environment)
 	})()
 end
 
-function Shim.load_infinitemath()
-	local suffixes_token = {}
-	local full_names_token = {}
-	local int_token = {}
-	local module_script = {
-		Values = {
-			Suffixes = suffixes_token,
-			FullNames = full_names_token,
-		},
-		Int = int_token,
-	}
-
-	local function shim_require(target)
-		if target == suffixes_token then
-			return load_module("src/InfiniteMath/Values/Suffixes.luau", "InfiniteMath.Suffixes")
-		elseif target == full_names_token then
-			return load_module("src/InfiniteMath/Values/FullNames.luau", "InfiniteMath.FullNames")
-		elseif target == int_token then
-			return load_module("src/InfiniteMath/Int.luau", "InfiniteMath.Int")
-		end
-		return builtin_require(target)
-	end
-
-	return luau.load(fs.readFile("src/InfiniteMath/init.luau"), {
-		debugName = "InfiniteMath",
-		environment = {
-			script = module_script,
-			require = shim_require,
-		},
-	})()
-end
-
-function Shim.load_infinitemath_value()
-	local api = Shim.load_infinitemath()
-
+local function load_bundle()
+	local AlyaNum = load_module("src/AlyaNum/init.luau", "AlyaNum")
 	local http_service = {
 		JSONEncode = function(_self, value)
 			return serde.encode("json", value)
@@ -57,14 +25,20 @@ function Shim.load_infinitemath_value()
 			return serde.decode("json", value)
 		end,
 	}
-	local api_token = { ClassName = "ModuleScript", Name = "InfiniteMath" }
+	local api_token = { ClassName = "ModuleScript", Name = "AlyaNum" }
+	local formatter_token = { ClassName = "ModuleScript", Name = "AlyaNumFormatter" }
+
 	function api_token:IsA(class_name)
+		return class_name == "ModuleScript"
+	end
+	function formatter_token:IsA(class_name)
 		return class_name == "ModuleScript"
 	end
 
 	local replicated_storage = {
 		FindFirstChild = function(_self, name)
-			return if name == "InfiniteMath" then api_token else nil
+			if name == "AlyaNum" then return api_token end
+			return nil
 		end,
 	}
 	local game = {
@@ -74,6 +48,7 @@ function Shim.load_infinitemath_value()
 			error("unexpected service: " .. tostring(name), 2)
 		end,
 	}
+
 	local instance = {
 		new = function(class_name)
 			local object = {
@@ -91,14 +66,12 @@ function Shim.load_infinitemath_value()
 			return object
 		end,
 	}
-	local script = {
-		Parent = {},
-	}
+	local formatter
 	local function shim_require(target)
-		if target == api_token then return api end
+		if target == api_token then return AlyaNum end
+		if target == formatter_token then return formatter end
 		return builtin_require(target)
 	end
-	local builtin_typeof = typeof
 	local function shim_typeof(value)
 		if type(value) == "table" and rawget(value, "__mock_instance") == true then
 			return "Instance"
@@ -106,14 +79,37 @@ function Shim.load_infinitemath_value()
 		return builtin_typeof(value)
 	end
 
-	local value_factory = load_module("src/PlayerDataInitializer/InfiniteMathValue.luau", "InfiniteMathValue", {
+	formatter = load_module("src/PlayerDataInitializer/AlyaNumFormatter.luau", "AlyaNumFormatter", {
 		game = game,
-		script = script,
-		Instance = instance,
-		typeof = shim_typeof,
 		require = shim_require,
 	})
-	return value_factory, api
+	local script = {
+		Parent = {
+			AlyaNumFormatter = formatter_token,
+		},
+	}
+	local AlyaNumValue = load_module(
+		"src/PlayerDataInitializer/AlyaNumValue.luau",
+		"AlyaNumValue",
+		{
+			game = game,
+			script = script,
+			Instance = instance,
+			typeof = shim_typeof,
+			require = shim_require,
+		}
+	)
+	return AlyaNum, formatter, AlyaNumValue
+end
+
+function Shim.load_alyanum()
+	local AlyaNum, formatter = load_bundle()
+	return AlyaNum, formatter
+end
+
+function Shim.load_alyanum_value()
+	local AlyaNum, formatter, AlyaNumValue = load_bundle()
+	return AlyaNumValue, AlyaNum, formatter
 end
 
 return Shim

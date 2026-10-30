@@ -115,8 +115,8 @@ jobs:
             --command-name wide-profile-change-diff "lune run bench/change_diff.bench.luau" \
             --command-name legacy-migration-history "lune run bench/legacy_migration.bench.luau" \
             --command-name read-version-history "lune run bench/read_history.bench.luau" \
-            --command-name infinimath-arithmetic "lune run bench/infinimath.bench.luau" \
-            --command-name infinimathvalue-format "lune run bench/infinimathvalue.bench.luau" \
+            --command-name alyanum-arithmetic "lune run bench/alyanum.bench.luau" \
+            --command-name alyanumvalue-format "lune run bench/alyanumvalue.bench.luau" \
             --command-name playerdata-startup-eager "lune run bench/playerdata_startup_eager.bench.luau" \
             --command-name playerdata-startup-lazy "lune run bench/playerdata_startup_lazy.bench.luau" \
             --command-name playerdata-set-paths "lune run bench/playerdata_set_paths.bench.luau"
