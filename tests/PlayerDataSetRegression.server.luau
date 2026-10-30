@@ -71,8 +71,8 @@ local test_ok, test_error = pcall(function()
 	assert(scheduler_enabled, "PlayerDataCore did not enable the advanced scheduler")
 	assert(scheduler_policy.algorithm == "drr", "PlayerDataCore did not configure DRR scheduling")
 	assert(scheduler_policy.shadow_algorithm == "weighted", "PlayerDataCore did not configure weighted shadow scheduling")
-	assert(scheduler_policy.shadow_enabled == true and scheduler_policy.shadow_sample_rate == 1,
-		"PlayerDataCore did not enable full-rate scheduler shadow comparisons")
+	assert(scheduler_policy.shadow_enabled == true and scheduler_policy.shadow_sample_rate == 0.1,
+		"PlayerDataCore did not enable 10% scheduler shadow comparisons")
 	assert(scheduler_rollout.percent == 100 and scheduler_rollout.salt == "playerdatacore-scheduler-v1",
 		"PlayerDataCore did not configure its scheduler rollout")
 	local record_options = captured_record_options
