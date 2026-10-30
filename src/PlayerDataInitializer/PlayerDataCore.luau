@@ -1069,7 +1069,7 @@ local function new(dependencies: Dependencies?): Controller
 				end
 				warn("[PlayerData] V2 mailbox acceleration could not start; durable queue polling remains enabled",
 					if start_call_ok then tostring(start_message or start_result) else tostring(start_result))
-				return
+				return false
 			end
 			wakeup_acceleration = acceleration
 			return true
