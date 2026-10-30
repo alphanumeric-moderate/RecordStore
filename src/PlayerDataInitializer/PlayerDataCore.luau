@@ -1015,7 +1015,7 @@ local function new(dependencies: Dependencies?): Controller
 			return
 		end
 
-		local initialized, initialize_error = pcall(function()
+		local initialized, initialize_error = pcall(function(): boolean
 			local v2_factory = injected.RecordStoreV2 or require(script.Parent.RecordStoreV2)
 			local acceleration_factory = injected.RecordStoreV2Acceleration
 				or require(script.Parent.RecordStoreV2Acceleration)
@@ -1072,6 +1072,7 @@ local function new(dependencies: Dependencies?): Controller
 				return
 			end
 			wakeup_acceleration = acceleration
+			return true
 		end)
 		if not initialized then
 			warn("[PlayerData] V2 mailbox integration initialization failed; durable queue polling remains enabled",
@@ -1195,25 +1196,35 @@ local function new(dependencies: Dependencies?): Controller
 		end
 
 		local function process_mailbox_message(payload: unknown, message_value: any, context: unknown)
-			if type(message_value) ~= "table"
-				or type(message_value.Type) ~= "string"
-				or type(message_value.Id) ~= "string"
-				or type(message_value.Attempts) ~= "number"
-				or type(message_value.CreatedAt) ~= "number"
+			if type(message_value) ~= "table" then
+				return false, "V2 mailbox returned a malformed message snapshot"
+			end
+			local message_type = message_value.Type
+			local message_id = message_value.Id
+			local attempts = message_value.Attempts
+			local created_at = message_value.CreatedAt
+			local sender_job_id: string = if type(message_value.SenderJobId) == "string"
+				then message_value.SenderJobId :: string
+				else ""
+			if type(message_type) ~= "string"
+				or type(message_id) ~= "string"
+				or type(attempts) ~= "number"
+				or type(created_at) ~= "number"
 			then
 				return false, "V2 mailbox returned a malformed message snapshot"
 			end
-			return dispatch_queue_message(
+			local accepted, message = dispatch_queue_message(
 				player,
 				record,
-				message_value.Type,
+				message_type,
 				payload,
-				message_value.Attempts,
-				message_value.Id,
-				if type(message_value.SenderJobId) == "string" then message_value.SenderJobId else "",
-				message_value.CreatedAt,
+				attempts,
+				message_id,
+				sender_job_id,
+				created_at,
 				context
 			)
+			return accepted, message or ""
 		end
 
 		local registration_call_ok, registered, registration_or_error = pcall(function()
