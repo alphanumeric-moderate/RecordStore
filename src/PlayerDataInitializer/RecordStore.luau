@@ -17905,7 +17905,7 @@ end
 				final_message = update_message
 				if final_status ~= nil then break end
 			end
-			if decision == "duplicate" or decision == "conflict" or decision == "capacity" or decision == "fenced"
+			if decision == "conflict" or decision == "capacity" or decision == "fenced"
 				or decision == "corrupt" or decision == "retryable" or decision == "validation"
 			then
 				final_status = decision :: TransactionStatus
