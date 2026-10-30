@@ -1226,11 +1226,14 @@ local function new(dependencies: Dependencies?): Controller
 				if not process_call_ok then
 					warn("[PlayerData]", player.Name, "V2 mailbox wake-up processing raised",
 						tostring(process_result))
-				elseif process_result ~= "processed" and process_result ~= "empty"
-					and process_result ~= "busy" and should_warn_result(process_result)
-				then
-					warn("[PlayerData]", player.Name, "V2 mailbox wake-up processing failed",
-						process_result, process_message or "")
+				else
+					local process_code = process_result :: RecordStore.ResultCode
+					if process_code ~= "processed" and process_code ~= "empty"
+						and process_code ~= "busy" and should_warn_result(process_code)
+					then
+						warn("[PlayerData]", player.Name, "V2 mailbox wake-up processing failed",
+							process_code, process_message or "")
+					end
 				end
 			end)
 		end)
@@ -1246,6 +1249,11 @@ local function new(dependencies: Dependencies?): Controller
 			return
 		end
 		wakeup_registrations[record] = registration_or_error
+		if sessions[player] ~= record or closing_records[record]
+			or departed_players[player] or shutting_down
+		then
+			disconnect_mailbox_wakeup(record)
+		end
 	end
 
 	local function merge_pending(record: PlayerRecord, changes: {[string]: DataValue})

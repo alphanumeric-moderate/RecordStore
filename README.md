@@ -192,7 +192,7 @@ return PlayerDataCore.new({
 })
 ```
 
-`QueueMessageHandler` is required when mailbox wake-ups are enabled. Its signature is `(player, message_type, payload, attempts, message_id, sender_job_id, created_at, context) -> (accepted, message?)`. Return `true` only after the application-owned operation has completed. Return `false` with a reason to leave the message retryable. The handler must be idempotent because Mailbox V2 provides at-least-once delivery; do not acknowledge a message before its durable effect is confirmed.
+`QueueMessageHandler` is required when mailbox wake-ups are enabled. Its signature is `(player, message_type, payload, attempts, message_id, sender_job_id, created_at, context) -> (accepted, message?)`. Return `true` only after the application-owned operation has completed. Return `false` with a reason to leave the message retryable. The handler must be idempotent because Mailbox V2 provides at-least-once delivery; do not acknowledge a message before its durable effect is confirmed. Cross-server wake-ups enter `Record:ProcessQueueAsync`, preserving RecordStore's queue-busy coordination and normal message-handler path.
 
 `MailboxWakeupsEnabled` automatically enables the RecordStore durable queue for PlayerData sessions. `MemoryStoreAccelerationHintsEnabled` requires mailbox wake-ups and adds bounded MemoryStore sorted-map hints alongside MessagingService notifications. Both switches default to `false`, and no external services are initialized by the default PlayerDataCore setup. If the optional acceleration service cannot start, PlayerDataCore keeps the mailbox's durable polling/reconciliation path available and continues player loading.
 
