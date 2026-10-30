@@ -79,7 +79,7 @@ local preflush_data_ref = preflush.Data :: { [string]: any }
 preflush_data_ref.settings.label = "before-transaction"
 RecordStore.Mock.set_before_next_update(function()
 	local data = preflush.Data :: { [string]: any }
-	data.settings.label = "during-prerequisite-flush"
+	data.settings.mode = "during-prerequisite-flush"
 end)
 local preflush_result, preflush_status, preflush_message = preflush:TransactAsync(
 	"flush-direct-edit-before-transaction",
@@ -91,16 +91,61 @@ assert(type(preflush_result) == "table", "pre-flush transaction did not return i
 local preflush_data = preflush:Get() :: { [string]: any }
 assert(preflush_data.coins == 20 and preflush_data.transaction_marker == true,
 	"transaction did not apply after the direct-edit prerequisite flush")
-assert(preflush_data.settings.label == "during-prerequisite-flush",
-	"direct record.Data edit made before TransactAsync was not flushed")
+assert(preflush_data.settings.label == "before-transaction",
+	"pre-transaction direct record.Data edit was not persisted")
+assert(preflush_data.settings.mode == "during-prerequisite-flush",
+	"separate mutation during the prerequisite flush was not persisted")
 assert(not preflush:IsDirty(), "prerequisite direct edit should be included in the transaction's clean baseline")
 local preflush_durable = RecordStore.Mock.get_record_raw(store_name, scope, "direct-edit-before-transaction") :: { [string]: any }
 assert(preflush_durable.revision == preflush_revision + 3,
 	"direct edit should flush once before the transaction commit")
-assert(((preflush_durable.data :: { [string]: any }).settings :: { [string]: any }).label == "during-prerequisite-flush",
-	"prerequisite flush did not persist the direct edit")
+local preflush_durable_settings = (preflush_durable.data :: { [string]: any }).settings :: { [string]: any }
+assert(preflush_durable_settings.label == "before-transaction",
+	"prerequisite flush did not persist the pre-transaction edit")
+assert(preflush_durable_settings.mode == "during-prerequisite-flush",
+	"prerequisite flush did not persist the separate concurrent edit")
 local preflush_close, preflush_close_message = preflush:Close()
 assert(preflush_close == "closed" or preflush_close == "fenced", preflush_close_message)
+
+RecordStore.Mock.reset()
+
+local deadline_record = RecordStore.Mock.new(store_name, scope, "deadline-bounds-prerequisite-flush", {
+	schema_version = 1,
+	autosave_interval = 1000,
+	lease_duration = 180,
+	lease_renewal = 60,
+	operation_deadline = 0.05,
+	retry_attempts = 2,
+	transactional_operations_enabled = true,
+})
+local deadline_opened, deadline_open_message = deadline_record:Open({
+	coins = 10,
+	settings = { label = "initial" },
+})
+assert(deadline_opened == "created" or deadline_opened == "loaded", deadline_open_message)
+local deadline_revision = deadline_record:GetRevision()
+local deadline_data = deadline_record.Data :: { [string]: any }
+deadline_data.settings.label = "must-not-be-flushed-after-deadline"
+task.wait(0.3)
+assert(os.clock() > 0.25, "deadline regression requires an elapsed local clock")
+RecordStore.Mock.set_update_failures(1, "budget", "deadline regression transient failure")
+local deadline_result, deadline_status, deadline_message = deadline_record:TransactAsync(
+	"deadline-bounds-prerequisite-flush",
+	increment_coins,
+	{ request = { kind = "increment-coins", amount = 10 } }
+)
+assert(deadline_status == "unknown", deadline_message)
+assert(deadline_result == nil, "transaction must not start after its prerequisite save deadline")
+assert(deadline_record:IsDirty(), "deadline-expired prerequisite flush must retain its local edit")
+local deadline_durable = RecordStore.Mock.get_record_raw(
+	store_name,
+	scope,
+	"deadline-bounds-prerequisite-flush"
+) :: { [string]: any }
+assert(deadline_durable.revision == deadline_revision,
+	"prerequisite save retried beyond the transaction deadline")
+assert(((deadline_durable.data :: { [string]: any }).settings :: { [string]: any }).label == "initial",
+	"deadline-expired prerequisite flush changed durable data")
 
 RecordStore.Mock.reset()
 
@@ -190,6 +235,92 @@ assert(((duplicate_durable.data :: { [string]: any }).settings :: { [string]: an
 	== "during-first-attempt", "duplicate reconciliation lost the newer local mutation")
 local duplicate_close, duplicate_close_message = duplicate:Close()
 assert(duplicate_close == "closed" or duplicate_close == "fenced", duplicate_close_message)
+
+RecordStore.Mock.reset()
+
+local function validate_bounded_sum(value: RecordStore.JsonValue): (boolean, string?)
+	if type(value) ~= "table" then return false, "record data must be a table" end
+	local data = value :: { [string]: RecordStore.JsonValue }
+	local a = data.a
+	local b = data.b
+	if type(a) ~= "number" or type(b) ~= "number" then
+		return false, "a and b must be numbers"
+	end
+	return a + b <= 10, "a + b must not exceed 10"
+end
+
+local constrained = RecordStore.Mock.new(store_name, scope, "validator-rejected-transaction-merge", {
+	schema_version = 1,
+	autosave_interval = 1000,
+	lease_duration = 180,
+	lease_renewal = 60,
+	operation_deadline = 20,
+	retry_attempts = 1,
+	transactional_operations_enabled = true,
+	validator = validate_bounded_sum,
+})
+local constrained_opened, constrained_open_message = constrained:Open({ a = 1, b = 1 })
+assert(constrained_opened == "created" or constrained_opened == "loaded", constrained_open_message)
+local function set_b_to_eight(
+	current: RecordStore.JsonValue?,
+	_input: RecordStore.JsonValue?
+): (RecordStore.JsonValue?, RecordStore.JsonValue?)
+	if type(current) ~= "table" then return nil, nil end
+	local data = table.clone(current :: { [string]: RecordStore.JsonValue })
+	data.b = 8
+	return data, { b = 8 }
+end
+RecordStore.Mock.set_before_next_update(function()
+	local data = constrained.Data :: { [string]: any }
+	data.a = 8
+end)
+local constrained_result, constrained_status, constrained_message = constrained:TransactAsync(
+	"validator-rejected-merge",
+	set_b_to_eight,
+	{ request = { kind = "bounded-update", b = 8 } }
+)
+assert(constrained_status == "unknown", constrained_message)
+assert(constrained_result == nil, "unreconciled transaction must not return a confirmed local result")
+assert(string.find(constrained_message or "", "transaction is committed", 1, true) ~= nil,
+	"reconciliation failure must disclose that the durable transaction committed")
+local unresolved_local = constrained.Data :: { [string]: any }
+assert(unresolved_local.a == 8 and unresolved_local.b == 1,
+	"validator-rejected reconciliation must preserve the newer local value")
+local unresolved_durable = RecordStore.Mock.get_record_raw(
+	store_name,
+	scope,
+	"validator-rejected-transaction-merge"
+) :: { [string]: any }
+local unresolved_durable_data = unresolved_durable.data :: { [string]: any }
+assert(unresolved_durable_data.a == 1 and unresolved_durable_data.b == 8,
+	"validator-rejected reconciliation must retain the committed durable transaction")
+
+unresolved_local.a = 2
+local recovered_result, recovered_status, recovered_message = constrained:TransactAsync(
+	"validator-rejected-merge",
+	set_b_to_eight,
+	{ request = { kind = "bounded-update", b = 8 } }
+)
+assert(recovered_status == "duplicate", recovered_message)
+assert(type(recovered_result) == "table", "same-ID retry must return the committed transaction result")
+local recovered_data = constrained:Get() :: { [string]: any }
+assert(recovered_data.a == 2 and recovered_data.b == 8,
+	"same-ID retry must reconcile corrected local data with the committed transaction")
+assert(constrained:IsDirty(), "corrected local data must remain dirty until saved")
+local recovered_save, recovered_save_message = constrained:Save("transaction-merge-validator-recovery")
+assert(recovered_save == "saved", recovered_save_message)
+local recovered_durable = RecordStore.Mock.get_record_raw(
+	store_name,
+	scope,
+	"validator-rejected-transaction-merge"
+) :: { [string]: any }
+local recovered_durable_data = recovered_durable.data :: { [string]: any }
+assert(recovered_durable.revision == unresolved_durable.revision + 1,
+	"reconciliation retry must not reapply the already committed transaction")
+assert(recovered_durable_data.a == 2 and recovered_durable_data.b == 8,
+	"recovered local data did not persist alongside the transaction result")
+local constrained_close, constrained_close_message = constrained:Close()
+assert(constrained_close == "closed" or constrained_close == "fenced", constrained_close_message)
 
 RecordStore.Mock.reset()
 print("[PASS] Transaction reconciliation preserves post-flush mutations and committed transaction data.")

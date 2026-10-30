@@ -17663,7 +17663,11 @@ end
 		if deadline == nil then return nil, "invalid", deadline_error end
 		if not was_unknown then
 			while state.change_sequence ~= state.saved_change_sequence do
-				local flush_code, flush_message = save_internal(state, "transaction-prerequisite", deadline, nil)
+				local remaining = math.max(0, deadline - now_local())
+				if remaining <= 0 then
+					return nil, "retryable", "transaction deadline exceeded before prerequisite flush"
+				end
+				local flush_code, flush_message = save_internal(state, "transaction-prerequisite", remaining, nil)
 				if flush_code ~= "saved" then
 					local status: TransactionStatus = if flush_code == "unknown" then "unknown" else "retryable"
 					return nil, status, flush_message or "dirty profile data could not be flushed before transaction"
@@ -18047,6 +18051,27 @@ end
 					return nil, "unknown", "newer local profile data could not be copied during transaction reconciliation"
 				end
 				merged_data = merge_transaction_local_changes(old_data :: JsonValue, local_data, confirmed.data :: JsonValue)
+			end
+			if merged_data ~= nil then
+				local merged_valid, merged_validation_message = validate_value(merged_data, state.options.validator)
+				if not merged_valid then
+					local reconciliation_message = "transaction is committed, but concurrent local changes could not be reconciled: "
+						.. (merged_validation_message or "merged data failed validation")
+					state.busy = false
+					state.state = "unknown"
+					state.current_operation_id = nil
+					state.pending_transaction = {
+						operation_id = operation_id,
+						kind = kind :: string,
+						request_identity = request_identity,
+						captured_change_sequence = captured_change_sequence,
+						base_data = copy_value(old_data),
+					}
+					state.next_reconciliation = now_local() + 0.25
+					state.last_reconciliation_category = "transaction_merge_validation"
+					state.last_error = reconciliation_message
+					return nil, "unknown", reconciliation_message
+				end
 			end
 			update_local_from_envelope(state, confirmed, confirmed_info)
 			if merged_data ~= nil then
