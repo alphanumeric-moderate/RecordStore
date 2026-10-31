@@ -78,6 +78,23 @@ local long_decimal_text = "1.2345678901234567890123456789012345"
 local long_decimal = CodeNum.parse(long_decimal_text)
 assert(CodeNum.isPrecise(long_decimal), "long decimal text did not select precise storage")
 assert(CodeNum.toString(long_decimal) == long_decimal_text, "long decimal parsing lost input digits")
+local binary64_midpoint_above = "1.00000000000000011102230246251565404236316680908203126"
+assert(CodeNum.toNumber(CodeNum.parse(binary64_midpoint_above)) == 1.0000000000000002,
+	"precise conversion discarded digits beyond the binary64 midpoint")
+assert(CodeNum.toNumber(CodeNum.parse("-" .. binary64_midpoint_above)) == -1.0000000000000002,
+	"negative precise conversion discarded digits beyond the binary64 midpoint")
+assert(CodeNum.toNumber(CodeNum.parse("2.4703282292062328e-324")) == 5e-324,
+	"precise conversion rounded a subnormal above the midpoint to zero")
+local negative_underflow = CodeNum.toNumber(CodeNum.parse("-1.234567890123456789e-400"))
+assert(negative_underflow == 0 and 1 / negative_underflow == -math.huge,
+	"precise underflow did not preserve negative zero")
+assert(CodeNum.toNumber(CodeNum.parse("1.7976931348623157e308")) == 1.7976931348623157e308,
+	"precise conversion overflowed the largest finite binary64 value")
+assert(CodeNum.toNumber(CodeNum.parse("1.234567890123456789e9000")) == math.huge,
+	"precise conversion did not overflow for a large exponent")
+local fallback_underflow = CodeNum.toNumber(CodeNum.parse("-1.234567890123456789e-9000"))
+assert(fallback_underflow == 0 and 1 / fallback_underflow == -math.huge,
+	"precise conversion did not preserve signed zero for a large negative exponent")
 assert(CodeNum.toString(CodeNum.parse("1.245", 3)) == "1.24", "half-even tie rounded an even digit upward")
 assert(CodeNum.toString(CodeNum.parse("1.255", 3)) == "1.26", "half-even tie failed to round an odd digit upward")
 assert(CodeNum.toString(CodeNum.parse("1.999", 2)) == "2", "precision carry did not renormalize the exponent")

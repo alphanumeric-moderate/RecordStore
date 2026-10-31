@@ -3020,6 +3020,19 @@ end
 function CodeNum.toNumber(value: Operand): number
 	assertValidValue(value)
 	if isPrecise(value) then
+		local parts = preciseParts(value)
+		if parts.sign == 0 then
+			return if parts.zeroSign < 0 then -0.0 else 0
+		end
+		if parts.expIsBig == 0 and math.abs(parts.expSmall) <= MAX_PRECISE_TEMP_DIGITS then
+			local native = tonumber(preciseToString(value, nil))
+			if native ~= nil then
+				if native == 0 then
+					return if parts.sign < 0 then -0.0 else 0
+				end
+				return native
+			end
+		end
 		local mantissa, isBig, small, sign, length, data = preciseScientificParts(value)
 		if mantissa == 0 then
 			return mantissa
