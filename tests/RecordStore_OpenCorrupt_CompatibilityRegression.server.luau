@@ -444,3 +444,53 @@ do
 end
 
 print("[PASS] Corruption compatibility, persistence, direct-mutation capture, validator isolation, change-event diff, and Update/Reconcile sync fast-path and event payload isolation and copy traversal invariants.")
+
+-- Case 6: future RecordStore implementation envelopes fail closed and remain untouched.
+RecordStore.Mock.reset()
+do
+	local store_name = "RecordStore_FutureEnvelopeRegression"
+	local scope = "global"
+	local key = "future-implementation-envelope"
+	local future_envelope = {
+		implementation_version = 3,
+		schema_version = 1,
+		revision = 22,
+		fencing_generation = 9,
+		created_at = 100,
+		updated_at = 200,
+		data = { Coins = 999, Inventory = { "FutureItem" } },
+		user_ids = {},
+		write_id = "future-implementation-write",
+	}
+	local seed_result, seed_message = RecordStore.Mock.seed_record_raw(store_name, scope, key, future_envelope)
+	assert(seed_result == "success", seed_message)
+	local record = RecordStore.Mock.new(store_name, scope, key, { schema_version = 1 })
+	local open_result, open_message = record:Open({ Coins = 0 })
+	assert(open_result == "future_schema",
+		("future implementation version was not rejected: %s: %s"):format(open_result, open_message or ""))
+	local raw_after_open = RecordStore.Mock.get_record_raw(store_name, scope, key) :: { [string]: any }
+	assert(raw_after_open.implementation_version == 3
+		and raw_after_open.revision == 22
+		and raw_after_open.write_id == "future-implementation-write"
+		and (raw_after_open.data :: { [string]: any }).Coins == 999,
+		"Open mutated an unsupported future implementation envelope")
+	local read_result, read_message = RecordStore.Mock.read_async(store_name, scope, key)
+	assert(read_result == nil and read_message == nil,
+		"future-version read returned a snapshot instead of failing closed")
+	local status = record:GetState()
+	assert(status == "future", "future envelope rejection did not leave a non-writable local state")
+	local save_result = record:Save("future-envelope-must-not-save")
+	assert(save_result ~= "saved", "Save reported success over a future implementation envelope")
+	local raw_after_save = RecordStore.Mock.get_record_raw(store_name, scope, key) :: { [string]: any }
+	assert(raw_after_save.implementation_version == 3
+		and raw_after_save.write_id == "future-implementation-write"
+		and (raw_after_save.data :: { [string]: any }).Coins == 999,
+		"Save overwrote a future implementation envelope")
+	local reconcile_result = RecordStore.Mock.reconcile(record)
+	assert(reconcile_result ~= "success", "Reconcile claimed success for a record that never acquired ownership")
+	local raw_after_reconcile = RecordStore.Mock.get_record_raw(store_name, scope, key) :: { [string]: any }
+	assert(raw_after_reconcile.implementation_version == 3
+		and raw_after_reconcile.write_id == "future-implementation-write"
+		and (raw_after_reconcile.data :: { [string]: any }).Coins == 999,
+		"Reconcile mutated a future implementation envelope")
+end
