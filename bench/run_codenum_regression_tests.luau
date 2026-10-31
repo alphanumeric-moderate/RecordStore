@@ -197,4 +197,36 @@ assert(CodeNum.toString(far_sum) == "1e" .. far_exponent,
 	"addition with a distant exponent changed the dominant value")
 assert(CodeNum.wasRounded(far_sum), "discarding a distant insignificant operand was not recorded")
 
+local large_aligned_value = CodeNum.parse(string.rep("9", 4096), 4096)
+local distant_small_value = CodeNum.parse("1e-5000", 4096)
+local aligned_add_ok, aligned_add_result = pcall(function()
+	return CodeNum.add(large_aligned_value, distant_small_value)
+end)
+assert(aligned_add_ok, "valid addition exceeded temporary capacity after coefficient alignment")
+assert(CodeNum.toString(aligned_add_result) == CodeNum.toString(large_aligned_value),
+	"adding a value beyond the selected precision changed the dominant coefficient")
+assert(CodeNum.wasRounded(aligned_add_result),
+	"discarding a value beyond the selected precision was not recorded")
+
+local rounded_zero_product = CodeNum.mul(rounded_parse, 0)
+assert(CodeNum.wasRounded(rounded_zero_product),
+	"multiplication by zero discarded rounded arithmetic ancestry")
+local rounded_zero_cancellation = CodeNum.sub(rounded_parse, rounded_parse)
+assert(CodeNum.wasRounded(rounded_zero_cancellation),
+	"exact cancellation discarded rounded arithmetic ancestry")
+local encoded_rounded_zero = CodeNum.encode(rounded_zero_product)
+assert(not CodeNum.wasRounded(CodeNum.decode(encoded_rounded_zero)),
+	"runtime-only rounding provenance was unexpectedly serialized")
+
+local invalid_precision_operations = {
+	function() CodeNum.add(math.huge, 1, 0) end,
+	function() CodeNum.sub(0 / 0, 1, 4097) end,
+	function() CodeNum.mul(-math.huge, 1, 0) end,
+	function() CodeNum.div(1, math.huge, 4097) end,
+	function() CodeNum.pow(2, 0, 0) end,
+}
+for _, operation in invalid_precision_operations do
+	assert(not pcall(operation), "invalid precision was accepted by an arithmetic operation")
+end
+
 print("[CodeNum 0.6.0] native, Wide, precise arithmetic, range, codec, and register regressions passed")
