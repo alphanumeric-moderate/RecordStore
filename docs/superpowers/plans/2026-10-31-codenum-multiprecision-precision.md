@@ -22,6 +22,7 @@
 - Precision arithmetic must not mutate operands or register input values.
 - Keep CN1 native/Wide values in CodeNumValue envelope version 1 and write CN2 precise values in envelope version 2.
 - New readers accept envelope versions 1 and 2, and canonicalize early version-1/CN2 values already written by initial 0.6.0 adapters to version 2.
+- CN2 preserves the sign and precision context of precise zero values; decoding restores precise storage with `wasRounded = false`. Native signed zero remains in CN1.
 - Unknown envelope versions must be rejected before normalization so an older v1-only reader can distinguish a v2 payload from its CN1 format.
 - Preserve the existing conservative serialized payload size limit.
 
@@ -31,6 +32,7 @@
 - Cancellation and mixed signs must not produce a negative zero or corrupt the selected decimal exponent.
 - Very distant exponents must not allocate unbounded alignment strings; insignificant operands must be discarded only when they cannot affect the requested precision.
 - Division by positive and negative zero, zero divided by zero, and exact halfway rounding must have deterministic behavior.
+- Signed precise zero must retain its precision context across CN2 round-trips without serializing runtime-only rounding provenance.
 - Reusing a register as both an input and destination must not mutate a precise operand or invalidate a stored value.
 
 ---
