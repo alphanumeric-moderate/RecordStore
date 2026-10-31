@@ -222,6 +222,8 @@ local negative_rounded = CodeNum.parse("-1.255", 2)
 local negative_rounded_zero = CodeNum.mul(negative_rounded, 0)
 assert(CodeNum.wasRounded(negative_rounded_zero),
 	"negative zero result discarded rounded arithmetic ancestry")
+assert(CodeNum.toString(negative_rounded_zero) == "-0",
+	"precise negative zero string conversion lost its sign")
 local negative_zero_number = CodeNum.toNumber(negative_rounded_zero)
 assert(negative_zero_number == 0 and 1 / negative_zero_number == -math.huge,
 	"precise rounded zero lost its negative sign during native conversion")
@@ -237,6 +239,29 @@ assert(CodeNum.wasRounded(negative_zero_precision)
 	and negative_zero_precision_number == 0
 	and 1 / negative_zero_precision_number == -math.huge,
 	"withPrecision did not preserve negative-zero provenance")
+
+local rounded_power_base = CodeNum.parse("1.5", 2)
+assert(CodeNum.toString(CodeNum.pow(rounded_power_base, 5, 2)) == "7.6",
+	"integer power rounded intermediate products instead of the final result")
+assert(CodeNum.toString(CodeNum.pow(rounded_power_base, -5, 2)) == "0.13",
+	"negative integer power inherited intermediate rounding error")
+assert(CodeNum.toString(CodeNum.pow(CodeNum.parse("1.5", 4), 3, 4)) == "3.375",
+	"integer power lost exactness when the selected precision was sufficient")
+
+local rounded_zero_times_infinity = CodeNum.mul(math.huge, rounded_zero_product)
+assert(rounded_zero_times_infinity ~= rounded_zero_times_infinity,
+	"Precise zero multiplied by infinity did not produce NaN")
+local negative_infinity_times_rounded_zero = CodeNum.mul(-math.huge, rounded_zero_product)
+assert(negative_infinity_times_rounded_zero ~= negative_infinity_times_rounded_zero,
+	"negative infinity multiplied by Precise zero did not produce NaN")
+
+local rounded_zero_register = CodeNum.createRegister()
+CodeNum.mulInto(rounded_zero_register, negative_rounded, 0)
+assert(CodeNum.isPrecise(rounded_zero_register) and CodeNum.wasRounded(rounded_zero_register),
+	"precise register did not retain zero rounding provenance")
+local register_add_result = CodeNum.add(rounded_zero_register, 1)
+assert(CodeNum.compare(register_add_result, 1) == 0 and CodeNum.wasRounded(register_add_result),
+	"precise register operand lost exact value or rounding provenance")
 local parsed_negative_zero = CodeNum.parse("-0", 34)
 assert(parsed_negative_zero == 0 and 1 / parsed_negative_zero == -math.huge,
 	"decimal parsing did not preserve negative zero")
