@@ -24,6 +24,6 @@ local legacy = HttpService:JSONEncode({
 })
 local migrated = CodeNumValue.normalize(legacy)
 assert(HttpService:JSONDecode(migrated).schema == "CodeNumValue")
-assert(CodeNum.toString(CodeNumValue.decode(migrated)) == "1.25e12")
+assert(CodeNum.compare(CodeNumValue.decode(migrated), 1.25e12) == 0)
 
 print("[CodeNumValue] Roblox StringValue adapter regressions passed")

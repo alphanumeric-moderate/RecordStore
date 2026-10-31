@@ -90,6 +90,41 @@ local rounded_old_integer = serde.encode("json", {
 assert(CodeNumValue.normalize(rounded_old_integer) == rounded_old_integer,
 	"non-representable legacy integer was rounded during migration")
 
+local function legacy_expression(op, left, right)
+	return serde.encode("json", {
+		schema = "CodeNum", version = 2,
+		value = { kind = "expression", op = op, left = left, right = right },
+	})
+end
+local function integer(sign, digits)
+	return { kind = "integer", sign = sign, digits = digits }
+end
+local function finite(value)
+	return { kind = "finite", value = value }
+end
+
+for _, expression in {
+	legacy_expression("add", integer(1, "9007199254740992"), finite(1)),
+	legacy_expression("sub", integer(-1, "9007199254740992"), finite(1)),
+	legacy_expression("mul", integer(1, "4503599627370496"), finite(2)),
+	legacy_expression("pow", finite(2), finite(53)),
+	legacy_expression("add", { kind = "expression", op = "add", left = integer(1, "9007199254740992"), right = finite(1) }, finite(-1)),
+	legacy_expression("mul", { kind = "scientific", sign = 1, mantissa = 1.25, exponent = "1000" }, finite(2)),
+	legacy_expression("mul", { kind = "scientific", sign = -1, mantissa = 1.25, exponent = "1000" }, finite(2)),
+} do
+	assert(CodeNumValue.normalize(expression) == expression, "unsafe integer expression was migrated")
+end
+local safe_expression = legacy_expression("add", integer(1, "9007199254740990"), finite(1))
+assert(CodeNum.compare(CodeNumValue.decode(CodeNumValue.normalize(safe_expression)), 9007199254740991) == 0)
+local fractional_expression = legacy_expression("div", finite(5), finite(2))
+assert(CodeNum.compare(CodeNumValue.decode(CodeNumValue.normalize(fractional_expression)), 2.5) == 0)
+local wide_fraction = legacy_expression("mul", { kind = "scientific", sign = 1, mantissa = 1.25, exponent = "-1000" }, finite(2))
+assert(CodeNum.compare(CodeNumValue.decode(CodeNumValue.normalize(wide_fraction)), CodeNum.fromScientific(2.5, "-1000")) == 0)
+local special_expression = legacy_expression("div", finite(1), finite(0))
+assert(CodeNumValue.decode(CodeNumValue.normalize(special_expression)) == math.huge)
+local failed_expression = legacy_expression("unsupported", finite(1), finite(2))
+assert(CodeNumValue.normalize(failed_expression) == failed_expression)
+
 local old_code_hyper = serde.encode("json", {
 	schema = "CodeNum",
 	version = 2,

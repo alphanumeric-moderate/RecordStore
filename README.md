@@ -177,7 +177,17 @@ CodeNum arithmetic is explicit: use `CodeNum.add`, `sub`, `mul`, `div`, and `pow
 
 `CodeNumValue` writes format version 1 and enforces a conservative 199,999-byte `StringValue` payload limit. It accepts native numbers, CodeNum `Wide` values, `CN1` payloads, and numeric strings. NaN and infinities are encoded by CodeNum's native-number payload variants.
 
-The migration decoder recognizes previous `AlyaNumValue` version-1 envelopes, `InfiniteMathValue` version-1 envelopes, and the earlier JSON `CodeNum` version-2 format. Values representable by CodeNum 0.5.0 are converted to the new `CodeNumValue` envelope. Earlier symbolic values and AlyaNum / InfiniteMath values outside CodeNum's supported range are preserved verbatim rather than silently reset; they remain legacy values until the application chooses an explicit conversion. Unknown versions of recognized schemas are rejected rather than overwritten.
+The migration decoder recognizes previous `AlyaNumValue` version-1 envelopes, `InfiniteMathValue` version-1 envelopes, and the earlier JSON `CodeNum` version-2 format.
+
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:f2a25b8fb069c85052f2ee32c478880cb6cd20b67680f3aa5094802f49d1f02b -->
+
+Values representable by CodeNum 0.5.0 are converted to the new `CodeNumValue` envelope, except that legacy expressions evaluating to integers outside the safe-integer range are preserved to avoid rounding.
+
+<!-- /coderabbit-ai-generated:v1 -->
+
+Earlier symbolic values and AlyaNum / InfiniteMath values outside CodeNum's supported range are preserved verbatim rather than silently reset; they remain legacy values until the application chooses an explicit conversion. Unknown versions of recognized schemas are rejected rather than overwritten.
 
 The StringValue transport retains a conservative 199,999-byte payload limit. CodeNum 0.5.0 is maintained in this repository and does not introduce a third-party numeric runtime dependency.
 

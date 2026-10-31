@@ -246,6 +246,16 @@ local function legacy_node_to_value(node: any, depth: number, budget: {count: nu
 			end
 			error("unsupported legacy expression operator")
 		end)
+		-- Native arithmetic may round integers beyond binary64's safe range.
+		if ok and type(result) == "number" and is_finite(result)
+			and math.abs(result) > 9007199254740991 and math.floor(result) == result
+		then
+			return nil
+		end
+		-- Positive-exponent Wide values exceed native range and are integers.
+		if ok and type(result) == "table" and api.compare(api.abs(result), 9007199254740991) == 1 then
+			return nil
+		end
 		return if ok then result else nil
 	elseif kind == "hyper" then
 		local base = legacy_node_to_value(node.base, depth + 1, budget)
