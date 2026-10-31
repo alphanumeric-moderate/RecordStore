@@ -2062,26 +2062,41 @@ local function precisePowerInteger(value: Operand, power: number, precision: num
 	local parts = preciseParts(value)
 	local selectedPrecision = precision or parts.precision
 	validatePrecision(selectedPrecision)
+	local guardDigits = math.min(32, math.ceil(math.log10(math.abs(power))) + 8)
+	local workingPrecision = math.min(
+		MAX_PRECISE_DIGITS,
+		math.max(parts.precision, selectedPrecision + guardDigits)
+	)
 	local factor = makePrecise(
 		if parts.sign == 0 then parts.zeroSign else parts.sign,
 		parts.digits, parts.expIsBig, parts.expSmall, parts.expSign,
-		parts.expLength, parts.expData, selectedPrecision, nil, nil, parts.wasRounded
+		parts.expLength, parts.expData, workingPrecision, nil, nil, parts.wasRounded
 	)
-	local result: Value = makePrecise(1, "1", 0, 0, 0, 0, nil, selectedPrecision, nil, nil)
+	local result: Value = makePrecise(1, "1", 0, 0, 0, 0, nil, workingPrecision, nil, nil)
 	local remaining = math.abs(power)
 	while remaining > 0 do
 		if remaining % 2 == 1 then
-			result = preciseMultiplyOperands(result, factor, nil, selectedPrecision)
+			result = preciseMultiplyOperands(result, factor, nil, workingPrecision)
 		end
 		remaining = math.floor(remaining / 2)
 		if remaining > 0 then
-			factor = preciseMultiplyOperands(factor, factor, nil, selectedPrecision)
+			factor = preciseMultiplyOperands(factor, factor, nil, workingPrecision)
 		end
 	end
 	if power < 0 then
-		return preciseDivideOperands(1, result, nil, selectedPrecision)
+		result = preciseDivideOperands(1, result, nil, workingPrecision)
+		local native, numberValue = getNative(result)
+		if native and not isFinite(numberValue) then
+			return numberValue
+		end
 	end
-	return result
+	local resultParts = preciseParts(result)
+	return makePrecise(
+		if resultParts.sign == 0 then resultParts.zeroSign else resultParts.sign,
+		resultParts.digits, resultParts.expIsBig, resultParts.expSmall, resultParts.expSign,
+		resultParts.expLength, resultParts.expData, selectedPrecision, nil, nil,
+		resultParts.wasRounded
+	)
 end
 
 @native
