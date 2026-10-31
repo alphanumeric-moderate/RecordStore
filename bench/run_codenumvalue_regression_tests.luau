@@ -23,6 +23,9 @@ local precise_integer = CodeNum.fromInteger(precise_integer_text)
 assert(CodeNum.isPrecise(precise_integer), "fromInteger did not retain precise storage")
 local precise_payload = CodeNumValue.encode(precise_integer)
 local precise_envelope = serde.decode("json", precise_payload)
+assert(CodeNumValue.inspect_serialized(payload), "CN1 envelope inspection failed")
+assert(CodeNumValue.inspect_serialized(precise_payload), "CN2 envelope inspection failed")
+assert(CodeNumValue.inspect_serialized(CodeNum.encode(large)), "raw CN1 inspection failed")
 assert(string.match(precise_envelope.value, "^CN2|P|") ~= nil, "CodeNumValue did not persist the CN2 codec")
 assert(CodeNum.toString(CodeNumValue.decode(precise_payload)) == precise_integer_text,
 	"CodeNumValue CN2 round-trip changed exact decimal digits")
@@ -72,6 +75,8 @@ local old_alyanum_hyper = serde.encode("json", {
 	},
 })
 assert(CodeNumValue.is_serialized(old_alyanum_hyper))
+assert(CodeNumValue.inspect_serialized(old_alyanum_hyper),
+	"bounded inspection rejected an unrepresentable but preservable AlyaNum payload")
 assert(CodeNumValue.normalize(old_alyanum_hyper) == old_alyanum_hyper,
 	"unrepresentable AlyaNum values must be preserved verbatim")
 
@@ -80,6 +85,8 @@ local old_infinitemath = serde.encode("json", {
 	version = 1,
 	value = { kind = "number", first = 1.25, second = 12 },
 })
+assert(CodeNumValue.inspect_serialized(old_infinitemath),
+	"bounded inspection rejected a recognized InfiniteMath payload")
 local infinitemath_migrated = CodeNumValue.normalize(old_infinitemath)
 assert(CodeNum.toNumber(CodeNumValue.decode(infinitemath_migrated)) == 1.25e12)
 
@@ -143,6 +150,24 @@ end
 local function finite(value)
 	return { kind = "finite", value = value }
 end
+
+local inspection_expression = legacy_expression("add", integer(1, "2"), integer(1, "3"))
+local original_add = CodeNum.add
+local inspection_add_calls = 0
+CodeNum.add = function(...)
+	inspection_add_calls += 1
+	return original_add(...)
+end
+assert(CodeNumValue.inspect_serialized(inspection_expression),
+	"bounded inspection rejected a recognized legacy expression")
+assert(CodeNumValue.is_serialized(inspection_expression),
+	"is_serialized did not use the bounded legacy inspection path")
+assert(inspection_add_calls == 0,
+	"legacy expression inspection evaluated arithmetic before Record:Open")
+CodeNum.add = original_add
+local inspection_normalized = CodeNumValue.normalize(inspection_expression)
+assert(CodeNum.toString(CodeNumValue.decode(inspection_normalized)) == "5",
+	"authoritative normalization did not evaluate the recognized expression")
 
 local exact_expression_cases = {
 	{
@@ -279,6 +304,10 @@ assert(string.find(CodeNumValue.format(old_code_hyper), "↑{100}", 1, true))
 local future = '{"schema":"CodeNumValue","version":99,"value":"CN1|N|1"}'
 assert(CodeNumValue.is_unsupported_version(future))
 assert(not CodeNumValue.is_serialized(future))
+assert(not CodeNumValue.inspect_serialized(future),
+	"bounded inspection accepted a future CodeNumValue envelope version")
+assert(not CodeNumValue.inspect_serialized("not a CodeNumValue payload"),
+	"bounded inspection accepted malformed serialized data")
 assert(not pcall(function() CodeNumValue.normalize(future) end),
 	"future CodeNumValue format version was accepted")
 local future_legacy = '{"schema":"CodeNum","version":99,"value":{}}'

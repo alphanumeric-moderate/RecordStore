@@ -1,0 +1,67 @@
+--!nocheck
+-- CodSpeed scenario: legacy CodeNum migration and verbatim preservation.
+
+local Shim = require("./codenum_shim")
+local CodeNumValue, CodeNum = Shim.load_codenum_value()
+local serde = require("@lune/serde")
+
+local function legacy(value)
+	return serde.encode("json", {
+		schema = "CodeNum",
+		version = 2,
+		value = value,
+	})
+end
+
+local function integer(sign, digits)
+	return { kind = "integer", sign = sign, digits = digits }
+end
+
+local function finite(value)
+	return { kind = "finite", value = value }
+end
+
+local function expression(op, left, right)
+	return legacy({ kind = "expression", op = op, left = left, right = right })
+end
+
+local large_integer_text = string.rep("9", 4096)
+local legacy_payloads = {
+	{ payload = legacy(integer(1, "9007199254740993")), preserve = false, expected = "9007199254740993" },
+	{ payload = expression("add", finite(1), finite(2)), preserve = false, expected = "3" },
+	{ payload = expression("div", integer(1, "1"), integer(1, "3")), preserve = true },
+	{
+		payload = expression("add", {
+			kind = "expression",
+			op = "div",
+			left = integer(1, "1"),
+			right = integer(1, "3"),
+		}, finite(1)),
+		preserve = true,
+	},
+	{ payload = legacy(integer(1, large_integer_text)), preserve = false, expected = large_integer_text },
+	{
+		payload = CodeNumValue.encode(CodeNum.fromScientific(1.25, "1000")),
+		preserve = true,
+		expected = "1.25e1000",
+	},
+	{
+		payload = CodeNumValue.encode(CodeNum.fromInteger("9007199254740993")),
+		preserve = true,
+		expected = "9007199254740993",
+	},
+}
+
+for _ = 1, 10 do
+	for _, case in ipairs(legacy_payloads) do
+		local normalized = CodeNumValue.normalize(case.payload)
+		assert((normalized == case.payload) == case.preserve,
+			"legacy migration changed its expected preserve-or-migrate decision")
+		if case.expected ~= nil then
+			assert(CodeNum.toString(CodeNumValue.decode(normalized)) == case.expected,
+				"legacy migration changed the exact expected numeric value")
+		end
+	end
+end
+
+print("[CodeNumValue migration] exact imports and conservative preservation passed")

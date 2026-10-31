@@ -78,6 +78,12 @@ local long_decimal_text = "1.2345678901234567890123456789012345"
 local long_decimal = CodeNum.parse(long_decimal_text)
 assert(CodeNum.isPrecise(long_decimal), "long decimal text did not select precise storage")
 assert(CodeNum.toString(long_decimal) == long_decimal_text, "long decimal parsing lost input digits")
+assert(CodeNum.toNumber(CodeNum.parse("0.3", 34)) == 0.3,
+	"precise decimal 0.3 did not round-trip to its binary64 value")
+assert(CodeNum.toNumber(CodeNum.withPrecision(0.3, 34)) == 0.3,
+	"precision-wrapped binary64 0.3 did not preserve its binary64 value")
+assert(CodeNum.toNumber(CodeNum.parse("0.1", 34)) == 0.1,
+	"precise decimal 0.1 did not round-trip to its binary64 value")
 local binary64_midpoint_above = "1.00000000000000011102230246251565404236316680908203126"
 assert(CodeNum.toNumber(CodeNum.parse(binary64_midpoint_above)) == 1.0000000000000002,
 	"precise conversion discarded digits beyond the binary64 midpoint")

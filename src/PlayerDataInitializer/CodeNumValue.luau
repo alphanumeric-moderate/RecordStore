@@ -612,6 +612,41 @@ function CodeNumValue.is_unsupported_version(value: any): boolean
 	return false
 end
 
+-- Validation runs before profile open. Do not evaluate legacy expression trees in this path.
+local function inspect_code_num_payload(payload: any): boolean
+	if type(payload) ~= "string" or #payload > MAX_SERIALIZED_LENGTH then return false end
+	local api = resolve_api()
+	local ok, decoded = pcall(api.decode, payload)
+	if not ok then return false end
+	local valid, supported = pcall(function()
+		return type(decoded) == "number" or api.isWide(decoded) or api.isPrecise(decoded)
+	end)
+	return valid and supported == true
+end
+
+function CodeNumValue.inspect_serialized(value: any): boolean
+	if type(value) ~= "string" or #value > MAX_SERIALIZED_LENGTH then return false end
+	if string.match(value, "^CN[12]|") ~= nil then return inspect_code_num_payload(value) end
+	local ok, envelope = pcall(function() return HttpService:JSONDecode(value) end)
+	if not ok or type(envelope) ~= "table" then return false end
+	if envelope.schema == SCHEMA then
+		return envelope.version == CodeNumValue.FORMAT_VERSION and inspect_code_num_payload(envelope.value)
+	elseif envelope.schema == LEGACY_ALYANUM_SCHEMA then
+		return envelope.version == 1 and type(envelope.value) == "table"
+	elseif envelope.schema == LEGACY_INFINITEMATH_SCHEMA then
+		if envelope.version ~= 1 or type(envelope.value) ~= "table" then return false end
+		local legacy_value = envelope.value
+		return legacy_value.kind == "number"
+			or (legacy_value.kind == "special"
+				and (legacy_value.name == "nan"
+					or legacy_value.name == "+infinity"
+					or legacy_value.name == "-infinity"))
+	elseif envelope.schema == LEGACY_CODE_SCHEMA then
+		return envelope.version == 2 and type(envelope.value) == "table"
+	end
+	return false
+end
+
 function CodeNumValue.normalize_serialized(value: any): (string?, Node?)
 	local decoded, canonical = decode_serialized(value)
 	if decoded == nil or canonical == nil then
@@ -624,8 +659,7 @@ function CodeNumValue.normalize_serialized(value: any): (string?, Node?)
 end
 
 function CodeNumValue.is_serialized(value: any): boolean
-	local decoded = decode_serialized(value)
-	return decoded ~= nil
+	return CodeNumValue.inspect_serialized(value)
 end
 
 function CodeNumValue.normalize(value: any): string

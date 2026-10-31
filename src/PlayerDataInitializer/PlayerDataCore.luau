@@ -49,6 +49,7 @@ type CodeNumValueFactoryAPI = {
 	is_value: (value: unknown) -> boolean,
 	normalize: (value: unknown) -> string,
 	is_serialized: (value: unknown) -> boolean,
+	inspect_serialized: ((value: unknown) -> boolean)?,
 	format: (value: unknown, options: NumberFormatOptions?) -> string,
 	new: (name: string, initial_value: unknown) -> StringValue,
 	normalize_serialized: ((value: unknown) -> (string?, CodeNumValueNode?))?,
@@ -73,6 +74,11 @@ local CodeNumValueFactory: CodeNumValueFactoryAPI = table.freeze({
 	end,
 	is_serialized = function(value: unknown): boolean
 		return get_codenum_value_factory().is_serialized(value)
+	end,
+	inspect_serialized = function(value: unknown): boolean
+		local factory = get_codenum_value_factory()
+		local inspect = factory.inspect_serialized
+		return if inspect ~= nil then inspect(value) else factory.is_serialized(value)
 	end,
 	format = function(value: unknown, options: NumberFormatOptions?): string
 		return get_codenum_value_factory().format(value, options)
@@ -563,7 +569,9 @@ local function validate_player_data(
 		local field = CONFIG.data[key]
 		if field ~= nil and field.class_name == "CodeNumValue" then
 			local factory = codenum_factory or CodeNumValueFactory
-			local supported = item_type == "string" and factory.is_serialized(item)
+			local inspect = factory.inspect_serialized
+			local supported = item_type == "string"
+				and (if inspect ~= nil then inspect(item) else factory.is_serialized(item))
 			local unsupported = item_type == "string" and factory.is_unsupported_version ~= nil
 				and factory.is_unsupported_version(item)
 			if not supported and not unsupported then
