@@ -6,7 +6,7 @@ RecordStore is a server-side Roblox Luau persistence module.
 
 ## Install in Roblox Studio
 
-The Rojo projects map `src/PlayerDataInitializer` to a Script named `ServerScriptService.PlayerDataInitializer`. Its child ModuleScripts include `PlayerData`, `PlayerDataCore`, `RecordStore`, `IntegerInfinityValue`, `CodeNumFormatter` and `CodeNumValue`. The scheduler and Mailbox V2 implementations are embedded in `RecordStore.luau`. CodeNum 0.5.0 is included at `src/CodeNum` and mapped to `ReplicatedStorage.CodeNum`.
+The Rojo projects map `src/PlayerDataInitializer` to a Script named `ServerScriptService.PlayerDataInitializer`. Its child ModuleScripts include `PlayerData`, `PlayerDataCore`, `RecordStore`, `IntegerInfinityValue`, `CodeNumFormatter` and `CodeNumValue`. The scheduler and Mailbox V2 implementations are embedded in `RecordStore.luau`. CodeNum 0.6.0 is included at `src/CodeNum` and mapped to `ReplicatedStorage.CodeNum`.
 
 **`CodeNum` must be a ModuleScript at `ReplicatedStorage.CodeNum`.** The CodeNum module is outside `PlayerDataInitializer`; `CodeNumFormatter` resolves it from `ReplicatedStorage`, while `CodeNumValue` is a child of `PlayerDataInitializer`.
 
@@ -75,8 +75,8 @@ The repository also includes:
 - `src/PlayerDataInitializer/RecordStoreMaintenanceRobloxAdapter.luau`: paged real DataStore key enumeration, uncached inspection, and revision-checked checkpoint adapters for the bounded maintenance runner. Generation-aware deletion remains explicitly application supplied.
 - `src/PlayerDataInitializer/IntegerInfinityValue.luau`: a `NumberValue` factory that rounds finite values to integers while preserving positive infinity, negative infinity, and NaN. The default `kills` field uses this type so non-finite values are not silently replaced with zero.
 - `src/PlayerDataInitializer/CodeNumFormatter.luau`: shared abbreviation formatting for native numbers and CodeNum values. It renders positive infinity as `Infinity`, negative infinity as `-Infinity`, and NaN as `NaN`.
-- `src/PlayerDataInitializer/CodeNumValue.luau`: an adapter for CodeNum 0.5.0. It persists the canonical `CN1` value codec inside a versioned JSON envelope and provides `get`/`set` helpers for a replicated StringValue backing instance. IEEE NaN and infinities use CodeNum's native special-number codec. With the default schema, this adapter is not loaded during startup; `PlayerDataCore` requires it only when a `CodeNumValue` field is configured or used.
-- `src/CodeNum/init.luau`: the project's CodeNum 0.5.0 module, with native-number fast paths, scientific `Wide` values, exact decimal exponents, and reusable arithmetic registers.
+- `src/PlayerDataInitializer/CodeNumValue.luau`: an adapter for CodeNum 0.6.0. It persists backward-compatible `CN1` native/`Wide` values and `CN2` precise values inside the existing version-1 JSON envelope, and provides `get`/`set` helpers for a replicated StringValue backing instance. IEEE NaN and infinities use CodeNum's native special-number codec. With the default schema, this adapter is not loaded during startup; `PlayerDataCore` requires it only when a `CodeNumValue` field is configured or used.
+- `src/CodeNum/init.luau`: the project's CodeNum 0.6.0 module, with native-number fast paths, scientific `Wide` values, bounded multiprecision decimal `Precise` values, exact decimal exponents, and reusable arithmetic registers.
 - `src/PlayerDataInitializer/init.server.luau`: a standard Script that starts the controller and shuts it down from `BindToClose`.
 
 ### PlayerData.Set API
@@ -122,7 +122,7 @@ DataStore write has completed synchronously.
 
 Numeric fields are normalized according to their configured Value type. For example, `kills` uses
 `IntegerInfinityValue`, so fractional input is rounded using the field's configured rounding rule.
-CodeNum fields accept a native number, a CodeNum `Wide` value, or a supported numeric string and serialize it without coercing extended-range values to a native `number`. To use CodeNum, configure a field in `CONFIG.data`, for example `cash = define_data_field("CodeNumValue", 0)`. The adapter stores the canonical `CN1` codec payload inside a versioned JSON envelope backed by a replicated `StringValue`; the leaderboard remains formatted, display-only text.
+CodeNum fields accept native numbers, CodeNum `Wide` and `Precise` values, or supported numeric strings. Precise values retain up to 4096 significant decimal digits without coercing the significand through a native `number`. To use CodeNum, configure a field in `CONFIG.data`, for example `cash = define_data_field("CodeNumValue", 0)`. The adapter stores backward-compatible `CN1` payloads and `CN2` precise payloads inside the existing version-1 JSON envelope backed by a replicated `StringValue`; the leaderboard remains formatted, display-only text.
 
 `Set` is server-side. Do not use it as a client-authoritative economy or permission boundary; validate
 gameplay actions and authorization on the server before changing protected fields.
@@ -160,7 +160,7 @@ The default `PlayerDataCore` configuration abbreviates `Kills` using `define_lea
 
 ### CodeNum support and persistence compatibility
 
-`ReplicatedStorage.CodeNum` exposes the CodeNum 0.5.0 module. Configure extended-range fields with `define_data_field("CodeNumValue", 0)`. `CodeNumValue` stores a versioned JSON envelope containing CodeNum's `CN1` codec payload in the profile and a replicated `StringValue`, then reconstructs a native number or `Wide` value when read.
+`ReplicatedStorage.CodeNum` exposes the CodeNum 0.6.0 module. Configure numeric fields with `define_data_field("CodeNumValue", 0)`. `CodeNumValue` stores the existing version-1 JSON envelope with a `CN1` payload for native/`Wide` values or a `CN2` payload for `Precise` values, then reconstructs the corresponding immutable value when read.
 
 ```luau
 local ServerScriptService = game:GetService("ServerScriptService")
@@ -173,9 +173,9 @@ local current = CodeNumValue.get(cash)
 CodeNumValue.set(cash, CodeNum.add(current, 100))
 ```
 
-CodeNum arithmetic is explicit: use `CodeNum.add`, `sub`, `mul`, `div`, and `pow` instead of Lua arithmetic metamethods. `CodeNum.fromScientific(mantissa, exponent)` accepts an exact decimal integer exponent string, including exponents larger than the native safe-integer range. The optional register API (`createRegister`, `addInto`, `subInto`, `mulInto`, `divInto`, and `readRegister`) supports reusable scratch storage for hot arithmetic paths. Registers are mutable scratch objects; ordinary `Wide` values are immutable.
+CodeNum arithmetic is explicit: use `CodeNum.add`, `sub`, `mul`, `div`, and `pow` instead of Lua arithmetic metamethods. `CodeNum.fromInteger(decimal)` constructs an exact decimal integer, and `CodeNum.parse(text, precision)` accepts a per-value significant-digit precision from 1 through 4096. Long decimal inputs with more than 15 significant digits select `Precise` storage automatically. `add`, `sub`, `mul`, and `div` accept an optional precision override; division defaults to 34 significant digits. Precise arithmetic rounds ties to even. Precise `pow` supports integer powers up to 1,000,000 and rejects fractional powers rather than silently downcasting. `toNumber()` converts to binary64 and can round, overflow, or underflow; use `toString()` or the codec when exact decimal digits are required. `CodeNum.fromScientific(mantissa, exponent)` accepts an exact decimal integer exponent string, including exponents larger than the native safe-integer range. The optional register API (`createRegister`, `addInto`, `subInto`, `mulInto`, `divInto`, and `readRegister`) supports reusable scratch storage for hot arithmetic paths. Registers are mutable scratch objects; ordinary `Wide` values are immutable.
 
-`CodeNumValue` writes format version 1 and enforces a conservative 199,999-byte `StringValue` payload limit. It accepts native numbers, CodeNum `Wide` values, `CN1` payloads, and numeric strings. NaN and infinities are encoded by CodeNum's native-number payload variants.
+`CodeNumValue` keeps JSON envelope format version 1 and enforces a conservative 199,999-byte `StringValue` payload limit. It accepts native numbers, CodeNum `Wide` and `Precise` values, `CN1` and `CN2` payloads, and numeric strings. Existing `CN1` values remain readable; new precise values use `CN2`. NaN and infinities are encoded by CodeNum's native-number payload variants.
 
 The migration decoder recognizes previous `AlyaNumValue` version-1 envelopes, `InfiniteMathValue` version-1 envelopes, and the earlier JSON `CodeNum` version-2 format.
 
@@ -183,13 +183,13 @@ The migration decoder recognizes previous `AlyaNumValue` version-1 envelopes, `I
 
 <!-- coderabbit-ai-generated-section:v1:8bc0aade0fd254c2dc8433b320a0ea2bf029f5652830ac7c9faf22acb8e8aac7 -->
 
-Values representable by CodeNum 0.5.0 are converted to the new `CodeNumValue` envelope, except that legacy expressions and hyperoperations evaluating to integers outside the safe-integer range are preserved to avoid rounding.
+Legacy integer nodes are imported through `CodeNum.fromInteger`, so values beyond binary64's exact-integer range migrate without losing decimal digits. Expressions that evaluate to `Precise` results can migrate; expressions that remain native-number or `Wide` results are still preserved when exact integer significands cannot be demonstrated.
 
 <!-- /coderabbit-ai-generated:v1 -->
 
 Earlier symbolic values and AlyaNum / InfiniteMath values outside CodeNum's supported range are preserved verbatim rather than silently reset; they remain legacy values until the application chooses an explicit conversion. Unknown versions of recognized schemas are rejected rather than overwritten.
 
-The StringValue transport retains a conservative 199,999-byte payload limit. CodeNum 0.5.0 is maintained in this repository and does not introduce a third-party numeric runtime dependency.
+The StringValue transport retains a conservative 199,999-byte payload limit. CodeNum 0.6.0 is maintained in this repository and does not introduce a third-party numeric runtime dependency. Precise coefficients are bounded to 4096 significant digits; the existing exponent magnitude limit remains unchanged.
 
 ### PlayerDataCore V2 mailbox wake-ups
 
