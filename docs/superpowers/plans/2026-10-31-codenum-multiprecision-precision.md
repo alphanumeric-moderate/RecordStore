@@ -17,7 +17,13 @@
 - Do not introduce runtime `require()` dependencies or third-party libraries.
 - Limit exact decimal coefficients to 4096 significant digits and keep the existing exponent magnitude limit of 10^308.
 - Use decimal round-half-to-even when a precision context truncates a coefficient.
-- Use a default of 34 significant digits for division; addition and multiplication inherit the minimum operand precision unless overridden.
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:daf7fc1392ebad46b32f1194f3296e9c48900c71b372dc600cbf45446c4e0f68 -->
+
+- Without a precision override, precise division uses the smallest of 34 significant digits and the operand precisions; two native-number operands may use the native fast path. Addition and multiplication inherit the lower operand precision. Precise negative powers use the same 34-digit cap; positive powers inherit the operand precision.
+
+<!-- /coderabbit-ai-generated:v1 -->
 - Do not claim arbitrary binary floating-point precision. Native-number inputs are converted through their shortest round-trippable decimal representation.
 - Precision arithmetic must not mutate operands or register input values.
 - Keep CN1 native/Wide values in CodeNumValue envelope version 1 and write CN2 precise values in envelope version 2.

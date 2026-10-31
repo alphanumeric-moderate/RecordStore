@@ -114,8 +114,35 @@ assert(CodeNum.toString(CodeNum.div(one, CodeNum.fromInteger("-3"), 34))
 	== "-0." .. string.rep("3", 34), "negative precise division changed sign")
 assert(CodeNum.toString(CodeNum.div(CodeNum.fromInteger("1"), CodeNum.fromInteger("8"), 34)) == "0.125",
 	"terminating precise division did not trim trailing zeros")
+assert(CodeNum.toString(CodeNum.div(CodeNum.parse("1", 2), three)) == "0.33",
+	"division did not inherit a lower operand precision")
+assert(CodeNum.toString(CodeNum.div(CodeNum.parse("1", 2), three, 5)) == "0.33333",
+	"division precision override did not take precedence")
+assert(type(CodeNum.div(1, 3)) == "number" and CodeNum.div(1, 3) == 1 / 3,
+	"native division did not retain its fast path")
 assert(CodeNum.toString(CodeNum.pow(CodeNum.fromInteger("2"), -3)) == "0.125",
 	"negative precise integer power failed")
+assert(CodeNum.toString(CodeNum.pow(three, -1)) == "0." .. string.rep("3", 34),
+	"negative precise power did not use the 34-digit default")
+assert(CodeNum.toString(CodeNum.pow(CodeNum.parse("3", 2), -1)) == "0.33",
+	"negative precise power ignored the operand's lower precision")
+assert(CodeNum.toString(CodeNum.pow(three, -1, 50)) == "0." .. string.rep("3", 50),
+	"negative precise power ignored its precision override")
+local reciprocal_midpoint_base = CodeNum.parse("7." .. string.rep("9", 30), 31)
+assert(CodeNum.toString(CodeNum.pow(reciprocal_midpoint_base, -1, 2)) == "0.13",
+	"negative power rounded its input before resolving a reciprocal midpoint")
+local power_midpoint_base = CodeNum.parse("1.25" .. string.rep("0", 25) .. "1", 29)
+assert(CodeNum.toString(CodeNum.pow(power_midpoint_base, 1, 2)) == "1.3",
+	"positive power rounded its input before resolving a midpoint")
+assert(CodeNum.toString(CodeNum.pow(CodeNum.parse("1.234", 4), 2)) == "1.523",
+	"positive precise power did not inherit its operand precision")
+
+assert(CodeNum.toString(CodeNum.sub(CodeNum.fromInteger("100"), 1)) == "99",
+	"precise subtraction misordered unequal-length coefficients")
+assert(CodeNum.toString(CodeNum.sub(CodeNum.fromInteger("5"), 10)) == "-5",
+	"precise subtraction lost the sign of the larger right coefficient")
+assert(CodeNum.toString(CodeNum.sub(CodeNum.fromInteger("123"), 23)) == "100",
+	"precise subtraction changed equal-length aligned coefficient comparison")
 
 local product = CodeNum.mul(CodeNum.fromInteger("123456789"), CodeNum.fromInteger("987654321"))
 assert(CodeNum.toString(product) == "121932631112635269", "precise coefficient multiplication is incorrect: " .. CodeNum.toString(product))

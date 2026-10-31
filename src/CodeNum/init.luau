@@ -1844,7 +1844,9 @@ local function preciseAddOperands(
 		resultSign = aParts.sign
 		resultDigits = decimalAddMagnitude(alignedA, alignedB)
 	else
-		local magnitudeComparison = decimalComparePadded(alignedA, alignedB)
+		local magnitudeComparison = if #alignedA ~= #alignedB
+			then (if #alignedA < #alignedB then -1 else 1)
+			else decimalComparePadded(alignedA, alignedB)
 		if magnitudeComparison == 0 then
 			return makePrecise(
 				0, "0", 0, 0, 0, 0, nil, precision, destination, nil,
@@ -2068,13 +2070,12 @@ local function precisePowerInteger(value: Operand, power: number, precision: num
 		return 1
 	end
 	local parts = preciseParts(value)
-	local selectedPrecision = precision or parts.precision
+	local selectedPrecision = precision or (if power < 0
+		then math.min(DEFAULT_DIVISION_PRECISION, parts.precision) else parts.precision)
 	validatePrecision(selectedPrecision)
 	local guardDigits = math.min(32, math.ceil(math.log10(math.abs(power))) + 8)
-	local workingPrecision = math.min(
-		MAX_PRECISE_DIGITS,
-		math.max(parts.precision, selectedPrecision + guardDigits)
-	)
+	-- Retain the input coefficient and allow guard digits for intermediate rounding.
+	local workingPrecision = math.min(MAX_PRECISE_DIGITS, math.max(#parts.digits, selectedPrecision) + guardDigits)
 	local factor = makePrecise(
 		if parts.sign == 0 then parts.zeroSign else parts.sign,
 		parts.digits, parts.expIsBig, parts.expSmall, parts.expSign,
