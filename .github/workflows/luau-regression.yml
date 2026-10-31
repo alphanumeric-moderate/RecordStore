@@ -33,10 +33,6 @@ jobs:
           rm lune.zip
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
-      - name: Regression - RecordStore core
-        timeout-minutes: 2
-        run: timeout --signal=TERM --kill-after=5s 60s lune run bench/run_regression_tests.luau
-
       - name: Regression - CodeNum 0.5 range
         timeout-minutes: 2
         run: timeout --signal=TERM --kill-after=5s 60s lune run bench/run_codenum_regression_tests.luau
@@ -44,6 +40,10 @@ jobs:
       - name: Regression - CodeNumValue persistence
         timeout-minutes: 2
         run: timeout --signal=TERM --kill-after=5s 60s lune run bench/run_codenumvalue_regression_tests.luau
+
+      - name: Regression - RecordStore core
+        timeout-minutes: 2
+        run: timeout --signal=TERM --kill-after=5s 60s lune run bench/run_regression_tests.luau
 
       - name: Regression - PlayerData.Set
         timeout-minutes: 2
