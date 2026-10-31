@@ -33,6 +33,13 @@
 
 ---
 
+## Follow-up correctness hardening
+
+- Precise values carry a private rounding-provenance bit. `CodeNum.wasRounded` exposes it to migration code; the bit is runtime-only and is not part of the CN2 wire format.
+- Legacy arithmetic migration rejects rounded operands and results, then checks the legacy result against an unrounded 4096-significant-digit CodeNum calculation. An inexact nested child prevents parent migration. The original serialized legacy payload is retained whenever exactness cannot be demonstrated.
+- Legacy exponent conversions are validated before passing them to native `pow` or hyperoperation paths. An integer that changes during binary64 conversion is never used as the migrated exponent.
+- Mixed precise multiplication and division preserve the sign of zero. IEEE NaN/infinity dispatch and division by signed zero remain handled by the pre-existing special-number paths and are covered by regressions.
+- Additional regression coverage exercises repeating division, coefficient overflow, binary64 arithmetic drift, exact and inexact logarithms, signed zero, mixed special values, half-even division ties, mixed-sign cancellation, and very distant exponents.
 ### Task 1: Precise value representation, parser, ordering, formatting, and codec
 
 **Files:**
@@ -48,11 +55,11 @@
 - Expose `MAX_PRECISE_DIGITS = 4096` and `DEFAULT_DIVISION_PRECISION = 34`.
 - Encode precise values as `CN2|P|<sign>|<digits>|<exponent>|<precision>`; continue decoding CN1 unchanged.
 
-- [ ] **Step 1: Add RED regression cases** for exact integers beyond 2^53-1, 18+ digit decimals, explicit precision, round-half-even, compare/sign/abs, exact string output, CN2 round trips, invalid precision, and the 4096-digit boundary.
-- [ ] **Step 2: Run** `lune run bench/run_codenum_regression_tests.luau` on the test-only commit and confirm the new API assertions fail against the current 0.5.0 source.
-- [ ] **Step 3: Implement** the private precise-state representation, decimal parsing and canonical normalization without changing the existing native/Wide constructors.
-- [ ] **Step 4: Implement** precise comparison, sign, absolute value, toString, toNumber/log10 conversion, CN2 encode/decode, and register read/write support.
-- [ ] **Step 5: Run** the focused Lune regression and confirm the precision representation cases pass.
+- [x] **Step 1: Add RED regression cases** for exact integers beyond 2^53-1, 18+ digit decimals, explicit precision, round-half-even, compare/sign/abs, exact string output, CN2 round trips, invalid precision, and the 4096-digit boundary.
+- [x] **Step 2: Run** `lune run bench/run_codenum_regression_tests.luau` on the test-only commit and confirm the new API assertions fail against the current 0.5.0 source.
+- [x] **Step 3: Implement** the private precise-state representation, decimal parsing and canonical normalization without changing the existing native/Wide constructors.
+- [x] **Step 4: Implement** precise comparison, sign, absolute value, toString, toNumber/log10 conversion, CN2 encode/decode, and register read/write support.
+- [x] **Step 5: Run** the focused Lune regression and confirm the precision representation cases pass.
 
 ### Task 2: Configurable precise arithmetic and register operations
 
@@ -67,11 +74,11 @@
 - Division uses integer long division and round-half-to-even.
 - Precise values support integer powers up to the existing 1,000,000 exponent limit. Fractional powers on precise values reject explicitly rather than silently downcasting.
 
-- [ ] **Step 1: Add RED cases** for exact add/subtract/multiply, mixed signs, cancellation, distant exponents, division at 34 digits, halfway division rounding, zero division, integer powers, and register aliasing.
-- [ ] **Step 2: Run** the focused Lune regression and confirm these cases fail before arithmetic implementation.
-- [ ] **Step 3: Implement** bounded decimal add/subtract/multiply/divide helpers and route only precise/explicit-precision operations through them.
-- [ ] **Step 4: Implement** immutable precise results in reusable registers; retain existing native/Wide register fast paths.
-- [ ] **Step 5: Run** focused arithmetic and register regressions.
+- [x] **Step 1: Add RED cases** for exact add/subtract/multiply, mixed signs, cancellation, distant exponents, division at 34 digits, halfway division rounding, zero division, integer powers, and register aliasing.
+- [x] **Step 2: Run** the focused Lune regression and confirm these cases fail before arithmetic implementation.
+- [x] **Step 3: Implement** bounded decimal add/subtract/multiply/divide helpers and route only precise/explicit-precision operations through them.
+- [x] **Step 4: Implement** immutable precise results in reusable registers; retain existing native/Wide register fast paths.
+- [x] **Step 5: Run** focused arithmetic and register regressions.
 
 ### Task 3: Persistence, formatting integration, documentation, and verification
 
@@ -90,9 +97,9 @@
 - Formatter recognizes CN1/CN2 strings and precise values.
 - Document the API, significant-digit limits, rounding model, conversion limits, and migration compatibility.
 
-- [ ] **Step 1: Add RED persistence and formatter tests** for CN2 payloads, exact legacy-integer migration, and formatter input.
-- [ ] **Step 2: Run** the CodeNumValue Lune regression and confirm CN2 handling fails before adapter changes.
-- [ ] **Step 3: Implement** adapter/formatter compatibility and update the CodeNum version references to 0.6.0.
-- [ ] **Step 4: Add** a focused multiprecision CodSpeed scenario that is separate from the existing mixed CodeNum 0.5 benchmark.
-- [ ] **Step 5: Run** CodeNum and CodeNumValue Lune regression suites, the repository's broader regression suite, and the configured CI type-check/build validations.
-- [ ] **Step 6: Review** the complete diff for compatibility, arithmetic bounds, aliasing, error handling, and accidental changes to existing fast paths before opening the PR.
+- [x] **Step 1: Add RED persistence and formatter tests** for CN2 payloads, exact legacy-integer migration, and formatter input.
+- [x] **Step 2: Run** the CodeNumValue Lune regression and confirm CN2 handling fails before adapter changes.
+- [x] **Step 3: Implement** adapter/formatter compatibility and update the CodeNum version references to 0.6.0.
+- [x] **Step 4: Add** a focused multiprecision CodSpeed scenario that is separate from the existing mixed CodeNum 0.5 benchmark.
+- [x] **Step 5: Run** CodeNum and CodeNumValue Lune regression suites, the repository's broader regression suite, and the configured CI type-check/build validations.
+- [x] **Step 6: Review** the complete diff for compatibility, arithmetic bounds, aliasing, error handling, and accidental changes to existing fast paths before opening the PR.
