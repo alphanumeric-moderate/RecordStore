@@ -2525,7 +2525,10 @@ local function multiplyInternal(
 			specialResult = if sign < 0 then -0.0 else 0
 		elseif divide then
 			specialResult = if sign < 0 then -math.huge else math.huge
-		elseif (nativeA and valueA == 0) or (nativeB and valueB == 0) then
+		elseif (nativeA and valueA == 0) or (nativeB and valueB == 0)
+			or (isPrecise(a) and preciseState(a).sign == 0)
+			or (isPrecise(b) and preciseState(b).sign == 0)
+		then
 			specialResult = 0 / 0
 		else
 			specialResult = if sign < 0 then -math.huge else math.huge
