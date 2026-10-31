@@ -27,10 +27,25 @@ end
 
 local large_integer_text = string.rep("9", 4096)
 local legacy_payloads = {
-	{ payload = legacy(integer(1, "9007199254740993")), preserve = false, expected = "9007199254740993" },
-	{ payload = expression("add", finite(1), finite(2)), preserve = false, expected = "3" },
-	{ payload = expression("div", integer(1, "1"), integer(1, "3")), preserve = true },
 	{
+		label = "integer above binary64 safe range",
+		payload = legacy(integer(1, "9007199254740993")),
+		preserve = false,
+		expected_value = CodeNum.fromInteger("9007199254740993"),
+	},
+	{
+		label = "exact expression",
+		payload = expression("add", finite(1), finite(2)),
+		preserve = false,
+		expected_value = 3,
+	},
+	{
+		label = "inexact expression",
+		payload = expression("div", integer(1, "1"), integer(1, "3")),
+		preserve = true,
+	},
+	{
+		label = "nested inexact expression",
 		payload = expression("add", {
 			kind = "expression",
 			op = "div",
@@ -39,16 +54,23 @@ local legacy_payloads = {
 		}, finite(1)),
 		preserve = true,
 	},
-	{ payload = legacy(integer(1, large_integer_text)), preserve = false, expected = large_integer_text },
 	{
-		payload = CodeNumValue.encode(CodeNum.fromScientific(1.25, "1000")),
-		preserve = true,
-		expected = "1.25e1000",
+		label = "4096-digit integer",
+		payload = legacy(integer(1, large_integer_text)),
+		preserve = false,
+		expected_value = CodeNum.fromInteger(large_integer_text),
 	},
 	{
+		label = "current CN1 envelope",
+		payload = CodeNumValue.encode(CodeNum.fromScientific(1.25, "1000")),
+		preserve = true,
+		expected_value = CodeNum.fromScientific(1.25, "1000"),
+	},
+	{
+		label = "current CN2 envelope",
 		payload = CodeNumValue.encode(CodeNum.fromInteger("9007199254740993")),
 		preserve = true,
-		expected = "9007199254740993",
+		expected_value = CodeNum.fromInteger("9007199254740993"),
 	},
 }
 
@@ -56,10 +78,11 @@ for _ = 1, 10 do
 	for _, case in ipairs(legacy_payloads) do
 		local normalized = CodeNumValue.normalize(case.payload)
 		assert((normalized == case.payload) == case.preserve,
-			"legacy migration changed its expected preserve-or-migrate decision")
-		if case.expected ~= nil then
-			assert(CodeNum.toString(CodeNumValue.decode(normalized)) == case.expected,
-				"legacy migration changed the exact expected numeric value")
+			"legacy migration changed its expected preserve-or-migrate decision: " .. case.label)
+		if case.expected_value ~= nil then
+			local actual = CodeNumValue.decode(normalized)
+			assert(CodeNum.compare(actual, case.expected_value) == 0,
+				"legacy migration changed the exact numeric value: " .. case.label)
 		end
 	end
 end
