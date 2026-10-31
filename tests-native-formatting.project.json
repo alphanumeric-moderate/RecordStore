@@ -13,17 +13,17 @@
       "PlayerDataCore": {
         "$path": "src/PlayerDataInitializer/PlayerDataCore.luau"
       },
-      "AlyaNumFormatter": {
-        "$path": "src/PlayerDataInitializer/AlyaNumFormatter.luau"
-      },
       "PlayerDataSetRegression": {
         "$path": "tests/PlayerDataSetRegression.server.luau"
+      },
+      "CodeNumFormatter": {
+        "$path": "src/PlayerDataInitializer/CodeNumFormatter.luau"
       }
     },
     "ReplicatedStorage": {
       "$className": "ReplicatedStorage",
-      "AlyaNum": {
-        "$path": "src/AlyaNum"
+      "CodeNum": {
+        "$path": "src/CodeNum"
       }
     }
   }

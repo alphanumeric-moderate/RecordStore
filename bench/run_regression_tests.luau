@@ -37,16 +37,16 @@ for _, path in {
 	"tests/RecordStore_OutboxMailboxAdapterRegression.server.luau",
 	"src/PlayerDataInitializer/PlayerDataCore.luau",
 	"src/PlayerDataInitializer/IntegerInfinityValue.luau",
-	"src/AlyaNum/init.luau",
-	"src/PlayerDataInitializer/AlyaNumFormatter.luau",
-	"src/PlayerDataInitializer/AlyaNumValue.luau",
-	"bench/alyanum_shim.luau",
-	"tests/AlyaNumValueRegression.server.luau",
-	"tests/AlyaNumFormattingRegression.server.luau",
-	"bench/run_alyanum_regression_tests.luau",
-	"bench/run_alyanumvalue_regression_tests.luau",
-	"bench/alyanum.bench.luau",
-	"bench/alyanumvalue.bench.luau",
+	"src/CodeNum/init.luau",
+	"src/PlayerDataInitializer/CodeNumFormatter.luau",
+	"src/PlayerDataInitializer/CodeNumValue.luau",
+	"bench/codenum_shim.luau",
+	"tests/CodeNumValueRegression.server.luau",
+	"tests/CodeNumFormattingRegression.server.luau",
+	"bench/run_codenum_regression_tests.luau",
+	"bench/run_codenumvalue_regression_tests.luau",
+	"bench/codenum.bench.luau",
+	"bench/codenumvalue.bench.luau",
 	"src/PlayerDataInitializer/init.server.luau",
 	"src/PlayerDataInitializer/PlayerData.luau",
 	"tests/PlayerDataSetRegression.server.luau",
@@ -78,22 +78,21 @@ assert(math.isnan(IntegerInfinityValue.normalize(0 / 0, "nearest")), "NaN was no
 assert(IntegerInfinityValue.normalize(17.4, "nearest") == 17, "finite rounding changed")
 assert(IntegerInfinityValue.normalize(-17.6, "nearest") == -18, "negative finite rounding changed")
 
-local AlyaNum, AlyaNumFormatter = require("./alyanum_shim").load_alyanum()
-assert(AlyaNumFormatter.format(999) == "999")
-assert(AlyaNumFormatter.format(1000) == "1K")
-assert(AlyaNumFormatter.format(1250) == "1.25K")
-assert(AlyaNumFormatter.format(999_999) == "1M")
-assert(AlyaNumFormatter.format(1_000_000_000_000) == "1T")
-assert(AlyaNumFormatter.format(-1_500_000_000) == "-1.5B")
-assert(AlyaNumFormatter.format(math.huge) == "Infinity")
-assert(AlyaNumFormatter.format(-math.huge) == "-Infinity")
-assert(AlyaNumFormatter.format(0 / 0) == "NaN")
-assert(AlyaNumFormatter.format(1_200_000, { decimals = 3, trim_trailing_zeros = false }) == "1.200M")
-assert(AlyaNumFormatter.format(1_200_000, { decimals = 3 }) == "1.2M")
-local high_range = AlyaNum.new(10):pow(1000)
-assert(AlyaNum.toNumber(high_range) == math.huge)
-assert(AlyaNumFormatter.format(high_range) ~= "")
-
+local CodeNum, CodeNumFormatter = require("./codenum_shim").load_codenum()
+assert(CodeNumFormatter.format(999) == "999")
+assert(CodeNumFormatter.format(1000) == "1K")
+assert(CodeNumFormatter.format(1250) == "1.25K")
+assert(CodeNumFormatter.format(999_999) == "1M")
+assert(CodeNumFormatter.format(1_000_000_000_000) == "1T")
+assert(CodeNumFormatter.format(-1_500_000_000) == "-1.5B")
+assert(CodeNumFormatter.format(math.huge) == "Infinity")
+assert(CodeNumFormatter.format(-math.huge) == "-Infinity")
+assert(CodeNumFormatter.format(0 / 0) == "NaN")
+assert(CodeNumFormatter.format(1_200_000, { decimals = 3, trim_trailing_zeros = false }) == "1.200M")
+assert(CodeNumFormatter.format(1_200_000, { decimals = 3 }) == "1.2M")
+local high_range = CodeNum.fromScientific(1.25, "1000")
+assert(CodeNum.toNumber(high_range) == math.huge)
+assert(CodeNumFormatter.format(high_range) == "1.25e1000")
 
 Shim.run_script("bench/run_services_regression.luau")
 Shim.run_script("bench/run_outbox_adapter_unit_regression.luau")

@@ -1,6 +1,6 @@
 --!nocheck
 -- Shared mock PlayerDataCore harness for regression and CodSpeed path benchmarks.
-return function(use_cached_paths, initial_saved_data, controller_overrides, defer_start)
+return function(use_cached_paths, initial_saved_data, controller_overrides, defer_start, use_codenum_field)
 
 local function replace_source_once(source, old_text, new_text)
 	local start_index, end_index = string.find(source, old_text, 1, true)
@@ -28,7 +28,7 @@ end
 	local fs = require("@lune/fs")
 	local luau = require("@lune/luau")
 	local task = require("@lune/task")
-	local AlyaNum, AlyaNumCoreFormatter = require("./alyanum_shim").load_alyanum()
+	local CodeNum, CodeNumCoreFormatter = require("./codenum_shim").load_codenum()
 	local builtin_typeof = typeof
 	
 	local function make_signal()
@@ -340,20 +340,20 @@ end
 		environment = { Instance = Instance },
 	})()
 	local native_number_format_calls = 0
-	local AlyaNumFormatter = {
+	local CodeNumFormatter = {
 		format = function(value, options)
 			native_number_format_calls += 1
-			return AlyaNumCoreFormatter.format(value, options)
+			return CodeNumCoreFormatter.format(value, options)
 		end,
 	}
 
-	local AlyaNumValue = {
+	local CodeNumValue = {
 		is_value = function(value) return type(value) == "string" end,
 		normalize = function(value) return tostring(value) end,
 		is_serialized = function(value) return type(value) == "string" end,
 		format = function(value, _options)
 			if type(value) == "number" then
-				error("native-number formatting must not use the AlyaNumValue persistence adapter", 2)
+				error("native-number formatting must not use the CodeNumValue persistence adapter", 2)
 			end
 			return tostring(value)
 		end,
@@ -364,11 +364,14 @@ end
 			return backing
 		end,
 	}
+	if use_codenum_field then
+		CodeNumValue = require("./codenum_shim").load_codenum_value()
+	end
 	
 	local module_tokens = {
 		RecordStore = {},
 		IntegerInfinityValue = {},
-		AlyaNumValue = {},
+		CodeNumValue = {},
 	}
 	local module_script = {
 		Parent = module_tokens,
@@ -380,14 +383,14 @@ end
 			return services[name]
 		end,
 	}
-	local module_require_counts = { AlyaNumValue = 0 }
+	local module_require_counts = { CodeNumValue = 0 }
 	
 	local function mock_require(target)
 		if target == module_tokens.RecordStore then return RecordStore end
 		if target == module_tokens.IntegerInfinityValue then return IntegerInfinityValue end
-		if target == module_tokens.AlyaNumValue then
-			module_require_counts.AlyaNumValue += 1
-			return AlyaNumValue
+		if target == module_tokens.CodeNumValue then
+			module_require_counts.CodeNumValue += 1
+			return CodeNumValue
 		end
 		error("unexpected dependency passed to require")
 	end
@@ -399,6 +402,13 @@ end
 	end
 	
 	local player_data_core_source = fs.readFile("src/PlayerDataInitializer/PlayerDataCore.luau")
+	if use_codenum_field then
+		player_data_core_source = replace_source_once(
+			player_data_core_source,
+			'admin = define_data_field("BoolValue", false),',
+			'admin = define_data_field("BoolValue", false),\n\t\tcash = define_data_field("CodeNumValue", 0),'
+		)
+	end
 	if not use_cached_paths then
 		player_data_core_source = replace_source_range(
 			player_data_core_source,
@@ -410,7 +420,7 @@ end
 			player_data_core_source,
 			"\tlocal function find_cached_player_child(",
 			"\tlocal function normalize_set_value(",
-			"\tlocal function find_player_value_instance(player: Player, key: string, field: DataField): Instance?\n\t\tif not CONFIG.leaderstats.enabled then\n\t\t\treturn nil\n\t\tend\n\n\t\tlocal definition = leaderstat_by_key[key]\n\t\tif field.class_name == \"AlyaNumValue\"\n\t\t\tor (definition ~= nil and definition.number_format ~= nil)\n\t\tthen\n\t\t\tlocal values = player:FindFirstChild(\"PlayerDataValues\")\n\t\t\treturn if values ~= nil then values:FindFirstChild(key) else nil\n\t\tend\n\n\t\tif definition ~= nil then\n\t\t\tlocal leaderstats = player:FindFirstChild(CONFIG.leaderstats.name)\n\t\t\treturn if leaderstats ~= nil then leaderstats:FindFirstChild(definition.name) else nil\n\t\tend\n\n\t\treturn nil\n\tend\n\n"
+			"\tlocal function find_player_value_instance(player: Player, key: string, field: DataField): Instance?\n\t\tif not CONFIG.leaderstats.enabled then\n\t\t\treturn nil\n\t\tend\n\n\t\tlocal definition = leaderstat_by_key[key]\n\t\tif field.class_name == \"CodeNumValue\"\n\t\t\tor (definition ~= nil and definition.number_format ~= nil)\n\t\tthen\n\t\t\tlocal values = player:FindFirstChild(\"PlayerDataValues\")\n\t\t\treturn if values ~= nil then values:FindFirstChild(key) else nil\n\t\tend\n\n\t\tif definition ~= nil then\n\t\t\tlocal leaderstats = player:FindFirstChild(CONFIG.leaderstats.name)\n\t\t\treturn if leaderstats ~= nil then leaderstats:FindFirstChild(definition.name) else nil\n\t\tend\n\n\t\treturn nil\n\tend\n\n"
 		)
 		player_data_core_source = replace_source_once(
 			player_data_core_source,
@@ -436,16 +446,16 @@ end
 		},
 	})()
 	assert(
-		module_require_counts.AlyaNumValue == 0,
-		"PlayerDataCore eagerly required optional AlyaNumValue in the default configuration"
+		module_require_counts.CodeNumValue == (if use_codenum_field then 1 else 0),
+		"PlayerDataCore eagerly required optional CodeNumValue in the default configuration"
 	)
 	
 	local controller_options = {
 		Players = Players,
 		RecordStore = RecordStore,
 		IntegerInfinityValue = IntegerInfinityValue,
-		AlyaNumValue = AlyaNumValue,
-		AlyaNumFormatter = AlyaNumFormatter,
+		CodeNumValue = CodeNumValue,
+		CodeNumFormatter = CodeNumFormatter,
 		new_instance = function(class_name) return Instance.new(class_name) end,
 		task = task,
 	}
@@ -453,8 +463,8 @@ end
 	local controller = PlayerDataCore.new(controller_options)
 	
 	assert(
-		module_require_counts.AlyaNumValue == 0,
-		"default PlayerData controller should not load AlyaNumValue when the field is unused"
+		module_require_counts.CodeNumValue == (if use_codenum_field then 1 else 0),
+		"default PlayerData controller should not load CodeNumValue when the field is unused"
 	)
 	if not defer_start then
 		assert(controller:Start(), "controller failed to start")
@@ -471,15 +481,16 @@ end
 				tostring(player._kick_message)
 			)
 		)
-		assert(native_number_format_calls > 0, "default Kills display did not use AlyaNumFormatter")
-		assert(module_require_counts.AlyaNumValue == 0,
-			"default native leaderstats should not load the AlyaNumValue adapter")
+		assert(native_number_format_calls > 0, "default Kills display did not use CodeNumFormatter")
+		assert(module_require_counts.CodeNumValue == 0,
+			"default native leaderstats should not load the CodeNumValue adapter")
 	end
 	return {
 		controller = controller,
 		player = player,
 		players = Players,
 		record = captured_record,
+		get_record = function() return captured_record end,
 		saved_records = saved_records,
 		get_record_options = function()
 			return captured_record_options

@@ -10,8 +10,8 @@
     },
     "ReplicatedStorage": {
       "$className": "ReplicatedStorage",
-      "AlyaNum": {
-        "$path": "src/AlyaNum"
+      "CodeNum": {
+        "$path": "src/CodeNum"
       }
     }
   }

@@ -6,9 +6,9 @@ RecordStore is a server-side Roblox Luau persistence module.
 
 ## Install in Roblox Studio
 
-The Rojo projects map `src/PlayerDataInitializer` to a Script named `ServerScriptService.PlayerDataInitializer`. Its child ModuleScripts include `PlayerData`, `PlayerDataCore`, `RecordStore`, `IntegerInfinityValue`, `AlyaNumFormatter` and `AlyaNumValue`. The scheduler and Mailbox V2 implementations are embedded in `RecordStore.luau`. AlyaNum is vendored at `src/AlyaNum` and mapped to `ReplicatedStorage.AlyaNum`.
+The Rojo projects map `src/PlayerDataInitializer` to a Script named `ServerScriptService.PlayerDataInitializer`. Its child ModuleScripts include `PlayerData`, `PlayerDataCore`, `RecordStore`, `IntegerInfinityValue`, `CodeNumFormatter` and `CodeNumValue`. The scheduler and Mailbox V2 implementations are embedded in `RecordStore.luau`. CodeNum 0.5.0 is included at `src/CodeNum` and mapped to `ReplicatedStorage.CodeNum`.
 
-**`AlyaNum` must be a ModuleScript at `ReplicatedStorage.AlyaNum`.** The vendored AlyaNum module is outside `PlayerDataInitializer`; `AlyaNumFormatter` resolves it from `ReplicatedStorage`, while `AlyaNumValue` is a child of `PlayerDataInitializer`.
+**`CodeNum` must be a ModuleScript at `ReplicatedStorage.CodeNum`.** The CodeNum module is outside `PlayerDataInitializer`; `CodeNumFormatter` resolves it from `ReplicatedStorage`, while `CodeNumValue` is a child of `PlayerDataInitializer`.
 
 Use `default.project.json` for the standard setup. The initializer starts the shared controller and registers `BindToClose` shutdown handling. Use exactly one initializer.
 
@@ -21,16 +21,16 @@ ServerScriptService
     ├── PlayerDataCore (ModuleScript; PlayerDataCore.luau)
     ├── RecordStore (ModuleScript; RecordStore.luau)
     ├── IntegerInfinityValue (ModuleScript; IntegerInfinityValue.luau)
-    ├── AlyaNumFormatter (ModuleScript; AlyaNumFormatter.luau)
-    └── AlyaNumValue (ModuleScript; AlyaNumValue.luau)
+    ├── CodeNumFormatter (ModuleScript; CodeNumFormatter.luau)
+    └── CodeNumValue (ModuleScript; CodeNumValue.luau)
 
 ReplicatedStorage
-└── AlyaNum (ModuleScript; source: src/AlyaNum/init.luau)
+└── CodeNum (ModuleScript; source: src/CodeNum/init.luau)
 ```
 
-Do not put `AlyaNum` inside `PlayerDataInitializer`. Its module must be named exactly `ReplicatedStorage.AlyaNum`. Keep `AlyaNumFormatter` and `AlyaNumValue` as children of the single `PlayerDataInitializer` Script. Use a separate test place or Studio session for compatibility testing.
+Do not put `CodeNum` inside `PlayerDataInitializer`. Its module must be named exactly `ReplicatedStorage.CodeNum`. Keep `CodeNumFormatter` and `CodeNumValue` as children of the single `PlayerDataInitializer` Script. Use a separate test place or Studio session for compatibility testing.
 
-**Recommended setup with Rojo:** from the repository root, run `rojo serve default.project.json`, open the place in Studio, connect using the Rojo Studio plugin, and sync. The existing project file maps `src/PlayerDataInitializer` and `src/AlyaNum` into the hierarchy shown above. To produce a place/model file instead, run `rojo build default.project.json -o RecordStore.rbxlx`.
+**Recommended setup with Rojo:** from the repository root, run `rojo serve default.project.json`, open the place in Studio, connect using the Rojo Studio plugin, and sync. The existing project file maps `src/PlayerDataInitializer` and `src/CodeNum` into the hierarchy shown above. To produce a place/model file instead, run `rojo build default.project.json -o RecordStore.rbxlx`.
 
 ## Non-finite numeric values
 
@@ -74,9 +74,9 @@ The repository also includes:
 - `src/PlayerDataInitializer/PurchaseAuthorityMigrationRunner.luau`: resumable, bounded import of an application-enumerated historical PurchaseId snapshot with uncached durable checkpoints, source count and rolling digest reconciliation; unresolved batches never advance the cursor.
 - `src/PlayerDataInitializer/RecordStoreMaintenanceRobloxAdapter.luau`: paged real DataStore key enumeration, uncached inspection, and revision-checked checkpoint adapters for the bounded maintenance runner. Generation-aware deletion remains explicitly application supplied.
 - `src/PlayerDataInitializer/IntegerInfinityValue.luau`: a `NumberValue` factory that rounds finite values to integers while preserving positive infinity, negative infinity, and NaN. The default `kills` field uses this type so non-finite values are not silently replaced with zero.
-- `src/PlayerDataInitializer/AlyaNumFormatter.luau`: shared abbreviation formatting for native numbers and AlyaNum values. It renders positive infinity as `Infinity`, negative infinity as `-Infinity`, and NaN as `NaN`.
-- `src/PlayerDataInitializer/AlyaNumValue.luau`: an adapter for the vendored AlyaNum library. It persists AlyaNum's normalized base representation in a versioned JSON envelope and provides `get`/`set` helpers for a replicated StringValue backing instance. IEEE special values use explicit tagged sentinels because AlyaNum itself accepts finite numeric inputs. With the default schema, this adapter is not loaded during startup; `PlayerDataCore` requires it only when an `AlyaNumValue` field is configured or used.
-- `src/AlyaNum/init.luau`: vendored AlyaNum source from `evilbocchi/alyanum`, pinned to commit `331b5e56d3857b04a4899fa9e46d6d39670c368a`. Its MIT license is included in `THIRD_PARTY_NOTICES/AlyaNum-MIT.txt`.
+- `src/PlayerDataInitializer/CodeNumFormatter.luau`: shared abbreviation formatting for native numbers and CodeNum values. It renders positive infinity as `Infinity`, negative infinity as `-Infinity`, and NaN as `NaN`.
+- `src/PlayerDataInitializer/CodeNumValue.luau`: an adapter for CodeNum 0.5.0. It persists the canonical `CN1` value codec inside a versioned JSON envelope and provides `get`/`set` helpers for a replicated StringValue backing instance. IEEE NaN and infinities use CodeNum's native special-number codec. With the default schema, this adapter is not loaded during startup; `PlayerDataCore` requires it only when a `CodeNumValue` field is configured or used.
+- `src/CodeNum/init.luau`: the project's CodeNum 0.5.0 module, with native-number fast paths, scientific `Wide` values, exact decimal exponents, and reusable arithmetic registers.
 - `src/PlayerDataInitializer/init.server.luau`: a standard Script that starts the controller and shuts it down from `BindToClose`.
 
 ### PlayerData.Set API
@@ -122,7 +122,7 @@ DataStore write has completed synchronously.
 
 Numeric fields are normalized according to their configured Value type. For example, `kills` uses
 `IntegerInfinityValue`, so fractional input is rounded using the field's configured rounding rule.
-AlyaNum fields accept an AlyaNum value or a supported finite numeric input and serialize it without coercing high-range values to a native `number`. To use AlyaNum, configure a field in `CONFIG.data`, for example `cash = define_data_field("AlyaNumValue", 0)`. The adapter stores the AlyaNum base representation in a versioned JSON payload backed by a replicated `StringValue`; the leaderboard remains formatted, display-only text.
+CodeNum fields accept a native number, a CodeNum `Wide` value, or a supported numeric string and serialize it without coercing extended-range values to a native `number`. To use CodeNum, configure a field in `CONFIG.data`, for example `cash = define_data_field("CodeNumValue", 0)`. The adapter stores the canonical `CN1` codec payload inside a versioned JSON envelope backed by a replicated `StringValue`; the leaderboard remains formatted, display-only text.
 
 `Set` is server-side. Do not use it as a client-authoritative economy or permission boundary; validate
 gameplay actions and authorization on the server before changing protected fields.
@@ -139,44 +139,58 @@ The reset is applied during post-load normalization and written through the acti
 
 ### Number formatting
 
-AlyaNumFormatter supplies the shared number-abbreviation path for native Luau numbers and AlyaNum objects:
+CodeNumFormatter supplies the shared number-abbreviation path for native Luau numbers and CodeNum objects:
 
 ```lua
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerScriptService = game:GetService("ServerScriptService")
 local initializer = ServerScriptService:WaitForChild("PlayerDataInitializer")
-local AlyaNum = require(ReplicatedStorage:WaitForChild("AlyaNum"))
-local AlyaNumFormatter = require(initializer:WaitForChild("AlyaNumFormatter"))
+local CodeNum = require(ReplicatedStorage:WaitForChild("CodeNum"))
+local CodeNumFormatter = require(initializer:WaitForChild("CodeNumFormatter"))
 
-print(AlyaNumFormatter.format(1_250)) -- 1.25K
-print(AlyaNumFormatter.format(1_000_000_000_000)) -- 1T
-print(AlyaNumFormatter.format(AlyaNum.new(10):pow(1000))) -- beyond native number range
-print(AlyaNumFormatter.format(math.huge)) -- Infinity
-print(AlyaNumFormatter.format(-math.huge)) -- -Infinity
-print(AlyaNumFormatter.format(0 / 0)) -- NaN
+print(CodeNumFormatter.format(1_250)) -- 1.25K
+print(CodeNumFormatter.format(1_000_000_000_000)) -- 1T
+print(CodeNumFormatter.format(CodeNum.fromScientific(1.25, "1000"))) -- beyond native number range
+print(CodeNumFormatter.format(math.huge)) -- Infinity
+print(CodeNumFormatter.format(-math.huge)) -- -Infinity
+print(CodeNumFormatter.format(0 / 0)) -- NaN
 ```
 
-The default `PlayerDataCore` configuration abbreviates `Kills` using `define_leaderstat("kills", "Kills", { decimals = 2 })`. Native numeric and `AlyaNumValue` leaderstats use `AlyaNumFormatter.format`. Explicit precision accepts integers from 0 through 6; `trim_trailing_zeros` controls whether fractional trailing zeros are kept. Formatting changes display text only, never persisted values.
+The default `PlayerDataCore` configuration abbreviates `Kills` using `define_leaderstat("kills", "Kills", { decimals = 2 })`. Native numeric and `CodeNumValue` leaderstats use `CodeNumFormatter.format`. Explicit precision accepts integers from 0 through 6; `trim_trailing_zeros` controls whether fractional trailing zeros are kept. Formatting changes display text only, never persisted values.
 
-### AlyaNum support and persistence compatibility
+### CodeNum support and persistence compatibility
 
-`ReplicatedStorage.AlyaNum` exposes the vendored AlyaNum library. Configure extended-range fields with `define_data_field("AlyaNumValue", 0)`. The `AlyaNumValue` adapter stores a versioned AlyaNum base representation in the profile and a replicated `StringValue`, then reconstructs an AlyaNum value when read.
+`ReplicatedStorage.CodeNum` exposes the CodeNum 0.5.0 module. Configure extended-range fields with `define_data_field("CodeNumValue", 0)`. `CodeNumValue` stores a versioned JSON envelope containing CodeNum's `CN1` codec payload in the profile and a replicated `StringValue`, then reconstructs a native number or `Wide` value when read.
 
 ```luau
 local ServerScriptService = game:GetService("ServerScriptService")
-local AlyaNumValue = require(ServerScriptService:WaitForChild("PlayerDataInitializer"):WaitForChild("AlyaNumValue"))
-local AlyaNum = require(game:GetService("ReplicatedStorage"):WaitForChild("AlyaNum"))
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local CodeNumValue = require(ServerScriptService:WaitForChild("PlayerDataInitializer"):WaitForChild("CodeNumValue"))
+local CodeNum = require(ReplicatedStorage:WaitForChild("CodeNum"))
 
 local cash = player.PlayerDataValues.cash
-local current = AlyaNumValue.get(cash)
-AlyaNumValue.set(cash, current + AlyaNum.new(100))
+local current = CodeNumValue.get(cash)
+CodeNumValue.set(cash, CodeNum.add(current, 100))
 ```
 
-AlyaNum uses an extended-range floating representation rather than arbitrary-precision integer arithmetic. It retains finite precision and has its own representational limits; applications requiring exact unbounded integer arithmetic need a separate integer representation. IEEE positive infinity, negative infinity, and NaN are not passed to AlyaNum as ordinary values. `AlyaNumValue` stores those states as explicit tagged sentinels, and `AlyaNumFormatter` displays them as `Infinity`, `-Infinity`, and `NaN`.
+CodeNum arithmetic is explicit: use `CodeNum.add`, `sub`, `mul`, `div`, and `pow` instead of Lua arithmetic metamethods. `CodeNum.fromScientific(mantissa, exponent)` accepts an exact decimal integer exponent string, including exponents larger than the native safe-integer range. The optional register API (`createRegister`, `addInto`, `subInto`, `mulInto`, `divInto`, and `readRegister`) supports reusable scratch storage for hot arithmetic paths. Registers are mutable scratch objects; ordinary `Wide` values are immutable.
 
-New values use the `AlyaNumValue` JSON format version 1. The adapter includes a compatibility decoder for saved `InfiniteMathValue` version-1 envelopes and version-2 CodeNum payloads. Values that AlyaNum can represent are normalized to the AlyaNumValue format; legacy symbolic CodeNum values outside AlyaNum's supported range are preserved verbatim and retain a safe legacy display instead of being replaced with defaults. The old `InfiniteMathValue` name is recognized only as a persisted legacy-format identifier; RecordStore no longer loads or depends on InfiniteMath at runtime.
+`CodeNumValue` writes format version 1 and enforces a conservative 199,999-byte `StringValue` payload limit. It accepts native numbers, CodeNum `Wide` values, `CN1` payloads, and numeric strings. NaN and infinities are encoded by CodeNum's native-number payload variants.
 
-The StringValue transport retains a conservative 199,999-byte payload limit. AlyaNum's MIT license and pinned upstream commit are recorded in `THIRD_PARTY_NOTICES/AlyaNum-MIT.txt`.
+The migration decoder recognizes previous `AlyaNumValue` version-1 envelopes, `InfiniteMathValue` version-1 envelopes, and the earlier JSON `CodeNum` version-2 format.
+
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:8bc0aade0fd254c2dc8433b320a0ea2bf029f5652830ac7c9faf22acb8e8aac7 -->
+
+Values representable by CodeNum 0.5.0 are converted to the new `CodeNumValue` envelope, except that legacy expressions and hyperoperations evaluating to integers outside the safe-integer range are preserved to avoid rounding.
+
+<!-- /coderabbit-ai-generated:v1 -->
+
+Earlier symbolic values and AlyaNum / InfiniteMath values outside CodeNum's supported range are preserved verbatim rather than silently reset; they remain legacy values until the application chooses an explicit conversion. Unknown versions of recognized schemas are rejected rather than overwritten.
+
+The StringValue transport retains a conservative 199,999-byte payload limit. CodeNum 0.5.0 is maintained in this repository and does not introduce a third-party numeric runtime dependency.
+
 ### PlayerDataCore V2 mailbox wake-ups
 
 `PlayerDataCore` can optionally bind each active player Record to the embedded Mailbox V2 and use `RecordStoreV2Acceleration` for cross-server wake-ups. Enable it through the dependencies passed to `PlayerDataCore.new` (for the standard Rojo setup, configure the call in `PlayerData.luau`):
@@ -218,7 +232,7 @@ To test default numeric leaderstats without the persistence adapter installed, b
 rojo build tests-native-formatting.project.json -o RecordStore-NativeFormattingRegression.rbxlx
 ```
 
-This project intentionally omits `ServerScriptService.AlyaNumValue` while keeping the real `ReplicatedStorage.AlyaNum` module and `AlyaNumFormatter`. Open the resulting place in Roblox Studio and run a server playtest. The mapped `PlayerDataSetRegression` must initialize the player, update the formatted `Kills` display (including `Infinity`, `-Infinity`, and `NaN`), and complete its persistence assertions without requiring the optional AlyaNumValue persistence adapter.
+This project intentionally omits `ServerScriptService.CodeNumValue` while keeping the real `ReplicatedStorage.CodeNum` module and `CodeNumFormatter`. Open the resulting place in Roblox Studio and run a server playtest. The mapped `PlayerDataSetRegression` must initialize the player, update the formatted `Kills` display (including `Infinity`, `-Infinity`, and `NaN`), and complete its persistence assertions without requiring the optional CodeNumValue persistence adapter.
 
 Regression scripts use `RecordStore.Mock`; they do not read or write live DataStore records.
 
