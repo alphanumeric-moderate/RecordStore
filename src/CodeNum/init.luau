@@ -1780,7 +1780,8 @@ local function preciseAddOperands(
 		local zeroSign = if aParts.zeroSign < 0 and bParts.zeroSign < 0 then -1 else 1
 		return makePrecise(
 			zeroSign, "0", 0, 0, 0, 0, nil, precision, destination, nil,
-			aParts.wasRounded or bParts.wasRounded, isPrecise(a) or isPrecise(b)
+			aParts.wasRounded or bParts.wasRounded,
+			isPrecise(a) or isPrecise(b) or precisionOverride ~= nil
 		)
 	end
 	if aParts.sign == 0 then
@@ -1847,7 +1848,7 @@ local function preciseAddOperands(
 		if magnitudeComparison == 0 then
 			return makePrecise(
 				0, "0", 0, 0, 0, 0, nil, precision, destination, nil,
-				aParts.wasRounded or bParts.wasRounded
+					aParts.wasRounded or bParts.wasRounded, isPrecise(a) or isPrecise(b) or precisionOverride ~= nil
 			)
 		elseif magnitudeComparison > 0 then
 			resultSign = aParts.sign
@@ -1876,9 +1877,12 @@ local function preciseMultiplyOperands(
 	validatePrecision(precision)
 	if aParts.sign == 0 or bParts.sign == 0 then
 		local zeroSign = operandSign(a) * operandSign(b)
-		if aParts.wasRounded or bParts.wasRounded then
+		local wasRounded = aParts.wasRounded or bParts.wasRounded
+		local preservePreciseZero = isPrecise(a) or isPrecise(b) or precisionOverride ~= nil
+		if wasRounded or preservePreciseZero then
 			return makePrecise(
-				zeroSign, "0", 0, 0, 0, 0, nil, precision, destination, nil, true
+				zeroSign, "0", 0, 0, 0, 0, nil, precision, destination, nil,
+				wasRounded, preservePreciseZero
 			)
 		end
 		local zero = if zeroSign < 0 then -0.0 else 0
@@ -1927,9 +1931,12 @@ local function preciseDivideOperands(
 		return infinity
 	elseif aParts.sign == 0 then
 		local zeroSign = operandSign(a) * operandSign(b)
-		if aParts.wasRounded or bParts.wasRounded then
+		local wasRounded = aParts.wasRounded or bParts.wasRounded
+		local preservePreciseZero = isPrecise(a) or isPrecise(b) or precisionOverride ~= nil
+		if wasRounded or preservePreciseZero then
 			return makePrecise(
-				zeroSign, "0", 0, 0, 0, 0, nil, precision, destination, nil, true
+				zeroSign, "0", 0, 0, 0, 0, nil, precision, destination, nil,
+				wasRounded, preservePreciseZero
 			)
 		end
 		local zero = if zeroSign < 0 then -0.0 else 0
@@ -2071,7 +2078,8 @@ local function precisePowerInteger(value: Operand, power: number, precision: num
 	local factor = makePrecise(
 		if parts.sign == 0 then parts.zeroSign else parts.sign,
 		parts.digits, parts.expIsBig, parts.expSmall, parts.expSign,
-		parts.expLength, parts.expData, workingPrecision, nil, nil, parts.wasRounded
+		parts.expLength, parts.expData, workingPrecision, nil, nil, parts.wasRounded,
+		isPrecise(value) or precision ~= nil
 	)
 	local result: Value = makePrecise(1, "1", 0, 0, 0, 0, nil, workingPrecision, nil, nil)
 	local remaining = math.abs(power)
@@ -2096,7 +2104,7 @@ local function precisePowerInteger(value: Operand, power: number, precision: num
 		if resultParts.sign == 0 then resultParts.zeroSign else resultParts.sign,
 		resultParts.digits, resultParts.expIsBig, resultParts.expSmall, resultParts.expSign,
 		resultParts.expLength, resultParts.expData, selectedPrecision, nil, nil,
-		resultParts.wasRounded
+		resultParts.wasRounded, isPrecise(value) or isPrecise(result) or precision ~= nil
 	)
 end
 
@@ -2746,6 +2754,11 @@ function CodeNum.parse(text: string, precision: number?): Value
 	end
 	local parsedParts = parseDecimalParts(normalized)
 	if parsedParts.sign == 0 then
+		if precision ~= nil then
+			return makePrecise(
+				parsedParts.zeroSign, "0", 0, 0, 0, 0, nil, precision, nil, nil, false, true
+			)
+		end
 		return if parsedParts.zeroSign < 0 then -0.0 else 0
 	end
 	if precision ~= nil or #parsedParts.digits > 15 then
@@ -2783,7 +2796,7 @@ function CodeNum.withPrecision(value: Operand, precision: number): Value
 	return makePrecise(
 		if parts.sign == 0 then parts.zeroSign else parts.sign,
 		parts.digits, parts.expIsBig, parts.expSmall, parts.expSign,
-		parts.expLength, parts.expData, precision, nil, nil, parts.wasRounded
+		parts.expLength, parts.expData, precision, nil, nil, parts.wasRounded, true
 	)
 end
 
@@ -2968,7 +2981,7 @@ function CodeNum.abs(value: Operand): Value
 		local parts = preciseParts(value)
 		return makePrecise(
 			1, parts.digits, parts.expIsBig, parts.expSmall, parts.expSign,
-			parts.expLength, parts.expData, parts.precision, nil, nil, parts.wasRounded
+			parts.expLength, parts.expData, parts.precision, nil, nil, parts.wasRounded, true
 		)
 	end
 	if type(value) == "number" then

@@ -23,6 +23,7 @@
 - Keep CN1 native/Wide values in CodeNumValue envelope version 1 and write CN2 precise values in envelope version 2.
 - New readers accept envelope versions 1 and 2, and canonicalize early version-1/CN2 values already written by initial 0.6.0 adapters to version 2.
 - CN2 preserves the sign and precision context of precise zero values; decoding restores precise storage with `wasRounded = false`. Native signed zero remains in CN1.
+- Any zero result derived from a Precise operand or an explicit precision context retains precise storage independently of whether the operation rounded; `wasRounded` records discarded digits only.
 - Unknown envelope versions must be rejected before normalization so an older v1-only reader can distinguish a v2 payload from its CN1 format.
 - Preserve the existing conservative serialized payload size limit.
 
