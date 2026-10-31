@@ -697,7 +697,9 @@ do
 	end)
 	assert(update_result == "success", update_message)
 
-	task.wait(0.06)
+	local dirty_age_started = os.clock()
+	while os.clock() - dirty_age_started < 0.06 do
+	end
 	local status = record:GetDurabilityStatus()
 	assert(status.dirty == true, "the cutoff fixture must retain an unsaved mutation")
 	assert(status.dirty_age_slo_exceeded == true,

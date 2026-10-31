@@ -3,9 +3,12 @@
 
 local HttpService = game:GetService("HttpService")
 
+local LEGACY_FORMAT_VERSION = 1
+local CURRENT_FORMAT_VERSION = 2
+
 local CodeNumValue = {
-	VERSION = "1.0.0",
-	FORMAT_VERSION = 1,
+	VERSION = "2.0.0",
+	FORMAT_VERSION = CURRENT_FORMAT_VERSION,
 }
 
 export type CodeNumWide = {
@@ -16,6 +19,10 @@ export type CodeNumWide = {
 	expLength: number,
 }
 
+export type CodeNumPrecise = {
+	_codeNum: "precise",
+}
+
 export type LegacyValue = {
 	kind: "legacy",
 	raw: string,
@@ -23,7 +30,7 @@ export type LegacyValue = {
 	value: any,
 }
 
-export type Value = number | CodeNumWide | LegacyValue
+export type Value = number | CodeNumWide | CodeNumPrecise | LegacyValue
 export type Node = { kind: string }
 export type Options = {
 	decimals: number?,
@@ -35,6 +42,10 @@ local SCHEMA = "CodeNumValue"
 local LEGACY_ALYANUM_SCHEMA = "AlyaNumValue"
 local LEGACY_INFINITEMATH_SCHEMA = "InfiniteMathValue"
 local LEGACY_CODE_SCHEMA = "CodeNum"
+
+local function is_supported_format_version(version: any): boolean
+	return version == LEGACY_FORMAT_VERSION or version == CodeNumValue.FORMAT_VERSION
+end
 
 local cached_api: any = nil
 local cached_formatter: any = nil
@@ -59,11 +70,14 @@ local function resolve_api(): any
 		error("failed to require CodeNum: " .. tostring(loaded), 2)
 	end
 	if type(loaded) ~= "table"
-		or loaded.VERSION ~= "0.5.0"
+		or loaded.VERSION ~= "0.6.0"
 		or type(loaded.encode) ~= "function"
 		or type(loaded.decode) ~= "function"
 		or type(loaded.parse) ~= "function"
 		or type(loaded.fromScientific) ~= "function"
+		or type(loaded.fromInteger) ~= "function"
+		or type(loaded.isPrecise) ~= "function"
+		or type(loaded.wasRounded) ~= "function"
 		or type(loaded.toString) ~= "function"
 		or type(loaded.toNumber) ~= "function"
 		or type(loaded.add) ~= "function"
@@ -75,7 +89,7 @@ local function resolve_api(): any
 		or type(loaded.log10) ~= "function"
 		or type(loaded.isWide) ~= "function"
 	then
-		error("ReplicatedStorage.CodeNum must expose the CodeNum 0.5.0 API", 2)
+		error("ReplicatedStorage.CodeNum must expose the CodeNum 0.6.0 API", 2)
 	end
 
 	cached_api = loaded
@@ -111,7 +125,7 @@ local function is_code_num_value(value: any): boolean
 		return true
 	end
 	local api = resolve_api()
-	if api.isWide(value) then
+	if api.isWide(value) or api.isPrecise(value) then
 		return true
 	end
 	if type(value) == "table" then
@@ -129,9 +143,12 @@ local function serialize_value(value: any): string
 	if type(payload) ~= "string" then
 		error("CodeNum.encode must return a string", 3)
 	end
+	local envelope_version = if string.match(payload, "^CN2|") ~= nil
+		then CodeNumValue.FORMAT_VERSION
+		else LEGACY_FORMAT_VERSION
 	local serialized = HttpService:JSONEncode({
 		schema = SCHEMA,
-		version = CodeNumValue.FORMAT_VERSION,
+		version = envelope_version,
 		value = payload,
 	})
 	if type(serialized) ~= "string" then
@@ -161,54 +178,114 @@ local function legacy_integer_to_value(sign: number, digits: string): any?
 	if digits == "" then
 		return 0
 	end
-	if #digits > 309 then
+	local api = resolve_api()
+	if #digits > api.MAX_PRECISE_DIGITS then
 		return nil
 	end
-
 	local literal = (if sign < 0 then "-" else "") .. digits
-	local native = tonumber(literal)
-	if native == nil or not is_finite(native) then
-		return nil
-	end
-	if string.format("%.0f", math.abs(native)) ~= digits then
-		return nil
-	end
-	return resolve_api().new(native)
+	local ok, parsed = pcall(function()
+		return api.fromInteger(literal)
+	end)
+	return if ok then parsed else nil
 end
 
-local function is_unsafe_legacy_result(api: any, result: any): boolean
-	-- Native arithmetic may round integers beyond binary64's safe range.
+local function legacy_results_equal(api: any, actual: any, exact: any): boolean
+	if type(actual) == "number" and actual ~= actual then
+		return type(exact) == "number" and exact ~= exact
+	elseif type(actual) == "number" and actual == 0
+		and type(exact) == "number" and exact == 0
+	then
+		return 1 / actual == 1 / exact
+	elseif type(actual) == "number" and (actual == math.huge or actual == -math.huge) then
+		return actual == exact
+	elseif type(exact) == "number" and (exact ~= exact or exact == math.huge or exact == -math.huge) then
+		return false
+	end
+	return api.compare(actual, exact) == 0
+end
+
+local function is_unsafe_legacy_result(
+	api: any,
+	result: any,
+	operation: string,
+	left: any,
+	right: any
+): boolean
+	if not is_code_num_value(result) or api.wasRounded(result)
+		or api.wasRounded(left) or api.wasRounded(right)
+	then
+		return true
+	end
+
+	-- Keep large native/Wide integers on their original legacy payload path.
 	if type(result) == "number" then
-		return is_finite(result) and math.abs(result) > 9007199254740991 and math.floor(result) == result
+		if is_finite(result) and math.abs(result) > 9007199254740991
+			and math.floor(result) == result
+		then
+			return true
+		end
+	elseif api.isWide(result) and api.compare(api.abs(result), 9007199254740991) == 1 then
+		return true
 	end
-	-- Positive-exponent Wide values exceed native range and are integers.
-	return type(result) == "table" and api.compare(api.abs(result), 9007199254740991) == 1
+
+	local ok, exact = pcall(function()
+		if operation == "add" then
+			return api.add(left, right, api.MAX_PRECISE_DIGITS)
+		elseif operation == "sub" then
+			return api.sub(left, right, api.MAX_PRECISE_DIGITS)
+		elseif operation == "mul" then
+			return api.mul(left, right, api.MAX_PRECISE_DIGITS)
+		elseif operation == "div" then
+			return api.div(left, right, api.MAX_PRECISE_DIGITS)
+		elseif operation == "pow" then
+			return api.pow(left, right, api.MAX_PRECISE_DIGITS)
+		end
+		error("unsupported legacy arithmetic operator")
+	end)
+	if not ok or not is_code_num_value(exact) or api.wasRounded(exact) then
+		return true
+	end
+	return not legacy_results_equal(api, result, exact)
 end
 
-local function legacy_node_to_value(node: any, depth: number, budget: {count: number}): any?
+local function is_exact_legacy_log10(api: any, value: any, result: number): boolean
+	if not is_finite(result) or math.floor(result) ~= result or api.wasRounded(value) then
+		return false
+	end
+	local ok, exact = pcall(function()
+		return api.pow(10, result, api.MAX_PRECISE_DIGITS)
+	end)
+	return ok and not api.wasRounded(exact) and api.compare(value, exact) == 0
+end
+
+local function legacy_node_to_value(
+	node: any,
+	depth: number,
+	budget: {count: number}
+): (any?, boolean)
 	if type(node) ~= "table" or depth > 128 then
-		return nil
+		return nil, false
 	end
 	budget.count += 1
 	if budget.count > 8192 then
-		return nil
+		return nil, false
 	end
 
 	local api = resolve_api()
 	local kind = node.kind
 	if kind == "finite" then
 		if not is_finite(node.value) then
-			return nil
+			return nil, false
 		end
-		return api.new(node.value)
+		return api.new(node.value), false
 	elseif kind == "integer" then
 		if (node.sign ~= 1 and node.sign ~= -1)
 			or type(node.digits) ~= "string"
 			or not string.match(node.digits, "^%d+$")
 		then
-			return nil
+			return nil, false
 		end
-		return legacy_integer_to_value(node.sign, node.digits)
+		return legacy_integer_to_value(node.sign, node.digits), false
 	elseif kind == "scientific" then
 		if (node.sign ~= 1 and node.sign ~= -1)
 			or not is_finite(node.mantissa)
@@ -216,106 +293,144 @@ local function legacy_node_to_value(node: any, depth: number, budget: {count: nu
 			or type(node.exponent) ~= "string"
 			or not string.match(node.exponent, "^[+-]?%d+$")
 		then
-			return nil
+			return nil, false
 		end
 		local ok, parsed = pcall(function()
 			return api.fromScientific(node.sign * node.mantissa, node.exponent)
 		end)
-		return if ok then parsed else nil
+		if ok then
+			return parsed, false
+		end
+		return nil, false
 	elseif kind == "special" then
 		if node.name == "nan" then
-			return 0 / 0
+			return 0 / 0, false
 		elseif node.name == "+infinity" then
-			return math.huge
+			return math.huge, false
 		elseif node.name == "-infinity" then
-			return -math.huge
+			return -math.huge, false
 		end
-		return nil
+		return nil, false
 	elseif kind == "expression" then
-		local left = legacy_node_to_value(node.left, depth + 1, budget)
-		local right = legacy_node_to_value(node.right, depth + 1, budget)
+		local left, leftRounded = legacy_node_to_value(node.left, depth + 1, budget)
+		local right, rightRounded = legacy_node_to_value(node.right, depth + 1, budget)
 		if left == nil or right == nil then
-			return nil
+			return nil, leftRounded or rightRounded
 		end
+		if leftRounded or rightRounded then
+			return nil, true
+		end
+		local operation = node.op
 		local ok, result = pcall(function()
-			if node.op == "add" then
+			if operation == "add" then
 				return api.add(left, right)
-			elseif node.op == "sub" then
+			elseif operation == "sub" then
 				return api.sub(left, right)
-			elseif node.op == "mul" then
+			elseif operation == "mul" then
 				return api.mul(left, right)
-			elseif node.op == "div" then
+			elseif operation == "div" then
 				return api.div(left, right)
-			elseif node.op == "pow" then
+			elseif operation == "pow" then
 				local power = api.toNumber(right)
-				if not is_finite(power) then
-					error("legacy power is outside CodeNum's numeric power domain")
+				if not is_finite(power) or api.compare(right, power) ~= 0 then
+					error("legacy power cannot be represented exactly as a native exponent")
 				end
 				return api.pow(left, power)
 			end
 			error("unsupported legacy expression operator")
 		end)
-		return if ok and not is_unsafe_legacy_result(api, result) then result else nil
+		if not ok then
+			return nil, false
+		end
+		local exactRight = if operation == "pow" then api.toNumber(right) else right
+		if is_unsafe_legacy_result(api, result, operation, left, exactRight) then
+			return nil, true
+		end
+		return result, false
 	elseif kind == "hyper" then
-		local base = legacy_node_to_value(node.base, depth + 1, budget)
-		local arrows = legacy_node_to_value(node.arrows, depth + 1, budget)
-		local height = legacy_node_to_value(node.height, depth + 1, budget)
+		local base, baseRounded = legacy_node_to_value(node.base, depth + 1, budget)
+		local arrows, arrowsRounded = legacy_node_to_value(node.arrows, depth + 1, budget)
+		local height, heightRounded = legacy_node_to_value(node.height, depth + 1, budget)
 		if base == nil or arrows == nil or height == nil then
-			return nil
+			return nil, baseRounded or arrowsRounded or heightRounded
+		end
+		if baseRounded or arrowsRounded or heightRounded then
+			return nil, true
 		end
 
 		local arrow_count = api.toNumber(arrows)
 		local native_height = api.toNumber(height)
 		if not is_finite(arrow_count) or not is_finite(native_height)
+			or api.compare(arrows, arrow_count) ~= 0 or api.compare(height, native_height) ~= 0
 			or native_height % 1 ~= 0 or native_height < 1 or native_height > 3
 		then
-			return nil
+			return nil, false
 		end
 
 		if arrow_count == 1 then
 			local ok, result = pcall(function()
 				return api.pow(base, native_height)
 			end)
-			return if ok and not is_unsafe_legacy_result(api, result) then result else nil
+			if not ok then
+				return nil, false
+			end
+			if is_unsafe_legacy_result(api, result, "pow", base, native_height) then
+				return nil, true
+			end
+			return result, false
 		elseif arrow_count == 2 and native_height <= 3 then
 			local base_native = api.toNumber(base)
-			if not is_finite(base_native) or math.abs(base_native) > 1_000_000 then
-				return nil
+			if not is_finite(base_native) or math.abs(base_native) > 1_000_000
+				or api.compare(base, base_native) ~= 0
+			then
+				return nil, false
 			end
-			local result = base_native
+			local result = base
+			local result_native = base_native
+			local exact_base = api.new(base_native)
 			for _ = 2, native_height do
-				local ok, next_result = pcall(function()
-					return base_native ^ result
+				local ok, next_native = pcall(function()
+					return base_native ^ result_native
 				end)
-				if not ok or not is_finite(next_result) then
-					return nil
+				if not ok or not is_finite(next_native) then
+					return nil, false
+				end
+				local parsed, next_result = pcall(function()
+					return api.new(next_native)
+				end)
+				if not parsed then
+					return nil, false
+				end
+				if is_unsafe_legacy_result(api, next_result, "pow", exact_base, result_native) then
+					return nil, true
 				end
 				result = next_result
+				result_native = next_native
 			end
-			local ok, parsed = pcall(function()
-				return api.new(result)
-			end)
-			return if ok and not is_unsafe_legacy_result(api, parsed) then parsed else nil
+			return result, false
 		end
-		return nil
+		return nil, false
 	elseif kind == "call" then
-		local inner = legacy_node_to_value(node.value, depth + 1, budget)
-		if inner == nil then
-			return nil
+		local inner, innerRounded = legacy_node_to_value(node.value, depth + 1, budget)
+		if inner == nil or innerRounded then
+			return nil, innerRounded
 		end
 		if node.op == "abs" then
-			return api.abs(inner)
+			return api.abs(inner), false
 		elseif node.op == "log10" then
 			local ok, result = pcall(function()
 				return api.log10(inner)
 			end)
 			if not ok or not is_finite(result) then
-				return nil
+				return nil, false
 			end
-			return result
+			if not is_exact_legacy_log10(api, inner, result) then
+				return nil, true
+			end
+			return result, false
 		end
 	end
-	return nil
+	return nil, false
 end
 
 local function alyanum_base_to_value(value: any): any?
@@ -399,7 +514,7 @@ local function decode_serialized_impl(serialized: string): (any?, string?)
 		return nil, nil
 	end
 
-	if string.sub(serialized, 1, 4) == "CN1|" then
+	if string.match(serialized, "^CN[12]|") ~= nil then
 		local ok, decoded = try_decode_code_num(serialized)
 		if not ok then
 			return nil, nil
@@ -415,7 +530,7 @@ local function decode_serialized_impl(serialized: string): (any?, string?)
 	end
 
 	if envelope.schema == SCHEMA then
-		if envelope.version ~= CodeNumValue.FORMAT_VERSION or type(envelope.value) ~= "string" then
+		if not is_supported_format_version(envelope.version) or type(envelope.value) ~= "string" then
 			return nil, nil
 		end
 		local valid, decoded = try_decode_code_num(envelope.value)
@@ -496,13 +611,49 @@ function CodeNumValue.is_unsupported_version(value: any): boolean
 		return false
 	end
 	if envelope.schema == SCHEMA then
-		return envelope.version ~= CodeNumValue.FORMAT_VERSION
+		return not is_supported_format_version(envelope.version)
 	elseif envelope.schema == LEGACY_ALYANUM_SCHEMA then
 		return envelope.version ~= 1
 	elseif envelope.schema == LEGACY_INFINITEMATH_SCHEMA then
 		return envelope.version ~= 1
 	elseif envelope.schema == LEGACY_CODE_SCHEMA then
 		return envelope.version ~= 2
+	end
+	return false
+end
+
+-- Validation runs before profile open. Do not evaluate legacy expression trees in this path.
+local function inspect_code_num_payload(payload: any): boolean
+	if type(payload) ~= "string" or #payload > MAX_SERIALIZED_LENGTH then return false end
+	local api = resolve_api()
+	local ok, decoded = pcall(api.decode, payload)
+	if not ok then return false end
+	local valid, supported = pcall(function()
+		return type(decoded) == "number" or api.isWide(decoded) or api.isPrecise(decoded)
+	end)
+	return valid and supported == true
+end
+
+function CodeNumValue.inspect_serialized(value: any): boolean
+	if type(value) ~= "string" or #value > MAX_SERIALIZED_LENGTH then return false end
+	if string.match(value, "^CN[12]|") ~= nil then return inspect_code_num_payload(value) end
+	local ok, envelope = pcall(function() return HttpService:JSONDecode(value) end)
+	if not ok or type(envelope) ~= "table" then return false end
+	if envelope.schema == SCHEMA then
+		return is_supported_format_version(envelope.version) and inspect_code_num_payload(envelope.value)
+	elseif envelope.schema == LEGACY_ALYANUM_SCHEMA then
+		return envelope.version == 1 and type(envelope.value) == "table"
+	elseif envelope.schema == LEGACY_INFINITEMATH_SCHEMA then
+		if envelope.version ~= 1 or type(envelope.value) ~= "table" then return false end
+		local legacy_value = envelope.value
+		return legacy_value.kind == "number"
+			or (legacy_value.kind == "special"
+				and (legacy_value.name == "nan"
+					or legacy_value.name == "+infinity"
+					or legacy_value.name == "-infinity"))
+	elseif envelope.schema == LEGACY_CODE_SCHEMA then
+		return envelope.version == 2 and type(envelope.value) == "table"
+			and (envelope.value.kind ~= "finite" or type(envelope.value.value) == "number")
 	end
 	return false
 end
@@ -519,8 +670,7 @@ function CodeNumValue.normalize_serialized(value: any): (string?, Node?)
 end
 
 function CodeNumValue.is_serialized(value: any): boolean
-	local decoded = decode_serialized(value)
-	return decoded ~= nil
+	return CodeNumValue.inspect_serialized(value)
 end
 
 function CodeNumValue.normalize(value: any): string

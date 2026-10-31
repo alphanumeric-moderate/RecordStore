@@ -51,22 +51,28 @@ benchmarks:
   - name: "compatibility regression suite"
     exec: lune run bench/run_compatibility_regression_tests.luau
 
-  - name: "CodeNum 0.5 arithmetic and reconstruction"
+  - name: "CodeNum 0.6 native and Wide arithmetic reconstruction"
     exec: lune run bench/codenum.bench.luau
+
+  - name: "CodeNum 0.6 multiprecision decimal arithmetic"
+    exec: lune run bench/codenum_multiprecision.bench.luau
 
   - name: "CodeNumValue format and normalization"
     exec: lune run bench/codenumvalue.bench.luau
 
-  - name: "PlayerData startup with legacy eager CodeNumValue load"
+  - name: "CodeNumValue legacy migration and payload preservation"
+    exec: lune run bench/codenumvalue_migration.bench.luau
+
+  - name: "PlayerData module initialization with eager CodeNumValue require"
     exec: lune run bench/playerdata_startup_eager.bench.luau
 
-  - name: "PlayerData startup with lazy optional CodeNumValue load"
+  - name: "PlayerData module initialization with lazy optional CodeNumValue require"
     exec: lune run bench/playerdata_startup_lazy.bench.luau
 
   - name: "PlayerData.Set path lookup"
     exec: lune run bench/playerdata_set_paths.bench.luau
 
-  - name: "CodeNum 0.5 range regressions"
+  - name: "CodeNum 0.6 range and precise arithmetic regressions"
     exec: lune run bench/run_codenum_regression_tests.luau
 
   - name: "CodeNumValue persistence regressions"
