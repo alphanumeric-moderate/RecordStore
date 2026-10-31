@@ -474,9 +474,9 @@ do
 		and raw_after_open.write_id == "future-implementation-write"
 		and (raw_after_open.data :: { [string]: any }).Coins == 999,
 		"Open mutated an unsupported future implementation envelope")
-	local read_result, read_message = RecordStore.Mock.read_async(store_name, scope, key)
-	assert(read_result == nil and read_message == nil,
-		"future-version read returned a snapshot instead of failing closed")
+	local read_snapshot, read_result, read_message = RecordStore.Mock.read_async(store_name, scope, key)
+	assert(read_snapshot == nil and read_result == "future_schema",
+		("future-version read did not fail closed: %s: %s"):format(tostring(read_result), tostring(read_message)))
 	local status = record:GetState()
 	assert(status == "future", "future envelope rejection did not leave a non-writable local state")
 	local save_result = record:Save("future-envelope-must-not-save")

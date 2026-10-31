@@ -16468,9 +16468,11 @@ local function open(self: Record, default_data: JsonValue?, recreate: boolean?):
 	return normalize_result_code(result) or "unknown", message
 end
 
-local function make_record(name: string, scope: string, key: string, options: Options, mock: boolean, transact_engine: (Record, string, string, TransactionReducer, TransactionOptions?, string?, JsonValue?, { OutboxEventSpec }?) -> (JsonValue?, TransactionStatus, string?), transaction_status_engine: (Record, string, JsonValue) -> TransactionReceiptStatus): Record
+local function make_record(name: string, scope: string, key: string, options: Options, mock: boolean, transact_engine: (Record, string, string, TransactionReducer, TransactionOptions?, string?, JsonValue?, { OutboxEventSpec }?) -> (JsonValue?, TransactionStatus, string?), transaction_status_engine: (Record, string, JsonValue) -> TransactionReceiptStatus, instance_id: string?): Record
 	local mode = if mock then "mock" else "live"
-	local id = HttpService:JSONEncode({ mode, name, scope, key })
+	local id = if instance_id == nil
+		then HttpService:JSONEncode({ mode, name, scope, key })
+		else HttpService:JSONEncode({ mode, name, scope, key, instance_id })
 	local existing = records[id]
 	if existing ~= nil then
 		local existing_state = private[existing]
@@ -20017,6 +20019,7 @@ RecordStore.Mock = (function()
 	local transaction_status_engine = (RecordStore._internals :: { [string]: any }).get_transaction_status :: (Record, string, JsonValue) -> TransactionReceiptStatus
 	local enqueue_mock = RecordStore._internals.enqueue_static.mock
 	local start_scheduler: () -> () = ((RecordStore :: any)._scheduler_runtime).start
+	local mock_client_sequence = 0
 	local function mock_new(name: string, scope: string, key: string, options: Options): Record
 		if closing then
 			error("RecordStore is shutting down", 2)
@@ -20037,6 +20040,32 @@ RecordStore.Mock = (function()
 		valid_options.takeover_enabled = false
 		start_scheduler()
 		return make_record(name, scope, key, valid_options, true, transact_engine, transaction_status_engine)
+	end
+
+	local function mock_new_client(name: string, scope: string, key: string, options: Options): Record
+		if closing then
+			error("RecordStore is shutting down", 2)
+		end
+		local valid_identity, identity_message = validate_store_identity(name, scope, key)
+		if not valid_identity then
+			error(identity_message, 2)
+		end
+		local normalized, options_message = normalize_options(options)
+		if normalized == nil then
+			error(options_message, 2)
+		end
+		local valid_options = normalized
+		if valid_options == nil then
+			error("normalized options are missing", 2)
+		end
+		valid_options.messaging_enabled = false
+		valid_options.takeover_enabled = false
+		mock_client_sequence += 1
+		start_scheduler()
+		return make_record(
+			name, scope, key, valid_options, true, transact_engine, transaction_status_engine,
+			("mock-client-%d"):format(mock_client_sequence)
+		)
 	end
 
 	local function read_async_mock(name: string, scope: string, key: string, operation_deadline: number?, legacy_decoder: LegacyDecoder?): (Snapshot?, ResultCode, string?)
@@ -20361,6 +20390,7 @@ RecordStore.Mock = (function()
 	local mock_mailbox_v2_migration_api = mailbox_v2_migration_api(true)
 	local Mock = {
 		new = mock_new,
+		new_client = mock_new_client,
 		reconcile = function(record: Record): (ResultCode, string?)
 			local state = private[record]
 			if state == nil or not state.backend.mock then
@@ -20483,6 +20513,7 @@ RecordStore.Mock = (function()
 			end
 			mock_database = {}
 			mock_counter = 0
+			mock_client_sequence = 0
 			mock_test_clock = nil
 			mock_test_clock_offset = 0
 			mock_update_replay_retries = 0
