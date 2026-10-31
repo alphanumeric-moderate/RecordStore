@@ -37,13 +37,13 @@ jobs:
         timeout-minutes: 2
         run: timeout --signal=TERM --kill-after=5s 60s lune run bench/run_regression_tests.luau
 
-      - name: Regression - AlyaNum range
+      - name: Regression - CodeNum 0.5 range
         timeout-minutes: 2
-        run: timeout --signal=TERM --kill-after=5s 60s lune run bench/run_alyanum_regression_tests.luau
+        run: timeout --signal=TERM --kill-after=5s 60s lune run bench/run_codenum_regression_tests.luau
 
-      - name: Regression - AlyaNumValue persistence
+      - name: Regression - CodeNumValue persistence
         timeout-minutes: 2
-        run: timeout --signal=TERM --kill-after=5s 60s lune run bench/run_alyanumvalue_regression_tests.luau
+        run: timeout --signal=TERM --kill-after=5s 60s lune run bench/run_codenumvalue_regression_tests.luau
 
       - name: Regression - PlayerData.Set
         timeout-minutes: 2

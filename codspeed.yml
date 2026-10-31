@@ -51,23 +51,23 @@ benchmarks:
   - name: "compatibility regression suite"
     exec: lune run bench/run_compatibility_regression_tests.luau
 
-  - name: "AlyaNum high-range arithmetic and reconstruction"
-    exec: lune run bench/alyanum.bench.luau
+  - name: "CodeNum 0.5 arithmetic and reconstruction"
+    exec: lune run bench/codenum.bench.luau
 
-  - name: "AlyaNumValue format and normalization"
-    exec: lune run bench/alyanumvalue.bench.luau
+  - name: "CodeNumValue format and normalization"
+    exec: lune run bench/codenumvalue.bench.luau
 
-  - name: "PlayerData startup with legacy eager AlyaNumValue load"
+  - name: "PlayerData startup with legacy eager CodeNumValue load"
     exec: lune run bench/playerdata_startup_eager.bench.luau
 
-  - name: "PlayerData startup with lazy optional AlyaNumValue load"
+  - name: "PlayerData startup with lazy optional CodeNumValue load"
     exec: lune run bench/playerdata_startup_lazy.bench.luau
 
   - name: "PlayerData.Set path lookup"
     exec: lune run bench/playerdata_set_paths.bench.luau
 
-  - name: "AlyaNum range regressions"
-    exec: lune run bench/run_alyanum_regression_tests.luau
+  - name: "CodeNum 0.5 range regressions"
+    exec: lune run bench/run_codenum_regression_tests.luau
 
-  - name: "AlyaNumValue persistence regressions"
-    exec: lune run bench/run_alyanumvalue_regression_tests.luau
+  - name: "CodeNumValue persistence regressions"
+    exec: lune run bench/run_codenumvalue_regression_tests.luau

@@ -25,29 +25,29 @@
       "IntegerInfinityValueRegression": {
         "$path": "tests/IntegerInfinityValueRegression.server.luau"
       },
-      "AlyaNumFormattingRegression": {
-        "$path": "tests/AlyaNumFormattingRegression.server.luau"
-      },
       "PlayerDataSetRegression": {
         "$path": "tests/PlayerDataSetRegression.server.luau"
       },
-      "AlyaNumValue": {
-        "$path": "src/PlayerDataInitializer/AlyaNumValue.luau"
-      },
-      "AlyaNumFormatter": {
-        "$path": "src/PlayerDataInitializer/AlyaNumFormatter.luau"
-      },
-      "AlyaNumValueRegression": {
-        "$path": "tests/AlyaNumValueRegression.server.luau"
-      },
       "RecordStoreLegacyPayloadRegression": {
         "$path": "tests/RecordStore_LegacyPayloadRegression.server.luau"
+      },
+      "CodeNumFormattingRegression": {
+        "$path": "tests/CodeNumFormattingRegression.server.luau"
+      },
+      "CodeNumValue": {
+        "$path": "src/PlayerDataInitializer/CodeNumValue.luau"
+      },
+      "CodeNumFormatter": {
+        "$path": "src/PlayerDataInitializer/CodeNumFormatter.luau"
+      },
+      "CodeNumValueRegression": {
+        "$path": "tests/CodeNumValueRegression.server.luau"
       }
     },
     "ReplicatedStorage": {
       "$className": "ReplicatedStorage",
-      "AlyaNum": {
-        "$path": "src/AlyaNum"
+      "CodeNum": {
+        "$path": "src/CodeNum"
       }
     }
   }
