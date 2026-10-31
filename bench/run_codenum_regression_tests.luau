@@ -164,13 +164,19 @@ local rounded_product = CodeNum.mul(CodeNum.fromInteger(string.rep("9", 4096)), 
 assert(CodeNum.wasRounded(rounded_product), "4097-digit multiplication did not record rounding")
 
 local negative_zero_product = CodeNum.mul(-0.0, CodeNum.fromInteger("2"))
-assert(negative_zero_product == 0 and 1 / negative_zero_product == -math.huge,
+local negative_zero_product_number = CodeNum.toNumber(negative_zero_product)
+assert(CodeNum.isPrecise(negative_zero_product)
+	and negative_zero_product_number == 0 and 1 / negative_zero_product_number == -math.huge,
 	"precise multiplication lost the sign of negative zero")
 local negative_zero_quotient = CodeNum.div(-0.0, CodeNum.fromInteger("2"))
-assert(negative_zero_quotient == 0 and 1 / negative_zero_quotient == -math.huge,
+local negative_zero_quotient_number = CodeNum.toNumber(negative_zero_quotient)
+assert(CodeNum.isPrecise(negative_zero_quotient)
+	and negative_zero_quotient_number == 0 and 1 / negative_zero_quotient_number == -math.huge,
 	"precise division lost the sign of negative zero")
 local negative_zero_over_negative = CodeNum.div(0.0, CodeNum.fromInteger("-2"))
-assert(negative_zero_over_negative == 0 and 1 / negative_zero_over_negative == -math.huge,
+local negative_zero_over_negative_number = CodeNum.toNumber(negative_zero_over_negative)
+assert(CodeNum.isPrecise(negative_zero_over_negative)
+	and negative_zero_over_negative_number == 0 and 1 / negative_zero_over_negative_number == -math.huge,
 	"precise division did not derive zero sign from both operands")
 
 local negative_precise = CodeNum.fromInteger("-1")
