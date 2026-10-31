@@ -173,6 +173,50 @@ local wide_fraction = legacy_expression("mul", { kind = "scientific", sign = 1, 
 assert(CodeNum.compare(CodeNumValue.decode(CodeNumValue.normalize(wide_fraction)), CodeNum.fromScientific(2.5, "-1000")) == 0)
 local special_expression = legacy_expression("div", finite(1), finite(0))
 assert(CodeNumValue.decode(CodeNumValue.normalize(special_expression)) == math.huge)
+
+local function legacy_call(op, value)
+	return serde.encode("json", {
+		schema = "CodeNum", version = 2,
+		value = { kind = "call", op = op, value = value },
+	})
+end
+
+local repeating_division = legacy_expression("div", integer(1, "1"), integer(1, "3"))
+assert(CodeNumValue.normalize(repeating_division) == repeating_division,
+	"repeating precise division was migrated after losing decimal digits")
+
+local power_3000 = {
+	kind = "expression", op = "pow",
+	left = integer(1, "9"), right = finite(3000),
+}
+local overflowing_product = legacy_expression("mul", power_3000, power_3000)
+assert(CodeNumValue.normalize(overflowing_product) == overflowing_product,
+	"multiplication beyond 4096 significant digits was migrated after rounding")
+
+local nested_repeating = legacy_expression("add", {
+	kind = "expression", op = "div",
+	left = integer(1, "1"), right = integer(1, "3"),
+}, finite(1))
+assert(CodeNumValue.normalize(nested_repeating) == nested_repeating,
+	"an inexact child expression was hidden by its parent")
+
+local binary64_sum = legacy_expression("add", finite(0.1), finite(0.2))
+assert(CodeNumValue.normalize(binary64_sum) == binary64_sum,
+	"binary64 addition with a rounded decimal result was migrated as exact")
+
+local fractional_power = legacy_expression("pow", finite(2), finite(0.5))
+assert(CodeNumValue.normalize(fractional_power) == fractional_power,
+	"fractional power was migrated without an exact decimal result")
+
+local approximate_logarithm = legacy_call("log10", finite(2))
+assert(CodeNumValue.normalize(approximate_logarithm) == approximate_logarithm,
+	"approximate logarithm was migrated as an exact value")
+local exact_logarithm = legacy_call("log10", integer(1, "1000"))
+local exact_logarithm_migrated = CodeNumValue.normalize(exact_logarithm)
+assert(exact_logarithm_migrated ~= exact_logarithm
+	and CodeNum.toString(CodeNumValue.decode(exact_logarithm_migrated)) == "3",
+	"exact power-of-ten logarithm was not migrated")
+
 local failed_expression = legacy_expression("unsupported", finite(1), finite(2))
 assert(CodeNumValue.normalize(failed_expression) == failed_expression)
 

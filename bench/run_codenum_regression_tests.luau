@@ -126,4 +126,49 @@ assert(not pcall(function() CodeNum.fromInteger(string.rep("9", 4097)) end),
 assert(not pcall(function() CodeNum.pow(long_decimal, 0.5) end),
 	"fractional powers silently downcast a precise value")
 
+
+local rounded_parse = CodeNum.parse("1.255", 2)
+assert(CodeNum.wasRounded(rounded_parse), "precision truncation was not recorded")
+assert(not CodeNum.wasRounded(CodeNum.fromInteger("1255")), "exact integer was marked rounded")
+assert(CodeNum.wasRounded(CodeNum.div(CodeNum.fromInteger("1"), CodeNum.fromInteger("3"))),
+	"repeating precise division was not marked rounded")
+assert(not CodeNum.wasRounded(CodeNum.div(CodeNum.fromInteger("5"), CodeNum.fromInteger("2"), 34)),
+	"terminating precise division was marked rounded")
+assert(CodeNum.wasRounded(CodeNum.abs(rounded_parse)), "absolute value discarded rounding provenance")
+assert(CodeNum.wasRounded(CodeNum.withPrecision(CodeNum.fromInteger("123456"), 3)),
+	"precision reduction did not record rounding")
+local rounded_product = CodeNum.mul(CodeNum.fromInteger(string.rep("9", 4096)), 9)
+assert(CodeNum.wasRounded(rounded_product), "4097-digit multiplication did not record rounding")
+
+local negative_zero_product = CodeNum.mul(-0.0, CodeNum.fromInteger("2"))
+assert(negative_zero_product == 0 and 1 / negative_zero_product == -math.huge,
+	"precise multiplication lost the sign of negative zero")
+local negative_zero_quotient = CodeNum.div(-0.0, CodeNum.fromInteger("2"))
+assert(negative_zero_quotient == 0 and 1 / negative_zero_quotient == -math.huge,
+	"precise division lost the sign of negative zero")
+local negative_zero_over_negative = CodeNum.div(0.0, CodeNum.fromInteger("-2"))
+assert(negative_zero_over_negative == 0 and 1 / negative_zero_over_negative == -math.huge,
+	"precise division did not derive zero sign from both operands")
+
+local negative_precise = CodeNum.fromInteger("-1")
+assert(CodeNum.div(negative_precise, 0.0) == -math.huge,
+	"negative precise numerator divided by positive zero returned the wrong infinity")
+assert(CodeNum.div(negative_precise, -0.0) == math.huge,
+	"negative precise numerator divided by negative zero returned the wrong infinity")
+assert(CodeNum.div(CodeNum.fromInteger("1"), -0.0) == -math.huge,
+	"positive precise numerator divided by negative zero returned the wrong infinity")
+
+local precise_special = CodeNum.fromInteger("9007199254740993")
+assert(CodeNum.add(math.huge, precise_special) == math.huge,
+	"positive infinity plus a precise value changed special-number semantics")
+assert(CodeNum.sub(-math.huge, precise_special) == -math.huge,
+	"negative infinity minus a precise value changed special-number semantics")
+assert(CodeNum.mul(-math.huge, precise_special) == -math.huge,
+	"infinity multiplication with a precise value changed sign")
+local negative_zero_from_infinity = CodeNum.div(CodeNum.fromInteger("-1"), math.huge)
+assert(negative_zero_from_infinity == 0 and 1 / negative_zero_from_infinity == -math.huge,
+	"precise division by infinity did not preserve signed zero")
+local mixed_nan = CodeNum.add(0 / 0, precise_special)
+assert(mixed_nan ~= mixed_nan, "NaN plus a precise value did not remain NaN")
+
 print("[CodeNum 0.6.0] native, Wide, precise arithmetic, range, codec, and register regressions passed")
