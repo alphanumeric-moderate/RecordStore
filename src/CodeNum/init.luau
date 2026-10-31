@@ -32,6 +32,7 @@ type RegisterState = {
 
 type PreciseState = {
 	sign: number,
+	zeroSign: number,
 	digits: string,
 	expIsBig: number,
 	expSmall: number,
@@ -44,6 +45,7 @@ type PreciseState = {
 
 type DecimalParts = {
 	sign: number,
+	zeroSign: number,
 	digits: string,
 	expIsBig: number,
 	expSmall: number,
@@ -1149,7 +1151,8 @@ end
 @native
 local function operandSign(value: Operand): number
 	if isPrecise(value) then
-		return preciseState(value).sign
+		local state = preciseState(value)
+		return if state.sign == 0 then state.zeroSign else state.sign
 	end
 	local native, numberValue = getNative(value)
 	if native then
@@ -1468,6 +1471,7 @@ local function parseDecimalParts(text: string): DecimalParts
 	if firstNonZero == nil then
 		return {
 			sign = 0,
+			zeroSign = 1,
 			digits = "0",
 			expIsBig = 0,
 			expSmall = 0,
@@ -1502,6 +1506,7 @@ local function parseDecimalParts(text: string): DecimalParts
 	)
 	return {
 		sign = parsedSign,
+		zeroSign = parsedSign,
 		digits = withoutTrailing,
 		expIsBig = finalIsBig,
 		expSmall = finalSmall,
@@ -1541,10 +1546,32 @@ local function makePrecise(
 	validatePrecision(precision)
 	digits = trimDecimalDigits(digits)
 	if digits == "0" or sign == 0 then
-		if destination ~= nil then
-			writeRegisterNative(destination, 0)
+		local zeroSign = if sign < 0 then -1 else 1
+		if inputWasRounded == true then
+			local precise: Precise = { _codeNum = "precise" }
+			PRECISE_STATES[precise] = {
+				sign = 0,
+				zeroSign = zeroSign,
+				digits = "0",
+				expIsBig = 0,
+				expSmall = 0,
+				expSign = 0,
+				expLength = 0,
+				expData = nil,
+				precision = precision,
+				wasRounded = true,
+			}
+			table.freeze(precise)
+			if destination ~= nil then
+				writeRegisterPrecise(destination, precise)
+				return 0
+			end
+			return precise
 		end
-		return 0
+		if destination ~= nil then
+			writeRegisterNative(destination, if zeroSign < 0 then -0.0 else 0)
+		end
+		return if zeroSign < 0 then -0.0 else 0
 	end
 	if string.find(digits, "[^0-9]") then
 		error("CodeNum: precise coefficient must contain decimal digits only", 3)
@@ -1594,6 +1621,7 @@ local function makePrecise(
 	local precise: Precise = { _codeNum = "precise" }
 	local state: PreciseState = {
 		sign = if sign < 0 then -1 else 1,
+		zeroSign = if sign < 0 then -1 else 1,
 		digits = digits,
 		expIsBig = expIsBig,
 		expSmall = if expIsBig == 0 then expSmall else 0,
@@ -1617,6 +1645,7 @@ local function preciseParts(value: Operand): DecimalParts
 		local state = preciseState(value)
 		return {
 			sign = state.sign,
+			zeroSign = state.zeroSign,
 			digits = state.digits,
 			expIsBig = state.expIsBig,
 			expSmall = state.expSmall,
@@ -1692,6 +1721,7 @@ local function preciseOrder(parts: DecimalParts): DecimalParts
 	)
 	return {
 		sign = parts.sign,
+		zeroSign = parts.zeroSign,
 		digits = parts.digits,
 		expIsBig = isBig,
 		expSmall = small,
@@ -1743,6 +1773,14 @@ local function preciseAddOperands(
 	validatePrecision(precision)
 	if subtractB then
 		bParts.sign = -bParts.sign
+		bParts.zeroSign = -bParts.zeroSign
+	end
+	if aParts.sign == 0 and bParts.sign == 0 then
+		local zeroSign = if aParts.zeroSign < 0 and bParts.zeroSign < 0 then -1 else 1
+		return makePrecise(
+			zeroSign, "0", 0, 0, 0, 0, nil, precision, destination, nil,
+			aParts.wasRounded or bParts.wasRounded
+		)
 	end
 	if aParts.sign == 0 then
 		return makePrecise(
@@ -1784,12 +1822,13 @@ local function preciseAddOperands(
 	local resultExpSign: number
 	local resultExpLength: number
 	local resultExpData: buffer?
-	if scaleDifference > 0 then
-		alignedA ..= string.rep("0", scaleDifference)
+	local alignment = scaleDifference :: number
+	if alignment > 0 then
+		alignedA ..= string.rep("0", alignment)
 		resultExpIsBig, resultExpSmall, resultExpSign, resultExpLength, resultExpData =
 			bParts.expIsBig, bParts.expSmall, bParts.expSign, bParts.expLength, bParts.expData
 	else
-		alignedB ..= string.rep("0", -scaleDifference)
+		alignedB ..= string.rep("0", -alignment)
 		resultExpIsBig, resultExpSmall, resultExpSign, resultExpLength, resultExpData =
 			aParts.expIsBig, aParts.expSmall, aParts.expSign, aParts.expLength, aParts.expData
 	end
@@ -1805,10 +1844,10 @@ local function preciseAddOperands(
 	else
 		local magnitudeComparison = decimalComparePadded(alignedA, alignedB)
 		if magnitudeComparison == 0 then
-			if destination ~= nil then
-				writeRegisterNative(destination, 0)
-			end
-			return 0
+			return makePrecise(
+				0, "0", 0, 0, 0, 0, nil, precision, destination, nil,
+				aParts.wasRounded or bParts.wasRounded
+			)
 		elseif magnitudeComparison > 0 then
 			resultSign = aParts.sign
 			resultDigits = decimalSubtractMagnitude(alignedA, alignedB)
@@ -1836,6 +1875,11 @@ local function preciseMultiplyOperands(
 	validatePrecision(precision)
 	if aParts.sign == 0 or bParts.sign == 0 then
 		local zeroSign = operandSign(a) * operandSign(b)
+		if aParts.wasRounded or bParts.wasRounded then
+			return makePrecise(
+				zeroSign, "0", 0, 0, 0, 0, nil, precision, destination, nil, true
+			)
+		end
 		local zero = if zeroSign < 0 then -0.0 else 0
 		if destination ~= nil then
 			writeRegisterNative(destination, zero)
@@ -1882,6 +1926,11 @@ local function preciseDivideOperands(
 		return infinity
 	elseif aParts.sign == 0 then
 		local zeroSign = operandSign(a) * operandSign(b)
+		if aParts.wasRounded or bParts.wasRounded then
+			return makePrecise(
+				zeroSign, "0", 0, 0, 0, 0, nil, precision, destination, nil, true
+			)
+		end
 		local zero = if zeroSign < 0 then -0.0 else 0
 		if destination ~= nil then
 			writeRegisterNative(destination, zero)
@@ -1942,6 +1991,9 @@ end
 
 local function preciseScientificParts(value: Operand): (number, number, number, number, number, buffer?)
 	local parts = preciseParts(value)
+	if parts.sign == 0 then
+		return if parts.zeroSign < 0 then -0.0 else 0, 0, 0, 0, 0, nil
+	end
 	local keep = math.min(#parts.digits, 17)
 	local leading = tonumber(string.sub(parts.digits, 1, keep)) :: number
 	local mantissa = leading / (10 ^ (keep - 1))
@@ -2716,6 +2768,9 @@ end
 
 @native
 function CodeNum.add(a: Operand, b: Operand, precision: number?): Value
+	if precision ~= nil then
+		validatePrecision(precision)
+	end
 	if type(a) == "number" and type(b) == "number" and precision == nil then
 		local result = a + b
 		if not isFinite(a) or not isFinite(b) or isFinite(result) then
@@ -2730,6 +2785,9 @@ end
 
 @native
 function CodeNum.sub(a: Operand, b: Operand, precision: number?): Value
+	if precision ~= nil then
+		validatePrecision(precision)
+	end
 	if type(a) == "number" and type(b) == "number" and precision == nil then
 		local result = a - b
 		if not isFinite(a) or not isFinite(b) or isFinite(result) then
@@ -2744,6 +2802,9 @@ end
 
 @native
 function CodeNum.mul(a: Operand, b: Operand, precision: number?): Value
+	if precision ~= nil then
+		validatePrecision(precision)
+	end
 	if type(a) == "number" and type(b) == "number" and precision == nil then
 		local result = a * b
 		if not isFinite(a) or not isFinite(b)
@@ -2760,6 +2821,9 @@ end
 
 @native
 function CodeNum.div(a: Operand, b: Operand, precision: number?): Value
+	if precision ~= nil then
+		validatePrecision(precision)
+	end
 	if type(a) == "number" and type(b) == "number" and precision == nil then
 		local result = a / b
 		if not isFinite(a) or not isFinite(b) or b == 0
@@ -2776,6 +2840,9 @@ end
 
 @native
 function CodeNum.pow(value: Operand, power: number, precision: number?): Value
+	if precision ~= nil then
+		validatePrecision(precision)
+	end
 	assertValidValue(value)
 	if not isFinite(power) then
 		error("CodeNum.pow expects a finite exponent", 2)
@@ -3030,6 +3097,9 @@ function CodeNum.encode(value: Operand): string
 	assertValidValue(value)
 	if isPrecise(value) then
 		local parts = preciseParts(value)
+		if parts.sign == 0 then
+			return if parts.zeroSign < 0 then "CN1|N|-0" else "CN1|N|0"
+		end
 		local exponentText = exponentToString(
 			parts.expIsBig, parts.expSmall, parts.expSign, parts.expLength, parts.expData
 		)
