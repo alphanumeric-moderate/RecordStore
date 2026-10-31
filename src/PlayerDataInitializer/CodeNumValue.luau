@@ -16,6 +16,10 @@ export type CodeNumWide = {
 	expLength: number,
 }
 
+export type CodeNumPrecise = {
+	_codeNum: "precise",
+}
+
 export type LegacyValue = {
 	kind: "legacy",
 	raw: string,
@@ -23,7 +27,7 @@ export type LegacyValue = {
 	value: any,
 }
 
-export type Value = number | CodeNumWide | LegacyValue
+export type Value = number | CodeNumWide | CodeNumPrecise | LegacyValue
 export type Node = { kind: string }
 export type Options = {
 	decimals: number?,
@@ -59,11 +63,13 @@ local function resolve_api(): any
 		error("failed to require CodeNum: " .. tostring(loaded), 2)
 	end
 	if type(loaded) ~= "table"
-		or loaded.VERSION ~= "0.5.0"
+		or loaded.VERSION ~= "0.6.0"
 		or type(loaded.encode) ~= "function"
 		or type(loaded.decode) ~= "function"
 		or type(loaded.parse) ~= "function"
 		or type(loaded.fromScientific) ~= "function"
+		or type(loaded.fromInteger) ~= "function"
+		or type(loaded.isPrecise) ~= "function"
 		or type(loaded.toString) ~= "function"
 		or type(loaded.toNumber) ~= "function"
 		or type(loaded.add) ~= "function"
@@ -75,7 +81,7 @@ local function resolve_api(): any
 		or type(loaded.log10) ~= "function"
 		or type(loaded.isWide) ~= "function"
 	then
-		error("ReplicatedStorage.CodeNum must expose the CodeNum 0.5.0 API", 2)
+		error("ReplicatedStorage.CodeNum must expose the CodeNum 0.6.0 API", 2)
 	end
 
 	cached_api = loaded
@@ -111,7 +117,7 @@ local function is_code_num_value(value: any): boolean
 		return true
 	end
 	local api = resolve_api()
-	if api.isWide(value) then
+	if api.isWide(value) or api.isPrecise(value) then
 		return true
 	end
 	if type(value) == "table" then
@@ -165,18 +171,21 @@ local function legacy_integer_to_value(sign: number, digits: string): any?
 		return nil
 	end
 
+	local api = resolve_api()
+	if #digits > api.MAX_PRECISE_DIGITS then
+		return nil
+	end
 	local literal = (if sign < 0 then "-" else "") .. digits
-	local native = tonumber(literal)
-	if native == nil or not is_finite(native) then
-		return nil
-	end
-	if string.format("%.0f", math.abs(native)) ~= digits then
-		return nil
-	end
-	return resolve_api().new(native)
+	local ok, parsed = pcall(function()
+		return api.fromInteger(literal)
+	end)
+	return if ok then parsed else nil
 end
 
 local function is_unsafe_legacy_result(api: any, result: any): boolean
+	if type(result) == "table" and api.isPrecise(result) then
+		return false
+	end
 	-- Native arithmetic may round integers beyond binary64's safe range.
 	if type(result) == "number" then
 		return is_finite(result) and math.abs(result) > 9007199254740991 and math.floor(result) == result
@@ -399,7 +408,7 @@ local function decode_serialized_impl(serialized: string): (any?, string?)
 		return nil, nil
 	end
 
-	if string.sub(serialized, 1, 4) == "CN1|" then
+	if string.match(serialized, "^CN[12]|") ~= nil then
 		local ok, decoded = try_decode_code_num(serialized)
 		if not ok then
 			return nil, nil
