@@ -186,6 +186,10 @@ end
 local function legacy_results_equal(api: any, actual: any, exact: any): boolean
 	if type(actual) == "number" and actual ~= actual then
 		return type(exact) == "number" and exact ~= exact
+	elseif type(actual) == "number" and actual == 0
+		and type(exact) == "number" and exact == 0
+	then
+		return 1 / actual == 1 / exact
 	elseif type(actual) == "number" and (actual == math.huge or actual == -math.huge) then
 		return actual == exact
 	elseif type(exact) == "number" and (exact ~= exact or exact == math.huge or exact == -math.huge) then
@@ -322,8 +326,8 @@ local function legacy_node_to_value(
 				return api.div(left, right)
 			elseif operation == "pow" then
 				local power = api.toNumber(right)
-				if not is_finite(power) then
-					error("legacy power is outside CodeNum's numeric power domain")
+				if not is_finite(power) or api.compare(right, power) ~= 0 then
+					error("legacy power cannot be represented exactly as a native exponent")
 				end
 				return api.pow(left, power)
 			end
@@ -351,6 +355,7 @@ local function legacy_node_to_value(
 		local arrow_count = api.toNumber(arrows)
 		local native_height = api.toNumber(height)
 		if not is_finite(arrow_count) or not is_finite(native_height)
+			or api.compare(arrows, arrow_count) ~= 0 or api.compare(height, native_height) ~= 0
 			or native_height % 1 ~= 0 or native_height < 1 or native_height > 3
 		then
 			return nil, false
@@ -369,26 +374,32 @@ local function legacy_node_to_value(
 			return result, false
 		elseif arrow_count == 2 and native_height <= 3 then
 			local base_native = api.toNumber(base)
-			if not is_finite(base_native) or math.abs(base_native) > 1_000_000 then
+			if not is_finite(base_native) or math.abs(base_native) > 1_000_000
+				or api.compare(base, base_native) ~= 0
+			then
 				return nil, false
 			end
 			local result = base
 			local result_native = base_native
+			local exact_base = api.new(base_native)
 			for _ = 2, native_height do
-				local ok, next_result = pcall(function()
-					return api.pow(base, result_native)
+				local ok, next_native = pcall(function()
+					return base_native ^ result_native
 				end)
-				if not ok then
+				if not ok or not is_finite(next_native) then
 					return nil, false
 				end
-				if is_unsafe_legacy_result(api, next_result, "pow", base, result_native) then
+				local parsed, next_result = pcall(function()
+					return api.new(next_native)
+				end)
+				if not parsed then
+					return nil, false
+				end
+				if is_unsafe_legacy_result(api, next_result, "pow", exact_base, result_native) then
 					return nil, true
 				end
 				result = next_result
-				result_native = api.toNumber(result)
-				if not is_finite(result_native) then
-					return nil, false
-				end
+				result_native = next_native
 			end
 			return result, false
 		end

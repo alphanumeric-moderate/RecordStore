@@ -208,6 +208,10 @@ local fractional_power = legacy_expression("pow", finite(2), finite(0.5))
 assert(CodeNumValue.normalize(fractional_power) == fractional_power,
 	"fractional power was migrated without an exact decimal result")
 
+local lossy_power_exponent = legacy_expression("pow", finite(-1), integer(1, "9007199254740993"))
+assert(CodeNumValue.normalize(lossy_power_exponent) == lossy_power_exponent,
+	"odd integer exponent was rounded to an even binary64 exponent during migration")
+
 local approximate_logarithm = legacy_call("log10", finite(2))
 assert(CodeNumValue.normalize(approximate_logarithm) == approximate_logarithm,
 	"approximate logarithm was migrated as an exact value")
