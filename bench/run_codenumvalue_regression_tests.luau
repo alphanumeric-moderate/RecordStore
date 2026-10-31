@@ -125,6 +125,27 @@ assert(CodeNumValue.decode(CodeNumValue.normalize(special_expression)) == math.h
 local failed_expression = legacy_expression("unsupported", finite(1), finite(2))
 assert(CodeNumValue.normalize(failed_expression) == failed_expression)
 
+local function legacy_hyper(base, arrows, height)
+	return serde.encode("json", {
+		schema = "CodeNum", version = 2,
+		value = { kind = "hyper", base = base, arrows = finite(arrows), height = finite(height) },
+	})
+end
+for _, hyper in {
+	legacy_hyper(finite(1000001), 1, 3),
+	legacy_hyper(finite(-1000001), 1, 3),
+	legacy_hyper({ kind = "scientific", sign = 1, mantissa = 1.25, exponent = "1000" }, 1, 1),
+	legacy_hyper(finite(16), 2, 2),
+} do
+	assert(CodeNumValue.normalize(hyper) == hyper, "unsafe integer hyperoperation was migrated")
+end
+for _, case in { { 1, 16 }, { 2, 256 } } do
+	local hyper = legacy_hyper(finite(4), case[1], 2)
+	assert(CodeNum.compare(CodeNumValue.decode(CodeNumValue.normalize(hyper)), case[2]) == 0)
+end
+local wide_hyper_fraction = legacy_hyper({ kind = "scientific", sign = 1, mantissa = 1.25, exponent = "-1000" }, 1, 1)
+assert(CodeNum.compare(CodeNumValue.decode(CodeNumValue.normalize(wide_hyper_fraction)), CodeNum.fromScientific(1.25, "-1000")) == 0)
+
 local old_code_hyper = serde.encode("json", {
 	schema = "CodeNum",
 	version = 2,
@@ -147,6 +168,30 @@ assert(not pcall(function() CodeNumValue.normalize(future) end),
 	"future CodeNumValue format version was accepted")
 local future_legacy = '{"schema":"CodeNum","version":99,"value":{}}'
 assert(CodeNumValue.is_unsupported_version(future_legacy))
+
+local create_harness = require("./playerdata_set_harness")
+for _, future_payload in { future, future_legacy } do
+	local harness = create_harness(true, {
+		kills = 41, equipped = "Default", admin = true, cash = future_payload,
+	}, { CodeNumValue = CodeNumValue }, true, true)
+	assert(harness.controller:Start(), "future-version controller failed to start")
+	local deadline = os.clock() + 5
+	while harness.player:GetAttribute("PlayerDataLoadStatus") ~= "Failed"
+		and harness.player:GetAttribute("PlayerDataLoadStatus") ~= "Loaded"
+		and os.clock() < deadline do
+		harness.task.wait(0.01)
+	end
+	local record = harness.get_record()
+	local saved_key = "PlayerData_Test1|global|Player_" .. tostring(harness.player.UserId)
+	assert(record ~= nil and harness.get_record_options().validator(harness.saved_records[saved_key]),
+		"recognized future version should pass the stored-data validator")
+	assert(harness.player:GetAttribute("PlayerDataLoadStatus") == "Failed" and harness.player._kick_message ~= nil,
+		"future-version player load must fail closed")
+	assert(record._update_calls == 0 and harness.saved_records[saved_key].cash == future_payload,
+		"future-version payload was replaced by a default or written during load")
+	assert(record.State == "closed", "failed future-version session was not closed")
+	assert(harness.controller:Shutdown(), "future-version controller failed to shut down")
+end
 
 local previous = backing.Value
 assert(not pcall(function() CodeNumValue.set(backing, {}) end))

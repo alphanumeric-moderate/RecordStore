@@ -1,6 +1,6 @@
 --!nocheck
 -- Shared mock PlayerDataCore harness for regression and CodSpeed path benchmarks.
-return function(use_cached_paths, initial_saved_data, controller_overrides, defer_start)
+return function(use_cached_paths, initial_saved_data, controller_overrides, defer_start, use_codenum_field)
 
 local function replace_source_once(source, old_text, new_text)
 	local start_index, end_index = string.find(source, old_text, 1, true)
@@ -364,6 +364,9 @@ end
 			return backing
 		end,
 	}
+	if use_codenum_field then
+		CodeNumValue = require("./codenum_shim").load_codenum_value()
+	end
 	
 	local module_tokens = {
 		RecordStore = {},
@@ -399,6 +402,13 @@ end
 	end
 	
 	local player_data_core_source = fs.readFile("src/PlayerDataInitializer/PlayerDataCore.luau")
+	if use_codenum_field then
+		player_data_core_source = replace_source_once(
+			player_data_core_source,
+			'admin = define_data_field("BoolValue", false),',
+			'admin = define_data_field("BoolValue", false),\n\t\tcash = define_data_field("CodeNumValue", 0),'
+		)
+	end
 	if not use_cached_paths then
 		player_data_core_source = replace_source_range(
 			player_data_core_source,
@@ -436,7 +446,7 @@ end
 		},
 	})()
 	assert(
-		module_require_counts.CodeNumValue == 0,
+		module_require_counts.CodeNumValue == (if use_codenum_field then 1 else 0),
 		"PlayerDataCore eagerly required optional CodeNumValue in the default configuration"
 	)
 	
@@ -453,7 +463,7 @@ end
 	local controller = PlayerDataCore.new(controller_options)
 	
 	assert(
-		module_require_counts.CodeNumValue == 0,
+		module_require_counts.CodeNumValue == (if use_codenum_field then 1 else 0),
 		"default PlayerData controller should not load CodeNumValue when the field is unused"
 	)
 	if not defer_start then
@@ -480,6 +490,7 @@ end
 		player = player,
 		players = Players,
 		record = captured_record,
+		get_record = function() return captured_record end,
 		saved_records = saved_records,
 		get_record_options = function()
 			return captured_record_options

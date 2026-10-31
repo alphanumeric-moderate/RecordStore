@@ -181,9 +181,9 @@ The migration decoder recognizes previous `AlyaNumValue` version-1 envelopes, `I
 
 <!-- coderabbit-ai-generated:v1 -->
 
-<!-- coderabbit-ai-generated-section:v1:f2a25b8fb069c85052f2ee32c478880cb6cd20b67680f3aa5094802f49d1f02b -->
+<!-- coderabbit-ai-generated-section:v1:8bc0aade0fd254c2dc8433b320a0ea2bf029f5652830ac7c9faf22acb8e8aac7 -->
 
-Values representable by CodeNum 0.5.0 are converted to the new `CodeNumValue` envelope, except that legacy expressions evaluating to integers outside the safe-integer range are preserved to avoid rounding.
+Values representable by CodeNum 0.5.0 are converted to the new `CodeNumValue` envelope, except that legacy expressions and hyperoperations evaluating to integers outside the safe-integer range are preserved to avoid rounding.
 
 <!-- /coderabbit-ai-generated:v1 -->
 

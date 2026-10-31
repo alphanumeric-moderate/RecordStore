@@ -176,6 +176,15 @@ local function legacy_integer_to_value(sign: number, digits: string): any?
 	return resolve_api().new(native)
 end
 
+local function is_unsafe_legacy_result(api: any, result: any): boolean
+	-- Native arithmetic may round integers beyond binary64's safe range.
+	if type(result) == "number" then
+		return is_finite(result) and math.abs(result) > 9007199254740991 and math.floor(result) == result
+	end
+	-- Positive-exponent Wide values exceed native range and are integers.
+	return type(result) == "table" and api.compare(api.abs(result), 9007199254740991) == 1
+end
+
 local function legacy_node_to_value(node: any, depth: number, budget: {count: number}): any?
 	if type(node) ~= "table" or depth > 128 then
 		return nil
@@ -246,17 +255,7 @@ local function legacy_node_to_value(node: any, depth: number, budget: {count: nu
 			end
 			error("unsupported legacy expression operator")
 		end)
-		-- Native arithmetic may round integers beyond binary64's safe range.
-		if ok and type(result) == "number" and is_finite(result)
-			and math.abs(result) > 9007199254740991 and math.floor(result) == result
-		then
-			return nil
-		end
-		-- Positive-exponent Wide values exceed native range and are integers.
-		if ok and type(result) == "table" and api.compare(api.abs(result), 9007199254740991) == 1 then
-			return nil
-		end
-		return if ok then result else nil
+		return if ok and not is_unsafe_legacy_result(api, result) then result else nil
 	elseif kind == "hyper" then
 		local base = legacy_node_to_value(node.base, depth + 1, budget)
 		local arrows = legacy_node_to_value(node.arrows, depth + 1, budget)
@@ -277,7 +276,7 @@ local function legacy_node_to_value(node: any, depth: number, budget: {count: nu
 			local ok, result = pcall(function()
 				return api.pow(base, native_height)
 			end)
-			return if ok then result else nil
+			return if ok and not is_unsafe_legacy_result(api, result) then result else nil
 		elseif arrow_count == 2 and native_height <= 3 then
 			local base_native = api.toNumber(base)
 			if not is_finite(base_native) or math.abs(base_native) > 1_000_000 then
@@ -296,7 +295,7 @@ local function legacy_node_to_value(node: any, depth: number, budget: {count: nu
 			local ok, parsed = pcall(function()
 				return api.new(result)
 			end)
-			return if ok then parsed else nil
+			return if ok and not is_unsafe_legacy_result(api, parsed) then parsed else nil
 		end
 		return nil
 	elseif kind == "call" then
