@@ -1,6 +1,6 @@
 --!nocheck
 local Shim = require("./codenum_shim")
-local CodeNumValue, CodeNum = Shim.load_codenum_value()
+local CodeNumValue, CodeNum, CodeNumFormatter = Shim.load_codenum_value()
 local serde = require("@lune/serde")
 
 local large = CodeNum.fromScientific(1.25, "1000")
@@ -17,6 +17,16 @@ assert(CodeNumValue.format(CodeNumValue.normalize(math.huge)) == "Infinity")
 assert(CodeNumValue.format(CodeNumValue.normalize(-math.huge)) == "-Infinity")
 assert(CodeNumValue.format(CodeNumValue.normalize(0 / 0)) == "NaN")
 assert(CodeNumValue.format(payload) == "1.25e1000")
+
+assert(CodeNumFormatter.format(0) == "0")
+assert(CodeNumFormatter.format(-0.0) == "0")
+assert(CodeNumFormatter.format(CodeNum.encode(1_250)) == "1.25K")
+assert(CodeNumFormatter.format(CodeNum.encode(large)) == "1.25e1000")
+local negative_precise = CodeNum.fromInteger("-123456789012345678901234567890")
+assert(string.sub(CodeNumFormatter.format(negative_precise), 1, 1) == "-")
+local suffixes = CodeNumFormatter.getSuffixes()
+local beyond_suffix = CodeNum.fromScientific(1, tostring((#suffixes + 1) * 3))
+assert(CodeNumFormatter.format(beyond_suffix) == CodeNum.toString(beyond_suffix))
 
 local precise_integer_text = "123456789012345678901234567890"
 local precise_integer = CodeNum.fromInteger(precise_integer_text)
