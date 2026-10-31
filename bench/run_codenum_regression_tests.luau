@@ -171,4 +171,30 @@ assert(negative_zero_from_infinity == 0 and 1 / negative_zero_from_infinity == -
 local mixed_nan = CodeNum.add(0 / 0, precise_special)
 assert(mixed_nan ~= mixed_nan, "NaN plus a precise value did not remain NaN")
 
+
+local negative_large = CodeNum.fromInteger("-9007199254740993")
+local positive_large = CodeNum.fromInteger("9007199254740992")
+assert(CodeNum.toString(CodeNum.add(negative_large, positive_large)) == "-1",
+	"mixed-sign precise addition corrupted its result sign")
+assert(CodeNum.add(exact_integer, CodeNum.fromInteger("-9007199254740993")) == 0,
+	"exact precise cancellation did not produce zero")
+assert(CodeNum.toString(CodeNum.sub(negative_large, positive_large)) == "-18014398509481985",
+	"mixed-sign precise subtraction changed the exact result")
+
+assert(CodeNum.toString(CodeNum.div(CodeNum.fromInteger("1"), CodeNum.fromInteger("8"), 2)) == "0.12",
+	"half-even division did not round a tie toward an even last digit")
+assert(CodeNum.toString(CodeNum.div(CodeNum.fromInteger("3"), CodeNum.fromInteger("8"), 2)) == "0.38",
+	"half-even division did not round an odd last digit upward")
+assert(CodeNum.toString(CodeNum.div(CodeNum.fromInteger("-1"), CodeNum.fromInteger("8"), 2)) == "-0.12",
+	"negative half-even division changed its rounding direction")
+assert(CodeNum.toString(CodeNum.div(CodeNum.fromInteger("-3"), CodeNum.fromInteger("8"), 2)) == "-0.38",
+	"negative half-even division did not preserve half-even rounding")
+
+local far_exponent = "1000000000000000000000000000000000000000"
+local far_value = CodeNum.fromScientific(1, far_exponent)
+local far_sum = CodeNum.add(far_value, 1, 34)
+assert(CodeNum.toString(far_sum) == "1e" .. far_exponent,
+	"addition with a distant exponent changed the dominant value")
+assert(CodeNum.wasRounded(far_sum), "discarding a distant insignificant operand was not recorded")
+
 print("[CodeNum 0.6.0] native, Wide, precise arithmetic, range, codec, and register regressions passed")
