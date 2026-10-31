@@ -1759,7 +1759,13 @@ local function preciseAddOperands(
 	end
 
 	local scaleDifference = exponentDifference(aParts, bParts)
-	if scaleDifference == nil or math.abs(scaleDifference) > MAX_PRECISE_TEMP_DIGITS then
+	local exceedsTemporaryCapacity = scaleDifference == nil
+	if scaleDifference ~= nil then
+		exceedsTemporaryCapacity =
+			#aParts.digits + math.max(scaleDifference, 0) > MAX_PRECISE_TEMP_DIGITS
+			or #bParts.digits + math.max(-scaleDifference, 0) > MAX_PRECISE_TEMP_DIGITS
+	end
+	if exceedsTemporaryCapacity then
 		local comparison = comparePreciseMagnitude(aParts, bParts)
 		local larger = if comparison >= 0 then aParts else bParts
 		local smaller = if comparison >= 0 then bParts else aParts
