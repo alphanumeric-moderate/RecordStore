@@ -282,6 +282,10 @@ local invalid_precision_operations = {
 	function() CodeNum.mul(-math.huge, 1, 0) end,
 	function() CodeNum.div(1, math.huge, 4097) end,
 	function() CodeNum.pow(2, 0, 0) end,
+	function() CodeNum.addInto(CodeNum.createRegister(), math.huge, 1, 0) end,
+	function() CodeNum.subInto(CodeNum.createRegister(), 0 / 0, 1, 4097) end,
+	function() CodeNum.mulInto(CodeNum.createRegister(), -math.huge, 1, 0) end,
+	function() CodeNum.divInto(CodeNum.createRegister(), 1, math.huge, 4097) end,
 }
 for _, operation in invalid_precision_operations do
 	assert(not pcall(operation), "invalid precision was accepted by an arithmetic operation")
