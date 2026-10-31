@@ -111,6 +111,15 @@ local function isPrecise(value: Operand): boolean
 end
 
 @native
+local function registerState(register: Register): RegisterState
+	local state = REGISTER_STATES[register]
+	if state == nil then
+		error("CodeNum: invalid register", 3)
+	end
+	return state
+end
+
+@native
 local function preciseState(value: Operand): PreciseState
 	if isRegister(value) then
 		local precise = registerState(value :: Register).precise
@@ -126,15 +135,6 @@ local function preciseState(value: Operand): PreciseState
 	local state = PRECISE_STATES[value :: Precise]
 	if state == nil then
 		error("CodeNum: invalid precise value", 3)
-	end
-	return state
-end
-
-@native
-local function registerState(register: Register): RegisterState
-	local state = REGISTER_STATES[register]
-	if state == nil then
-		error("CodeNum: invalid register", 3)
 	end
 	return state
 end
@@ -1988,7 +1988,7 @@ local function precisePowerInteger(value: Operand, power: number, precision: num
 		parts.sign, parts.digits, parts.expIsBig, parts.expSmall, parts.expSign,
 		parts.expLength, parts.expData, selectedPrecision, nil, nil
 	)
-	local result: Value = makePrecise(1, "1", 0, 1, 0, 0, nil, selectedPrecision, nil, nil)
+	local result: Value = makePrecise(1, "1", 0, 0, 0, 0, nil, selectedPrecision, nil, nil)
 	local remaining = math.abs(power)
 	while remaining > 0 do
 		if remaining % 2 == 1 then
@@ -3041,10 +3041,11 @@ function CodeNum.decode(text: string): Value
 	if preciseSignText ~= nil and preciseDigits ~= nil
 		and preciseExponentText ~= nil and precisePrecisionText ~= nil
 	then
-		local sign = tonumber(preciseSignText)
+		local decodedSign = tonumber(preciseSignText)
 		local precision = tonumber(precisePrecisionText)
-		if (sign ~= 1 and sign ~= -1)
-			or precision == nil or not isInteger(precision)
+		if decodedSign == nil or precision == nil
+			or (decodedSign ~= 1 and decodedSign ~= -1)
+			or not isInteger(precision)
 			or precision < 1 or precision > MAX_PRECISE_DIGITS
 			or #preciseDigits > MAX_PRECISE_DIGITS
 		then
@@ -3053,7 +3054,7 @@ function CodeNum.decode(text: string): Value
 		local exponentIsBig, exponentSmall, exponentSign, exponentLength, exponentData =
 			parseExponent(preciseExponentText)
 		return makePrecise(
-			sign, preciseDigits, exponentIsBig, exponentSmall, exponentSign,
+			decodedSign :: number, preciseDigits, exponentIsBig, exponentSmall, exponentSign,
 			exponentLength, exponentData, precision, nil, nil
 		)
 	end
