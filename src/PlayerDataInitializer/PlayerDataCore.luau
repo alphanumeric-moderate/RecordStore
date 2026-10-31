@@ -1058,14 +1058,23 @@ local function new(dependencies: Dependencies?): Controller
 			end
 
 			local acceleration = acceleration_factory.new(acceleration_options)
+			if shutting_down then
+				if type(acceleration.Stop) == "function" then
+					pcall(function() acceleration:Stop() end)
+				end
+				return false
+			end
 			local start_call_ok, start_result, start_message = pcall(function()
 				return acceleration:Start()
 			end)
-			if not start_call_ok or start_result ~= true then
+			if shutting_down or not start_call_ok or start_result ~= true then
 				if type(acceleration.Stop) == "function" then
 					pcall(function()
 						acceleration:Stop()
 					end)
+				end
+				if shutting_down then
+					return false
 				end
 				warn("[PlayerData] V2 mailbox acceleration could not start; durable queue polling remains enabled",
 					if start_call_ok then tostring(start_message or start_result) else tostring(start_result))
@@ -2806,7 +2815,13 @@ local function new(dependencies: Dependencies?): Controller
 		end
 		started = true
 		configure_advanced_scheduler()
+		if shutting_down then
+			return false
+		end
 		initialize_mailbox_wakeups()
+		if shutting_down then
+			return false
+		end
 
 		player_added_connection = players.PlayerAdded:Connect(function(player)
 			if not shutting_down then

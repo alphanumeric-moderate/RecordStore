@@ -1,6 +1,6 @@
 --!nocheck
 -- Shared mock PlayerDataCore harness for regression and CodSpeed path benchmarks.
-return function(use_cached_paths, initial_saved_data, controller_overrides)
+return function(use_cached_paths, initial_saved_data, controller_overrides, defer_start)
 
 local function replace_source_once(source, old_text, new_text)
 	local start_index, end_index = string.find(source, old_text, 1, true)
@@ -456,23 +456,25 @@ end
 		module_require_counts.AlyaNumValue == 0,
 		"default PlayerData controller should not load AlyaNumValue when the field is unused"
 	)
-	assert(controller:Start(), "controller failed to start")
-	local deadline = os.clock() + 5
-	while player:GetAttribute("PlayerDataLoadStatus") ~= "Loaded"
-		and player:GetAttribute("PlayerDataLoadStatus") ~= "Failed"
-		and os.clock() < deadline do
-		task.wait(0.01)
-	end
-	assert(
-		player:GetAttribute("PlayerDataLoadStatus") == "Loaded",
-		("player session did not load (status=%s, kick=%s)"):format(
-			tostring(player:GetAttribute("PlayerDataLoadStatus")),
-			tostring(player._kick_message)
+	if not defer_start then
+		assert(controller:Start(), "controller failed to start")
+		local deadline = os.clock() + 5
+		while player:GetAttribute("PlayerDataLoadStatus") ~= "Loaded"
+			and player:GetAttribute("PlayerDataLoadStatus") ~= "Failed"
+			and os.clock() < deadline do
+			task.wait(0.01)
+		end
+		assert(
+			player:GetAttribute("PlayerDataLoadStatus") == "Loaded",
+			("player session did not load (status=%s, kick=%s)"):format(
+				tostring(player:GetAttribute("PlayerDataLoadStatus")),
+				tostring(player._kick_message)
+			)
 		)
-	)
-	assert(native_number_format_calls > 0, "default Kills display did not use AlyaNumFormatter")
-	assert(module_require_counts.AlyaNumValue == 0,
-		"default native leaderstats should not load the AlyaNumValue adapter")
+		assert(native_number_format_calls > 0, "default Kills display did not use AlyaNumFormatter")
+		assert(module_require_counts.AlyaNumValue == 0,
+			"default native leaderstats should not load the AlyaNumValue adapter")
+	end
 	return {
 		controller = controller,
 		player = player,

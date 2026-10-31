@@ -241,6 +241,56 @@ drain_saved = true
 assert(pressure.controller:Shutdown(), "pressure controller failed to shut down")
 
 
+-- Shutdown may occur while the acceleration adapter is created, starts, or cleans up.
+for _, scenario in ipairs({ "constructor_yields", "success", "failure", "error", "cleanup_yields" }) do
+	local stop_calls = 0
+	local start_calls = 0
+	local acceleration = {}
+	function acceleration:Start()
+		start_calls += 1
+		if scenario ~= "cleanup_yields" then coroutine.yield() end
+		if scenario == "error" then error("startup failed") end
+		return scenario == "success", "startup failed"
+	end
+	function acceleration:Stop()
+		stop_calls += 1
+		if scenario == "cleanup_yields" then coroutine.yield() end
+	end
+	local harness = create_harness(true, nil, {
+		MailboxWakeupsEnabled = true,
+		QueueMessageHandler = function() return true end,
+		MessagingService = {},
+		HttpService = {},
+		RecordStoreV2 = { new = function()
+			return { Mailbox = { new = function() end }, Canonicalize = function() end }
+		end },
+		RecordStoreV2Acceleration = { new = function()
+			if scenario == "constructor_yields" then coroutine.yield() end
+			return acceleration
+		end },
+	}, true)
+	local connections = 0
+	for _, signal in ipairs({ harness.players.PlayerAdded, harness.players.PlayerRemoving }) do
+		local connect = signal.Connect
+		function signal:Connect(callback)
+			connections += 1
+			return connect(self, callback)
+		end
+	end
+	local startup = coroutine.create(function() return harness.controller:Start() end)
+	local ok, result = coroutine.resume(startup)
+	assert(ok and coroutine.status(startup) == "suspended", "startup did not pause: " .. scenario)
+	assert(harness.controller:Shutdown(), "shutdown during startup failed: " .. scenario)
+	ok, result = coroutine.resume(startup)
+	assert(ok and coroutine.status(startup) == "dead" and result == false,
+		"startup did not stop after shutdown: " .. scenario .. ": " .. tostring(result))
+	assert(stop_calls == 1, "acceleration was not stopped exactly once: " .. scenario)
+	assert(start_calls == (if scenario == "constructor_yields" then 0 else 1),
+		"unexpected acceleration startup calls: " .. scenario)
+	assert(connections == 0, "player signals were connected after shutdown: " .. scenario)
+	assert(harness.get_record_options() == nil, "player loading began after shutdown: " .. scenario)
+end
+
 -- V2 mailbox wake-ups are opt-in, handler-backed, and cleaned up with each session.
 do
 	local default_harness = create_harness(true)
