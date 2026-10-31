@@ -247,12 +247,12 @@ assert(CodeNum.isPrecise(exact_quotient_zero)
 	and not CodeNum.wasRounded(exact_quotient_zero)
 	and CodeNum.toString(CodeNum.add(exact_quotient_zero, 123)) == "120",
 	"exact division of precise zero discarded its precision context")
-local absolute_precise_zero = CodeNum.abs(decoded_positive_zero)
+local absolute_precise_zero = CodeNum.abs(explicit_precision_zero)
 assert(CodeNum.isPrecise(absolute_precise_zero)
 	and not CodeNum.wasRounded(absolute_precise_zero)
 	and CodeNum.toString(CodeNum.add(absolute_precise_zero, 123)) == "120",
 	"absolute value collapsed precise zero storage")
-local powered_precise_zero = CodeNum.pow(decoded_positive_zero, 2)
+local powered_precise_zero = CodeNum.pow(explicit_precision_zero, 2)
 assert(CodeNum.isPrecise(powered_precise_zero)
 	and not CodeNum.wasRounded(powered_precise_zero)
 	and CodeNum.toString(CodeNum.add(powered_precise_zero, 123)) == "120",
