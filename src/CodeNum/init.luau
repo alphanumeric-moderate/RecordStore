@@ -2004,7 +2004,7 @@ end
 local function preciseToString(value: Operand, significantDigits: number?): string
 	local parts = preciseParts(value)
 	if parts.sign == 0 then
-		return "0"
+		return if parts.zeroSign < 0 then "-0" else "0"
 	end
 	local precision = significantDigits or #parts.digits
 	validatePrecision(precision)
