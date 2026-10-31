@@ -51,8 +51,11 @@ benchmarks:
   - name: "compatibility regression suite"
     exec: lune run bench/run_compatibility_regression_tests.luau
 
-  - name: "CodeNum 0.5 arithmetic and reconstruction"
+  - name: "CodeNum 0.6 native and Wide arithmetic reconstruction"
     exec: lune run bench/codenum.bench.luau
+
+  - name: "CodeNum 0.6 multiprecision decimal arithmetic"
+    exec: lune run bench/codenum_multiprecision.bench.luau
 
   - name: "CodeNumValue format and normalization"
     exec: lune run bench/codenumvalue.bench.luau
