@@ -72,8 +72,4 @@ benchmarks:
   - name: "PlayerData.Set path lookup"
     exec: lune run bench/playerdata_set_paths.bench.luau
 
-  - name: "CodeNum 0.6 range and precise arithmetic regressions"
-    exec: lune run bench/run_codenum_regression_tests.luau
-
-  - name: "CodeNumValue persistence regressions"
-    exec: lune run bench/run_codenumvalue_regression_tests.luau
+# Correctness regressions run in luau-regression.yml; do not instrument them as performance benchmarks.

@@ -291,13 +291,47 @@ assert(parsed_negative_zero == 0 and 1 / parsed_negative_zero == -math.huge,
 local scientific_negative_zero = CodeNum.fromScientific(-0.0, "100")
 assert(scientific_negative_zero == 0 and 1 / scientific_negative_zero == -math.huge,
 	"scientific construction did not preserve negative zero")
+local positive_rounded_zero = CodeNum.mul(rounded_parse, 0)
+assert(CodeNum.isPrecise(positive_rounded_zero) and CodeNum.wasRounded(positive_rounded_zero),
+	"positive rounded zero lost its precise representation or rounding provenance")
+local encoded_positive_zero = CodeNum.encode(positive_rounded_zero)
+assert(encoded_positive_zero == "CN2|P|1|0|0|2",
+	"positive precise zero did not retain its precision in the CN2 codec")
+local decoded_positive_zero = CodeNum.decode(encoded_positive_zero)
+assert(CodeNum.isPrecise(decoded_positive_zero) and not CodeNum.wasRounded(decoded_positive_zero),
+	"decoded positive precise zero did not retain precise storage independently of rounding provenance")
+assert(CodeNum.encode(decoded_positive_zero) == encoded_positive_zero,
+	"positive precise zero did not have a stable CN2 round-trip")
+local positive_zero_number = CodeNum.toNumber(decoded_positive_zero)
+assert(positive_zero_number == 0 and 1 / positive_zero_number == math.huge,
+	"positive precise zero changed sign during native conversion")
+local integer_123 = CodeNum.fromInteger("123")
+assert(CodeNum.toString(CodeNum.add(positive_rounded_zero, integer_123)) == "120",
+	"positive rounded zero did not apply its precision context before serialization")
+assert(CodeNum.toString(CodeNum.add(decoded_positive_zero, integer_123)) == "120",
+	"CN2 round-trip discarded the precision context of positive zero")
+
 local encoded_negative_zero = CodeNum.encode(negative_rounded_zero)
-assert(encoded_negative_zero == "CN1|N|-0",
-	"precise negative zero did not use the signed native zero codec")
+assert(encoded_negative_zero == "CN2|P|-1|0|0|2",
+	"negative precise zero did not retain its precision in the CN2 codec")
 local decoded_negative_zero = CodeNum.decode(encoded_negative_zero)
-assert(decoded_negative_zero == 0 and 1 / decoded_negative_zero == -math.huge
-	and not CodeNum.wasRounded(decoded_negative_zero),
-	"negative zero codec changed its sign or persisted runtime-only provenance")
+assert(CodeNum.isPrecise(decoded_negative_zero) and not CodeNum.wasRounded(decoded_negative_zero),
+	"decoded negative precise zero did not retain precise storage independently of rounding provenance")
+assert(CodeNum.encode(decoded_negative_zero) == encoded_negative_zero,
+	"negative precise zero did not have a stable CN2 round-trip")
+local negative_zero_number = CodeNum.toNumber(decoded_negative_zero)
+assert(negative_zero_number == 0 and 1 / negative_zero_number == -math.huge,
+	"negative precise zero changed sign during native conversion")
+
+local native_positive_zero_payload = CodeNum.encode(0)
+local native_negative_zero_payload = CodeNum.encode(-0.0)
+assert(native_positive_zero_payload == "CN1|N|0" and native_negative_zero_payload == "CN1|N|-0",
+	"native positive or negative zero lost CN1 compatibility")
+local decoded_native_negative_zero = CodeNum.decode(native_negative_zero_payload)
+assert(not CodeNum.isPrecise(decoded_native_negative_zero)
+	and decoded_native_negative_zero == 0
+	and 1 / decoded_native_negative_zero == -math.huge,
+	"native negative zero no longer decodes as signed native zero")
 
 local invalid_precision_operations = {
 	function() CodeNum.add(math.huge, 1, 0) end,

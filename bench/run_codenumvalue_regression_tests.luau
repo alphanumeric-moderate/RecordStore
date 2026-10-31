@@ -12,6 +12,23 @@ assert(CodeNumValue.FORMAT_VERSION == 2)
 assert(not CodeNumValue.is_unsupported_version(payload))
 assert(CodeNum.toString(CodeNumValue.decode(payload)) == CodeNum.toString(large))
 assert(CodeNumValue.normalize(payload) == payload, "canonical serialization was not stable")
+
+local persisted_rounded_zero = CodeNum.mul(CodeNum.parse("1.255", 2), 0)
+local persisted_zero_payload = CodeNumValue.encode(persisted_rounded_zero)
+local persisted_zero_envelope = serde.decode("json", persisted_zero_payload)
+assert(persisted_zero_envelope.version == 2
+	and string.match(persisted_zero_envelope.value, "^CN2|P|") ~= nil,
+	"CodeNumValue did not persist precise zero in a version-2 CN2 envelope")
+local persisted_zero = CodeNumValue.decode(persisted_zero_payload)
+assert(CodeNum.isPrecise(persisted_zero) and not CodeNum.wasRounded(persisted_zero),
+	"CodeNumValue precise-zero round-trip lost precise storage or serialized rounding provenance")
+assert(CodeNumValue.normalize(persisted_zero_payload) == persisted_zero_payload,
+	"CodeNumValue precise-zero serialization was not canonical")
+assert(CodeNum.toString(CodeNum.add(persisted_zero, CodeNum.fromInteger("123"))) == "120",
+	"CodeNumValue precise-zero round-trip lost its precision context")
+local native_zero_envelope = serde.decode("json", CodeNumValue.encode(-0.0))
+assert(native_zero_envelope.version == 1 and native_zero_envelope.value == "CN1|N|-0",
+	"native negative zero no longer uses the version-1 CN1 envelope")
 assert(CodeNumValue.is_serialized(payload), "current payload was not recognized")
 
 assert(CodeNumValue.format(CodeNumValue.normalize(1_250)) == "1.25K")
