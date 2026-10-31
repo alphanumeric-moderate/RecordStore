@@ -3230,6 +3230,9 @@ end
 
 @native
 function CodeNum.addInto(register: Register, a: Operand, b: Operand, precision: number?): Register
+	if precision ~= nil then
+		validatePrecision(precision)
+	end
 	if not isRegister(register) then
 		error("CodeNum.addInto expects a CodeNum register", 2)
 	end
@@ -3241,6 +3244,9 @@ end
 
 @native
 function CodeNum.subInto(register: Register, a: Operand, b: Operand, precision: number?): Register
+	if precision ~= nil then
+		validatePrecision(precision)
+	end
 	if not isRegister(register) then
 		error("CodeNum.subInto expects a CodeNum register", 2)
 	end
@@ -3252,6 +3258,9 @@ end
 
 @native
 function CodeNum.mulInto(register: Register, a: Operand, b: Operand, precision: number?): Register
+	if precision ~= nil then
+		validatePrecision(precision)
+	end
 	if not isRegister(register) then
 		error("CodeNum.mulInto expects a CodeNum register", 2)
 	end
@@ -3263,6 +3272,9 @@ end
 
 @native
 function CodeNum.divInto(register: Register, a: Operand, b: Operand, precision: number?): Register
+	if precision ~= nil then
+		validatePrecision(precision)
+	end
 	if not isRegister(register) then
 		error("CodeNum.divInto expects a CodeNum register", 2)
 	end
