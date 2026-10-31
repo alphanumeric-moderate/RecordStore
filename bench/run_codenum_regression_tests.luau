@@ -95,7 +95,7 @@ assert(CodeNum.toString(CodeNum.pow(CodeNum.fromInteger("2"), -3)) == "0.125",
 	"negative precise integer power failed")
 
 local product = CodeNum.mul(CodeNum.fromInteger("123456789"), CodeNum.fromInteger("987654321"))
-assert(CodeNum.toString(product) == "121932631112635269", "precise coefficient multiplication is incorrect")
+assert(CodeNum.toString(product) == "121932631112635269", "precise coefficient multiplication is incorrect: " .. CodeNum.toString(product))
 assert(CodeNum.toString(CodeNum.pow(CodeNum.fromInteger("123456"), 2)) == "15241383936",
 	"precise integer power is incorrect")
 
