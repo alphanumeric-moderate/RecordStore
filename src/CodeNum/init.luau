@@ -2675,7 +2675,7 @@ function CodeNum.fromInteger(text: string, precision: number?): Value
 	if type(text) ~= "string" or string.match(text, "^[%+%-]?%d+$") == nil then
 		error("CodeNum.fromInteger expects a signed decimal integer string", 2)
 	end
-	return CodeNum.parse(text, precision)
+	return CodeNum.parse(text, precision or MAX_PRECISE_DIGITS)
 end
 
 function CodeNum.withPrecision(value: Operand, precision: number): Value
