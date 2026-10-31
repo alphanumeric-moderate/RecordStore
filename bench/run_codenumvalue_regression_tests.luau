@@ -61,7 +61,7 @@ local old_infinitemath = serde.encode("json", {
 	value = { kind = "number", first = 1.25, second = 12 },
 })
 local infinitemath_migrated = CodeNumValue.normalize(old_infinitemath)
-assert(CodeNum.toString(CodeNumValue.decode(infinitemath_migrated)) == "1.25e12")
+assert(CodeNum.toNumber(CodeNumValue.decode(infinitemath_migrated)) == 1.25e12)
 
 local old_code_integer = serde.encode("json", {
 	schema = "CodeNum",
