@@ -161,6 +161,28 @@ local function finite(value)
 	return { kind = "finite", value = value }
 end
 
+local function legacy_envelope(value, version)
+	return serde.encode("json", { schema = "CodeNum", version = version or 2, value = value })
+end
+local malformed_finite_payloads = {
+	legacy_envelope({ kind = "finite" }),
+	legacy_envelope({ kind = "finite", value = "12" }),
+	legacy_envelope({ kind = "finite", value = false }),
+	legacy_envelope({ kind = "finite", value = {} }),
+}
+for _, malformed in malformed_finite_payloads do
+	assert(not CodeNumValue.inspect_serialized(malformed) and not CodeNumValue.is_serialized(malformed),
+		"inspection accepted a finite legacy node without a numeric value")
+end
+assert(CodeNumValue.inspect_serialized(legacy_envelope(finite(-12.5))),
+	"inspection rejected a numeric finite legacy node")
+assert(not CodeNumValue.inspect_serialized(legacy_envelope(finite(1), 1)),
+	"inspection accepted an unsupported legacy version")
+assert(not CodeNumValue.inspect_serialized(legacy_envelope("not a node")),
+	"inspection accepted a non-table legacy node")
+assert(CodeNumValue.inspect_serialized(legacy_envelope({ kind = "unknown" })),
+	"inspection rejected a preservable legacy node kind")
+
 local inspection_expression = legacy_expression("add", integer(1, "2"), integer(1, "3"))
 local original_add = CodeNum.add
 local inspection_add_calls = 0
@@ -339,6 +361,10 @@ for _, future_payload in { future, future_legacy } do
 	local saved_key = "PlayerData_Test1|global|Player_" .. tostring(harness.player.UserId)
 	assert(record ~= nil and harness.get_record_options().validator(harness.saved_records[saved_key]),
 		"recognized future version should pass the stored-data validator")
+	assert(not harness.get_record_options().validator({ cash = malformed_finite_payloads[1] }),
+		"stored-data validator accepted a malformed finite legacy node")
+	assert(harness.get_record_options().validator({ cash = legacy_envelope(finite(1)) }),
+		"stored-data validator rejected a numeric finite legacy node")
 	assert(harness.player:GetAttribute("PlayerDataLoadStatus") == "Failed" and harness.player._kick_message ~= nil,
 		"future-version player load must fail closed")
 	assert(record._update_calls == 0 and harness.saved_records[saved_key].cash == future_payload,

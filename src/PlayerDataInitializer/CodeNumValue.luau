@@ -643,6 +643,7 @@ function CodeNumValue.inspect_serialized(value: any): boolean
 					or legacy_value.name == "-infinity"))
 	elseif envelope.schema == LEGACY_CODE_SCHEMA then
 		return envelope.version == 2 and type(envelope.value) == "table"
+			and (envelope.value.kind ~= "finite" or type(envelope.value.value) == "number")
 	end
 	return false
 end
