@@ -39,6 +39,7 @@ type PreciseState = {
 	expLength: number,
 	expData: buffer?,
 	precision: number,
+	wasRounded: boolean,
 }
 
 type DecimalParts = {
@@ -50,6 +51,7 @@ type DecimalParts = {
 	expLength: number,
 	expData: buffer?,
 	precision: number,
+	wasRounded: boolean,
 }
 
 type DecimalLimbs = {number}
@@ -1506,6 +1508,7 @@ local function parseDecimalParts(text: string): DecimalParts
 		expLength = finalLength,
 		expData = finalData,
 		precision = MAX_PRECISE_DIGITS,
+		wasRounded = false,
 	}
 end
 
@@ -1531,7 +1534,8 @@ local function makePrecise(
 	expData: buffer?,
 	precision: number,
 	destination: Register?,
-	tinyAdjustment: number?
+	tinyAdjustment: number?,
+	inputWasRounded: boolean?
 ): Value
 	validatePrecision(precision)
 	digits = trimDecimalDigits(digits)
@@ -1554,8 +1558,10 @@ local function makePrecise(
 	end
 
 	local dropped: number
+	local wasRounded = inputWasRounded == true or tinyAdjustment ~= nil
 	digits, dropped = roundDecimalDigits(digits, precision, tinyAdjustment)
 	if dropped > 0 then
+		wasRounded = true
 		expIsBig, expSmall, expSign, expLength, expData = exponentAddSmall(
 			expIsBig, expSmall, expSign, expLength, expData, dropped, nil
 		)
@@ -1594,6 +1600,7 @@ local function makePrecise(
 		expLength = if expIsBig == 1 then expLength else 0,
 		expData = copyPreciseExponent(expIsBig, expLength, expData),
 		precision = precision,
+		wasRounded = wasRounded,
 	}
 	PRECISE_STATES[precise] = state
 	table.freeze(precise)
@@ -1616,6 +1623,7 @@ local function preciseParts(value: Operand): DecimalParts
 			expLength = state.expLength,
 			expData = state.expData,
 			precision = state.precision,
+			wasRounded = state.wasRounded,
 		}
 	end
 
@@ -1690,6 +1698,7 @@ local function preciseOrder(parts: DecimalParts): DecimalParts
 		expLength = length,
 		expData = data,
 		precision = parts.precision,
+		wasRounded = parts.wasRounded,
 	}
 end
 
@@ -1737,12 +1746,14 @@ local function preciseAddOperands(
 	if aParts.sign == 0 then
 		return makePrecise(
 			bParts.sign, bParts.digits, bParts.expIsBig, bParts.expSmall, bParts.expSign,
-			bParts.expLength, bParts.expData, precision, destination, nil
+			bParts.expLength, bParts.expData, precision, destination, nil,
+			aParts.wasRounded or bParts.wasRounded
 		)
 	elseif bParts.sign == 0 then
 		return makePrecise(
 			aParts.sign, aParts.digits, aParts.expIsBig, aParts.expSmall, aParts.expSign,
-			aParts.expLength, aParts.expData, precision, destination, nil
+			aParts.expLength, aParts.expData, precision, destination, nil,
+			aParts.wasRounded or bParts.wasRounded
 		)
 	end
 
@@ -1754,7 +1765,8 @@ local function preciseAddOperands(
 		local tinyAdjustment = if larger.sign == smaller.sign then 1 else -1
 		return makePrecise(
 			larger.sign, larger.digits, larger.expIsBig, larger.expSmall, larger.expSign,
-			larger.expLength, larger.expData, precision, destination, tinyAdjustment
+			larger.expLength, larger.expData, precision, destination, tinyAdjustment,
+			aParts.wasRounded or bParts.wasRounded
 		)
 	end
 
@@ -1800,7 +1812,8 @@ local function preciseAddOperands(
 	end
 	return makePrecise(
 		resultSign, resultDigits, resultExpIsBig, resultExpSmall, resultExpSign,
-		resultExpLength, resultExpData, precision, destination, nil
+		resultExpLength, resultExpData, precision, destination, nil,
+		aParts.wasRounded or bParts.wasRounded
 	)
 end
 
@@ -1815,10 +1828,12 @@ local function preciseMultiplyOperands(
 	local precision = precisionOverride or math.min(aParts.precision, bParts.precision)
 	validatePrecision(precision)
 	if aParts.sign == 0 or bParts.sign == 0 then
+		local zeroSign = operandSign(a) * operandSign(b)
+		local zero = if zeroSign < 0 then -0.0 else 0
 		if destination ~= nil then
-			writeRegisterNative(destination, 0)
+			writeRegisterNative(destination, zero)
 		end
-		return 0
+		return zero
 	end
 	local product = decimalLimbsToString(
 		multiplyDecimalLimbs(decimalStringToLimbs(aParts.digits), decimalStringToLimbs(bParts.digits))
@@ -1830,7 +1845,7 @@ local function preciseMultiplyOperands(
 	)
 	return makePrecise(
 		aParts.sign * bParts.sign, product, expIsBig, expSmall, expSign, expLength, expData,
-		precision, destination, nil
+		precision, destination, nil, aParts.wasRounded or bParts.wasRounded
 	)
 end
 
@@ -1859,10 +1874,12 @@ local function preciseDivideOperands(
 		end
 		return infinity
 	elseif aParts.sign == 0 then
+		local zeroSign = operandSign(a) * operandSign(b)
+		local zero = if zeroSign < 0 then -0.0 else 0
 		if destination ~= nil then
-			writeRegisterNative(destination, 0)
+			writeRegisterNative(destination, zero)
 		end
-		return 0
+		return zero
 	end
 
 	local decimalOrder = #aParts.digits - #bParts.digits
@@ -1906,11 +1923,13 @@ local function preciseDivideOperands(
 		decimalOrder - (precision - 1),
 		nil
 	)
+	local resultWasRounded = aParts.wasRounded or bParts.wasRounded
+		or compareDecimalLimbs(remainder, { 0 }) ~= 0
 	return makePrecise(
 		aParts.sign * bParts.sign,
 		decimalLimbsToString(quotient),
 		scaleIsBig, scaleSmall, scaleSign, scaleLength, scaleData,
-		precision, destination, nil
+		precision, destination, nil, resultWasRounded
 	)
 end
 
@@ -1986,7 +2005,7 @@ local function precisePowerInteger(value: Operand, power: number, precision: num
 	validatePrecision(selectedPrecision)
 	local factor = makePrecise(
 		parts.sign, parts.digits, parts.expIsBig, parts.expSmall, parts.expSign,
-		parts.expLength, parts.expData, selectedPrecision, nil, nil
+		parts.expLength, parts.expData, selectedPrecision, nil, nil, parts.wasRounded
 	)
 	local result: Value = makePrecise(1, "1", 0, 0, 0, 0, nil, selectedPrecision, nil, nil)
 	local remaining = math.abs(power)
@@ -2684,7 +2703,7 @@ function CodeNum.withPrecision(value: Operand, precision: number): Value
 	local parts = preciseParts(value)
 	return makePrecise(
 		parts.sign, parts.digits, parts.expIsBig, parts.expSmall, parts.expSign,
-		parts.expLength, parts.expData, precision, nil, nil
+		parts.expLength, parts.expData, precision, nil, nil, parts.wasRounded
 	)
 end
 
@@ -2854,7 +2873,7 @@ function CodeNum.abs(value: Operand): Value
 		local parts = preciseParts(value)
 		return makePrecise(
 			1, parts.digits, parts.expIsBig, parts.expSmall, parts.expSign,
-			parts.expLength, parts.expData, parts.precision, nil, nil
+			parts.expLength, parts.expData, parts.precision, nil, nil, parts.wasRounded
 		)
 	end
 	if type(value) == "number" then
@@ -3155,6 +3174,11 @@ end
 
 function CodeNum.isPrecise(value: Operand): boolean
 	return isPrecise(value)
+end
+
+function CodeNum.wasRounded(value: Operand): boolean
+	assertValidValue(value)
+	return if isPrecise(value) then preciseState(value).wasRounded else false
 end
 
 @native

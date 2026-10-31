@@ -70,6 +70,7 @@ local function resolve_api(): any
 		or type(loaded.fromScientific) ~= "function"
 		or type(loaded.fromInteger) ~= "function"
 		or type(loaded.isPrecise) ~= "function"
+		or type(loaded.wasRounded) ~= "function"
 		or type(loaded.toString) ~= "function"
 		or type(loaded.toNumber) ~= "function"
 		or type(loaded.add) ~= "function"
@@ -182,42 +183,99 @@ local function legacy_integer_to_value(sign: number, digits: string): any?
 	return if ok then parsed else nil
 end
 
-local function is_unsafe_legacy_result(api: any, result: any): boolean
-	if type(result) == "table" and api.isPrecise(result) then
+local function legacy_results_equal(api: any, actual: any, exact: any): boolean
+	if type(actual) == "number" and actual ~= actual then
+		return type(exact) == "number" and exact ~= exact
+	elseif type(actual) == "number" and (actual == math.huge or actual == -math.huge) then
+		return actual == exact
+	elseif type(exact) == "number" and (exact ~= exact or exact == math.huge or exact == -math.huge) then
 		return false
 	end
-	-- Native arithmetic may round integers beyond binary64's safe range.
-	if type(result) == "number" then
-		return is_finite(result) and math.abs(result) > 9007199254740991 and math.floor(result) == result
-	end
-	-- Positive-exponent Wide values exceed native range and are integers.
-	return type(result) == "table" and api.compare(api.abs(result), 9007199254740991) == 1
+	return api.compare(actual, exact) == 0
 end
 
-local function legacy_node_to_value(node: any, depth: number, budget: {count: number}): any?
+local function is_unsafe_legacy_result(
+	api: any,
+	result: any,
+	operation: string,
+	left: any,
+	right: any
+): boolean
+	if not is_code_num_value(result) or api.wasRounded(result)
+		or api.wasRounded(left) or api.wasRounded(right)
+	then
+		return true
+	end
+
+	-- Keep large native/Wide integers on their original legacy payload path.
+	if type(result) == "number" then
+		if is_finite(result) and math.abs(result) > 9007199254740991
+			and math.floor(result) == result
+		then
+			return true
+		end
+	elseif api.isWide(result) and api.compare(api.abs(result), 9007199254740991) == 1 then
+		return true
+	end
+
+	local ok, exact = pcall(function()
+		if operation == "add" then
+			return api.add(left, right, api.MAX_PRECISE_DIGITS)
+		elseif operation == "sub" then
+			return api.sub(left, right, api.MAX_PRECISE_DIGITS)
+		elseif operation == "mul" then
+			return api.mul(left, right, api.MAX_PRECISE_DIGITS)
+		elseif operation == "div" then
+			return api.div(left, right, api.MAX_PRECISE_DIGITS)
+		elseif operation == "pow" then
+			return api.pow(left, right, api.MAX_PRECISE_DIGITS)
+		end
+		error("unsupported legacy arithmetic operator")
+	end)
+	if not ok or not is_code_num_value(exact) or api.wasRounded(exact) then
+		return true
+	end
+	return not legacy_results_equal(api, result, exact)
+end
+
+local function is_exact_legacy_log10(api: any, value: any, result: number): boolean
+	if not is_finite(result) or math.floor(result) ~= result or api.wasRounded(value) then
+		return false
+	end
+	local ok, exact = pcall(function()
+		return api.pow(10, result, api.MAX_PRECISE_DIGITS)
+	end)
+	return ok and not api.wasRounded(exact) and api.compare(value, exact) == 0
+end
+
+local function legacy_node_to_value(
+	node: any,
+	depth: number,
+	budget: {count: number}
+): (any?, boolean)
 	if type(node) ~= "table" or depth > 128 then
-		return nil
+		return nil, false
 	end
 	budget.count += 1
 	if budget.count > 8192 then
-		return nil
+		return nil, false
 	end
 
 	local api = resolve_api()
 	local kind = node.kind
 	if kind == "finite" then
 		if not is_finite(node.value) then
-			return nil
+			return nil, false
 		end
-		return api.new(node.value)
+		return api.new(node.value), false
 	elseif kind == "integer" then
 		if (node.sign ~= 1 and node.sign ~= -1)
 			or type(node.digits) ~= "string"
 			or not string.match(node.digits, "^%d+$")
 		then
-			return nil
+			return nil, false
 		end
-		return legacy_integer_to_value(node.sign, node.digits)
+		return legacy_integer_to_value(node.sign, node.digits), false
 	elseif kind == "scientific" then
 		if (node.sign ~= 1 and node.sign ~= -1)
 			or not is_finite(node.mantissa)
@@ -225,37 +283,44 @@ local function legacy_node_to_value(node: any, depth: number, budget: {count: nu
 			or type(node.exponent) ~= "string"
 			or not string.match(node.exponent, "^[+-]?%d+$")
 		then
-			return nil
+			return nil, false
 		end
 		local ok, parsed = pcall(function()
 			return api.fromScientific(node.sign * node.mantissa, node.exponent)
 		end)
-		return if ok then parsed else nil
+		if ok then
+			return parsed, false
+		end
+		return nil, false
 	elseif kind == "special" then
 		if node.name == "nan" then
-			return 0 / 0
+			return 0 / 0, false
 		elseif node.name == "+infinity" then
-			return math.huge
+			return math.huge, false
 		elseif node.name == "-infinity" then
-			return -math.huge
+			return -math.huge, false
 		end
-		return nil
+		return nil, false
 	elseif kind == "expression" then
-		local left = legacy_node_to_value(node.left, depth + 1, budget)
-		local right = legacy_node_to_value(node.right, depth + 1, budget)
+		local left, leftRounded = legacy_node_to_value(node.left, depth + 1, budget)
+		local right, rightRounded = legacy_node_to_value(node.right, depth + 1, budget)
 		if left == nil or right == nil then
-			return nil
+			return nil, leftRounded or rightRounded
 		end
+		if leftRounded or rightRounded then
+			return nil, true
+		end
+		local operation = node.op
 		local ok, result = pcall(function()
-			if node.op == "add" then
+			if operation == "add" then
 				return api.add(left, right)
-			elseif node.op == "sub" then
+			elseif operation == "sub" then
 				return api.sub(left, right)
-			elseif node.op == "mul" then
+			elseif operation == "mul" then
 				return api.mul(left, right)
-			elseif node.op == "div" then
+			elseif operation == "div" then
 				return api.div(left, right)
-			elseif node.op == "pow" then
+			elseif operation == "pow" then
 				local power = api.toNumber(right)
 				if not is_finite(power) then
 					error("legacy power is outside CodeNum's numeric power domain")
@@ -264,13 +329,23 @@ local function legacy_node_to_value(node: any, depth: number, budget: {count: nu
 			end
 			error("unsupported legacy expression operator")
 		end)
-		return if ok and not is_unsafe_legacy_result(api, result) then result else nil
+		if not ok then
+			return nil, false
+		end
+		local exactRight = if operation == "pow" then api.toNumber(right) else right
+		if is_unsafe_legacy_result(api, result, operation, left, exactRight) then
+			return nil, true
+		end
+		return result, false
 	elseif kind == "hyper" then
-		local base = legacy_node_to_value(node.base, depth + 1, budget)
-		local arrows = legacy_node_to_value(node.arrows, depth + 1, budget)
-		local height = legacy_node_to_value(node.height, depth + 1, budget)
+		local base, baseRounded = legacy_node_to_value(node.base, depth + 1, budget)
+		local arrows, arrowsRounded = legacy_node_to_value(node.arrows, depth + 1, budget)
+		local height, heightRounded = legacy_node_to_value(node.height, depth + 1, budget)
 		if base == nil or arrows == nil or height == nil then
-			return nil
+			return nil, baseRounded or arrowsRounded or heightRounded
+		end
+		if baseRounded or arrowsRounded or heightRounded then
+			return nil, true
 		end
 
 		local arrow_count = api.toNumber(arrows)
@@ -278,53 +353,67 @@ local function legacy_node_to_value(node: any, depth: number, budget: {count: nu
 		if not is_finite(arrow_count) or not is_finite(native_height)
 			or native_height % 1 ~= 0 or native_height < 1 or native_height > 3
 		then
-			return nil
+			return nil, false
 		end
 
 		if arrow_count == 1 then
 			local ok, result = pcall(function()
 				return api.pow(base, native_height)
 			end)
-			return if ok and not is_unsafe_legacy_result(api, result) then result else nil
+			if not ok then
+				return nil, false
+			end
+			if is_unsafe_legacy_result(api, result, "pow", base, native_height) then
+				return nil, true
+			end
+			return result, false
 		elseif arrow_count == 2 and native_height <= 3 then
 			local base_native = api.toNumber(base)
 			if not is_finite(base_native) or math.abs(base_native) > 1_000_000 then
-				return nil
+				return nil, false
 			end
-			local result = base_native
+			local result = base
+			local result_native = base_native
 			for _ = 2, native_height do
 				local ok, next_result = pcall(function()
-					return base_native ^ result
+					return api.pow(base, result_native)
 				end)
-				if not ok or not is_finite(next_result) then
-					return nil
+				if not ok then
+					return nil, false
+				end
+				if is_unsafe_legacy_result(api, next_result, "pow", base, result_native) then
+					return nil, true
 				end
 				result = next_result
+				result_native = api.toNumber(result)
+				if not is_finite(result_native) then
+					return nil, false
+				end
 			end
-			local ok, parsed = pcall(function()
-				return api.new(result)
-			end)
-			return if ok and not is_unsafe_legacy_result(api, parsed) then parsed else nil
+			return result, false
 		end
-		return nil
+		return nil, false
 	elseif kind == "call" then
-		local inner = legacy_node_to_value(node.value, depth + 1, budget)
-		if inner == nil then
-			return nil
+		local inner, innerRounded = legacy_node_to_value(node.value, depth + 1, budget)
+		if inner == nil or innerRounded then
+			return nil, innerRounded
 		end
 		if node.op == "abs" then
-			return api.abs(inner)
+			return api.abs(inner), false
 		elseif node.op == "log10" then
 			local ok, result = pcall(function()
 				return api.log10(inner)
 			end)
 			if not ok or not is_finite(result) then
-				return nil
+				return nil, false
 			end
-			return result
+			if not is_exact_legacy_log10(api, inner, result) then
+				return nil, true
+			end
+			return result, false
 		end
 	end
-	return nil
+	return nil, false
 end
 
 local function alyanum_base_to_value(value: any): any?
