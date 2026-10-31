@@ -1471,7 +1471,7 @@ local function parseDecimalParts(text: string): DecimalParts
 	if firstNonZero == nil then
 		return {
 			sign = 0,
-			zeroSign = 1,
+			zeroSign = if signText == "-" then -1 else 1,
 			digits = "0",
 			expIsBig = 0,
 			expSmall = 0,
@@ -2063,7 +2063,8 @@ local function precisePowerInteger(value: Operand, power: number, precision: num
 	local selectedPrecision = precision or parts.precision
 	validatePrecision(selectedPrecision)
 	local factor = makePrecise(
-		parts.sign, parts.digits, parts.expIsBig, parts.expSmall, parts.expSign,
+		if parts.sign == 0 then parts.zeroSign else parts.sign,
+		parts.digits, parts.expIsBig, parts.expSmall, parts.expSign,
 		parts.expLength, parts.expData, selectedPrecision, nil, nil, parts.wasRounded
 	)
 	local result: Value = makePrecise(1, "1", 0, 0, 0, 0, nil, selectedPrecision, nil, nil)
@@ -2701,7 +2702,7 @@ function CodeNum.fromScientific(mantissa: number, exponent: number | string): Va
 	end
 
 	if mantissa == 0 then
-		return 0
+		return if 1 / mantissa == -math.huge then -0.0 else 0
 	end
 
 	return makeValue(mantissa, isBig, small, sign, length, data, nil)
@@ -2726,7 +2727,7 @@ function CodeNum.parse(text: string, precision: number?): Value
 	end
 	local parsedParts = parseDecimalParts(normalized)
 	if parsedParts.sign == 0 then
-		return 0
+		return if parsedParts.zeroSign < 0 then -0.0 else 0
 	end
 	if precision ~= nil or #parsedParts.digits > 15 then
 		return makePrecise(
