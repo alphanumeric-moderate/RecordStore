@@ -177,9 +177,9 @@ CodeNum arithmetic is explicit: use `CodeNum.add`, `sub`, `mul`, `div`, and `pow
 
 <!-- coderabbit-ai-generated:v1 -->
 
-<!-- coderabbit-ai-generated-section:v1:f52b13ba4a31a2024ac843895fc99079d50e097121cb946046331ee8ecc1eb8e -->
+<!-- coderabbit-ai-generated-section:v1:9dca4bdb9aee51ab3cab9a5d8c162e27ad4c5c3c50b968dfaecaf2051f4b38a3 -->
 
-`add`, `sub`, `mul`, and `div` accept an optional precision override. Without one, precise division uses 34 significant digits or the lower operand precision, whichever is smaller; two native-number operands may use the native fast path. Precise negative powers use the same 34-digit cap, while positive powers inherit the operand precision.
+`add`, `sub`, `mul`, `div`, and `pow` accept an optional precision override. Without an override, precise division uses 34 significant digits or the lower operand precision, whichever is smaller; two native-number operands may use the native fast path. Without an override, precise negative powers use the smaller of 34 significant digits and the operand precision, while positive powers inherit the operand precision.
 
 <!-- /coderabbit-ai-generated:v1 -->
 
