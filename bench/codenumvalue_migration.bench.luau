@@ -25,7 +25,7 @@ local function expression(op, left, right)
 	return legacy({ kind = "expression", op = op, left = left, right = right })
 end
 
-local large_integer_text = string.rep("9", 4096)
+-- Maximum-width import correctness is asserted in run_codenumvalue_regression_tests.luau.
 local legacy_payloads = {
 	{
 		label = "integer above binary64 safe range",
@@ -53,12 +53,6 @@ local legacy_payloads = {
 			right = integer(1, "3"),
 		}, finite(1)),
 		preserve = true,
-	},
-	{
-		label = "4096-digit integer",
-		payload = legacy(integer(1, large_integer_text)),
-		preserve = false,
-		expected_value = CodeNum.fromInteger(large_integer_text),
 	},
 	{
 		label = "current CN1 envelope",
