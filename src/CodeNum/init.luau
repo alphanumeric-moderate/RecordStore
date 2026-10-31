@@ -1541,13 +1541,14 @@ local function makePrecise(
 	precision: number,
 	destination: Register?,
 	tinyAdjustment: number?,
-	inputWasRounded: boolean?
+	inputWasRounded: boolean?,
+	preservePreciseZero: boolean?
 ): Value
 	validatePrecision(precision)
 	digits = trimDecimalDigits(digits)
 	if digits == "0" or sign == 0 then
 		local zeroSign = if sign < 0 then -1 else 1
-		if inputWasRounded == true then
+		if inputWasRounded == true or preservePreciseZero == true then
 			local precise: Precise = { _codeNum = "precise" }
 			PRECISE_STATES[precise] = {
 				sign = 0,
@@ -1559,7 +1560,7 @@ local function makePrecise(
 				expLength = 0,
 				expData = nil,
 				precision = precision,
-				wasRounded = true,
+				wasRounded = inputWasRounded == true,
 			}
 			table.freeze(precise)
 			if destination ~= nil then
@@ -3133,13 +3134,11 @@ function CodeNum.encode(value: Operand): string
 	assertValidValue(value)
 	if isPrecise(value) then
 		local parts = preciseParts(value)
-		if parts.sign == 0 then
-			return if parts.zeroSign < 0 then "CN1|N|-0" else "CN1|N|0"
-		end
+		local sign = if parts.sign == 0 then parts.zeroSign else parts.sign
 		local exponentText = exponentToString(
 			parts.expIsBig, parts.expSmall, parts.expSign, parts.expLength, parts.expData
 		)
-		return "CN2|P|" .. tostring(parts.sign) .. "|" .. parts.digits
+		return "CN2|P|" .. tostring(sign) .. "|" .. parts.digits
 			.. "|" .. exponentText .. "|" .. tostring(parts.precision)
 	end
 	if isRegister(value) then
@@ -3187,7 +3186,7 @@ function CodeNum.decode(text: string): Value
 			parseExponent(preciseExponentText)
 		return makePrecise(
 			decodedSign :: number, preciseDigits, exponentIsBig, exponentSmall, exponentSign,
-			exponentLength, exponentData, precision, nil, nil
+			exponentLength, exponentData, precision, nil, nil, false, true
 		)
 	end
 
