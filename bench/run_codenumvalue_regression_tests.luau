@@ -126,8 +126,10 @@ assert(migrated_maximum_legacy_integer ~= maximum_legacy_integer,
 	"4096-digit legacy exact integer was not migrated")
 assert(CodeNum.isPrecise(CodeNumValue.decode(migrated_maximum_legacy_integer)),
 	"4096-digit legacy integer did not use precise storage")
-assert(CodeNum.toString(CodeNumValue.decode(migrated_maximum_legacy_integer)) == maximum_legacy_integer_text,
-	"4096-digit legacy integer migration changed decimal digits")
+assert(CodeNum.compare(
+	CodeNumValue.decode(migrated_maximum_legacy_integer),
+	CodeNum.fromInteger(maximum_legacy_integer_text)
+) == 0, "4096-digit legacy integer migration changed its exact numeric value")
 
 local function legacy_expression(op, left, right)
 	return serde.encode("json", {
