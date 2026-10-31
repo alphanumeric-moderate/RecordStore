@@ -168,10 +168,6 @@ local function legacy_integer_to_value(sign: number, digits: string): any?
 	if digits == "" then
 		return 0
 	end
-	if #digits > 309 then
-		return nil
-	end
-
 	local api = resolve_api()
 	if #digits > api.MAX_PRECISE_DIGITS then
 		return nil
