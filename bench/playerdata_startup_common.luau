@@ -9,7 +9,7 @@ local SOURCES = {
 	PlayerData = fs.readFile("src/PlayerDataInitializer/PlayerData.luau"),
 	PlayerDataCore = fs.readFile("src/PlayerDataInitializer/PlayerDataCore.luau"),
 	IntegerInfinityValue = fs.readFile("src/PlayerDataInitializer/IntegerInfinityValue.luau"),
-	AlyaNumValue = fs.readFile("src/PlayerDataInitializer/AlyaNumValue.luau"),
+	CodeNumValue = fs.readFile("src/PlayerDataInitializer/CodeNumValue.luau"),
 	Initializer = fs.readFile("src/PlayerDataInitializer/init.server.luau"),
 }
 
@@ -18,7 +18,7 @@ local MODULE_PATHS = {
 	PlayerData = "src/PlayerDataInitializer/PlayerData.luau",
 	PlayerDataCore = "src/PlayerDataInitializer/PlayerDataCore.luau",
 	IntegerInfinityValue = "src/PlayerDataInitializer/IntegerInfinityValue.luau",
-	AlyaNumValue = "src/PlayerDataInitializer/AlyaNumValue.luau",
+	CodeNumValue = "src/PlayerDataInitializer/CodeNumValue.luau",
 }
 
 local function make_signal()
@@ -31,7 +31,7 @@ local function make_signal()
 	return signal
 end
 
-local function cold_start(eager_alyanum_value)
+local function cold_start(eager_codenum_value)
 	local parent = {}
 	local modules = {}
 
@@ -75,17 +75,17 @@ local function cold_start(eager_alyanum_value)
 		end,
 	}
 
-	local require_counts = { AlyaNumValue = 0 }
+	local require_counts = { CodeNumValue = 0 }
 	local cache = {}
 	local core_source = SOURCES.PlayerDataCore
 
-	if eager_alyanum_value then
+	if eager_codenum_value then
 		local needle = 'local IntegerInfinityValueFactory = require(script.Parent.IntegerInfinityValue)\n'
 		local index = string.find(core_source, needle, 1, true)
 		assert(index ~= nil, "could not find PlayerDataCore's dependency insertion point")
 		local insert_at = index + #needle
 		core_source = string.sub(core_source, 1, insert_at - 1)
-			.. 'local _legacy_eager_alyanum_value_factory = require(script.Parent.AlyaNumValue)\n'
+			.. 'local _codenum_value_factory_eager_test = require(script.Parent.CodeNumValue)\n'
 			.. string.sub(SOURCES.PlayerDataCore, insert_at)
 	end
 
@@ -106,8 +106,8 @@ local function cold_start(eager_alyanum_value)
 
 		assert(MODULE_PATHS[module.Name] ~= nil, "unexpected module: " .. module.Name)
 
-		if module.Name == "AlyaNumValue" then
-			require_counts.AlyaNumValue += 1
+		if module.Name == "CodeNumValue" then
+			require_counts.CodeNumValue += 1
 		end
 
 		local source = if module.Name == "PlayerDataCore" then core_source else SOURCES[module.Name]
@@ -140,19 +140,19 @@ local function cold_start(eager_alyanum_value)
 	initializer()
 
 	assert(
-		require_counts.AlyaNumValue == (eager_alyanum_value and 1 or 0),
-		"optional AlyaNumValue module-load count does not match the selected startup path"
+		require_counts.CodeNumValue == (eager_codenum_value and 1 or 0),
+		"optional CodeNumValue module-load count does not match the selected startup path"
 	)
 end
 
-return function(eager_alyanum_value)
+return function(eager_codenum_value)
 	local ITERATIONS = 25
 
 	for _ = 1, ITERATIONS do
-		cold_start(eager_alyanum_value)
+		cold_start(eager_codenum_value)
 	end
 
-	print(if eager_alyanum_value
-		then "[PlayerData startup] legacy eager AlyaNumValue dependency passed"
-		else "[PlayerData startup] lazy optional AlyaNumValue dependency passed")
+	print(if eager_codenum_value
+		then "[PlayerData startup] eager CodeNumValue dependency passed"
+		else "[PlayerData startup] lazy optional CodeNumValue dependency passed")
 end
