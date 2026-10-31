@@ -1,6 +1,6 @@
 --!nocheck
 -- Shared mock PlayerDataCore harness for regression and CodSpeed path benchmarks.
-return function(use_cached_paths, initial_saved_data, controller_overrides)
+return function(use_cached_paths, initial_saved_data, controller_overrides, defer_start)
 
 local function replace_source_once(source, old_text, new_text)
 	local start_index, end_index = string.find(source, old_text, 1, true)
@@ -210,7 +210,13 @@ end
 		saved_records[seeded_key] = clone_data(initial_saved_data)
 	end
 
-	local RecordStore = {}
+	local RecordStore = {
+	MailboxV2 = {
+		new = function()
+			error("the mailbox module stub must not be constructed by the PlayerDataCore test harness")
+		end,
+	},
+}
 	function RecordStore.is_retryable_result()
 		return false
 	end
@@ -266,6 +272,49 @@ end
 			return "success", nil
 		end
 	
+		function record:GetMailboxOwner()
+			return {
+				store_name = name,
+				scope = scope,
+				profile_key = key,
+				user_id = if options.user_ids ~= nil then options.user_ids[1] else nil,
+			}
+		end
+
+		function record:CreateMailboxStoreAdapter()
+			return {}, "success", nil
+		end
+
+		function record:BindMailboxV2Async(mailbox)
+			if self.State ~= "active" then
+				return "fenced", "record is not active"
+			end
+			self._mailbox_v2 = mailbox
+			return "success", nil
+		end
+
+		function record:ProcessQueueAsync(max_messages)
+			self._queue_process_calls = (self._queue_process_calls or 0) + 1
+			self._queue_process_limit = max_messages
+			local handler = self._options.on_queue_message_async
+			if type(handler) ~= "function" then
+				return "invalid", "asynchronous queue handler is not configured"
+			end
+			local accepted, message = handler(
+				"AwardKill",
+				{ amount = 1 },
+				1,
+				"mailbox-message-1",
+				"remote-server",
+				12345,
+				{ source = "record-process" }
+			)
+			if not accepted then
+				return "budget", message
+			end
+			return "processed", "1"
+		end
+
 		function record:Stats()
 			return { busy = 0 }
 		end
@@ -407,23 +456,25 @@ end
 		module_require_counts.AlyaNumValue == 0,
 		"default PlayerData controller should not load AlyaNumValue when the field is unused"
 	)
-	assert(controller:Start(), "controller failed to start")
-	local deadline = os.clock() + 5
-	while player:GetAttribute("PlayerDataLoadStatus") ~= "Loaded"
-		and player:GetAttribute("PlayerDataLoadStatus") ~= "Failed"
-		and os.clock() < deadline do
-		task.wait(0.01)
-	end
-	assert(
-		player:GetAttribute("PlayerDataLoadStatus") == "Loaded",
-		("player session did not load (status=%s, kick=%s)"):format(
-			tostring(player:GetAttribute("PlayerDataLoadStatus")),
-			tostring(player._kick_message)
+	if not defer_start then
+		assert(controller:Start(), "controller failed to start")
+		local deadline = os.clock() + 5
+		while player:GetAttribute("PlayerDataLoadStatus") ~= "Loaded"
+			and player:GetAttribute("PlayerDataLoadStatus") ~= "Failed"
+			and os.clock() < deadline do
+			task.wait(0.01)
+		end
+		assert(
+			player:GetAttribute("PlayerDataLoadStatus") == "Loaded",
+			("player session did not load (status=%s, kick=%s)"):format(
+				tostring(player:GetAttribute("PlayerDataLoadStatus")),
+				tostring(player._kick_message)
+			)
 		)
-	)
-	assert(native_number_format_calls > 0, "default Kills display did not use AlyaNumFormatter")
-	assert(module_require_counts.AlyaNumValue == 0,
-		"default native leaderstats should not load the AlyaNumValue adapter")
+		assert(native_number_format_calls > 0, "default Kills display did not use AlyaNumFormatter")
+		assert(module_require_counts.AlyaNumValue == 0,
+			"default native leaderstats should not load the AlyaNumValue adapter")
+	end
 	return {
 		controller = controller,
 		player = player,

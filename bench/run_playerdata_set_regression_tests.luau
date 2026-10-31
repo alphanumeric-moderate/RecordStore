@@ -240,4 +240,241 @@ assert(save_calls == 1 and pressure.saved_records[pressure_key].kills == pressur
 drain_saved = true
 assert(pressure.controller:Shutdown(), "pressure controller failed to shut down")
 
+
+-- Shutdown may occur while the acceleration adapter is created, starts, or cleans up.
+for _, scenario in ipairs({ "constructor_yields", "success", "failure", "error", "cleanup_yields" }) do
+	local stop_calls = 0
+	local start_calls = 0
+	local acceleration = {}
+	function acceleration:Start()
+		start_calls += 1
+		if scenario ~= "cleanup_yields" then coroutine.yield() end
+		if scenario == "error" then error("startup failed") end
+		return scenario == "success", "startup failed"
+	end
+	function acceleration:Stop()
+		stop_calls += 1
+		if scenario == "cleanup_yields" then coroutine.yield() end
+	end
+	local harness = create_harness(true, nil, {
+		MailboxWakeupsEnabled = true,
+		QueueMessageHandler = function() return true end,
+		MessagingService = {},
+		HttpService = {},
+		RecordStoreV2 = { new = function()
+			return { Mailbox = { new = function() end }, Canonicalize = function() end }
+		end },
+		RecordStoreV2Acceleration = { new = function()
+			if scenario == "constructor_yields" then coroutine.yield() end
+			return acceleration
+		end },
+	}, true)
+	local connections = 0
+	for _, signal in ipairs({ harness.players.PlayerAdded, harness.players.PlayerRemoving }) do
+		local connect = signal.Connect
+		function signal:Connect(callback)
+			connections += 1
+			return connect(self, callback)
+		end
+	end
+	local startup = coroutine.create(function() return harness.controller:Start() end)
+	local ok, result = coroutine.resume(startup)
+	assert(ok and coroutine.status(startup) == "suspended", "startup did not pause: " .. scenario)
+	assert(harness.controller:Shutdown(), "shutdown during startup failed: " .. scenario)
+	ok, result = coroutine.resume(startup)
+	assert(ok and coroutine.status(startup) == "dead" and result == false,
+		"startup did not stop after shutdown: " .. scenario .. ": " .. tostring(result))
+	assert(stop_calls == 1, "acceleration was not stopped exactly once: " .. scenario)
+	assert(start_calls == (if scenario == "constructor_yields" then 0 else 1),
+		"unexpected acceleration startup calls: " .. scenario)
+	assert(connections == 0, "player signals were connected after shutdown: " .. scenario)
+	assert(harness.get_record_options() == nil, "player loading began after shutdown: " .. scenario)
+end
+
+-- V2 mailbox wake-ups are opt-in, handler-backed, and cleaned up with each session.
+do
+	local default_harness = create_harness(true)
+	local default_options = default_harness.get_record_options()
+	assert(default_options.durable_queue_enabled == false,
+		"the default PlayerDataCore configuration must not enable the durable queue")
+	assert(default_options.on_queue_message == nil and default_options.on_queue_message_async == nil,
+		"the default PlayerDataCore configuration must not install queue handlers")
+	assert(default_harness.controller:Shutdown(), "default mailbox regression controller failed to shut down")
+
+	local missing_handler_ok = pcall(function()
+		create_harness(true, nil, { MailboxWakeupsEnabled = true })
+	end)
+	assert(not missing_handler_ok,
+		"MailboxWakeupsEnabled must reject startup configuration without an application queue handler")
+	local missing_wakeup_ok = pcall(function()
+		create_harness(true, nil, { MemoryStoreAccelerationHintsEnabled = true })
+	end)
+	assert(not missing_wakeup_ok,
+		"MemoryStore hints must require MailboxWakeupsEnabled")
+
+	local received = {}
+	local acceleration_options = nil
+	local registration_callback = nil
+	local registration = nil
+	local stop_calls = 0
+	local fake_acceleration = {}
+	function fake_acceleration:Start()
+		self.started = true
+		return true, nil
+	end
+	function fake_acceleration:Register(owner, callback)
+		self.owner = owner
+		registration_callback = callback
+		registration = { Connected = true }
+		function registration:Disconnect()
+			self.Connected = false
+		end
+		return true, registration
+	end
+	function fake_acceleration:Stop()
+		stop_calls += 1
+		self.started = false
+		return true
+	end
+
+	local fake_acceleration_factory = {
+		new = function(options)
+			acceleration_options = options
+			return fake_acceleration
+		end,
+	}
+	local captured_mailbox_options = nil
+	local fake_v2_factory = {
+		new = function(_record_store, mailbox_module, options)
+			assert(type(mailbox_module) == "table" and type(mailbox_module.new) == "function",
+				"PlayerDataCore did not supply the embedded Mailbox V2 module")
+			assert(options.acceleration_module == fake_acceleration_factory,
+				"PlayerDataCore did not pass the acceleration adapter to RecordStoreV2")
+			local api = {
+				Canonicalize = function(owner)
+					return owner.profile_key
+				end,
+			}
+			api.Mailbox = {
+				new = function(store, owner, mailbox_options)
+					assert(store ~= nil, "PlayerDataCore did not create a mailbox storage adapter")
+					captured_mailbox_options = mailbox_options
+					local mailbox = {}
+					function mailbox:BindWakeups(adapter)
+						self.wakeups = adapter
+						return true, nil
+					end
+					mailbox._owner = owner
+					return mailbox
+				end,
+			}
+			return api
+		end,
+	}
+
+	local messaging_service = {}
+	local memory_store_service = {}
+	local http_service = {}
+	local wakeup_harness = create_harness(true, nil, {
+		MailboxWakeupsEnabled = true,
+		MemoryStoreAccelerationHintsEnabled = true,
+		MessagingService = messaging_service,
+		MemoryStoreService = memory_store_service,
+		HttpService = http_service,
+		ServerId = "playerdata-mailbox-regression",
+		RecordStoreV2 = fake_v2_factory,
+		RecordStoreV2Acceleration = fake_acceleration_factory,
+		QueueMessageHandler = function(
+			message_player,
+			message_type,
+			payload,
+			attempts,
+			message_id,
+			sender_job_id,
+			created_at,
+			context
+		)
+			received[#received + 1] = {
+				player = message_player,
+				message_type = message_type,
+				payload = payload,
+				attempts = attempts,
+				message_id = message_id,
+				sender_job_id = sender_job_id,
+				created_at = created_at,
+				context = context,
+			}
+			if message_type == "AwardKill" then
+				return true, nil
+			end
+			return false, "unsupported message type"
+		end,
+	})
+
+	local wakeup_record_options = wakeup_harness.get_record_options()
+	assert(wakeup_record_options.durable_queue_enabled == true,
+		"enabling PlayerDataCore mailbox wake-ups must enable the durable queue")
+	assert(type(wakeup_record_options.on_queue_message) == "function",
+		"legacy durable-queue polling handler was not installed")
+	assert(type(wakeup_record_options.on_queue_message_async) == "function",
+		"asynchronous V2 queue handler was not installed")
+	assert(acceleration_options ~= nil and acceleration_options.enabled == true,
+		"PlayerDataCore did not enable the V2 acceleration adapter")
+	assert(acceleration_options.enable_memory_store == true
+		and acceleration_options.memory_store_service == memory_store_service,
+		"PlayerDataCore did not enable MemoryStore acceleration hints")
+	assert(acceleration_options.messaging_service == messaging_service
+		and acceleration_options.http_service == http_service
+		and acceleration_options.server_id == "playerdata-mailbox-regression",
+		"PlayerDataCore did not pass its injected Roblox services to acceleration")
+	assert(wakeup_record_options ~= nil and wakeup_harness.record._mailbox_v2 ~= nil,
+		"PlayerDataCore did not bind a V2 mailbox to the active Record")
+	assert(captured_mailbox_options ~= nil
+		and captured_mailbox_options.active_record == wakeup_harness.record,
+		"PlayerDataCore did not bind the mailbox to the exact active Record")
+	local active_allowed, active_guard_error = captured_mailbox_options.activation_guard("enqueue")
+	assert(active_allowed == true, active_guard_error)
+	assert(wakeup_harness.record._mailbox_v2.wakeups == fake_acceleration,
+		"PlayerDataCore did not bind the wake-up adapter to Mailbox V2")
+	assert(registration ~= nil and registration.Connected,
+		"PlayerDataCore did not register the V2 mailbox wake-up callback")
+
+	local legacy_ok, legacy_error = wakeup_record_options.on_queue_message(
+		"AwardKill", { amount = 2 }, 1, "legacy-message-1", "legacy-server", 123
+	)
+	assert(legacy_ok, legacy_error)
+	local async_context = { source = "legacy-async" }
+	local async_ok, async_error = wakeup_record_options.on_queue_message_async(
+		"AwardKill", { amount = 3 }, 2, "legacy-message-2", "legacy-server", 124, async_context
+	)
+	assert(async_ok, async_error)
+	assert(#received == 2, "legacy queue messages were not routed through the application handler")
+	assert(received[1].player == wakeup_harness.player and received[2].context == async_context,
+		"legacy queue handler did not receive the player and delivery context")
+
+	registration_callback()
+	assert(wakeup_harness.record._queue_process_calls == 1
+		and wakeup_harness.record._queue_process_limit == 4,
+		"wake-up callback did not enter Record:ProcessQueueAsync with the configured batch cap")
+	assert(#received == 3 and received[3].message_id == "mailbox-message-1"
+		and received[3].context.source == "record-process",
+		"wake-up callback did not drain through RecordStore's queue processing path")
+
+	wakeup_harness.players.PlayerRemoving:Fire(wakeup_harness.player)
+	task.wait(0.1)
+	assert(registration.Connected == false,
+		"PlayerDataCore did not disconnect a player's wake-up registration on leave")
+	local inactive_guard = captured_mailbox_options.activation_guard("process")
+	assert(inactive_guard == false, "mailbox activation guard remained open after player removal")
+	local rejected_after_leave = wakeup_record_options.on_queue_message(
+		"AwardKill", { amount = 5 }, 1, "late-message", "remote-server", 126
+	)
+	assert(rejected_after_leave == false,
+		"PlayerDataCore accepted a queue message after its player session had been removed")
+	assert(wakeup_harness.controller:Shutdown(), "mailbox wake-up controller failed to shut down")
+	assert(stop_calls == 1 and fake_acceleration.started == false,
+		"PlayerDataCore did not stop the shared acceleration adapter exactly once on shutdown")
+end
+
 print("[PlayerData.Set] Lune integration regression passed")
+

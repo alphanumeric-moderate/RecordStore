@@ -177,6 +177,27 @@ AlyaNum uses an extended-range floating representation rather than arbitrary-pre
 New values use the `AlyaNumValue` JSON format version 1. The adapter includes a compatibility decoder for saved `InfiniteMathValue` version-1 envelopes and version-2 CodeNum payloads. Values that AlyaNum can represent are normalized to the AlyaNumValue format; legacy symbolic CodeNum values outside AlyaNum's supported range are preserved verbatim and retain a safe legacy display instead of being replaced with defaults. The old `InfiniteMathValue` name is recognized only as a persisted legacy-format identifier; RecordStore no longer loads or depends on InfiniteMath at runtime.
 
 The StringValue transport retains a conservative 199,999-byte payload limit. AlyaNum's MIT license and pinned upstream commit are recorded in `THIRD_PARTY_NOTICES/AlyaNum-MIT.txt`.
+### PlayerDataCore V2 mailbox wake-ups
+
+`PlayerDataCore` can optionally bind each active player Record to the embedded Mailbox V2 and use `RecordStoreV2Acceleration` for cross-server wake-ups. Enable it through the dependencies passed to `PlayerDataCore.new` (for the standard Rojo setup, configure the call in `PlayerData.luau`):
+
+```luau
+local PlayerDataCore = require(script.Parent.PlayerDataCore)
+local QueueMessageHandler = require(script.Parent.YourQueueMessageHandler)
+
+return PlayerDataCore.new({
+    MailboxWakeupsEnabled = true,
+    MemoryStoreAccelerationHintsEnabled = true,
+    QueueMessageHandler = QueueMessageHandler.handle,
+})
+```
+
+`QueueMessageHandler` is required when mailbox wake-ups are enabled. Its signature is `(player, message_type, payload, attempts, message_id, sender_job_id, created_at, context) -> (accepted, message?)`. Return `true` only after the application-owned operation has completed. Return `false` with a reason to leave the message retryable. The handler must be idempotent because Mailbox V2 provides at-least-once delivery; do not acknowledge a message before its durable effect is confirmed. Cross-server wake-ups enter `Record:ProcessQueueAsync`, preserving RecordStore's queue-busy coordination and normal message-handler path.
+
+`MailboxWakeupsEnabled` automatically enables the RecordStore durable queue for PlayerData sessions. `MemoryStoreAccelerationHintsEnabled` requires mailbox wake-ups and adds bounded MemoryStore sorted-map hints alongside MessagingService notifications. Both switches default to `false`, and no external services are initialized by the default PlayerDataCore setup. If the optional acceleration service cannot start, PlayerDataCore keeps the mailbox's durable polling/reconciliation path available and continues player loading.
+
+The wake-up adapter is not a profile-save accelerator: it only signals Mailbox V2 work. MessagingService and MemoryStore hints are advisory and may be lost, duplicated, delayed, or throttled. RecordStore's durable mailbox polling remains the recovery path. A Record whose legacy queue has not drained may reject V2 binding; PlayerDataCore leaves the existing queue handler available rather than discarding queued work.
+
 ## Rojo
 
 Build the standard production place, including `PlayerDataInitializer`:
