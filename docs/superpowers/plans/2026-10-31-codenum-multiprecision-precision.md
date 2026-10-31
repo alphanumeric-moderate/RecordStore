@@ -20,7 +20,9 @@
 - Use a default of 34 significant digits for division; addition and multiplication inherit the minimum operand precision unless overridden.
 - Do not claim arbitrary binary floating-point precision. Native-number inputs are converted through their shortest round-trippable decimal representation.
 - Precision arithmetic must not mutate operands or register input values.
-- CN2 precise payloads must be accepted without changing the CodeNumValue JSON envelope version; CN1 remains readable.
+- Keep CN1 native/Wide values in CodeNumValue envelope version 1 and write CN2 precise values in envelope version 2.
+- New readers accept envelope versions 1 and 2, and canonicalize early version-1/CN2 values already written by initial 0.6.0 adapters to version 2.
+- Unknown envelope versions must be rejected before normalization so an older v1-only reader can distinguish a v2 payload from its CN1 format.
 - Preserve the existing conservative serialized payload size limit.
 
 ## Review Focus
@@ -92,7 +94,8 @@
 - Modify: `codspeed.yml`
 
 **Interfaces:**
-- CodeNumValue accepts CN1 and CN2 values and keeps the existing JSON envelope format.
+- CodeNumValue writes CN1 values in envelope version 1 and CN2 values in envelope version 2; readers accept both and migrate early version-1/CN2 envelopes to version 2.
+- Unknown outer envelope versions are rejected rather than decoded as if their inner payload used the older CN1 codec.
 - Legacy CodeNum integer nodes use `fromInteger` so values beyond binary64's exact range can migrate without rounding.
 - Formatter recognizes CN1/CN2 strings and precise values.
 - Document the API, significant-digit limits, rounding model, conversion limits, and migration compatibility.

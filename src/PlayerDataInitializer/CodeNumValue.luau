@@ -3,9 +3,12 @@
 
 local HttpService = game:GetService("HttpService")
 
+local LEGACY_FORMAT_VERSION = 1
+local CURRENT_FORMAT_VERSION = 2
+
 local CodeNumValue = {
-	VERSION = "1.0.0",
-	FORMAT_VERSION = 1,
+	VERSION = "2.0.0",
+	FORMAT_VERSION = CURRENT_FORMAT_VERSION,
 }
 
 export type CodeNumWide = {
@@ -39,6 +42,10 @@ local SCHEMA = "CodeNumValue"
 local LEGACY_ALYANUM_SCHEMA = "AlyaNumValue"
 local LEGACY_INFINITEMATH_SCHEMA = "InfiniteMathValue"
 local LEGACY_CODE_SCHEMA = "CodeNum"
+
+local function is_supported_format_version(version: any): boolean
+	return version == LEGACY_FORMAT_VERSION or version == CodeNumValue.FORMAT_VERSION
+end
 
 local cached_api: any = nil
 local cached_formatter: any = nil
@@ -136,9 +143,12 @@ local function serialize_value(value: any): string
 	if type(payload) ~= "string" then
 		error("CodeNum.encode must return a string", 3)
 	end
+	local envelope_version = if string.match(payload, "^CN2|") ~= nil
+		then CodeNumValue.FORMAT_VERSION
+		else LEGACY_FORMAT_VERSION
 	local serialized = HttpService:JSONEncode({
 		schema = SCHEMA,
-		version = CodeNumValue.FORMAT_VERSION,
+		version = envelope_version,
 		value = payload,
 	})
 	if type(serialized) ~= "string" then
@@ -520,7 +530,7 @@ local function decode_serialized_impl(serialized: string): (any?, string?)
 	end
 
 	if envelope.schema == SCHEMA then
-		if envelope.version ~= CodeNumValue.FORMAT_VERSION or type(envelope.value) ~= "string" then
+		if not is_supported_format_version(envelope.version) or type(envelope.value) ~= "string" then
 			return nil, nil
 		end
 		local valid, decoded = try_decode_code_num(envelope.value)
@@ -601,7 +611,7 @@ function CodeNumValue.is_unsupported_version(value: any): boolean
 		return false
 	end
 	if envelope.schema == SCHEMA then
-		return envelope.version ~= CodeNumValue.FORMAT_VERSION
+		return not is_supported_format_version(envelope.version)
 	elseif envelope.schema == LEGACY_ALYANUM_SCHEMA then
 		return envelope.version ~= 1
 	elseif envelope.schema == LEGACY_INFINITEMATH_SCHEMA then
@@ -630,7 +640,7 @@ function CodeNumValue.inspect_serialized(value: any): boolean
 	local ok, envelope = pcall(function() return HttpService:JSONDecode(value) end)
 	if not ok or type(envelope) ~= "table" then return false end
 	if envelope.schema == SCHEMA then
-		return envelope.version == CodeNumValue.FORMAT_VERSION and inspect_code_num_payload(envelope.value)
+		return is_supported_format_version(envelope.version) and inspect_code_num_payload(envelope.value)
 	elseif envelope.schema == LEGACY_ALYANUM_SCHEMA then
 		return envelope.version == 1 and type(envelope.value) == "table"
 	elseif envelope.schema == LEGACY_INFINITEMATH_SCHEMA then

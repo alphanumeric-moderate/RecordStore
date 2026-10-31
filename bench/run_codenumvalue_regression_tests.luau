@@ -8,6 +8,8 @@ local payload = CodeNumValue.encode(large)
 local envelope = serde.decode("json", payload)
 assert(envelope.schema == "CodeNumValue" and envelope.version == 1)
 assert(envelope.value == CodeNum.encode(large))
+assert(CodeNumValue.FORMAT_VERSION == 2)
+assert(not CodeNumValue.is_unsupported_version(payload))
 assert(CodeNum.toString(CodeNumValue.decode(payload)) == CodeNum.toString(large))
 assert(CodeNumValue.normalize(payload) == payload, "canonical serialization was not stable")
 assert(CodeNumValue.is_serialized(payload), "current payload was not recognized")
@@ -37,9 +39,31 @@ assert(CodeNumValue.inspect_serialized(payload), "CN1 envelope inspection failed
 assert(CodeNumValue.inspect_serialized(precise_payload), "CN2 envelope inspection failed")
 assert(CodeNumValue.inspect_serialized(CodeNum.encode(large)), "raw CN1 inspection failed")
 assert(string.match(precise_envelope.value, "^CN2|P|") ~= nil, "CodeNumValue did not persist the CN2 codec")
+assert(precise_envelope.version == 2,
+	"CN2 precise payload must use CodeNumValue envelope version 2")
+assert(not CodeNumValue.is_unsupported_version(precise_payload),
+	"supported CN2 envelope version was classified as unsupported")
 assert(CodeNum.toString(CodeNumValue.decode(precise_payload)) == precise_integer_text,
 	"CodeNumValue CN2 round-trip changed exact decimal digits")
 assert(CodeNumValue.normalize(precise_payload) == precise_payload, "CN2 canonical serialization was not stable")
+
+local early_cn2_v1_payload = serde.encode("json", {
+	schema = "CodeNumValue",
+	version = 1,
+	value = precise_envelope.value,
+})
+assert(CodeNumValue.inspect_serialized(early_cn2_v1_payload),
+	"reader rejected CN2 payloads written in the earlier version-1 envelope")
+assert(not CodeNumValue.is_unsupported_version(early_cn2_v1_payload),
+	"earlier version-1 CN2 envelope was incorrectly treated as a future version")
+local migrated_cn2_payload = CodeNumValue.normalize(early_cn2_v1_payload)
+local migrated_cn2_envelope = serde.decode("json", migrated_cn2_payload)
+assert(migrated_cn2_envelope.version == 2
+	and migrated_cn2_envelope.value == precise_envelope.value,
+	"earlier version-1 CN2 envelope was not canonicalized to version 2")
+assert(CodeNum.compare(CodeNumValue.decode(migrated_cn2_payload), precise_integer) == 0,
+	"v1-to-v2 CN2 envelope migration changed its exact value")
+
 assert(CodeNumValue.format(precise_payload) == CodeNumValue.format(precise_integer),
 	"CodeNumValue did not format a persisted precise value")
 
