@@ -342,8 +342,10 @@ local register_add_result = CodeNum.add(rounded_zero_register, 1)
 assert(CodeNum.compare(register_add_result, 1) == 0 and CodeNum.wasRounded(register_add_result),
 	"precise register operand lost exact value or rounding provenance")
 local parsed_negative_zero = CodeNum.parse("-0", 34)
-assert(parsed_negative_zero == 0 and 1 / parsed_negative_zero == -math.huge,
-	"decimal parsing did not preserve negative zero")
+local parsed_negative_zero_number = CodeNum.toNumber(parsed_negative_zero)
+assert(CodeNum.isPrecise(parsed_negative_zero)
+	and parsed_negative_zero_number == 0 and 1 / parsed_negative_zero_number == -math.huge,
+	"decimal parsing did not preserve precise negative zero")
 local scientific_negative_zero = CodeNum.fromScientific(-0.0, "100")
 assert(scientific_negative_zero == 0 and 1 / scientific_negative_zero == -math.huge,
 	"scientific construction did not preserve negative zero")
