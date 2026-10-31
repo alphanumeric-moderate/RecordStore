@@ -1289,7 +1289,8 @@ do
 	assert(second:Save("owner-b-confirmation") == "saved", "owner B could not save after stale owner A reconciliation")
 	local final = RecordStore.Mock.get_record_raw(store_name, scope, key) :: { [string]: any }
 	assert(final.fencing_generation == second_generation, "owner A invalidated owner B after B's save")
-	assert(final.write_id == second:GetLastSaved().WriteId, "owner B's latest saved write ID was not durable")
+	local last_saved = second:GetLastSaved()
+	assert(last_saved ~= nil and final.write_id == last_saved.WriteId, "owner B's latest saved write ID was not durable")
 	assert(((final.session :: { [string]: any }).token) == second_token,
 		"owner B's session was lost after save")
 	assert((final.data :: { [string]: any }).coins == 77,

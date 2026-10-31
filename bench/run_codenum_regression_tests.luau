@@ -154,6 +154,18 @@ assert(string.match(precise_payload, "^CN2|P|") ~= nil, "precise values did not 
 local precise_decoded = CodeNum.decode(precise_payload)
 assert(CodeNum.isPrecise(precise_decoded), "CN2 decoding did not restore precise storage")
 assert(CodeNum.toString(precise_decoded) == long_decimal_text, "CN2 round-trip lost decimal digits")
+assert(not pcall(function() CodeNum.decode("CN2|P|1|1234|0|3") end),
+	"CN2 decoding silently rounded a coefficient exceeding its precision")
+assert(not pcall(function() CodeNum.decode("CN2|P|1|0012300|0|2") end),
+	"CN2 decoding accepted excess significant digits surrounded by zeros")
+assert(not pcall(function() CodeNum.decode("CN2|P|1|" .. string.rep("0", 4097) .. "|0|1") end),
+	"CN2 decoding accepted a coefficient above the digit limit")
+local padded_precise = CodeNum.decode("CN2|P|1|0012300|-2|3")
+assert(CodeNum.toString(padded_precise) == "123" and not CodeNum.wasRounded(padded_precise),
+	"CN2 decoding rejected or rounded insignificant coefficient zeros")
+local padded_zero = CodeNum.decode("CN2|P|-1|0000|0|1")
+assert(CodeNum.isPrecise(padded_zero) and 1 / CodeNum.toNumber(padded_zero) == -math.huge,
+	"CN2 decoding changed a padded signed zero")
 assert(CodeNum.compare(CodeNum.abs(CodeNum.parse("-" .. long_decimal_text)), long_decimal) == 0,
 	"precise absolute value changed the coefficient")
 assert(CodeNum.sign(CodeNum.parse("-" .. long_decimal_text)) == -1, "precise sign was incorrect")
@@ -179,6 +191,19 @@ assert(not pcall(function() CodeNum.pow(long_decimal, 0.5) end),
 
 local rounded_parse = CodeNum.parse("1.255", 2)
 assert(CodeNum.wasRounded(rounded_parse), "precision truncation was not recorded")
+local rounded_zero_power = CodeNum.pow(rounded_parse, 0)
+assert(CodeNum.isPrecise(rounded_zero_power) and CodeNum.wasRounded(rounded_zero_power)
+	and CodeNum.toString(CodeNum.add(rounded_zero_power, 123)) == "120",
+	"zero power discarded the precise operand's precision or rounding ancestry")
+local override_zero_power = CodeNum.pow(rounded_parse, 0, 4)
+assert(CodeNum.isPrecise(override_zero_power) and CodeNum.wasRounded(override_zero_power)
+	and CodeNum.toString(CodeNum.add(override_zero_power, 123)) == "124",
+	"zero power did not preserve its explicit precision and rounding ancestry")
+assert(CodeNum.isPrecise(CodeNum.pow(2, 0, 3)) and type(CodeNum.pow(2, 0)) == "number",
+	"zero power changed explicit or native precision dispatch")
+local zero_to_zero = CodeNum.pow(CodeNum.parse("0", 2), 0)
+assert(CodeNum.encode(zero_to_zero) == "CN2|P|1|1|0|2" and not CodeNum.wasRounded(zero_to_zero),
+	"zero to the zeroth power discarded its precise context or invented rounding")
 assert(not CodeNum.wasRounded(CodeNum.fromInteger("1255")), "exact integer was marked rounded")
 assert(CodeNum.wasRounded(CodeNum.div(CodeNum.fromInteger("1"), CodeNum.fromInteger("3"))),
 	"repeating precise division was not marked rounded")

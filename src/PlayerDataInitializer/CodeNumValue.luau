@@ -274,7 +274,7 @@ local function legacy_node_to_value(
 	local api = resolve_api()
 	local kind = node.kind
 	if kind == "finite" then
-		if not is_finite(node.value) then
+		if type(node.value) ~= "number" or not is_finite(node.value) then
 			return nil, false
 		end
 		return api.new(node.value), false

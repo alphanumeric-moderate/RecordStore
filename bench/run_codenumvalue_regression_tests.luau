@@ -205,6 +205,18 @@ end
 local function legacy_envelope(value, version)
 	return serde.encode("json", { schema = "CodeNum", version = version or 2, value = value })
 end
+for _, malformed_node in { { kind = "finite" }, { kind = "finite", value = "12" },
+	{ kind = "finite", value = false }, { kind = "finite", value = {} } } do
+	local nested_malformed = legacy_expression("add", {
+		kind = "expression", op = "mul", left = finite(2), right = malformed_node,
+	}, finite(1))
+	assert(CodeNumValue.normalize(nested_malformed) == nested_malformed,
+		"malformed nested finite node did not preserve its original legacy payload")
+end
+local invalid_precise_payload = '{"schema":"CodeNumValue","version":2,"value":"CN2|P|1|1234|0|3"}'
+assert(not CodeNumValue.is_serialized(invalid_precise_payload)
+	and not pcall(function() CodeNumValue.normalize(invalid_precise_payload) end),
+	"CodeNumValue accepted a CN2 coefficient exceeding its precision")
 local malformed_finite_payloads = {
 	legacy_envelope({ kind = "finite" }),
 	legacy_envelope({ kind = "finite", value = "12" }),

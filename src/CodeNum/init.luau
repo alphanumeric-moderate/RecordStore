@@ -2066,13 +2066,13 @@ local function preciseToString(value: Operand, significantDigits: number?): stri
 end
 
 local function precisePowerInteger(value: Operand, power: number, precision: number?): Value
-	if power == 0 then
-		return 1
-	end
 	local parts = preciseParts(value)
 	local selectedPrecision = precision or (if power < 0
 		then math.min(DEFAULT_DIVISION_PRECISION, parts.precision) else parts.precision)
 	validatePrecision(selectedPrecision)
+	if power == 0 then
+		return makePrecise(1, "1", 0, 0, 0, 0, nil, selectedPrecision, nil, nil, parts.wasRounded)
+	end
 	local guardDigits = math.min(32, math.ceil(math.log10(math.abs(power))) + 8)
 	-- Retain the input coefficient and allow guard digits for intermediate rounding.
 	local workingPrecision = math.min(MAX_PRECISE_DIGITS, math.max(#parts.digits, selectedPrecision) + guardDigits)
@@ -3194,6 +3194,10 @@ function CodeNum.decode(text: string): Value
 			or precision < 1 or precision > MAX_PRECISE_DIGITS
 			or #preciseDigits > MAX_PRECISE_DIGITS
 		then
+			error("CodeNum.decode received an invalid precise payload", 2)
+		end
+		local significantDigits = string.gsub(trimDecimalDigits(preciseDigits), "0+$", "")
+		if #significantDigits > precision then
 			error("CodeNum.decode received an invalid precise payload", 2)
 		end
 		local exponentIsBig, exponentSmall, exponentSign, exponentLength, exponentData =
