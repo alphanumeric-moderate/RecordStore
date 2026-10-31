@@ -2761,7 +2761,8 @@ function CodeNum.withPrecision(value: Operand, precision: number): Value
 	validatePrecision(precision)
 	local parts = preciseParts(value)
 	return makePrecise(
-		parts.sign, parts.digits, parts.expIsBig, parts.expSmall, parts.expSign,
+		if parts.sign == 0 then parts.zeroSign else parts.sign,
+		parts.digits, parts.expIsBig, parts.expSmall, parts.expSign,
 		parts.expLength, parts.expData, precision, nil, nil, parts.wasRounded
 	)
 end
