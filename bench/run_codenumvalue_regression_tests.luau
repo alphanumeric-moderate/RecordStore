@@ -115,6 +115,20 @@ assert(rounded_migrated ~= rounded_old_integer, "exact integer above 2^53 was no
 assert(CodeNum.toString(CodeNumValue.decode(rounded_migrated)) == "9007199254740993",
 	"legacy integer above 2^53 was rounded during migration")
 
+local maximum_legacy_integer_text = string.rep("9", 4096)
+local maximum_legacy_integer = serde.encode("json", {
+	schema = "CodeNum",
+	version = 2,
+	value = { kind = "integer", sign = 1, digits = maximum_legacy_integer_text },
+})
+local migrated_maximum_legacy_integer = CodeNumValue.normalize(maximum_legacy_integer)
+assert(migrated_maximum_legacy_integer ~= maximum_legacy_integer,
+	"4096-digit legacy exact integer was not migrated")
+assert(CodeNum.isPrecise(CodeNumValue.decode(migrated_maximum_legacy_integer)),
+	"4096-digit legacy integer did not use precise storage")
+assert(CodeNum.toString(CodeNumValue.decode(migrated_maximum_legacy_integer)) == maximum_legacy_integer_text,
+	"4096-digit legacy integer migration changed decimal digits")
+
 local function legacy_expression(op, left, right)
 	return serde.encode("json", {
 		schema = "CodeNum", version = 2,
