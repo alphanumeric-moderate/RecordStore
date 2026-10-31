@@ -1475,6 +1475,7 @@ local function parseDecimalParts(text: string): DecimalParts
 			expLength = 0,
 			expData = nil,
 			precision = MAX_PRECISE_DIGITS,
+			wasRounded = false,
 		}
 	end
 
