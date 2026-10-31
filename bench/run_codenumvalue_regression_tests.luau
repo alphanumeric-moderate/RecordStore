@@ -18,6 +18,26 @@ assert(CodeNumValue.format(CodeNumValue.normalize(-math.huge)) == "-Infinity")
 assert(CodeNumValue.format(CodeNumValue.normalize(0 / 0)) == "NaN")
 assert(CodeNumValue.format(payload) == "1.25e1000")
 
+local precise_integer_text = "123456789012345678901234567890"
+local precise_integer = CodeNum.fromInteger(precise_integer_text)
+assert(CodeNum.isPrecise(precise_integer), "fromInteger did not retain precise storage")
+local precise_payload = CodeNumValue.encode(precise_integer)
+local precise_envelope = serde.decode("json", precise_payload)
+assert(string.match(precise_envelope.value, "^CN2|P|") ~= nil, "CodeNumValue did not persist the CN2 codec")
+assert(CodeNum.toString(CodeNumValue.decode(precise_payload)) == precise_integer_text,
+	"CodeNumValue CN2 round-trip changed exact decimal digits")
+assert(CodeNumValue.normalize(precise_payload) == precise_payload, "CN2 canonical serialization was not stable")
+assert(CodeNumValue.format(precise_payload) == CodeNumValue.format(precise_integer),
+	"CodeNumValue did not format a persisted precise value")
+
+local precise_backing = CodeNumValue.new("PreciseCash", precise_integer)
+assert(CodeNum.toString(CodeNumValue.get(precise_backing)) == precise_integer_text,
+	"StringValue backing lost precise decimal digits")
+CodeNumValue.set(precise_backing, CodeNum.add(precise_integer, 1))
+assert(CodeNum.toString(CodeNumValue.get(precise_backing)) == "123456789012345678901234567891",
+	"StringValue set/get lost precise integer addition")
+precise_backing:Destroy()
+
 local backing = CodeNumValue.new("Cash", large)
 assert(backing.Name == "Cash")
 assert(CodeNum.compare(CodeNumValue.get(backing), large) == 0)
@@ -69,9 +89,12 @@ local old_code_integer = serde.encode("json", {
 	value = { kind = "integer", sign = 1, digits = "123456789012345678901234567890" },
 })
 assert(CodeNumValue.is_serialized(old_code_integer))
-assert(CodeNumValue.normalize(old_code_integer) == old_code_integer,
-	"old exact integers outside binary64's exact integer range must be preserved")
-assert(string.find(CodeNumValue.format(old_code_integer), "…", 1, true) ~= nil)
+local migrated_old_code_integer = CodeNumValue.normalize(old_code_integer)
+assert(migrated_old_code_integer ~= old_code_integer, "legacy exact integer was not migrated")
+assert(CodeNum.isPrecise(CodeNumValue.decode(migrated_old_code_integer)),
+	"legacy exact integer did not use precise storage")
+assert(CodeNum.toString(CodeNumValue.decode(migrated_old_code_integer))
+	== "123456789012345678901234567890", "legacy exact integer migration rounded decimal digits")
 
 local safe_old_integer = serde.encode("json", {
 	schema = "CodeNum",
@@ -87,8 +110,10 @@ local rounded_old_integer = serde.encode("json", {
 	version = 2,
 	value = { kind = "integer", sign = 1, digits = "9007199254740993" },
 })
-assert(CodeNumValue.normalize(rounded_old_integer) == rounded_old_integer,
-	"non-representable legacy integer was rounded during migration")
+local rounded_migrated = CodeNumValue.normalize(rounded_old_integer)
+assert(rounded_migrated ~= rounded_old_integer, "exact integer above 2^53 was not migrated")
+assert(CodeNum.toString(CodeNumValue.decode(rounded_migrated)) == "9007199254740993",
+	"legacy integer above 2^53 was rounded during migration")
 
 local function legacy_expression(op, left, right)
 	return serde.encode("json", {
@@ -103,16 +128,42 @@ local function finite(value)
 	return { kind = "finite", value = value }
 end
 
+local exact_expression_cases = {
+	{
+		legacy_expression("add", integer(1, "9007199254740992"), finite(1)),
+		"9007199254740993",
+	},
+	{
+		legacy_expression("sub", integer(-1, "9007199254740992"), finite(1)),
+		"-9007199254740993",
+	},
+	{
+		legacy_expression("mul", integer(1, "4503599627370496"), finite(2)),
+		"9007199254740992",
+	},
+	{
+		legacy_expression("add", {
+			kind = "expression", op = "add",
+			left = integer(1, "9007199254740992"), right = finite(1),
+		}, finite(-1)),
+		"9007199254740992",
+	},
+}
+for _, case in exact_expression_cases do
+	local expression = case[1]
+	local expected = case[2]
+	local migrated = CodeNumValue.normalize(expression)
+	assert(migrated ~= expression, "exact legacy integer expression was not migrated")
+	assert(CodeNum.toString(CodeNumValue.decode(migrated)) == expected,
+		"precise legacy expression migration changed its exact result")
+end
 for _, expression in {
-	legacy_expression("add", integer(1, "9007199254740992"), finite(1)),
-	legacy_expression("sub", integer(-1, "9007199254740992"), finite(1)),
-	legacy_expression("mul", integer(1, "4503599627370496"), finite(2)),
 	legacy_expression("pow", finite(2), finite(53)),
-	legacy_expression("add", { kind = "expression", op = "add", left = integer(1, "9007199254740992"), right = finite(1) }, finite(-1)),
 	legacy_expression("mul", { kind = "scientific", sign = 1, mantissa = 1.25, exponent = "1000" }, finite(2)),
 	legacy_expression("mul", { kind = "scientific", sign = -1, mantissa = 1.25, exponent = "1000" }, finite(2)),
 } do
-	assert(CodeNumValue.normalize(expression) == expression, "unsafe integer expression was migrated")
+	assert(CodeNumValue.normalize(expression) == expression,
+		"binary64 or Wide legacy expression was migrated without exact significand evidence")
 end
 local safe_expression = legacy_expression("add", integer(1, "9007199254740990"), finite(1))
 assert(CodeNum.compare(CodeNumValue.decode(CodeNumValue.normalize(safe_expression)), 9007199254740991) == 0)
