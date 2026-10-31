@@ -218,6 +218,39 @@ local encoded_rounded_zero = CodeNum.encode(rounded_zero_product)
 assert(not CodeNum.wasRounded(CodeNum.decode(encoded_rounded_zero)),
 	"runtime-only rounding provenance was unexpectedly serialized")
 
+local negative_rounded = CodeNum.parse("-1.255", 2)
+local negative_rounded_zero = CodeNum.mul(negative_rounded, 0)
+assert(CodeNum.wasRounded(negative_rounded_zero),
+	"negative zero result discarded rounded arithmetic ancestry")
+local negative_zero_number = CodeNum.toNumber(negative_rounded_zero)
+assert(negative_zero_number == 0 and 1 / negative_zero_number == -math.huge,
+	"precise rounded zero lost its negative sign during native conversion")
+local negative_zero_power = CodeNum.toNumber(CodeNum.pow(negative_rounded_zero, 3))
+assert(negative_zero_power == 0 and 1 / negative_zero_power == -math.huge,
+	"odd integer power changed the sign of precise negative zero")
+local positive_zero_power = CodeNum.toNumber(CodeNum.pow(negative_rounded_zero, 2))
+assert(positive_zero_power == 0 and 1 / positive_zero_power == math.huge,
+	"even integer power did not produce positive zero")
+local negative_zero_precision = CodeNum.withPrecision(negative_rounded_zero, 12)
+local negative_zero_precision_number = CodeNum.toNumber(negative_zero_precision)
+assert(CodeNum.wasRounded(negative_zero_precision)
+	and negative_zero_precision_number == 0
+	and 1 / negative_zero_precision_number == -math.huge,
+	"withPrecision did not preserve negative-zero provenance")
+local parsed_negative_zero = CodeNum.parse("-0", 34)
+assert(parsed_negative_zero == 0 and 1 / parsed_negative_zero == -math.huge,
+	"decimal parsing did not preserve negative zero")
+local scientific_negative_zero = CodeNum.fromScientific(-0.0, "100")
+assert(scientific_negative_zero == 0 and 1 / scientific_negative_zero == -math.huge,
+	"scientific construction did not preserve negative zero")
+local encoded_negative_zero = CodeNum.encode(negative_rounded_zero)
+assert(encoded_negative_zero == "CN1|N|-0",
+	"precise negative zero did not use the signed native zero codec")
+local decoded_negative_zero = CodeNum.decode(encoded_negative_zero)
+assert(decoded_negative_zero == 0 and 1 / decoded_negative_zero == -math.huge
+	and not CodeNum.wasRounded(decoded_negative_zero),
+	"negative zero codec changed its sign or persisted runtime-only provenance")
+
 local invalid_precision_operations = {
 	function() CodeNum.add(math.huge, 1, 0) end,
 	function() CodeNum.sub(0 / 0, 1, 4097) end,
