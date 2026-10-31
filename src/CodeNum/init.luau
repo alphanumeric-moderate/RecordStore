@@ -3003,6 +3003,9 @@ function CodeNum.toNumber(value: Operand): number
 	assertValidValue(value)
 	if isPrecise(value) then
 		local mantissa, isBig, small, sign, length, data = preciseScientificParts(value)
+		if mantissa == 0 then
+			return mantissa
+		end
 		local exponent = exponentToNumber(isBig, small, sign, length, data)
 		if exponent == nil then
 			return if mantissa < 0 then -math.huge else math.huge
