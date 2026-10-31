@@ -103,7 +103,7 @@ local function resolve_options(options: Options?): (number, boolean)
 	elseif type(trim) ~= "boolean" then
 		error("options.trim_trailing_zeros must be a boolean", 3)
 	end
-	return decimals, trim
+	return decimals, trim :: boolean
 end
 
 local function trim_decimal_zeros(value: string): string

@@ -25,6 +25,10 @@ export type LegacyValue = {
 
 export type Value = number | CodeNumWide | LegacyValue
 export type Node = { kind: string }
+export type Options = {
+	decimals: number?,
+	trim_trailing_zeros: boolean?,
+}
 
 local MAX_SERIALIZED_LENGTH = 199_999
 local SCHEMA = "CodeNumValue"

@@ -28,9 +28,9 @@ type RegisterState = {
 export type Operand = Value | Register
 
 local CodeNum = {}
-local WIDE_BUFFERS: {[Wide]: buffer} = setmetatable({}, { __mode = "k" })
-local WIDE_VALUES: {[Wide]: boolean} = setmetatable({}, { __mode = "k" })
-local REGISTER_STATES: {[Register]: RegisterState} = setmetatable({}, { __mode = "k" })
+local WIDE_BUFFERS = setmetatable({} :: {[Wide]: buffer}, { __mode = "k" })
+local WIDE_VALUES = setmetatable({} :: {[Wide]: boolean}, { __mode = "k" })
+local REGISTER_STATES = setmetatable({} :: {[Register]: RegisterState}, { __mode = "k" })
 
 local BASE = 67108864
 local BASE_BYTES = 4
@@ -196,7 +196,6 @@ local function subtractMagnitudeParts(
 	bData: buffer?
 ): number
 	local aCount = if aIsBig == 1 then aLength else smallMagnitudeLength(aSmall)
-	local bCount = if bIsBig == 1 then bLength else smallMagnitudeLength(bSmall)
 	local borrow = 0
 
 	for index = 0, aCount - 1 do
@@ -523,7 +522,8 @@ local function exponentAdd(
 				buffer.copy(out, 0, bData :: buffer, 0, bLength * BASE_BYTES)
 			end
 		else
-			_, resultLength = writeSmallMagnitude(out, bSmall)
+			local _ignoredSign: number
+			_ignoredSign, resultLength = writeSmallMagnitude(out, bSmall)
 		end
 	elseif bResolvedSign == 0 then
 		resultSign = aResolvedSign
@@ -533,7 +533,8 @@ local function exponentAdd(
 				buffer.copy(out, 0, aData :: buffer, 0, aLength * BASE_BYTES)
 			end
 		else
-			_, resultLength = writeSmallMagnitude(out, aSmall)
+			local _ignoredSign: number
+			_ignoredSign, resultLength = writeSmallMagnitude(out, aSmall)
 		end
 	elseif aResolvedSign == bResolvedSign then
 		resultSign = aResolvedSign
@@ -2004,7 +2005,7 @@ function CodeNum.decode(text: string): Value
 end
 
 function CodeNum.createRegister(): Register
-	local register: Register = table.freeze({ _codeNum = "register" })
+	local register: Register = table.freeze({ _codeNum = "register" :: "register" })
 	REGISTER_STATES[register] = {
 		kind = 0,
 		n = 0,
