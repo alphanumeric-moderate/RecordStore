@@ -310,6 +310,22 @@ assert(CodeNum.toString(CodeNum.add(positive_rounded_zero, integer_123)) == "120
 	"positive rounded zero did not apply its precision context before serialization")
 assert(CodeNum.toString(CodeNum.add(decoded_positive_zero, integer_123)) == "120",
 	"CN2 round-trip discarded the precision context of positive zero")
+for _, sum in { CodeNum.add(decoded_positive_zero, 0), CodeNum.add(0, decoded_positive_zero),
+	CodeNum.sub(decoded_positive_zero, 0) } do
+	assert(CodeNum.isPrecise(sum) and not CodeNum.wasRounded(sum),
+		"zero arithmetic discarded precise storage or introduced rounding provenance")
+	local round_trip = CodeNum.decode(CodeNum.encode(sum))
+	assert(CodeNum.toString(CodeNum.add(round_trip, 123)) == "120",
+		"zero arithmetic discarded precision across a chained codec round-trip")
+end
+local rounded_zero_sum = CodeNum.add(positive_rounded_zero, 0)
+assert(CodeNum.wasRounded(rounded_zero_sum), "zero addition discarded rounding provenance")
+local zero_register = CodeNum.createRegister()
+CodeNum.addInto(zero_register, decoded_positive_zero, 0)
+CodeNum.addInto(zero_register, zero_register, 0)
+assert(CodeNum.isPrecise(zero_register) and not CodeNum.wasRounded(zero_register)
+	and CodeNum.toString(CodeNum.add(zero_register, 123)) == "120",
+	"aliased register zero addition discarded its precision context")
 
 local encoded_negative_zero = CodeNum.encode(negative_rounded_zero)
 assert(encoded_negative_zero == "CN2|P|-1|0|0|2",
@@ -322,6 +338,9 @@ assert(CodeNum.encode(decoded_negative_zero) == encoded_negative_zero,
 local negative_zero_number = CodeNum.toNumber(decoded_negative_zero)
 assert(negative_zero_number == 0 and 1 / negative_zero_number == -math.huge,
 	"negative precise zero changed sign during native conversion")
+local negative_zero_sum = CodeNum.toNumber(CodeNum.add(decoded_negative_zero, -0.0))
+assert(negative_zero_sum == 0 and 1 / negative_zero_sum == -math.huge,
+	"precise zero addition changed the sign of two negative zeros")
 
 local native_positive_zero_payload = CodeNum.encode(0)
 local native_negative_zero_payload = CodeNum.encode(-0.0)

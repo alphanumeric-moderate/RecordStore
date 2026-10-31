@@ -1780,7 +1780,7 @@ local function preciseAddOperands(
 		local zeroSign = if aParts.zeroSign < 0 and bParts.zeroSign < 0 then -1 else 1
 		return makePrecise(
 			zeroSign, "0", 0, 0, 0, 0, nil, precision, destination, nil,
-			aParts.wasRounded or bParts.wasRounded
+			aParts.wasRounded or bParts.wasRounded, isPrecise(a) or isPrecise(b)
 		)
 	end
 	if aParts.sign == 0 then
