@@ -199,8 +199,58 @@ local negative_large = CodeNum.fromInteger("-9007199254740993")
 local positive_large = CodeNum.fromInteger("9007199254740992")
 assert(CodeNum.toString(CodeNum.add(negative_large, positive_large)) == "-1",
 	"mixed-sign precise addition corrupted its result sign")
-assert(CodeNum.add(exact_integer, CodeNum.fromInteger("-9007199254740993")) == 0,
-	"exact precise cancellation did not produce zero")
+local exact_integer_cancellation = CodeNum.add(
+	exact_integer, CodeNum.fromInteger("-9007199254740993")
+)
+assert(CodeNum.compare(exact_integer_cancellation, 0) == 0
+	and CodeNum.isPrecise(exact_integer_cancellation)
+	and not CodeNum.wasRounded(exact_integer_cancellation),
+	"exact precise cancellation did not retain a precise zero without inventing rounding provenance")
+
+local precision_two_value = CodeNum.parse("1.2", 2)
+local explicit_precision_zero = CodeNum.parse("0", 2)
+assert(CodeNum.isPrecise(explicit_precision_zero)
+	and not CodeNum.wasRounded(explicit_precision_zero)
+	and CodeNum.toString(CodeNum.add(explicit_precision_zero, 123)) == "120",
+	"explicit precision on zero was not retained by parsing")
+local negative_explicit_precision_zero = CodeNum.parse("-0", 2)
+assert(CodeNum.isPrecise(negative_explicit_precision_zero)
+	and CodeNum.toNumber(negative_explicit_precision_zero) == 0
+	and 1 / CodeNum.toNumber(negative_explicit_precision_zero) == -math.huge,
+	"explicit negative-zero precision or sign was not retained by parsing")
+local integer_zero = CodeNum.fromInteger("0")
+assert(CodeNum.isPrecise(integer_zero),
+	"exact integer construction collapsed zero to native storage")
+local assigned_precision_zero = CodeNum.withPrecision(0, 2)
+assert(CodeNum.isPrecise(assigned_precision_zero)
+	and CodeNum.toString(CodeNum.add(assigned_precision_zero, 123)) == "120",
+	"withPrecision did not assign a precision context to native zero")
+
+local exact_cancellation_zero = CodeNum.sub(precision_two_value, precision_two_value)
+assert(CodeNum.isPrecise(exact_cancellation_zero)
+	and not CodeNum.wasRounded(exact_cancellation_zero)
+	and CodeNum.toString(CodeNum.add(exact_cancellation_zero, 123)) == "120",
+	"exact cancellation discarded the selected precision context")
+local exact_product_zero = CodeNum.mul(precision_two_value, 0)
+assert(CodeNum.isPrecise(exact_product_zero)
+	and not CodeNum.wasRounded(exact_product_zero)
+	and CodeNum.toString(CodeNum.add(exact_product_zero, 123)) == "120",
+	"multiplication by native zero discarded the precise operand's context")
+local exact_quotient_zero = CodeNum.div(explicit_precision_zero, precision_two_value)
+assert(CodeNum.isPrecise(exact_quotient_zero)
+	and not CodeNum.wasRounded(exact_quotient_zero)
+	and CodeNum.toString(CodeNum.add(exact_quotient_zero, 123)) == "120",
+	"exact division of precise zero discarded its precision context")
+local absolute_precise_zero = CodeNum.abs(decoded_positive_zero)
+assert(CodeNum.isPrecise(absolute_precise_zero)
+	and not CodeNum.wasRounded(absolute_precise_zero)
+	and CodeNum.toString(CodeNum.add(absolute_precise_zero, 123)) == "120",
+	"absolute value collapsed precise zero storage")
+local powered_precise_zero = CodeNum.pow(decoded_positive_zero, 2)
+assert(CodeNum.isPrecise(powered_precise_zero)
+	and not CodeNum.wasRounded(powered_precise_zero)
+	and CodeNum.toString(CodeNum.add(powered_precise_zero, 123)) == "120",
+	"integer power collapsed precise zero storage")
 assert(CodeNum.toString(CodeNum.sub(negative_large, positive_large)) == "-18014398509481985",
 	"mixed-sign precise subtraction changed the exact result")
 
