@@ -7148,7 +7148,7 @@ local mock_get_failure_message: string? = nil
 local close_internal: (state: InternalState, shutdown: boolean) -> (ResultCode, string?)
 local complete_deferred_takeover: (state: InternalState) -> ()
 local process_queue_internal: (state: InternalState, max_messages: number) -> (ResultCode, string?)
-local copy_value: (value: unknown) -> JsonValue?
+local copy_value: (value: unknown, shape_validation: { nodes: number, message: string? }?) -> JsonValue?
 local track_external_data_mutation: (state: InternalState) -> ()
 local messaging_enabled: (state: InternalState) -> boolean
 local publish_record_message: (state: InternalState, kind: string, message_type: string?, data: JsonValue?, generation: number?, target_job_id: string?, target_token: string?, request_id: string?, handoff_status: HandoffStatus?, requester_job_id: string?) -> (boolean, string?)
@@ -7506,7 +7506,7 @@ local function backend_metadata_matches(info: BackendInfo?, envelope: Envelope):
 	return true
 end
 
-local function copy_value_internal(
+copy_value = function(
 	value: unknown,
 	shape_validation: { nodes: number, message: string? }?
 ): JsonValue?
@@ -7630,18 +7630,7 @@ local function copy_value_internal(
 	return clone(value, 1)
 end
 
-copy_value = function(value: unknown): JsonValue?
-	return copy_value_internal(value, nil)
-end
 
-local function copy_value_with_shape_validation(value: unknown): (JsonValue?, string?)
-	local validation: { nodes: number, message: string? } = {
-		nodes = 0,
-		message = nil,
-	}
-	local copied = copy_value_internal(value, validation)
-	return copied, validation.message
-end
 local function encode_non_finite_numbers(
 	value: JsonValue
 ): (JsonValue, { NonFiniteNumberMarker })
@@ -13490,14 +13479,15 @@ local function update(self: Record, callback: (JsonValue?) -> JsonValue?): (Resu
 	if next_value == nil then
 		return "validation", "update callback returned nil"
 	end
-	local copy_ok, copied_or_error, shape_message = pcall(function()
-		return copy_value_with_shape_validation(next_value)
+	local shape_validation = { nodes = 0, message = nil }
+	local copy_ok, copied_or_error = pcall(function()
+		return copy_value(next_value, shape_validation)
 	end)
 	if not copy_ok or copied_or_error == nil then
 		return "validation", "update callback returned invalid data"
 	end
-	if shape_message ~= nil then
-		return "validation", shape_message
+	if shape_validation.message ~= nil then
+		return "validation", shape_validation.message
 	end
 	local copied = copied_or_error
 	local valid, message = validate_value(copied, state.options.validator, true)
