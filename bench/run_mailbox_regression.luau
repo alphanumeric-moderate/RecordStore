@@ -2,12 +2,15 @@
 local Shim = require("./RobloxShim")
 local serde = require("@lune/serde")
 local RecordStore = Shim.load()
-local MailboxV2 = RecordStore.MailboxV2
+local Mailbox = RecordStore.Mailbox
+assert(Mailbox ~= nil, "canonical RecordStore.Mailbox V1 API is missing")
+assert(Mailbox.Version == 1 and Mailbox.ProtocolVersion == 2, "mailbox API/storage protocol versions were conflated")
+assert(RecordStore.MailboxV2 == nil, "superseded MailboxV2 public API remained exposed")
 
 local now_ms = 1_800_000_000_000
 local guid_counter = 0
 local owner = {
-	store_name = "MailboxV2OrderingRegression",
+	store_name = "MailboxOrderingRegression",
 	scope = "global",
 	profile_key = "profile-1",
 	user_id = 123,
@@ -38,7 +41,7 @@ end
 
 local function new_mailbox(options, store)
 	options = table.clone(options or {})
-	store = store or MailboxV2.MockStore()
+	store = store or Mailbox.MockStore()
 	options.active_record = active_record
 	options.allow_unattested_activation = true
 	options.encode = function(value) return serde.encode("json", value) end
@@ -52,16 +55,16 @@ local function new_mailbox(options, store)
 	options.dlq_segment_max_messages = options.dlq_segment_max_messages or 8
 	options.preparation_shard_count = options.preparation_shard_count or 2
 	options.preparation_max_entries_per_shard = options.preparation_max_entries_per_shard or 16
-	return MailboxV2.new(store, owner, options), store
+	return Mailbox.new(store, owner, options), store
 end
 
 do
 	local unsafe_owner = table.clone(owner)
 	unsafe_owner.user_id = 9007199254740992
 	local accepted = pcall(function()
-		MailboxV2.new(MailboxV2.MockStore(), unsafe_owner, {})
+		Mailbox.new(Mailbox.MockStore(), unsafe_owner, {})
 	end)
-	assert(not accepted, "embedded Mailbox V2 accepted an owner UserId beyond the safe-integer range")
+	assert(not accepted, "embedded Mailbox V1 accepted an owner UserId beyond the safe-integer range")
 end
 
 local function enqueue(mailbox, message_type, idempotency_key, ordering_key, priority, available_at)
@@ -85,8 +88,8 @@ local function process_one(mailbox, handler)
 end
 
 local function test_platform_guid_fallback_when_no_callback_is_supplied()
-	local store = MailboxV2.MockStore()
-	local mailbox = MailboxV2.new(store, owner, {
+	local store = Mailbox.MockStore()
+	local mailbox = Mailbox.new(store, owner, {
 		allow_unattested_activation = true,
 		encode = function(value) return serde.encode("json", value) end,
 		now_ms = function() return now_ms end,
@@ -148,7 +151,7 @@ local function test_injected_clock_and_guid_contracts_fail_closed()
 end
 
 local function test_clock_is_never_called_inside_update_async_transform()
-	local backing = MailboxV2.MockStore()
+	local backing = Mailbox.MockStore()
 	local inside_transform = false
 	local store = {
 		GetAsync = function(_, key) return backing:GetAsync(key) end,
@@ -239,7 +242,7 @@ local function test_ordering_is_opt_in_and_input_validation_is_side_effect_free(
 end
 
 local function test_producer_idempotency_conflict_and_preparation_response_loss()
-	local backing = MailboxV2.MockStore()
+	local backing = Mailbox.MockStore()
 	local route = nil
 	local lost_route_write = false
 	local store = {
@@ -295,7 +298,7 @@ end
 
 local function test_every_enqueue_write_boundary_recovers_durably()
 	local function create_mailbox(failure_index, failure_mode)
-		local backing = MailboxV2.MockStore()
+		local backing = Mailbox.MockStore()
 		local write_trace = {}
 		local store = {
 			GetAsync = function(_, key) return backing:GetAsync(key) end,
@@ -424,7 +427,7 @@ local function test_delayed_predecessor_blocks_later_high_priority_work()
 end
 
 local function test_dead_letter_replay_gets_a_new_ordering_sequence_and_recovers_from_stale_reads()
-	local backing = MailboxV2.MockStore()
+	local backing = Mailbox.MockStore()
 	local stale_reads = {}
 	local store = {
 		GetAsync = function(_, key)
@@ -554,7 +557,7 @@ local function test_corrupt_ordering_index_fails_closed()
 end
 
 local function test_stale_cache_cannot_bypass_claim_metadata_validation()
-	local backing = MailboxV2.MockStore()
+	local backing = Mailbox.MockStore()
 	local target_route = nil
 	local cached_record = nil
 	local serve_stale = false
@@ -579,7 +582,7 @@ local function test_stale_cache_cannot_bypass_claim_metadata_validation()
 	assert(backing.values[target_route].state == "ready",
 		"invalid canonical metadata was mutated by a claim despite the stale cache")
 
-	local second_backing = MailboxV2.MockStore()
+	local second_backing = Mailbox.MockStore()
 	local second_target = nil
 	local mutate_key_on_claim = false
 	local mutated = false
@@ -830,7 +833,7 @@ local function test_future_schema_writers_cancel_updates()
 
 	local order_key = "future-ordering-schema"
 	local intercepted_order_route = nil
-	local order_backing = MailboxV2.MockStore()
+	local order_backing = Mailbox.MockStore()
 	local order_store = {
 		GetAsync = function(_, key) return order_backing:GetAsync(key) end,
 		GetAsyncFresh = function(_, key) return order_backing:GetAsyncFresh(key) end,
@@ -862,7 +865,7 @@ local function test_future_schema_writers_cancel_updates()
 end
 
 local function test_reclaim_fences_a_concurrent_append()
-	local backing = MailboxV2.MockStore()
+	local backing = Mailbox.MockStore()
 	local target_segment_key = nil
 	local intercept_armed = false
 	local injected = false
@@ -944,7 +947,7 @@ local function test_reclaim_fences_a_concurrent_append()
 end
 
 local function test_reclaim_uses_fresh_canonical_state()
-	local backing = MailboxV2.MockStore()
+	local backing = Mailbox.MockStore()
 	local stale_route = nil
 	local stale_terminal = nil
 	local store = {
@@ -1054,7 +1057,7 @@ local function test_retrying_predecessor_blocks_same_key_successor()
 end
 
 local function test_claim_update_fails_closed_if_order_sequence_changes_after_arbitration()
-	local backing = MailboxV2.MockStore()
+	local backing = Mailbox.MockStore()
 	local claim_route = nil
 	local intercept_claim = false
 	local intercept_done = false
@@ -1139,7 +1142,7 @@ local function test_priority_burst_policy_is_bounded_and_configurable()
 end
 
 local function test_acknowledgement_response_loss_recovers_without_redelivery()
-	local backing = MailboxV2.MockStore()
+	local backing = Mailbox.MockStore()
 	local route = nil
 	local fail_next_route_update = false
 	local store = {
@@ -1186,7 +1189,7 @@ end
 
 local function test_acknowledgement_terminal_write_fault_matrix()
 	for _, failure_mode in ipairs({ "before", "after" }) do
-		local backing = MailboxV2.MockStore()
+		local backing = Mailbox.MockStore()
 		local route = nil
 		local injected = false
 		local store = {
@@ -1249,7 +1252,7 @@ local function test_acknowledgement_terminal_write_fault_matrix()
 end
 
 local function test_dead_letter_transition_response_loss_recovers_once()
-	local backing = MailboxV2.MockStore()
+	local backing = Mailbox.MockStore()
 	local route = nil
 	local fail_next_route_update = false
 	local store = {
@@ -1397,8 +1400,8 @@ local function test_mailbox_maintenance_reports_bounded_state_and_fails_closed()
 		"mailbox maintenance capacity/readiness report was inconsistent with the observed queue")
 	assert(queued.message_id ~= nil, "maintenance fixture did not retain a canonical message ID")
 
-	local denied_store = MailboxV2.MockStore()
-	local denied_mailbox = MailboxV2.new(denied_store, owner, {
+	local denied_store = Mailbox.MockStore()
+	local denied_mailbox = Mailbox.new(denied_store, owner, {
 		active_record = active_record,
 		activation_guard = function() return false, "maintenance not enabled" end,
 		encode = function(value) return serde.encode("json", value) end,
@@ -1413,10 +1416,10 @@ end
 local function test_recordstore_installs_shared_scheduler_for_v2_claim_renewal()
 	RecordStore.Mock.reset()
 	local renewal_calls = 0
-	local record = RecordStore.Mock.new("MailboxV2SchedulerIntegration", "global", "profile-scheduler", {
+	local record = RecordStore.Mock.new("MailboxSchedulerIntegration", "global", "profile-scheduler", {
 		schema_version = 1,
 		durable_queue_enabled = true,
-		queue_store_name = "MailboxV2SchedulerIntegrationQueue",
+		queue_store_name = "MailboxSchedulerIntegrationQueue",
 		autosave_interval = 1000,
 		lease_duration = 180,
 		lease_renewal = 60,
@@ -1437,7 +1440,7 @@ local function test_recordstore_installs_shared_scheduler_for_v2_claim_renewal()
 	local adapter, adapter_code, adapter_message = record:CreateMailboxStoreAdapter()
 	assert(adapter_code == "success" and type(adapter) == "table",
 		"core mailbox adapter creation failed: " .. tostring(adapter_message))
-	local mailbox = MailboxV2.new(adapter, record:GetMailboxOwner(), {
+	local mailbox = Mailbox.new(adapter, record:GetMailboxOwner(), {
 		active_record = record,
 		encode = function(value) return serde.encode("json", value) end,
 		activation_guard = function() return true end,
@@ -1450,7 +1453,7 @@ local function test_recordstore_installs_shared_scheduler_for_v2_claim_renewal()
 	local enabled_snapshot = RecordStore.get_scheduler_snapshot()
 	assert(enabled_snapshot.enabled == true,
 		"shared scheduler request was not activated: " .. serde.encode("json", enabled_snapshot.rollout))
-	local bind_result, bind_message = record:BindMailboxV2Async(mailbox)
+	local bind_result, bind_message = record:BindMailboxAsync(mailbox)
 	assert(bind_result == "success", "core did not bind the V2 mailbox: " .. tostring(bind_message))
 	local bound_snapshot = RecordStore.get_scheduler_snapshot()
 	assert(bound_snapshot.enabled == true,
@@ -1506,5 +1509,5 @@ test_competing_mailbox_instances_cannot_claim_the_same_message()
 test_mailbox_capacity_is_bounded_and_reported()
 test_mailbox_maintenance_reports_bounded_state_and_fails_closed()
 
-print("[MailboxV2] ordering, claim/ack recovery, bounded capacity, maintenance reporting, stale-read resistance, and idempotency regressions passed.")
+print("[Mailbox] ordering, claim/ack recovery, bounded capacity, maintenance reporting, stale-read resistance, and idempotency regressions passed.")
 Shim.close()

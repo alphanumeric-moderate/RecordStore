@@ -36,11 +36,20 @@ benchmarks:
   - name: "scheduler queue-wait window retention (5,000 selections)"
     exec: lune run bench/scheduler_metrics_wait.bench.luau
 
+  - name: "V1 process-local trace ring (40,000 events)"
+    exec: lune run bench/v1_trace_ring.bench.luau
+
+  - name: "V1 read coalescer cache churn (20,000 keys)"
+    exec: lune run bench/v1_read_coalescer.bench.luau
+
   - name: "session lifecycle (create/update/save/close/reopen)"
     exec: lune run bench/session_lifecycle.bench.luau
 
   - name: "production DataStore adapter lifecycle and ambiguous-write recovery"
     exec: lune run bench/production_adapter.bench.luau
+
+  - name: "RecordStore Update copy and validation (large profile, 32 updates)"
+    exec: lune run bench/update_validation_pipeline.bench.luau
 
   - name: "large profile update and save"
     exec: lune run bench/large_profile.bench.luau

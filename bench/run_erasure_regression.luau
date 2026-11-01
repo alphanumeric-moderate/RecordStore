@@ -3,8 +3,8 @@
 -- do not execute it until the remaining implementation and regression slices are present.
 local Shim = require("./RobloxShim")
 local RecordStore = Shim.load()
-local V2Module = require(
-	game:GetService("ServerScriptService"):WaitForChild("PlayerDataInitializer"):WaitForChild("RecordStoreV2")
+local V1Module = require(
+	game:GetService("ServerScriptService"):WaitForChild("PlayerDataInitializer"):WaitForChild("RecordStoreV1")
 )
 local ErasureModule = require(
 	game:GetService("ServerScriptService"):WaitForChild("PlayerDataInitializer"):WaitForChild("PlayerDataErasure")
@@ -281,11 +281,11 @@ do
 	local user_id = 206
 	local _, key = create_profile(user_id, 21)
 	local manifest_store = new_manifest_store()
-	local v2 = V2Module.new(RecordStore, RecordStore.MailboxV2)
+	local v1 = V1Module.new(RecordStore, RecordStore.Mailbox)
 	local erasure = ErasureModule.new(manifest_store, {
 		record_store = RecordStore.Mock,
-		record_store_v2 = { new = function() return v2 end },
-		mailbox_module = RecordStore.MailboxV2,
+		record_store_v1 = { new = function() return v1 end },
+		mailbox_module = RecordStore.Mailbox,
 		profile_store_name = "PlayerData_Test1",
 		profile_scope = "global",
 		key_prefix = "Player_",
@@ -309,11 +309,11 @@ do
 	local user_id = 205
 	local _, key = create_profile(user_id, 20)
 	local manifest_store = new_manifest_store()
-	local v2 = V2Module.new(RecordStore, RecordStore.MailboxV2)
+	local v1 = V1Module.new(RecordStore, RecordStore.Mailbox)
 	local erasure = ErasureModule.new(manifest_store, {
 		record_store = RecordStore.Mock,
-		record_store_v2 = { new = function() return v2 end },
-		mailbox_module = RecordStore.MailboxV2,
+		record_store_v1 = { new = function() return v1 end },
+		mailbox_module = RecordStore.Mailbox,
 		profile_store_name = "PlayerData_Test1",
 		profile_scope = "global",
 		key_prefix = "Player_",
@@ -332,8 +332,8 @@ do
 	bounded_store.list_versions_async = function() return table.create(1024, {}), "success" end
 	local bounded_erasure = ErasureModule.new(new_manifest_store(), {
 		record_store = bounded_store,
-		record_store_v2 = { new = function() return v2 end },
-		mailbox_module = RecordStore.MailboxV2,
+		record_store_v1 = { new = function() return v1 end },
+		mailbox_module = RecordStore.Mailbox,
 		profile_store_name = "PlayerData_Test1", profile_scope = "global", key_prefix = "Player_",
 		profile_family_verified = true, writer_inventory_verified = true,
 		application_inventory_manifest_id = "test-inventory-playerdata-v1",
@@ -356,13 +356,13 @@ do
 
 	local changed_inventory = ErasureModule.new(manifest_store, {
 		record_store = RecordStore.Mock,
-		record_store_v2 = { new = function() return v2 end },
-		mailbox_module = RecordStore.MailboxV2,
+		record_store_v1 = { new = function() return v1 end },
+		mailbox_module = RecordStore.Mailbox,
 		profile_store_name = "PlayerData_Test1",
 		profile_scope = "global",
 		key_prefix = "Player_",
 		profile_family_verified = true,
-		application_inventory_manifest_id = "test-inventory-playerdata-v2",
+		application_inventory_manifest_id = "test-inventory-playerdata-v1",
 		writer_inventory_verified = true,
 		verify_templates = function(rendered_user_id, templates)
 			return rendered_user_id == user_id and #templates == 1
@@ -383,11 +383,11 @@ do
 	local kicks = 0
 	local record, key = create_profile(user_id, 30)
 	local manifest_store = new_manifest_store()
-	local v2 = V2Module.new(RecordStore, RecordStore.MailboxV2)
+	local v1 = V1Module.new(RecordStore, RecordStore.Mailbox)
 	local erasure = ErasureModule.new(manifest_store, {
 		record_store = RecordStore.Mock,
-		record_store_v2 = { new = function() return v2 end },
-		mailbox_module = RecordStore.MailboxV2,
+		record_store_v1 = { new = function() return v1 end },
+		mailbox_module = RecordStore.Mailbox,
 		profile_store_name = "PlayerData_Test1",
 		profile_scope = "global",
 		key_prefix = "Player_",
@@ -413,7 +413,7 @@ expect(unsafe_plan.code == "invalid",
 	"PlayerDataErasure coordinator planned an unsafe UserId")
 local unsafe_status = erasure:GetStatus(9007199254740992)
 expect(unsafe_status.code == "invalid",
-	"RecordStoreV2 erasure status accepted an unsafe UserId")
+	"RecordStoreV1 erasure status accepted an unsafe UserId")
 local plan = erasure:PlanAsync(user_id, "erase-coordinator-203")
 	expect(plan.code == "success" and plan.rtbf_coverage_verified == true,
 		"verified PlayerDataCore plan failed: " .. tostring(plan.message))

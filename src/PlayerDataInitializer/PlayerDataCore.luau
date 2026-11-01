@@ -154,8 +154,8 @@ export type Dependencies = {
 	MailboxWakeupsEnabled: boolean?,
 	MemoryStoreAccelerationHintsEnabled: boolean?,
 	QueueMessageHandler: QueueMessageHandler?,
-	RecordStoreV2: any?,
-	RecordStoreV2Acceleration: any?,
+	RecordStoreV1: any?,
+	RecordStoreAcceleration: any?,
 	MessagingService: any?,
 	MemoryStoreService: any?,
 	HttpService: any?,
@@ -1014,7 +1014,7 @@ local function new(dependencies: Dependencies?): Controller
 	local deferred_close_running: {[PlayerRecord]: boolean} = {}
 	local deferred_close_requested: {[PlayerRecord]: boolean} = {}
 	local start_deferred_close: (PlayerRecord) -> ()
-	local recordstore_v2: any? = nil
+	local recordstore_v1: any? = nil
 	local wakeup_acceleration: any? = nil
 	local wakeup_registrations: {[PlayerRecord]: any} = {}
 
@@ -1024,31 +1024,31 @@ local function new(dependencies: Dependencies?): Controller
 		end
 
 		local initialized, initialize_error = pcall(function(): boolean
-			local v2_factory = injected.RecordStoreV2 or require(script.Parent.RecordStoreV2)
-			local acceleration_factory = injected.RecordStoreV2Acceleration
-				or require(script.Parent.RecordStoreV2Acceleration)
-			local mailbox_module = (record_store :: any).MailboxV2
-			if type(v2_factory) ~= "table" or type(v2_factory.new) ~= "function" then
-				error("RecordStoreV2 must expose new")
+			local v1_factory = injected.RecordStoreV1 or require(script.Parent.RecordStoreV1)
+			local acceleration_factory = injected.RecordStoreAcceleration
+				or require(script.Parent.RecordStoreAcceleration)
+			local mailbox_module = (record_store :: any).Mailbox
+			if type(v1_factory) ~= "table" or type(v1_factory.new) ~= "function" then
+				error("RecordStoreV1 must expose new")
 			end
 			if type(acceleration_factory) ~= "table" or type(acceleration_factory.new) ~= "function" then
-				error("RecordStoreV2Acceleration must expose new")
+				error("RecordStoreAcceleration must expose new")
 			end
 			if type(mailbox_module) ~= "table" or type(mailbox_module.new) ~= "function" then
-				error("RecordStore must expose its embedded MailboxV2 implementation")
+				error("RecordStore must expose its embedded Mailbox implementation")
 			end
 
-			local v2_api = v2_factory.new(record_store, mailbox_module, {
+			local v1_api = v1_factory.new(record_store, mailbox_module, {
 				acceleration_module = acceleration_factory,
 			})
-			if type(v2_api) ~= "table"
-				or type(v2_api.Mailbox) ~= "table"
-				or type(v2_api.Mailbox.new) ~= "function"
-				or type(v2_api.Canonicalize) ~= "function"
+			if type(v1_api) ~= "table"
+				or type(v1_api.Mailbox) ~= "table"
+				or type(v1_api.Mailbox.new) ~= "function"
+				or type(v1_api.Canonicalize) ~= "function"
 			then
-				error("RecordStoreV2 returned an incomplete mailbox wake-up API")
+				error("RecordStoreV1 returned an incomplete mailbox wake-up API")
 			end
-			recordstore_v2 = v2_api
+			recordstore_v1 = v1_api
 
 			local messaging_service = injected.MessagingService or game:GetService("MessagingService")
 			local http_service = injected.HttpService or game:GetService("HttpService")
@@ -1084,7 +1084,7 @@ local function new(dependencies: Dependencies?): Controller
 				if shutting_down then
 					return false
 				end
-				warn("[PlayerData] V2 mailbox acceleration could not start; durable queue polling remains enabled",
+				warn("[PlayerData] Mailbox V1 acceleration could not start; durable queue polling remains enabled",
 					if start_call_ok then tostring(start_message or start_result) else tostring(start_result))
 				return false
 			end
@@ -1092,7 +1092,7 @@ local function new(dependencies: Dependencies?): Controller
 			return true
 		end)
 		if not initialized then
-			warn("[PlayerData] V2 mailbox integration initialization failed; durable queue polling remains enabled",
+			warn("[PlayerData] Mailbox V1 integration initialization failed; durable queue polling remains enabled",
 				tostring(initialize_error))
 		end
 	end
@@ -1155,7 +1155,7 @@ local function new(dependencies: Dependencies?): Controller
 	end
 
 	local function bind_player_mailbox(player: Player, record: PlayerRecord)
-		if not mailbox_wakeups_enabled or recordstore_v2 == nil then
+		if not mailbox_wakeups_enabled or recordstore_v1 == nil then
 			return
 		end
 		if sessions[player] ~= record or closing_records[record] or departed_players[player] then
@@ -1166,7 +1166,7 @@ local function new(dependencies: Dependencies?): Controller
 			return record:CreateMailboxStoreAdapter()
 		end)
 		if not adapter_call_ok or store == nil then
-			warn("[PlayerData]", player.Name, "could not create its V2 mailbox store adapter",
+			warn("[PlayerData]", player.Name, "could not create its Mailbox V1 store adapter",
 				if adapter_call_ok then tostring(store_message or store_result) else tostring(store))
 			return
 		end
@@ -1175,13 +1175,13 @@ local function new(dependencies: Dependencies?): Controller
 			return record:GetMailboxOwner()
 		end)
 		if not owner_call_ok or type(owner) ~= "table" then
-			warn("[PlayerData]", player.Name, "could not resolve its V2 mailbox owner",
+			warn("[PlayerData]", player.Name, "could not resolve its Mailbox V1 owner",
 				if owner_call_ok then "invalid mailbox owner" else tostring(owner))
 			return
 		end
 
 		local mailbox_call_ok, mailbox = pcall(function()
-			return recordstore_v2.Mailbox.new(store, owner, {
+			return recordstore_v1.Mailbox.new(store, owner, {
 				active_record = record,
 				activation_guard = function(_operation: string)
 					local allowed = sessions[player] == record
@@ -1194,16 +1194,16 @@ local function new(dependencies: Dependencies?): Controller
 			})
 		end)
 		if not mailbox_call_ok or type(mailbox) ~= "table" then
-			warn("[PlayerData]", player.Name, "could not construct its V2 mailbox",
+			warn("[PlayerData]", player.Name, "could not construct its Mailbox V1",
 				if mailbox_call_ok then "mailbox constructor returned no instance" else tostring(mailbox))
 			return
 		end
 
 		local bind_call_ok, bind_result, bind_message = pcall(function()
-			return record:BindMailboxV2Async(mailbox)
+			return record:BindMailboxAsync(mailbox)
 		end)
 		if not bind_call_ok or bind_result ~= "success" then
-			warn("[PlayerData]", player.Name, "V2 mailbox binding was not confirmed",
+			warn("[PlayerData]", player.Name, "Mailbox V1 binding was not confirmed",
 				if bind_call_ok then tostring(bind_message or bind_result) else tostring(bind_result))
 			return
 		end
@@ -1216,16 +1216,16 @@ local function new(dependencies: Dependencies?): Controller
 			return mailbox:BindWakeups(wakeup_acceleration)
 		end)
 		if not wakeups_bound_call_ok or wakeups_bound ~= true then
-			warn("[PlayerData]", player.Name, "could not bind the V2 mailbox wake-up adapter",
+			warn("[PlayerData]", player.Name, "could not bind the Mailbox V1 wake-up adapter",
 				if wakeups_bound_call_ok then tostring(wakeups_bind_error) else tostring(wakeups_bound))
 			return
 		end
 
 		local owner_text_call_ok, owner_text = pcall(function()
-			return recordstore_v2.Canonicalize(owner)
+			return recordstore_v1.Canonicalize(owner)
 		end)
 		if not owner_text_call_ok or type(owner_text) ~= "string" then
-			warn("[PlayerData]", player.Name, "could not canonicalize its V2 mailbox owner",
+			warn("[PlayerData]", player.Name, "could not canonicalize its Mailbox V1 owner",
 				if owner_text_call_ok then "canonical owner identity is invalid" else tostring(owner_text))
 			return
 		end
@@ -1241,25 +1241,25 @@ local function new(dependencies: Dependencies?): Controller
 					return record:ProcessQueueAsync(CONFIG.mailbox_max_messages_per_wake)
 				end)
 				if not process_call_ok then
-					warn("[PlayerData]", player.Name, "V2 mailbox wake-up processing raised",
+					warn("[PlayerData]", player.Name, "Mailbox V1 wake-up processing raised",
 						tostring(process_result))
 				elseif process_result ~= "processed" and process_result ~= "empty"
 					and process_result ~= "busy"
 				then
-					warn("[PlayerData]", player.Name, "V2 mailbox wake-up processing failed",
+					warn("[PlayerData]", player.Name, "Mailbox V1 wake-up processing failed",
 						tostring(process_result), process_message or "")
 				end
 			end)
 		end)
 		if not registration_call_ok or registered ~= true then
-			warn("[PlayerData]", player.Name, "V2 mailbox wake-up registration failed",
+			warn("[PlayerData]", player.Name, "Mailbox V1 wake-up registration failed",
 				if registration_call_ok then tostring(registration_or_error) else tostring(registered))
 			return
 		end
 		if type(registration_or_error) ~= "table"
 			or type(registration_or_error.Disconnect) ~= "function"
 		then
-			warn("[PlayerData]", player.Name, "V2 mailbox wake-up registration returned no disconnect handle")
+			warn("[PlayerData]", player.Name, "Mailbox V1 wake-up registration returned no disconnect handle")
 			return
 		end
 		wakeup_registrations[record] = registration_or_error
@@ -1364,8 +1364,8 @@ local function new(dependencies: Dependencies?): Controller
 				end
 			end
 
-			local batch = table.clone(pending)
-			table.clear(pending)
+			local batch = pending
+			pending_changes[record] = {}
 			local call_ok, result, message = pcall(function()
 				return record:Update(function(current)
 					if type(current) ~= "table" then
@@ -2916,7 +2916,7 @@ local function new(dependencies: Dependencies?): Controller
 				acceleration:Stop()
 			end)
 			if not stop_ok then
-				warn("[PlayerData] V2 mailbox acceleration shutdown failed", tostring(stop_error))
+				warn("[PlayerData] Mailbox V1 acceleration shutdown failed", tostring(stop_error))
 			end
 		end
 		return true

@@ -58,7 +58,7 @@ end
 
 function Runner.new(maintenance, config)
 	if type(maintenance) ~= "table" or type(maintenance.NewCompactor) ~= "function" then
-		error("RecordStoreV2 maintenance API with NewCompactor is required", 2)
+		error("RecordStoreV1 maintenance API with NewCompactor is required", 2)
 	end
 	if type(config) ~= "table" or not valid_text(config.job_id, MAX_JOB_ID_BYTES) then
 		error("config.job_id must be 1 to 96 bytes", 2)

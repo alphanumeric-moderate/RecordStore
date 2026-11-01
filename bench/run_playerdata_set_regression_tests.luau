@@ -113,6 +113,35 @@ task.wait(0.1)
 assert(saved_records[saved_key].kills == previous_kills,
 	"PlayerData.Set should persist the restored baseline after recovery")
 
+-- A newer same-field mutation arriving during an uncertain write must win over
+-- the detached batch when the original write is restored through reconciliation.
+local interleaved_original_update = record.Update
+local interleaved_older_value = previous_kills + 31
+local interleaved_newer_value = previous_kills + 32
+record.Update = function(self, _transform)
+	local accepted, rejection = controller.Set(player, "kills", interleaved_newer_value)
+	assert(accepted, rejection)
+	self.State = "unknown"
+	return "unknown", "injected ambiguous write after a newer PlayerData mutation"
+end
+kills.Value = interleaved_older_value
+task.wait(0.1)
+assert(saved_records[saved_key].kills == previous_kills,
+	"uncertain interleaved update must not persist either queued value")
+assert(kills.Value == interleaved_newer_value,
+	"newer in-flight PlayerData mutation was not retained in the runtime value")
+record.Update = interleaved_original_update
+record.State = "active"
+record_options.on_event("reconcile", record.Key, "success", nil)
+task.wait(0.1)
+assert(saved_records[saved_key].kills == interleaved_newer_value,
+	"reconciliation did not preserve the newest same-field PlayerData mutation")
+success, message = controller.Set(player, "kills", previous_kills)
+assert(success, message)
+task.wait(0.1)
+assert(saved_records[saved_key].kills == previous_kills,
+	"PlayerData.Set did not persist the restored value after interleaved recovery")
+
 -- A removed cached value must trigger a safe child lookup rather than being reused.
 local lookups_before_removed_value = get_find_first_child_calls()
 kills:Destroy()
