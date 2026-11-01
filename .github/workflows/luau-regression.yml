@@ -81,17 +81,17 @@ jobs:
         timeout-minutes: 2
         run: timeout --signal=TERM --kill-after=5s 60s lune run bench/run_scheduler_metrics_window_regression.luau
 
-      - name: Regression - V2 in-memory service structures
+      - name: Regression - V1 in-memory service structures
         timeout-minutes: 2
-        run: timeout --signal=TERM --kill-after=5s 60s lune run bench/run_v2_services_regression.luau
+        run: timeout --signal=TERM --kill-after=5s 60s lune run bench/run_v1_services_regression.luau
 
-      - name: Regression - V2 mailbox ordering and security
+      - name: Regression - V1 mailbox ordering and security
         timeout-minutes: 2
-        run: timeout --signal=TERM --kill-after=5s 60s lune run bench/run_mailbox_v2_ordering_regression.luau
+        run: timeout --signal=TERM --kill-after=5s 60s lune run bench/run_mailbox_regression.luau
 
-      - name: Regression - V3-to-V2 migration protocol
+      - name: Regression - legacy mailbox migration protocol
         timeout-minutes: 2
-        run: timeout --signal=TERM --kill-after=5s 60s lune run bench/run_mailbox_v2_migration_regression.luau
+        run: timeout --signal=TERM --kill-after=5s 60s lune run bench/run_legacy_mailbox_migration_regression.luau
 
       - name: Regression - independent maintenance runner
         timeout-minutes: 2

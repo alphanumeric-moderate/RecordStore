@@ -19,11 +19,11 @@ for _, path in {
 	"src/PlayerDataInitializer/RecordStoreOutboxMailboxAdapter.luau",
 	"src/PlayerDataInitializer/RecordStoreOutboxConsumerAdapter.luau",
 	"tests/RecordStore_OutboxConsumerAdapterRegression.server.luau",
-	"src/PlayerDataInitializer/RecordStoreV2.luau",
-	"src/PlayerDataInitializer/RecordStoreV2Acceleration.luau",
-	"src/PlayerDataInitializer/RecordStoreMailboxV2Migration.luau",
-	"src/PlayerDataInitializer/RecordStoreMailboxV2MigrationAdapter.luau",
-	"bench/run_mailbox_v2_migration_regression.luau",
+	"src/PlayerDataInitializer/RecordStoreV1.luau",
+	"src/PlayerDataInitializer/RecordStoreAcceleration.luau",
+	"src/PlayerDataInitializer/RecordStoreLegacyMailboxMigration.luau",
+	"src/PlayerDataInitializer/RecordStoreLegacyMailboxMigrationAdapter.luau",
+	"bench/run_legacy_mailbox_migration_regression.luau",
 	"src/PlayerDataInitializer/PlayerDataErasure.luau",
 	"src/PlayerDataInitializer/RecordStoreMaintenanceRunner.luau",
 	"src/PlayerDataInitializer/RecordStoreMaintenanceRobloxAdapter.luau",
@@ -33,7 +33,7 @@ for _, path in {
 	"bench/run_crash_simulator_regression.luau",
 	"bench/run_acceleration_regression.luau",
 	"bench/run_offline_maintenance_runner_regression.luau",
-	"tests/RecordStoreV2NonSaveServicesRegression.server.luau",
+	"tests/RecordStoreV1NonSaveServicesRegression.server.luau",
 	"tests/RecordStore_OutboxMailboxAdapterRegression.server.luau",
 	"src/PlayerDataInitializer/PlayerDataCore.luau",
 	"src/PlayerDataInitializer/IntegerInfinityValue.luau",
@@ -110,8 +110,8 @@ Shim.run_script("tests/PurchaseAuthorityMigrationRunnerRegression.server.luau")
 Shim.run_script("tests/RecordStore_QuarantineFenceRegression.server.luau")
 Shim.run_script("tests/RecordStore_OutboxMailboxAdapterRegression.server.luau")
 Shim.run_script("tests/RecordStore_OutboxConsumerAdapterRegression.server.luau")
-Shim.run_script("tests/RecordStoreV2NonSaveServicesRegression.server.luau")
-Shim.run_script("bench/run_mailbox_v2_migration_regression.luau")
+Shim.run_script("tests/RecordStoreV1NonSaveServicesRegression.server.luau")
+Shim.run_script("bench/run_legacy_mailbox_migration_regression.luau")
 Shim.run_script("bench/run_scheduler_bugfix_regression.luau")
 Shim.run_script("tests/RecordStore_NonSaveRoadmapRegression.server.luau")
 Shim.run_script("bench/run_erasure_regression.luau")
