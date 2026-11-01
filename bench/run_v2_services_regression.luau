@@ -75,6 +75,13 @@ for index, event in ipairs(latest.events) do
 	expect(event.sequence == index + 44, "trace ring reused slots in the wrong chronological order")
 end
 
+local narrow = tracer:GetOperationTrace("ring-operation", 4)
+expect(narrow.truncated == true and #narrow.events == 4,
+	"trace query did not report truncation when its bounded result omitted older events")
+for index, event in ipairs(narrow.events) do
+	expect(event.sequence == index + 56, "bounded trace query did not retain the newest matching events")
+end
+
 local fetch_count = 0
 local coalescer = V2.ReadCoalescer.new(function(key)
 	fetch_count += 1
