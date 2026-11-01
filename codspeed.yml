@@ -78,4 +78,10 @@ benchmarks:
   - name: "PlayerData.Set path lookup"
     exec: lune run bench/playerdata_set_paths.bench.luau
 
+  - name: "wake-up acceleration pending-owner cancellation and FIFO dispatch (512 owners x 64)"
+    exec: lune run bench/acceleration_pending_queue.bench.luau
+
+  - name: "wake-up acceleration event deduplication and capacity retention (10,000 messages)"
+    exec: lune run bench/acceleration_event_dedup.bench.luau
+
 # Correctness regressions run in luau-regression.yml; do not instrument them as performance benchmarks.

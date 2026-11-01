@@ -1,12 +1,26 @@
 --!nocheck
--- Wake-up acceleration regressions. Hints are intentionally best-effort; durable
--- mailbox polling must recover work regardless of notification outcomes. This is
--- written for the final verification phase and has not yet been executed.
+-- Wake-up acceleration regressions. Hints remain advisory; durable mailbox
+-- polling must recover work regardless of notification outcomes.
 local Simulator = require("./DeterministicCrashSimulator")
 local Acceleration = require("../src/PlayerDataInitializer/RecordStoreV2Acceleration")
 
 local function expect(value, message)
 	assert(value, message)
+end
+
+local function owner_hash(material)
+	local first, second = 5381, 1
+	for index = 1, #material do
+		local byte = string.byte(material, index)
+		first = (first * 33 + byte) % 2147483647
+		second = (second * 65599 + byte) % 2147483629
+	end
+	return string.format("%08x%08x", first, second)
+end
+
+local function shard_for(hash, shard_count)
+	local bucket = tonumber(string.sub(hash, 1, 8), 16) or 0
+	return (bucket % shard_count) + 1
 end
 
 local function make_pair(options)
@@ -34,8 +48,8 @@ local function make_pair(options)
 			shard_count = 4,
 			coalesce_window_ms = options.coalesce_window_ms or 25,
 			max_pending_owners = options.max_pending_owners or 8,
-			max_registered_owners = 8,
-			max_callbacks_per_pump = 4,
+			max_registered_owners = options.max_registered_owners or 8,
+			max_callbacks_per_pump = options.max_callbacks_per_pump or 4,
 			now_ms = function() return simulator:Now(server_id) end,
 			schedule = schedule_for(server_id),
 		}
@@ -285,6 +299,133 @@ do
 	local snapshot = receiver:Stats()
 	snapshot.metrics.callback_errors = 999
 	expect(receiver:Stats().metrics.callback_errors == 1, "Stats exposed mutable metric state")
+end
+
+
+-- A full pending queue preserves FIFO order while arbitrary disconnects unlink
+-- entries and repeated hints update a queued owner's reason in place.
+do
+	local owner_count = 64
+	local simulator, publisher, receiver = make_pair({
+		max_pending_owners = owner_count,
+		max_registered_owners = owner_count,
+		max_callbacks_per_pump = 7,
+	})
+	local handles = {}
+	local callbacks = {}
+	for index = 1, owner_count do
+		local callback_index = index
+		local owner = "fifo-owner-" .. tostring(index)
+		local accepted, handle = receiver:Register(owner, function(reason)
+			callbacks[#callbacks + 1] = { index = callback_index, reason = reason }
+		end)
+		expect(accepted == true, "large FIFO owner registration failed")
+		handles[index] = handle
+	end
+	for index = 1, owner_count do
+		local owner = "fifo-owner-" .. tostring(index)
+		expect(publisher:Publish(owner, "enqueue").code == "scheduled",
+			"large FIFO owner publication failed")
+	end
+	local delivered = simulator:RunUntil(0, 500)
+	expect(delivered.code == "success" and receiver:Stats().pending_owners == owner_count,
+		"full pending queue did not retain every owner")
+	for index = 2, owner_count, 2 do
+		handles[index]:Disconnect()
+	end
+	expect(receiver:Stats().pending_owners == owner_count / 2,
+		"arbitrary disconnects did not unlink exactly half the pending owners")
+	expect(publisher:Publish("fifo-owner-1", "reconcile").code == "scheduled",
+		"coalesced FIFO update publication failed")
+	simulator:RunUntil(0, 500)
+	local drained = simulator:RunUntil(25, 5000)
+	expect(drained.code == "success" and #callbacks == owner_count / 2,
+		"FIFO dispatch did not drain the remaining owners")
+	for callback_index, owner_index in ipairs({ 1, 3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27, 29, 31,
+		33, 35, 37, 39, 41, 43, 45, 47, 49, 51, 53, 55, 57, 59, 61, 63 }) do
+		expect(callbacks[callback_index].index == owner_index,
+			"pending queue changed FIFO order after unlinking an arbitrary owner")
+		expect(callbacks[callback_index].reason == if owner_index == 1 then "reconcile" else "enqueue",
+			"coalescing did not preserve the newest queued reason")
+	end
+	expect(receiver:Stats().pending_owners == 0,
+		"FIFO dispatch left pending owners behind")
+end
+
+-- Event expiry keeps its strict TTL boundary, handles a backwards-moving test
+-- clock without assuming timestamp insertion order, and evicts by insertion order.
+do
+	local now_ms = 0
+	local messaging = {
+		SubscribeAsync = function()
+			return { Disconnect = function() end }
+		end,
+		PublishAsync = function() end,
+	}
+	local receiver = Acceleration.new({
+		messaging_service = messaging,
+		server_id = "dedup-regression",
+		enabled = true,
+		shard_count = 4,
+		max_registered_owners = 4,
+		max_pending_owners = 4,
+		max_seen_events = 5,
+		now_ms = function() return now_ms end,
+		schedule = function() return true end,
+	})
+	expect(receiver:Start() == true, "event-dedup regression receiver failed to start")
+	local owner = "seen-event-owner"
+	local registered = receiver:Register(owner, function() end)
+	expect(registered == true, "event-dedup regression owner failed to register")
+	local hash = owner_hash(owner)
+	local shard = shard_for(hash, 4)
+	local function deliver(event_id)
+		return receiver:_receive(shard, {
+			version = 1,
+			owner_hash = hash,
+			event_id = event_id,
+			reason = "enqueue",
+			sender = "remote-server",
+			published_at_ms = math.max(0, now_ms),
+		})
+	end
+	now_ms = 0
+	local first_ok = deliver("ttl-boundary")
+	expect(first_ok == true, "first TTL event was rejected")
+	now_ms = 120000
+	local boundary_ok, boundary_reason = deliver("ttl-boundary")
+	expect(boundary_ok == false and boundary_reason == "duplicate",
+		"event expired at the inclusive TTL boundary")
+	now_ms = 120001
+	local expired_ok = deliver("ttl-boundary")
+	expect(expired_ok == true,
+		"event did not expire strictly after the TTL boundary")
+	now_ms = 100002
+	local first_inserted_ok = deliver("first-inserted")
+	expect(first_inserted_ok == true, "first out-of-order timestamp event was rejected")
+	now_ms = 160000
+	local second_inserted_ok = deliver("second-inserted-earlier-time")
+	expect(second_inserted_ok == true, "backwards-clock event was rejected")
+	now_ms = 180000
+	expect(deliver("third-inserted-middle-time") == true,
+		"third timestamp-ordered event was rejected")
+	now_ms = 210000
+	expect(deliver("fourth-inserted-later-time") == true,
+		"fourth timestamp-ordered event was rejected")
+	now_ms = 220001
+	local capacity_third_ok = deliver("capacity-sixth")
+	expect(capacity_third_ok == true, "capacity test event was rejected")
+	local retained_ok, retained_reason = deliver("second-inserted-earlier-time")
+	expect(retained_ok == false and retained_reason == "duplicate",
+		"capacity eviction followed timestamp order instead of insertion order")
+	local oldest_inserted_ok = deliver("ttl-boundary")
+	expect(oldest_inserted_ok == true,
+		"capacity eviction did not remove the oldest inserted event")
+	now_ms = 340003
+	local expired_again_ok = deliver("second-inserted-earlier-time")
+	expect(expired_again_ok == true,
+		"timestamp-heap expiry did not clear the remaining event window")
+	receiver:Stop()
 end
 
 -- Subscription failure must roll back partial setup, allowing a clean retry.
