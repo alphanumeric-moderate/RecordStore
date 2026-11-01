@@ -852,8 +852,12 @@ local function new_tracer(options)
 			event_id_generator = function() return http_service:GenerateGUID(false) end
 		end
 	end
+
 	local tracer = { events = {}, next_sequence = 1, dropped = 0, emitted = 0, sampled = 0, store = options.store }
 	local local_event_nonce = tostring(tracer) .. ":" .. tostring(os.clock()) .. ":" .. tostring(math.random())
+	local event_head = 1
+	local event_count = 0
+
 	local function next_trace_event_id(sequence, timestamp)
 		if type(event_id_generator) == "function" then
 			local value = io_call(event_id_generator)
@@ -861,11 +865,25 @@ local function new_tracer(options)
 		end
 		return digest(local_event_nonce .. ":" .. tostring(sequence) .. ":" .. tostring(timestamp))
 	end
+
+	local function for_each_event(callback)
+		for offset = 0, event_count - 1 do
+			local index = (event_head + offset - 1) % capacity + 1
+			local event = tracer.events[index]
+			if event ~= nil and callback(event) == false then
+				break
+			end
+		end
+	end
+
 	function tracer:Emit(event)
 		if type(event) ~= "table" then return false, "trace event required" end
 		local result = tostring(event.result or "unknown")
 		local always = result == "unknown" or result == "corrupt" or result == "failed" or result == "conflict"
-		if not always and result == "success" then self.sampled += 1; if self.sampled % sample_every ~= 0 then return true, "sampled_out" end end
+		if not always and result == "success" then
+			self.sampled += 1
+			if self.sampled % sample_every ~= 0 then return true, "sampled_out" end
+		end
 		local timestamp = if finite(event.timestamp_unix) then event.timestamp_unix else os.time()
 		local value = {
 			sequence = self.next_sequence,
@@ -876,40 +894,69 @@ local function new_tracer(options)
 			causation_id = if valid_text(event.causation_id, 128) then event.causation_id else nil,
 			component = if valid_text(event.component, 64) then event.component else "unknown",
 			operation = if valid_text(event.operation, 64) then event.operation else "unknown",
-			state = if valid_text(event.state, 64) then event.state else nil, result = result,
+			state = if valid_text(event.state, 64) then event.state else nil,
+			result = result,
 			attempt = if finite(event.attempt) then event.attempt else nil,
 			duration_bucket_ms = if finite(event.duration_ms) then math.floor(math.max(0, event.duration_ms) / 10) * 10 else nil,
 			revision = if finite(event.revision) then event.revision else nil,
 			error_category = if valid_text(event.error_category, 64) then event.error_category else nil,
 			complete = event.complete ~= false,
 		}
-		self.next_sequence += 1; self.emitted += 1
-		table.insert(self.events, value)
-		while #self.events > capacity do table.remove(self.events, 1); self.dropped += 1 end
+		self.next_sequence += 1
+		self.emitted += 1
+
+		if event_count < capacity then
+			local index = (event_head + event_count - 1) % capacity + 1
+			self.events[index] = value
+			event_count += 1
+		else
+			self.events[event_head] = value
+			event_head = event_head % capacity + 1
+			self.dropped += 1
+		end
 		return true, nil
 	end
+
 	function tracer:GetOperationTrace(operation_id, limit)
 		if not valid_text(operation_id, 128) then return { code = "invalid", events = {} } end
-		local matches = {}
-		for _, event in ipairs(self.events) do
+		limit = math.clamp(math.floor(limit or 128), 1, 256)
+
+		local matches = table.create(limit)
+		local match_head = 1
+		local match_count = 0
+		local match_total = 0
+		for_each_event(function(event)
 			if event.operation_id == operation_id or event.correlation_id == operation_id or event.causation_id == operation_id then
+				match_total += 1
 				local value = copy(event)
 				value.evidence_source = "process_local"
-				table.insert(matches, value)
+				if match_count < limit then
+					local index = (match_head + match_count - 1) % limit + 1
+					matches[index] = value
+					match_count += 1
+				else
+					matches[match_head] = value
+					match_head = match_head % limit + 1
+				end
 			end
+		end)
+
+		local events = table.create(match_count)
+		for offset = 0, match_count - 1 do
+			local index = (match_head + offset - 1) % limit + 1
+			events[offset + 1] = matches[index]
 		end
-		limit = math.clamp(math.floor(limit or 128), 1, 256)
-		local truncated = #matches > limit
-		while #matches > limit do table.remove(matches, 1) end
+		local truncated = match_total > limit
 		return {
-			code = "success", events = matches,
+			code = "success",
+			events = events,
 			truncated = truncated or self.dropped > 0,
 			dropped_local_events = self.dropped,
 			completeness = if self.dropped == 0 and not truncated then "local_ring_complete" else "incomplete",
 			evidence_summary = {
 				durable_read = "not_requested",
-				process_local_events = #matches,
-				process_local_only_events = #matches,
+				process_local_events = #events,
+				process_local_only_events = #events,
 				durable_events = 0,
 				durable_only_events = 0,
 				durable_and_local_events = 0,
@@ -918,14 +965,18 @@ local function new_tracer(options)
 			note = "not a linearizable cross-server snapshot",
 		}
 	end
+
 	function tracer:FlushAsync(operation_id, maximum)
 		if not self.store then return { code = "unsupported", message = "no durable trace adapter configured" } end
 		if not valid_text(operation_id, 128) then return { code = "invalid" } end
 		maximum = math.clamp(math.floor(maximum or 32), 1, 128)
 		local batch = {}
-		for _, event in ipairs(self.events) do
-			if event.operation_id == operation_id or event.correlation_id == operation_id or event.causation_id == operation_id then table.insert(batch, copy(event)); if #batch >= maximum then break end end
-		end
+		for_each_event(function(event)
+			if event.operation_id == operation_id or event.correlation_id == operation_id or event.causation_id == operation_id then
+				batch[#batch + 1] = copy(event)
+				if #batch >= maximum then return false end
+			end
+		end)
 		if #batch == 0 then return { code = "empty", flushed = 0 } end
 		local key = "rv2t-" .. digest(operation_id)
 		local flushed_at = os.time()
@@ -951,6 +1002,7 @@ local function new_tracer(options)
 		if type(stored) ~= "table" or stored.operation_id ~= operation_id then return { code = "conflict", flushed = 0 } end
 		return { code = "committed", flushed = #batch, retained = #stored.events, truncated = stored.truncated }
 	end
+
 	function tracer:GetOperationTraceAsync(operation_id, limit)
 		local result = self:GetOperationTrace(operation_id, limit)
 		if not self.store then return result end
@@ -958,8 +1010,11 @@ local function new_tracer(options)
 		if read_error then
 			result.durable_read = "unknown"
 			result.evidence_summary = {
-				durable_read = "unknown", process_local_events = #result.events,
-				durable_events = 0, durable_and_local_events = 0, consistency = "process_local_only",
+				durable_read = "unknown",
+				process_local_events = #result.events,
+				durable_events = 0,
+				durable_and_local_events = 0,
+				consistency = "process_local_only",
 			}
 			result.message = read_error
 			return result
@@ -1018,16 +1073,32 @@ local function new_tracer(options)
 		}
 		return result
 	end
+
 	function tracer:Drain(limit)
 		limit = math.clamp(math.floor(limit or 64), 1, 256)
-		local result = {}
-		for _ = 1, math.min(limit, #self.events) do table.insert(result, table.remove(self.events, 1)) end
+		local count = math.min(limit, event_count)
+		local result = table.create(count)
+		for offset = 0, count - 1 do
+			local index = (event_head + offset - 1) % capacity + 1
+			result[offset + 1] = self.events[index]
+			self.events[index] = nil
+		end
+		event_head = (event_head + count - 1) % capacity + 1
+		event_count -= count
 		return result
 	end
-	function tracer:Stats() return { retained = #self.events, capacity = capacity, dropped = self.dropped, emitted = self.emitted, sampled = self.sampled } end
+
+	function tracer:Stats()
+		return {
+			retained = event_count,
+			capacity = capacity,
+			dropped = self.dropped,
+			emitted = self.emitted,
+			sampled = self.sampled,
+		}
+	end
 	return tracer
 end
-
 local function new_migrations(options)
 	options = options or {}
 	local manifest_store = options.manifest_store or options.store
@@ -3607,11 +3678,83 @@ local function new_read_coalescer(fetch, options)
 		error("max_entries must be an integer from 1 to 2048", 2)
 	end
 
-	local values, inflight = {}, {}
+	local values, inflight, expiry_heap = {}, {}, {}
+	local entry_count = 0
 	local service = { hits = 0, misses = 0, coalesced = 0, evictions = 0 }
 
 	local function make_cache_key(key, fence_key)
 		return tostring(fence_key or "") .. "\0" .. key
+	end
+
+	local function heap_less(left, right)
+		if left.expires ~= right.expires then return left.expires < right.expires end
+		return left.key < right.key
+	end
+
+	local function heap_swap(left_index, right_index)
+		local left = expiry_heap[left_index]
+		local right = expiry_heap[right_index]
+		expiry_heap[left_index] = right
+		expiry_heap[right_index] = left
+		left.heap_index = right_index
+		right.heap_index = left_index
+	end
+
+	local function heap_sift_up(index)
+		while index > 1 do
+			local parent = math.floor(index / 2)
+			if not heap_less(expiry_heap[index], expiry_heap[parent]) then break end
+			heap_swap(index, parent)
+			index = parent
+		end
+	end
+
+	local function heap_sift_down(index)
+		while true do
+			local left = index * 2
+			if left > #expiry_heap then break end
+			local right = left + 1
+			local smallest = left
+			if right <= #expiry_heap and heap_less(expiry_heap[right], expiry_heap[left]) then
+				smallest = right
+			end
+			if not heap_less(expiry_heap[smallest], expiry_heap[index]) then break end
+			heap_swap(index, smallest)
+			index = smallest
+		end
+	end
+
+	local function heap_push(entry)
+		local index = #expiry_heap + 1
+		expiry_heap[index] = entry
+		entry.heap_index = index
+		heap_sift_up(index)
+	end
+
+	local function heap_remove(entry)
+		local index = entry.heap_index
+		if index == nil then return end
+		local last_index = #expiry_heap
+		local last = expiry_heap[last_index]
+		expiry_heap[last_index] = nil
+		entry.heap_index = nil
+		if index == last_index then return end
+		expiry_heap[index] = last
+		last.heap_index = index
+		local parent = math.floor(index / 2)
+		if index > 1 and heap_less(last, expiry_heap[parent]) then
+			heap_sift_up(index)
+		else
+			heap_sift_down(index)
+		end
+	end
+
+	local function remove_cache_entry(entry)
+		if values[entry.key] == entry then
+			values[entry.key] = nil
+			entry_count -= 1
+		end
+		heap_remove(entry)
 	end
 
 	function service:GetAsync(key, fence_key)
@@ -3624,9 +3767,9 @@ local function new_read_coalescer(fetch, options)
 				self.hits += 1
 				return copy(cached.value), nil, "cache"
 			end
-			-- Never retain expired values: waiters must not see an old entry
-			-- after the refresh fetch fails.
-			values[cache_key] = nil
+			-- Expired entries are removed before a refresh fetch so failed
+			-- refreshes cannot leave stale data available to future callers.
+			remove_cache_entry(cached)
 		end
 
 		local active = inflight[cache_key]
@@ -3655,20 +3798,25 @@ local function new_read_coalescer(fetch, options)
 		inflight[cache_key] = flight
 		local result, message = io_call(fetch, key)
 		if result ~= nil then
-			flight.result = copy(result)
+			-- Keep one private snapshot for both in-flight waiters and the cache.
+			-- Every value returned to a caller remains a defensive copy.
+			local snapshot = copy(result)
+			flight.result = snapshot
 			if flight.invalidated ~= true and inflight[cache_key] == flight then
-				values[cache_key] = { value = copy(result), expires = os.clock() + ttl }
-				local size = 0
-				for _ in pairs(values) do size += 1 end
-				while size > maximum do
-					local oldest, expires
-					for candidate, row in pairs(values) do
-						if expires == nil or row.expires < expires then oldest, expires = candidate, row.expires end
-					end
+				local entry = {
+					key = cache_key,
+					value = snapshot,
+					expires = os.clock() + ttl,
+					heap_index = nil,
+				}
+				values[cache_key] = entry
+				entry_count += 1
+				heap_push(entry)
+				while entry_count > maximum do
+					local oldest = expiry_heap[1]
 					if oldest == nil then break end
-					values[oldest] = nil
+					remove_cache_entry(oldest)
 					self.evictions += 1
-					size -= 1
 				end
 			end
 		else
@@ -3677,13 +3825,14 @@ local function new_read_coalescer(fetch, options)
 		if inflight[cache_key] == flight then inflight[cache_key] = nil end
 		if event ~= nil then event:Fire(); event:Destroy() end
 		if result == nil then return nil, message end
-		return copy(result), nil, "fetch"
+		return copy(flight.result), nil, "fetch"
 	end
 
 	function service:Invalidate(key, fence_key)
 		if not valid_text(key, 256) then return false, "invalid key" end
 		local cache_key = make_cache_key(key, fence_key)
-		values[cache_key] = nil
+		local cached = values[cache_key]
+		if cached ~= nil then remove_cache_entry(cached) end
 		local active = inflight[cache_key]
 		if active ~= nil then
 			active.invalidated = true
@@ -3696,12 +3845,14 @@ local function new_read_coalescer(fetch, options)
 		for _, active in pairs(inflight) do active.invalidated = true end
 		table.clear(inflight)
 		table.clear(values)
+		table.clear(expiry_heap)
+		entry_count = 0
 		return true
 	end
 
 	function service:Stats()
 		return {
-			entries = key_count(values),
+			entries = entry_count,
 			in_flight = key_count(inflight),
 			hits = self.hits,
 			misses = self.misses,
@@ -3711,7 +3862,6 @@ local function new_read_coalescer(fetch, options)
 	end
 	return service
 end
-
 local function canonical_request(value)
 	local ok, result = pcall(canonical, value)
 	return if ok then result else nil
