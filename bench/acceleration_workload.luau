@@ -19,7 +19,7 @@ local function owner_hash(material)
 	return string.format("%08x%08x", first, second)
 end
 
-local function make_acceleration(now_ms, options)
+local function make_acceleration(now_ms)
 	local messaging = {}
 	function messaging:SubscribeAsync(_topic, _callback)
 		return { Disconnect = function() end }
@@ -38,7 +38,6 @@ local function make_acceleration(now_ms, options)
 		max_seen_events = SEEN_EVENT_LIMIT,
 		now_ms = function() return now_ms end,
 		schedule = function() return true end,
-		...(options or {}),
 	})
 	assert(acceleration:Start(), "acceleration benchmark failed to start")
 	return acceleration
@@ -82,12 +81,18 @@ local function run_pending_queue()
 		assert(acceleration:Stats().pending_owners == PENDING_OWNER_COUNT / 2,
 			"pending owner cancellation did not unlink exactly half the queue")
 
-		while acceleration:Stats().pending_owners > 0 do
+		local target_callbacks = PENDING_OWNER_COUNT / 2
+		local pump_iterations = 0
+		while callbacks < target_callbacks and pump_iterations < PENDING_OWNER_COUNT do
 			acceleration:_pump()
+			pump_iterations += 1
 		end
-		assert(callbacks == PENDING_OWNER_COUNT / 2,
+		assert(callbacks == target_callbacks,
 			"pending owner queue dispatched an incorrect callback count")
-		checksum += callbacks + acceleration:Stats().metrics.callbacks_run
+		local stats = acceleration:Stats()
+		assert(stats.pending_owners == 0 and stats.metrics.callbacks_run == target_callbacks,
+			"pending owner queue did not drain or miscount callbacks")
+		checksum += callbacks + stats.metrics.callbacks_run
 		acceleration:Stop()
 	end
 
@@ -114,7 +119,7 @@ local function run_event_dedup()
 		})
 		assert(accepted == false and reason == "not_registered",
 			"unregistered benchmark owner unexpectedly entered the pending queue")
-		checksum += acceleration:Stats().metrics.received
+		checksum += index
 	end
 
 	assert(checksum == DEDUP_MESSAGE_COUNT * (DEDUP_MESSAGE_COUNT + 1) / 2,
