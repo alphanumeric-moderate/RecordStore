@@ -20,14 +20,14 @@
     },
     {
       "id": "datamodel.rojo-workspace-child-is-part",
-      "source": "typecheck/fixtures/datamodel/parent-folder.server.luau",
+      "source": "typecheck/fixtures/datamodel/workspace-child-positive.server.luau",
       "expect": "pass",
       "settings": "typecheck/fixtures/settings/new-solver-strict-datamodel.json",
       "sourcemap": "datamodel"
     },
     {
       "id": "datamodel.rejects-wrong-workspace-child-class",
-      "source": "typecheck/fixtures/datamodel/parent-class-negative.server.luau",
+      "source": "typecheck/fixtures/datamodel/workspace-child-negative.server.luau",
       "expect": "type-error",
       "line": 3,
       "settings": "typecheck/fixtures/settings/new-solver-strict-datamodel.json",
