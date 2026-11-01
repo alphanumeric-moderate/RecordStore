@@ -48,6 +48,9 @@ benchmarks:
   - name: "production DataStore adapter lifecycle and ambiguous-write recovery"
     exec: lune run bench/production_adapter.bench.luau
 
+  - name: "RecordStore Update copy and validation (large profile, 32 updates)"
+    exec: lune run bench/update_validation_pipeline.bench.luau
+
   - name: "large profile update and save"
     exec: lune run bench/large_profile.bench.luau
 
