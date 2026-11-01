@@ -32,7 +32,7 @@ expect(bundle.V1.Acceleration == bundle.Acceleration, "default acceleration modu
 
 local namespaces = {
 	LegacyMailboxMigration = {
-		Runner = "RecordStoreLegacyLegacyMailboxMigration", Adapter = "RecordStoreLegacyLegacyMailboxMigrationAdapter",
+		Runner = "RecordStoreLegacyMailboxMigration", Adapter = "RecordStoreLegacyMailboxMigrationAdapter",
 	},
 	Purchases = {
 		Authority = "PurchaseDataStoreAuthority", MigrationRunner = "PurchaseAuthorityMigrationRunner",

@@ -79,19 +79,19 @@ jobs:
           source = (root / "RecordStore.luau").read_text()
           forbidden = [
               r"require\s*\(\s*script\.Parent\.RecordStoreScheduler\s*\)",
-              r"require\s*\(\s*script\.Parent\.MailboxV2\s*\)",
+              r"require\s*\(\s*script\.Parent\.Mailbox\s*\)",
           ]
           required_declarations = [
               "local RecordStoreScheduler: EmbeddedSchedulerModule = {} :: EmbeddedSchedulerModule",
-              "local MailboxV2 = {}",
-              "function MailboxV2.new(",
+              "local Mailbox = {}",
+              "function Mailbox.new(",
           ]
           violations = [pattern for pattern in forbidden if re.search(pattern, source)]
           missing = [declaration for declaration in required_declarations if source.count(declaration) != 1]
           separate = [
               str(path) for path in (
                   root / "RecordStoreScheduler.luau",
-                  root / "MailboxV2.luau",
+                  root / "Mailbox.luau",
               ) if path.exists()
           ]
           if violations or missing or separate:
@@ -105,7 +105,7 @@ jobs:
                   print("Separate implementation files must not remain:")
                   print("\n".join(separate))
               raise SystemExit(1)
-          print("Scheduler and Mailbox V2 implementations are embedded in RecordStore.luau")
+          print("Scheduler and Mailbox V1 API implementations are embedded in RecordStore.luau; the persisted mailbox protocol remains v2")
           PY
 
       - name: Require explicit types at Studio solver-sensitive boundaries
