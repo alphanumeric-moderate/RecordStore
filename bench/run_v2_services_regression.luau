@@ -2,15 +2,15 @@
 local Shim = require("./RobloxShim")
 local RecordStore = Shim.load()
 local initializer = Shim.environment.game:GetService("ServerScriptService"):WaitForChild("PlayerDataInitializer")
-local V2Module = Shim.environment.require(initializer:WaitForChild("RecordStoreV2"))
-local V2 = V2Module.new(RecordStore, RecordStore.MailboxV2)
+local V1Module = Shim.environment.require(initializer:WaitForChild("RecordStoreV1"))
+local V1 = V1Module.new(RecordStore, RecordStore.Mailbox)
 
 local function expect(value, message)
 	assert(value, message)
 end
 
 local trace_id = 0
-local tracer = V2.Tracing.new({
+local tracer = V1.Tracing.new({
 	max_events = 16,
 	success_sample_every = 1,
 	new_event_id = function()
@@ -83,7 +83,7 @@ for index, event in ipairs(narrow.events) do
 end
 
 local fetch_count = 0
-local coalescer = V2.ReadCoalescer.new(function(key)
+local coalescer = V1.ReadCoalescer.new(function(key)
 	fetch_count += 1
 	return {
 		key = key,
@@ -110,7 +110,7 @@ expect(refreshed.nested.serial == 3 and fetch_count == 3,
 	"read coalescer returned an invalidated snapshot")
 
 local eviction_fetches = 0
-local eviction = V2.ReadCoalescer.new(function(key)
+local eviction = V1.ReadCoalescer.new(function(key)
 	eviction_fetches += 1
 	return { key = key, serial = eviction_fetches }
 end, {
@@ -143,7 +143,7 @@ expect(clear_ok == true and eviction:Stats().entries == 0 and eviction:Stats().i
 	"read coalescer Clear did not reset cache state")
 
 local ttl_zero_calls = 0
-local no_ttl = V2.ReadCoalescer.new(function()
+local no_ttl = V1.ReadCoalescer.new(function()
 	ttl_zero_calls += 1
 	return { serial = ttl_zero_calls }
 end, {

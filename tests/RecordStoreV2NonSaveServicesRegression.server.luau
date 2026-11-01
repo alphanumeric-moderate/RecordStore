@@ -2,10 +2,10 @@
 local Shim = require("./RobloxShim")
 local RecordStore = Shim.load()
 local initializer = game:GetService("ServerScriptService"):WaitForChild("PlayerDataInitializer")
-local V2Module = require(initializer:WaitForChild("RecordStoreV2"))
+local V2Module = require(initializer:WaitForChild("RecordStoreV1"))
 local ServicesModule = require(initializer:WaitForChild("RecordStoreServices"))
-local V2 = V2Module.new(RecordStore, RecordStore.MailboxV2)
-local V2Mock = V2Module.new(RecordStore.Mock, RecordStore.MailboxV2)
+local V1 = V2Module.new(RecordStore, RecordStore.Mailbox)
+local V1Mock = V2Module.new(RecordStore.Mock, RecordStore.Mailbox)
 
 local function expect(value, message)
 	assert(value, message)
@@ -13,12 +13,12 @@ end
 
 local service_bundle = ServicesModule.new(RecordStore)
 expect(service_bundle.Core == RecordStore, "service registry is bound to a different RecordStore core")
-expect(service_bundle.V2.Version == 2, "service registry did not initialize the V2 API against the core")
+expect(service_bundle.V1.Version == 2, "service registry did not initialize the V2 API against the core")
 for _, name in {
-	"RecordStoreV2",
-	"RecordStoreV2Acceleration",
-	"RecordStoreMailboxV2Migration",
-	"RecordStoreMailboxV2MigrationAdapter",
+	"RecordStoreV1",
+	"RecordStoreAcceleration",
+	"RecordStoreLegacyMailboxMigration",
+	"RecordStoreLegacyMailboxMigrationAdapter",
 	"PurchaseDataStoreAuthority",
 	"PurchaseAuthorityMigrationRunner",
 	"PurchaseInventoryManifest",
@@ -88,23 +88,23 @@ local function assert_leg_outcome(sagas_service, transfer_id, leg, state)
 	return outcome
 end
 
-local policy_status, policy_message = V2.ApplyRuntimePolicy({
+local policy_status, policy_message = V1.ApplyRuntimePolicy({
 	revision = 2,
 	max_dirty_age_seconds = 120,
 })
 expect(policy_status == "success", "versioned runtime policy rejected: " .. tostring(policy_message))
-local runtime_snapshot = V2.GetRuntimeSnapshot()
+local runtime_snapshot = V1.GetRuntimeSnapshot()
 expect(runtime_snapshot.policy.revision == 2 and runtime_snapshot.policy.max_dirty_age_seconds == 120,
 	"runtime snapshot did not reflect the validated policy")
 expect(type(runtime_snapshot.scheduler) == "table", "runtime snapshot omitted the core scheduler snapshot")
-expect(V2.ApplyRuntimePolicy({ revision = 2, max_dirty_age_seconds = 120 }) == "invalid",
+expect(V1.ApplyRuntimePolicy({ revision = 2, max_dirty_age_seconds = 120 }) == "invalid",
 	"runtime policy accepted a stale revision")
-expect(V2.ApplyRuntimePolicy({ revision = 3, max_dirty_age_seconds = math.huge }) == "invalid",
+expect(V1.ApplyRuntimePolicy({ revision = 3, max_dirty_age_seconds = math.huge }) == "invalid",
 	"runtime policy accepted a non-finite dirty-age threshold")
 
 local trace_store = new_store()
 local trace_a_id = 0
-local tracer = V2.Tracing.new({
+local tracer = V1.Tracing.new({
 	max_events = 16, success_sample_every = 1, store = trace_store,
 	new_event_id = function() trace_a_id += 1; return "trace-a-" .. tostring(trace_a_id) end,
 })
@@ -125,7 +125,7 @@ expect(local_trace.events[1].evidence_source == "process_local"
 local flush = tracer:FlushAsync("operation-1", 8)
 expect(flush.code == "committed", "durable trace flush failed: " .. tostring(flush.message))
 
-local trace_b = V2.Tracing.new({
+local trace_b = V1.Tracing.new({
 	max_events = 16, success_sample_every = 1, store = trace_store,
 	new_event_id = function() return "trace-b-1" end,
 })
@@ -160,7 +160,7 @@ local transaction_contract_open, transaction_contract_message = transaction_cont
 expect(transaction_contract_open == "created" or transaction_contract_open == "loaded",
 	"transaction contract Record open failed: " .. tostring(transaction_contract_message))
 local restore_revision_before_unsafe_user = transaction_contract_record:GetRevision()
-local unsafe_restore = V2.ProfileDoctor.Restore(
+local unsafe_restore = V1.ProfileDoctor.Restore(
 	transaction_contract_record,
 	{ Balance = 999 },
 	restore_revision_before_unsafe_user,
@@ -180,7 +180,7 @@ expect(unsafe_restore.code == "invalid"
 
 local transaction_reducer_calls = 0
 local transaction_contract_request = { amount = 7, reason = "test" }
-local transaction_contract = V2.Transactions.Run(
+local transaction_contract = V1.Transactions.Run(
 	transaction_contract_record, "v2-transaction-contract-001", transaction_contract_request,
 	function(current, request)
 		transaction_reducer_calls += 1
@@ -191,7 +191,7 @@ local transaction_contract = V2.Transactions.Run(
 )
 expect(transaction_contract.code == "committed" and transaction_contract.result.Balance == 7,
 	"V2 transaction wrapper did not expose the durable Record transaction result: " .. tostring(transaction_contract.code))
-local transaction_contract_duplicate = V2.Transactions.Run(
+local transaction_contract_duplicate = V1.Transactions.Run(
 	transaction_contract_record, "v2-transaction-contract-001", transaction_contract_request,
 	function(current, request)
 		transaction_reducer_calls += 1
@@ -211,7 +211,7 @@ local inbox_contract_record = RecordStore.Mock.new("V2InboxContract", "global", 
 local inbox_contract_open, inbox_contract_message = inbox_contract_record:Open({ total = 0 })
 expect(inbox_contract_open == "created" or inbox_contract_open == "loaded",
 	"inbox contract Record open failed: " .. tostring(inbox_contract_message))
-local inbox_contract = V2.Inbox.ApplyBatch(
+local inbox_contract = V1.Inbox.ApplyBatch(
 	inbox_contract_record, "inbox-contract-batch-001",
 	{ { message_id = "inbox-contract-message-001", message_type = "delta", payload = { amount = 4 }, payload_version = 1 } },
 	function(current, payload)
@@ -222,7 +222,7 @@ local inbox_contract = V2.Inbox.ApplyBatch(
 )
 expect(inbox_contract.code == "committed" and inbox_contract.applied == 1,
 	"V2 inbox batch did not commit mutation plus its idempotency receipt: " .. tostring(inbox_contract.code))
-local inbox_duplicate = V2.Inbox.ApplyBatch(
+local inbox_duplicate = V1.Inbox.ApplyBatch(
 	inbox_contract_record, "inbox-contract-batch-001",
 	{ { message_id = "inbox-contract-message-001", message_type = "delta", payload = { amount = 4 }, payload_version = 1 } },
 	function(current, payload)
@@ -240,7 +240,7 @@ local outbox_contract_record = RecordStore.Mock.new("V2OutboxTransactionContract
 local outbox_contract_open, outbox_contract_message = outbox_contract_record:Open({ Balance = 0 })
 expect(outbox_contract_open == "created" or outbox_contract_open == "loaded",
 	"outbox contract Record open failed: " .. tostring(outbox_contract_message))
-local outbox_transaction = V2.Transactions.CommitWithOutbox(
+local outbox_transaction = V1.Transactions.CommitWithOutbox(
 	outbox_contract_record, "v2-outbox-contract-001", { reason = "credit", amount = 9 },
 	function(current, request)
 		local updated = clone(current)
@@ -263,7 +263,7 @@ local outbox_events = outbox_contract_record:GetOutboxAsync(4)
 expect(type(outbox_events) == "table" and #outbox_events == 1,
 	"V2 outbox transaction omitted its durable outbox intent")
 local outbox_revision_before_invalid = outbox_contract_record:GetRevision()
-local invalid_outbox_key = V2.Transactions.CommitWithOutbox(
+local invalid_outbox_key = V1.Transactions.CommitWithOutbox(
 	outbox_contract_record, string.rep("x", 65), { reason = "too long", amount = 1 },
 	function(current, request)
 		local updated = clone(current)
@@ -280,7 +280,7 @@ expect(invalid_outbox_key.code == "invalid"
 	and outbox_contract_record:Get().Balance == 9,
 	"oversized V2 outbox id was not rejected before transaction mutation")
 local outbox_revision_before_unsafe_user = outbox_contract_record:GetRevision()
-local unsafe_outbox_user = V2.Transactions.CommitWithOutbox(
+local unsafe_outbox_user = V1.Transactions.CommitWithOutbox(
 	outbox_contract_record, "v2-outbox-unsafe-user-id", { reason = "unsafe user", amount = 1 },
 	function(current, request)
 		local updated = clone(current)
@@ -305,7 +305,7 @@ local legacy_receipt_open, legacy_receipt_open_error = legacy_receipt_record:Ope
 expect(legacy_receipt_open == "created" or legacy_receipt_open == "loaded",
 	"embedded legacy receipt fixture failed to open: " .. tostring(legacy_receipt_open_error))
 local legacy_grant_calls = 0
-local legacy_receipt_processor = V2.ReceiptProcessor.new({
+local legacy_receipt_processor = V1.ReceiptProcessor.new({
 	products = {
 		[1001] = {
 			grant = function(current)
@@ -357,7 +357,7 @@ local recipient_open, recipient_open_message = recipient:Open({ Balance = 25 })
 expect(sender_open == "created" or sender_open == "loaded", "sender open failed: " .. tostring(sender_open_message))
 expect(recipient_open == "created" or recipient_open == "loaded", "recipient open failed: " .. tostring(recipient_open_message))
 local saga_store = new_store()
-local sagas = V2.Sagas.new(saga_store)
+local sagas = V1.Sagas.new(saga_store)
 local transfer = sagas:TransferAsync("transfer-stable-001", sender, recipient, 15, {
 	sender_id = "sender", recipient_id = "recipient",
 })
@@ -391,7 +391,7 @@ local durable_transfer_status = sagas:GetStatus("transfer-response-loss-002")
 expect(durable_transfer_status.code == "settled", "saga status read did not return the durable terminal phase")
 
 local terminal_loss_store = new_store()
-local terminal_loss_sagas = V2.Sagas.new(terminal_loss_store)
+local terminal_loss_sagas = V1.Sagas.new(terminal_loss_store)
 local terminal_loss_enabled = true
 local terminal_base_update = terminal_loss_store.UpdateAsync
 terminal_loss_store.UpdateAsync = function(self, key, transform)
@@ -561,7 +561,7 @@ end
 do
 	local source, target = new_leg_pair("V2SagaReserveResponseLoss")
 	local source_loss_seen = inject_post_commit_unknown(source, ":reserve")
-	local saga_service = V2.Sagas.new(new_store())
+	local saga_service = V1.Sagas.new(new_store())
 	local initial = saga_service:TransferAsync("reserve-loss", source, target, 100, {
 		sender_id = "sender", recipient_id = "recipient",
 	})
@@ -584,7 +584,7 @@ end
 do
 	local source, target = new_leg_pair("V2SagaCreditResponseLoss")
 	local credit_loss_seen = inject_post_commit_unknown(target, ":credit")
-	local saga_service = V2.Sagas.new(new_store())
+	local saga_service = V1.Sagas.new(new_store())
 	local initial = saga_service:TransferAsync("credit-loss", source, target, 10, {
 		sender_id = "sender", recipient_id = "recipient",
 	})
@@ -607,7 +607,7 @@ end
 do
 	local source, target = new_leg_pair("V2SagaSettleResponseLoss")
 	local settle_loss_seen = inject_post_commit_unknown(source, ":settle")
-	local saga_service = V2.Sagas.new(new_store())
+	local saga_service = V1.Sagas.new(new_store())
 	local initial = saga_service:TransferAsync("settle-loss", source, target, 10, {
 		sender_id = "sender", recipient_id = "recipient",
 	})
@@ -630,7 +630,7 @@ end
 do
 	local source, target = new_leg_pair("V2SagaRefundResponseLoss")
 	local saga_store = new_store()
-	local saga_service = V2.Sagas.new(saga_store)
+	local saga_service = V1.Sagas.new(saga_store)
 	local source_base = source.TransactAsync
 	local refund_loss_armed = true
 	local compensation_phase_was_durable_before_refund = false
@@ -707,7 +707,7 @@ end
 do
 	local source, target = new_leg_pair("V2SagaReservePrecommit")
 	local fault_seen = inject_precommit_unknown(source, ":reserve")
-	local saga_service = V2.Sagas.new(new_store())
+	local saga_service = V1.Sagas.new(new_store())
 	local initial = saga_service:TransferAsync("reserve-precommit", source, target, 10, {
 		sender_id = "sender", recipient_id = "recipient",
 	})
@@ -732,7 +732,7 @@ end
 do
 	local source, target = new_leg_pair("V2SagaCreditPrecommit")
 	local fault_seen = inject_precommit_unknown(target, ":credit")
-	local saga_service = V2.Sagas.new(new_store())
+	local saga_service = V1.Sagas.new(new_store())
 	local initial = saga_service:TransferAsync("credit-precommit", source, target, 10, {
 		sender_id = "sender", recipient_id = "recipient",
 	})
@@ -757,7 +757,7 @@ end
 do
 	local source, target = new_leg_pair("V2SagaSettlePrecommit")
 	local fault_seen = inject_precommit_unknown(source, ":settle")
-	local saga_service = V2.Sagas.new(new_store())
+	local saga_service = V1.Sagas.new(new_store())
 	local initial = saga_service:TransferAsync("settle-precommit", source, target, 10, {
 		sender_id = "sender", recipient_id = "recipient",
 	})
@@ -783,7 +783,7 @@ end
 
 do
 	local source, target = new_leg_pair("V2SagaRefundPrecommit")
-	local saga_service = V2.Sagas.new(new_store())
+	local saga_service = V1.Sagas.new(new_store())
 	local source_base = source.TransactAsync
 	local refund_fault_armed = true
 	local compensation_was_durable = false
@@ -842,7 +842,7 @@ end
 end -- scope saga precommit matrix
 
 local projection_store = new_store()
-local projections = V2.Projections.new(projection_store)
+local projections = V1.Projections.new(projection_store)
 local registered = projections:Register("balance_projection_v1", 1, function(current, event)
 	local updated = clone(current)
 	updated.total = (updated.total or 0) + event.amount
@@ -866,7 +866,7 @@ local unchanged_projection = projections:GetAsync("balance_projection_v1", "user
 expect(unchanged_projection.code == "success" and unchanged_projection.row.value.total == 10,
 	"conflicting projection event mutated the materialized value")
 local rebuild_store = new_store()
-local rebuild_projections = V2.Projections.new(rebuild_store)
+local rebuild_projections = V1.Projections.new(rebuild_store)
 expect(rebuild_projections:Register("durable_balance_v1", 1, function(current, event)
 	local updated = clone(current)
 	updated.total = (updated.total or 0) + event.amount
@@ -896,7 +896,7 @@ local durable_rebuild_status = rebuild_projections:GetRebuildStatusAsync("durabl
 expect(durable_rebuild_status.code == "success" and durable_rebuild_status.cursor == "page-2"
 	and durable_rebuild_status.source_snapshot_id == "snapshot-17",
 	"durable projection rebuild status did not expose its saved cursor and snapshot")
-local restarted_rebuild_projections = V2.Projections.new(rebuild_store)
+local restarted_rebuild_projections = V1.Projections.new(rebuild_store)
 expect(restarted_rebuild_projections:Register("durable_balance_v1", 1, function(current, event)
 	local updated = clone(current)
 	updated.total = (updated.total or 0) + event.amount
@@ -919,7 +919,7 @@ expect(wrong_snapshot.code == "conflict",
 	"durable rebuild ID was reused with a different source snapshot")
 
 local malformed_rebuild_store = new_store()
-local malformed_rebuilds = V2.Projections.new(malformed_rebuild_store)
+local malformed_rebuilds = V1.Projections.new(malformed_rebuild_store)
 expect(malformed_rebuilds:Register("malformed_cursor_v1", 1, function(current, event)
 	local updated = clone(current)
 	updated.total = (updated.total or 0) + event.amount
@@ -977,7 +977,7 @@ local families = {
 		end,
 	},
 }
-local erasure = V2.Erasure.new(erase_store, families, {
+local erasure = V1.Erasure.new(erase_store, families, {
 	verify_templates = function(_user_id, rendered) return type(rendered) == "table" and #rendered == 2 end,
 })
 local erasure_plan = erasure:PlanAsync(123456, "erase-stable-1")
@@ -1008,7 +1008,7 @@ do -- A successful delete with a lost response must replay as idempotent absence
 	local deleted = false
 	local delete_attempts = 0
 	local replay_store = new_store()
-	local replay_erasure = V2.Erasure.new(replay_store, {
+	local replay_erasure = V1.Erasure.new(replay_store, {
 		{
 			name = "replay_family",
 			templates = { { name = "PlayerData", scope = "global", key = "Player_{user_id}" } },
@@ -1066,7 +1066,7 @@ do
 		GetAsyncFresh = function(_, key) return durable_store:GetAsyncFresh(key) end,
 		UpdateAsync = function(_, key, transform) return durable_store:UpdateAsync(key, transform) end,
 	}
-	local stale_erasure = V2.Erasure.new(stale_store, {}, {
+	local stale_erasure = V1.Erasure.new(stale_store, {}, {
 		verify_templates = function() return true end,
 	})
 	local blocked_stale, stale_status = stale_erasure:ShouldBlockWrites(782)
@@ -1075,7 +1075,7 @@ do
 end
 
 expect(not pcall(function()
-	V2.Erasure.new(new_store(), {
+	V1.Erasure.new(new_store(), {
 		{
 			name = "underspecified_family",
 			templates = { { key = "Player_{user_id}" } },
@@ -1084,7 +1084,7 @@ expect(not pcall(function()
 end), "erasure accepted a key-only template that wildcarded DataStore name and scope")
 
 local unmatched_deleted = 0
-local unmatched_erasure = V2.Erasure.new(new_store(), {
+local unmatched_erasure = V1.Erasure.new(new_store(), {
 	{
 		name = "profile_family",
 		templates = { { name = "PlayerData", scope = "global", key = "Player_{user_id}" } },
@@ -1122,7 +1122,7 @@ legacy_completed_store.values["rv2erase-u780"] = {
 	status = "completed", cursor = 0, completed_count = 0, entries = {}, coverage = {},
 	rtbf_coverage_verified = false,
 }
-local legacy_completed_erasure = V2.Erasure.new(legacy_completed_store, {}, {
+local legacy_completed_erasure = V1.Erasure.new(legacy_completed_store, {}, {
 	verify_templates = function() return false end,
 })
 local resolved_store = new_store()
@@ -1137,7 +1137,7 @@ resolved_store.values["rv2erase-u786"] = {
 	coverage = {},
 	rtbf_coverage_verified = false,
 }
-local resolved_erasure = V2.Erasure.new(resolved_store, {}, {
+local resolved_erasure = V1.Erasure.new(resolved_store, {}, {
 	verify_templates = function() return false end,
 })
 local resolved_is_erased = resolved_erasure:IsErased(786)
@@ -1160,7 +1160,7 @@ expect(legacy_execute.code == "coverage_unverified",
 	"legacy completed manifest without RTBF coverage proof was reported as committed")
 
 local incomplete_deleted = 0
-local incomplete_erasure = V2.Erasure.new(new_store(), {
+local incomplete_erasure = V1.Erasure.new(new_store(), {
 	{
 		name = "partial_family",
 		templates = { { name = "PlayerData", scope = "global", key = "Player_{user_id}" } },
@@ -1186,7 +1186,7 @@ expect(incomplete_execution.code == "coverage_unverified" and incomplete_deleted
 local per_item_fence_store = new_store()
 local per_item_fence_calls = 0
 local per_item_delete_calls = 0
-local per_item_fence_erasure = V2.Erasure.new(per_item_fence_store, {
+local per_item_fence_erasure = V1.Erasure.new(per_item_fence_store, {
 	{
 		name = "fenced_family",
 		templates = { { name = "PlayerData", scope = "global", key = "Fence_{user_id}" } },
@@ -1234,7 +1234,7 @@ do -- Corrupt manifests and forged coverage flags must not trigger erasure write
 		coverage = { malformed_family = { status = "template_verified_by_integrator", count = 1, inventory_complete = true, unmatched_count = 0 } },
 		rtbf_coverage_verified = true, template_fingerprint = "invalid",
 	}
-	local malformed_erasure = V2.Erasure.new(malformed_store, { malformed_family }, {
+	local malformed_erasure = V1.Erasure.new(malformed_store, { malformed_family }, {
 		verify_templates = function() return true end,
 	})
 	local call_ok, malformed_result = pcall(function()
@@ -1254,7 +1254,7 @@ do -- Corrupt manifests and forged coverage flags must not trigger erasure write
 		dependencies_clear = function() return true end,
 		redact_or_delete_if_generation = function() forged_deletes += 1; return "deleted" end,
 	}
-	local forged_erasure = V2.Erasure.new(forged_store, { forged_family }, {
+	local forged_erasure = V1.Erasure.new(forged_store, { forged_family }, {
 		verify_templates = function() return true end,
 	})
 	local verified_plan = forged_erasure:PlanAsync(783, "forged-coverage")
@@ -1278,24 +1278,24 @@ end
 do -- Reject malformed erasure family/template arrays and non-integer generations.
 	local valid_template = { name = "PlayerData", scope = "global", key = "Sparse_{user_id}" }
 	expect(not pcall(function()
-		V2.Erasure.new(new_store(), {
+		V1.Erasure.new(new_store(), {
 			[2] = { name = "sparse_family", templates = { valid_template } },
 		})
 	end), "erasure constructor silently accepted a sparse family array")
 	expect(not pcall(function()
-		V2.Erasure.new(new_store(), {
+		V1.Erasure.new(new_store(), {
 			{ name = "sparse_templates", templates = { [2] = valid_template } },
 		})
 	end), "erasure constructor silently accepted a sparse template array")
 	expect(not pcall(function()
-		V2.Erasure.new(new_store(), {
+		V1.Erasure.new(new_store(), {
 			{ name = "oversized_template", templates = {
 				{ name = string.rep("N", 51), scope = "global", key = "Oversized_{user_id}" },
 			} },
 		})
 	end), "erasure constructor accepted an overlong DataStore name")
 	local invalid_generation_store = new_store()
-	local invalid_generation_erasure = V2.Erasure.new(invalid_generation_store, {
+	local invalid_generation_erasure = V1.Erasure.new(invalid_generation_store, {
 		{
 			name = "fractional_generation",
 			templates = { { name = "PlayerData", scope = "global", key = "Generation_{user_id}" } },
@@ -1323,7 +1323,7 @@ for index = 1, 513 do
 	})
 end
 local oversize_store = new_store()
-local oversize_erasure = V2.Erasure.new(oversize_store, {
+local oversize_erasure = V1.Erasure.new(oversize_store, {
 	{
 		name = "oversized_family",
 		templates = { { name = "PlayerData", scope = "global", key = "Player_{user_id}" } },
@@ -1370,7 +1370,7 @@ local concurrent_family = {
 		end,
 	},
 }
-concurrent_eraser = V2.Erasure.new(concurrent_erase_store, concurrent_family, {
+concurrent_eraser = V1.Erasure.new(concurrent_erase_store, concurrent_family, {
 	verify_templates = function() return true end,
 })
 expect(concurrent_eraser:PlanAsync(654321, "erase-concurrent-1").code == "success",
@@ -1383,7 +1383,7 @@ expect(concurrent_eraser:GetStatus(654321).status == "completed"
 	and concurrent_eraser:GetStatus(654321).cursor == 2,
 	"concurrent erasure execution regressed the durable cursor");
 
-local unverified_erasure = V2.Erasure.new(new_store(), {
+local unverified_erasure = V1.Erasure.new(new_store(), {
 	{
 		name = "unverified_family",
 		templates = { { name = "SharedStore", scope = "global", key = "shared-key-{user_id}" } },
@@ -1407,7 +1407,7 @@ do -- A failed item after an earlier delete must not checkpoint partial-page cou
 	local delete_attempts = 0
 	local fail_second_inspection = true
 	local retry_checkpoint = nil
-	local retry_compactor = V2.Maintenance.NewCompactor({
+	local retry_compactor = V1.Maintenance.NewCompactor({
 		initial_cursor = "cursor-a",
 		next_page = function(cursor, maximum)
 			expect(cursor == "cursor-a" and maximum == 2,
@@ -1452,7 +1452,7 @@ end
 do -- A non-advancing nonterminal page cursor must fail closed instead of looping forever.
 	local inspect_calls = 0
 	local persist_calls = 0
-	local stalled = V2.Maintenance.NewCompactor({
+	local stalled = V1.Maintenance.NewCompactor({
 		initial_cursor = "same-cursor",
 		next_page = function() return { { key = "stalled-key", generation = 1 } }, "same-cursor", false end,
 		inspect = function()
@@ -1470,7 +1470,7 @@ end
 do -- "dry_run" is only a valid compactor delete result when explicitly enabled.
 	local function run_dry_outcome_compactor(allow_dry_run)
 		local persisted = nil
-		local compactor = V2.Maintenance.NewCompactor({
+		local compactor = V1.Maintenance.NewCompactor({
 			initial_cursor = "cursor-a",
 			allow_dry_run = allow_dry_run,
 			next_page = function(cursor, maximum)
@@ -1503,7 +1503,7 @@ end
 
 local compaction_store = new_store()
 local removed = {}
-local compactor = V2.Maintenance.NewCompactor({
+local compactor = V1.Maintenance.NewCompactor({
 	next_page = function(cursor, maximum)
 		return { { key = "expired-a", generation = 4 }, { key = "active-b", generation = 7 } }, nil, true
 	end,
@@ -1535,7 +1535,7 @@ do -- Verify a time budget cannot interrupt a multi-item durable page.
 	}
 	local budget_checkpoint = nil
 	local delay_until = 0
-	local budget_compactor = V2.Maintenance.NewCompactor({
+	local budget_compactor = V1.Maintenance.NewCompactor({
 		next_page = function(cursor, maximum)
 			expect(cursor == "before-page" and maximum == 2,
 				"page-level budget regression received an unexpected cursor or bound")
@@ -1573,7 +1573,7 @@ local checkpoint_calls = 0
 local delete_applied = false
 local requested_cursors = {}
 local durable_cursor = "cursor-a"
-local checkpoint_loss_compactor = V2.Maintenance.NewCompactor({
+local checkpoint_loss_compactor = V1.Maintenance.NewCompactor({
 	initial_cursor = "cursor-a",
 	next_page = function(cursor, maximum)
 		table.insert(requested_cursors, cursor)
@@ -1616,7 +1616,7 @@ expect(durable_cursor == "cursor-b" and checkpoint_loss_store.values.checkpoint.
 	"retry failed to persist the recovered compaction cursor")
 
 local unknown_compaction_store = new_store()
-local unknown_compactor = V2.Maintenance.NewCompactor({
+local unknown_compactor = V1.Maintenance.NewCompactor({
 	next_page = function(cursor)
 		return { { key = "uncertain", generation = 2 } }, cursor, false
 	end,
@@ -1660,7 +1660,7 @@ migration_manifest_store.UpdateAsync = function(self, key, transform)
 		return proposed
 	end)
 end
-local migrations = V2.Migrations.new({
+local migrations = V1.Migrations.new({
 	manifest_store = migration_manifest_store,
 	require_durable_manifest = true,
 })
@@ -1736,7 +1736,7 @@ expect(resolved_migration_manifest ~= nil and resolved_migration_manifest.status
 	and type(resolved_migration_manifest.resolution) == "table",
 	"migration quarantine resolution was not durably audited")
 
-local repair_preview = V2.ProfileDoctor.PreviewRepair(migration_record, {
+local repair_preview = V1.ProfileDoctor.PreviewRepair(migration_record, {
 	id = "cash-repair", revision = "v1",
 	preview = function(data) local updated = clone(data); updated.cash = 20; return updated end,
 	validate = function(data) return type(data.cash) == "number" and data.cash >= 0 end,
@@ -1744,14 +1744,14 @@ local repair_preview = V2.ProfileDoctor.PreviewRepair(migration_record, {
 expect(repair_preview.code == "success" and repair_preview.preview_only == true,
 	"profile repair preview did not remain read-only")
 local restore_revision = migration_record:GetRevision()
-local missing_authorizer = V2.ProfileDoctor.Restore(
+local missing_authorizer = V1.ProfileDoctor.Restore(
 	migration_record, { cash = 99 }, restore_revision,
 	"restore-no-auth", "operator-1", "missing authorizer",
 	{ subject_user_id = 123456, is_erased = function() return false end }
 )
 expect(missing_authorizer.code == "disabled",
 	"restore did not fail closed when no application authorizer was supplied")
-local denied_restore = V2.ProfileDoctor.Restore(
+local denied_restore = V1.ProfileDoctor.Restore(
 	migration_record, { cash = 99 }, restore_revision,
 	"restore-denied", "operator-1", "authorization should be denied",
 	{
@@ -1761,7 +1761,7 @@ local denied_restore = V2.ProfileDoctor.Restore(
 	}
 )
 expect(denied_restore.code == "denied", "restore ignored an explicit authorization denial")
-local stale_restore = V2.ProfileDoctor.Restore(
+local stale_restore = V1.ProfileDoctor.Restore(
 	migration_record, { cash = 99 }, restore_revision - 1,
 	"restore-stale-revision", "operator-1", "stale revision",
 	{
@@ -1771,7 +1771,7 @@ local stale_restore = V2.ProfileDoctor.Restore(
 	}
 )
 expect(stale_restore.code == "conflict", "restore accepted a stale profile revision")
-local restored = V2.ProfileDoctor.Restore(
+local restored = V1.ProfileDoctor.Restore(
 	migration_record, {
 		cash = 99,
 		__recordstore_reserved_do_not_restore = "historical-overwrite",
@@ -1803,7 +1803,7 @@ expect(restored_data.cash == 99, "historical restore did not replace the intende
 
 local profile_quarantine_store = new_store()
 local diagnosed_revision = migration_record:GetRevision()
-local quarantined_profile = V2Mock.ProfileDoctor.QuarantineAsync(
+local quarantined_profile = V1Mock.ProfileDoctor.QuarantineAsync(
 	migration_record, profile_quarantine_store, "profile-quarantine-001",
 	"operator-1", "manual diagnosis requires writer fencing", diagnosed_revision
 )
@@ -1816,25 +1816,25 @@ expect(type(durable_profile_fence) == "table"
 	and durable_profile_fence.implementation_version == 2147483646
 	and type(durable_profile_fence.__recordstore_quarantine_fence_v1) == "table",
 	"profile quarantine did not install the atomic same-key writer fence")
-local profile_quarantine_status = V2Mock.ProfileDoctor.GetQuarantineStatusAsync(migration_record, profile_quarantine_store)
+local profile_quarantine_status = V1Mock.ProfileDoctor.GetQuarantineStatusAsync(migration_record, profile_quarantine_store)
 expect(profile_quarantine_status.code == "success" and profile_quarantine_status.status == "quarantined",
 	"profile quarantine status could not be read durably")
-local blocked_writer = V2Mock.ProfileDoctor.CheckWritableAsync(migration_record, profile_quarantine_store)
+local blocked_writer = V1Mock.ProfileDoctor.CheckWritableAsync(migration_record, profile_quarantine_store)
 expect(blocked_writer.code == "quarantined" and blocked_writer.allowed == false,
 	"quarantine writer gate allowed writes while the profile was quarantined")
-local fail_closed_writer = V2Mock.ProfileDoctor.CheckWritableAsync(migration_record, {
+local fail_closed_writer = V1Mock.ProfileDoctor.CheckWritableAsync(migration_record, {
 	GetAsync = function() error("injected quarantine read failure") end,
 	UpdateAsync = function() error("unexpected write") end,
 })
 expect(fail_closed_writer.allowed == false and fail_closed_writer.code == "unknown",
 	"quarantine writer gate allowed writes when status was unknown")
-local profile_quarantine_resolved = V2Mock.ProfileDoctor.ResolveQuarantineAsync(
+local profile_quarantine_resolved = V1Mock.ProfileDoctor.ResolveQuarantineAsync(
 	migration_record, profile_quarantine_store, "profile-quarantine-001",
 	"operator-1", "write paths inspected", migration_record:GetRevision()
 )
 expect(profile_quarantine_resolved.code == "committed",
 	"profile quarantine resolution failed: " .. tostring(profile_quarantine_resolved.code))
-expect(V2Mock.ProfileDoctor.GetQuarantineStatusAsync(migration_record, profile_quarantine_store).status == "resolved",
+expect(V1Mock.ProfileDoctor.GetQuarantineStatusAsync(migration_record, profile_quarantine_store).status == "resolved",
 	"profile quarantine resolution was not persisted")
 local released_profile = RecordStore.Mock.get_record_raw(
 	"V2MigrationProfiles", "global", "profile"
@@ -1845,7 +1845,7 @@ expect(type(released_profile) == "table"
 	and type(released_profile.fencing_generation) == "number"
 	and released_profile.fencing_generation >= durable_profile_fence.fencing_generation + 1,
 	"resolved quarantine did not durably remove its fence and advance generation")
-local resumed_writer = V2Mock.ProfileDoctor.CheckWritableAsync(migration_record, profile_quarantine_store)
+local resumed_writer = V1Mock.ProfileDoctor.CheckWritableAsync(migration_record, profile_quarantine_store)
 expect(resumed_writer.code == "success" and resumed_writer.allowed == true,
 	"writer gate remained blocked after an audited quarantine resolution")
 
