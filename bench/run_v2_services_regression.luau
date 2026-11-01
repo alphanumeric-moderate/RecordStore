@@ -113,7 +113,7 @@ end, {
 
 for _, key in { "a", "b", "c", "d" } do
 	expect(eviction:GetAsync(key) ~= nil, "read coalescer failed to insert " .. key)
-	task.wait(0.002)
+	Shim.environment.task.wait(0.002)
 end
 expect(eviction:Stats().entries == 4, "read coalescer did not reach configured capacity")
 expect(eviction:Invalidate("b") == true, "read coalescer could not remove a non-root expiry entry")
