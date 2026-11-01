@@ -3,10 +3,10 @@ local fs = require("@lune/fs")
 local luau = require("@lune/luau")
 local Shim = require("./RobloxShim")
 local RecordStore = Shim.load()
-local V2Module = luau.load(fs.readFile("src/PlayerDataInitializer/RecordStoreV2.luau"), {
-	debugName = "RecordStoreV2",
+local V1Module = luau.load(fs.readFile("src/PlayerDataInitializer/RecordStoreV1.luau"), {
+	debugName = "RecordStoreV1",
 })()
-local V2 = V2Module.new(RecordStore, RecordStore.MailboxV2)
+local V1 = V1Module.new(RecordStore, RecordStore.Mailbox)
 local Runner = luau.load(fs.readFile("src/PlayerDataInitializer/RecordStoreMaintenanceRunner.luau"), {
 	debugName = "RecordStoreMaintenanceRunner",
 })()
@@ -73,7 +73,7 @@ local function common_config(job_id, mode)
 end
 
 -- Dry-run persists bounded progress but never calls the destructive adapter.
-local dry = Runner.new(V2.Maintenance, common_config("dry-run-1", "dry_run"))
+local dry = Runner.new(V1.Maintenance, common_config("dry-run-1", "dry_run"))
 local dry_result = dry:Run(1, 1, 500)
 expect(dry_result.code == "yielded" and dry_result.cursor == "row:1",
 	"dry-run failed to yield after its bounded first page")
@@ -89,7 +89,7 @@ expect(exposed_checkpoint ~= nil and exposed_checkpoint.cursor == "row:1",
 exposed_checkpoint.cursor = "row:999"
 expect(dry:GetCheckpoint().cursor == "row:1",
 	"mutating a returned checkpoint snapshot changed runner state")
-local resumed_dry = Runner.new(V2.Maintenance, common_config("dry-run-1", "dry_run"))
+local resumed_dry = Runner.new(V1.Maintenance, common_config("dry-run-1", "dry_run"))
 local dry_complete = resumed_dry:Run(8, 1, 500)
 expect(dry_complete.code == "completed" and #delete_calls == 0,
 	"dry-run did not resume from its durable checkpoint without deleting data")
@@ -103,34 +103,34 @@ do
 		processed = 1, removed = 0, status = "completed",
 	}
 	expect(not pcall(function()
-		Runner.new(V2.Maintenance, common_config("forged-complete", "dry_run"))
+		Runner.new(V1.Maintenance, common_config("forged-complete", "dry_run"))
 	end), "runner accepted a completed checkpoint with an unfinished cursor")
 	durable_checkpoint = {
 		version = 1, job_id = "forged-counts", revision = 2, cursor = nil,
 		processed = 1, removed = 2, status = "completed",
 	}
 	expect(not pcall(function()
-		Runner.new(V2.Maintenance, common_config("forged-counts", "dry_run"))
+		Runner.new(V1.Maintenance, common_config("forged-counts", "dry_run"))
 	end), "runner accepted a checkpoint whose removed count exceeds processed work")
 	durable_checkpoint = {
 		version = 1, job_id = "forged-status", revision = 3, cursor = "row:1",
 		processed = 1, removed = 0, status = "future_status",
 	}
 	expect(not pcall(function()
-		Runner.new(V2.Maintenance, common_config("forged-status", "dry_run"))
+		Runner.new(V1.Maintenance, common_config("forged-status", "dry_run"))
 	end), "runner accepted an unknown checkpoint status")
 	durable_checkpoint = saved_checkpoint
 end
 
 -- Execute mode cannot be constructed without both authorization and a durable writer fence.
 expect(not pcall(function()
-	Runner.new(V2.Maintenance, common_config("unguarded", "execute"))
+	Runner.new(V1.Maintenance, common_config("unguarded", "execute"))
 end), "execute runner accepted missing authorization/fence callbacks")
 
 -- A committed checkpoint with a lost response is accepted only after exact read-back.
 durable_checkpoint = nil
 checkpoint_response_lost = true
-local loss_runner = Runner.new(V2.Maintenance, common_config("checkpoint-response-loss", "dry_run"))
+local loss_runner = Runner.new(V1.Maintenance, common_config("checkpoint-response-loss", "dry_run"))
 local loss_result = loss_runner:Step(1, 500)
 expect(loss_result.code == "incomplete" and loss_result.checkpoint_revision == 1,
 	"runner did not reconcile a durable checkpoint whose response was lost")
@@ -147,7 +147,7 @@ execute_config.assert_fence = function()
 	fence_checks += 1
 	return fence_checks == 1
 end
-local execute_runner = Runner.new(V2.Maintenance, execute_config)
+local execute_runner = Runner.new(V1.Maintenance, execute_config)
 local blocked = execute_runner:Step(1, 500)
 expect(blocked.code == "unknown",
 	"lost writer fence did not stop execution with an unresolved result")
@@ -198,12 +198,12 @@ do -- Slow storage reads must not starve single-key maintenance progress.
 			return true
 		end,
 	}
-	local slow_runner = Runner.new(V2.Maintenance, late_config)
+	local slow_runner = Runner.new(V1.Maintenance, late_config)
 	local first_yield = slow_runner:Run(8, 1, 1)
 	expect(first_yield.code == "yielded" and late_checkpoint ~= nil
 		and late_checkpoint.cursor == "late-a" and late_checkpoint.processed == 1,
 		"slow single-key page read starved progress instead of checkpointing and yielding")
-	local resumed_runner = Runner.new(V2.Maintenance, late_config)
+	local resumed_runner = Runner.new(V1.Maintenance, late_config)
 	local resumed_result = resumed_runner:Run(8, 1, 500)
 	expect(resumed_result.code == "completed" and late_checkpoint.status == "completed"
 		and late_checkpoint.processed == 2 and late_page_calls == 2,
@@ -279,7 +279,7 @@ do -- Validate generation-aware deletes in execute mode across resumable per-key
 		authorize = function() return true end,
 		assert_fence = function() return true end,
 	}
-	local live_runner = Runner.new(V2.Maintenance, live_config)
+	local live_runner = Runner.new(V1.Maintenance, live_config)
 	local live_result = live_runner:Run(8, 1, 500)
 	local stats = live_runner:Stats()
 	expect(live_result.code == "completed" and stats.status == "completed",
@@ -302,7 +302,7 @@ end
 do -- Reject inconsistent page completion metadata before advancing durable progress.
 	local function bad_page_compactor(completion_value, cursor_value)
 		local checkpoint_calls = 0
-		local candidate = V2.Maintenance.NewCompactor({
+		local candidate = V1.Maintenance.NewCompactor({
 			next_page = function() return {}, cursor_value, completion_value end,
 			inspect = function() return { status = "success", eligible = false, dependencies_clear = true } end,
 			delete_if_generation = function() return "skipped" end,
@@ -342,7 +342,7 @@ for _, mutation in {
 	config.next_page = function() work_calls += 1; return {}, nil, true end
 	config.inspect = function() work_calls += 1 end
 	config.delete_if_generation = function() work_calls += 1 end
-	expect(not pcall(Runner.new, V2.Maintenance, config) and work_calls == 0,
+	expect(not pcall(Runner.new, V1.Maintenance, config) and work_calls == 0,
 		"malformed checkpoint reached maintenance work: " .. mutation.field .. "/" .. tostring(mutation.value))
 end
 
@@ -352,7 +352,7 @@ do -- Invalid run bounds must not call adapters, even after a runner is construc
 	config.load_checkpoint = function() return nil end
 	config.next_page = function() work_calls += 1; return {}, nil, true end
 	config.persist_checkpoint = function() work_calls += 1; return true end
-	local runner = Runner.new(V2.Maintenance, config)
+	local runner = Runner.new(V1.Maintenance, config)
 	for _, bad in { 0, -1, 1.5, math.huge, 0 / 0, "1", false } do
 		expect(runner:Step(bad, 1).code == "invalid" and runner:Step(1, bad).code == "invalid"
 			and runner:Run(bad, 1, 1).code == "invalid" and runner:Run(1, bad, 1).code == "invalid"
@@ -363,7 +363,7 @@ do -- Invalid run bounds must not call adapters, even after a runner is construc
 		and runner:Run(1, 1, 1001).code == "invalid" and work_calls == 0,
 		"out-of-range bounds performed maintenance work")
 	for _, bounds in { { 1, 1, 1 }, { 64, 256, 1000 } } do
-		local bounded = Runner.new(V2.Maintenance, config)
+		local bounded = Runner.new(V1.Maintenance, config)
 		expect(bounded:Run(table.unpack(bounds)).code == "completed", "inclusive maintenance bound was rejected")
 		local before = work_calls
 		expect(bounded:Step(1, 1).code == "completed" and bounded:Run().code == "completed"
@@ -383,14 +383,14 @@ do -- A competing valid checkpoint is not proof that this runner's CAS succeeded
 		external_checkpoint.processed += 1
 		return false, "competing runner committed"
 	end
-	local runner = Runner.new(V2.Maintenance, config)
+	local runner = Runner.new(V1.Maintenance, config)
 	local result = runner:Step(1, 100)
 	local stats = runner:Stats()
 	expect(result.code == "unknown" and runner:GetCheckpoint() == nil
 		and stats.cursor == nil and stats.processed == 0 and stats.removed == 0
 		and stats.checkpoint_revision == 0 and external_checkpoint.revision == 2
 		and external_checkpoint.processed == 2, "failed CAS adopted a competitor's checkpoint or retained unconfirmed progress")
-	local resumed = Runner.new(V2.Maintenance, config)
+	local resumed = Runner.new(V1.Maintenance, config)
 	expect(resumed:Step(1, 100).code == "completed" and resumed:Stats().checkpoint_revision == 2,
 		"fresh runner failed to honor the winning durable checkpoint")
 end
@@ -406,7 +406,7 @@ for _, denial in { false, "allowed", 1, {} } do
 	config.persist_checkpoint = function(proposed) checkpoint = copy(proposed); return true end
 	config.authorize = function() return authorized end
 	config.assert_fence = function() return true end
-	local runner = Runner.new(V2.Maintenance, config)
+	local runner = Runner.new(V1.Maintenance, config)
 	expect(runner:Step(1, 100).code == "blocked" and work_calls == 0 and checkpoint == nil,
 		"authorization denial/ambiguous result allowed enumeration")
 	authorized = true

@@ -11,10 +11,10 @@ end
 local Shim = require("./RobloxShim")
 local RecordStore = Shim.load()
 local Mock = RecordStore.Mock
-local MailboxV2 = RecordStore.MailboxV2
+local Mailbox = RecordStore.Mailbox
 
 assert(type(Mock.get_session_status_async) == "function", "session status diagnostic API is missing")
-assert(type(MailboxV2.MaintenanceAsync) == "function", "mailbox maintenance API is missing")
+assert(type(Mailbox.MaintenanceAsync) == "function", "mailbox maintenance API is missing")
 assert(type(RecordStore.inspect_profile_async) == "function", "Profile Doctor inspection API is missing")
 assert(type(Mock.inspect_profile_async) == "function", "mock Profile Doctor inspection API is missing")
 assert(type(RecordStore.diff_profile_versions_async) == "function", "Profile Doctor version diff API is missing")
@@ -146,8 +146,8 @@ Mock.set_get_failures(1, "injected read failure")
 local unreadable, unreadable_result = Mock.get_session_status_async("SessionStatusTest", "global", "active")
 assert(unreadable == nil and unreadable_result == "unknown", "read failures must not look like an unowned profile")
 
-local store = MailboxV2.MockStore()
-local mailbox = MailboxV2.new(store, {
+local store = Mailbox.MockStore()
+local mailbox = Mailbox.new(store, {
 	store_name = "PlayerData",
 	scope = "global",
 	profile_key = "maintenance-owner",
