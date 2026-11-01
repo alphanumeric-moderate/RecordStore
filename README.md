@@ -201,7 +201,7 @@ Earlier symbolic values and AlyaNum / InfiniteMath values outside CodeNum's supp
 
 The StringValue transport retains a conservative 199,999-byte payload limit. CodeNum 0.6.0 is maintained in this repository and does not introduce a third-party numeric runtime dependency. Precise coefficients are bounded to 4096 significant digits; the existing exponent magnitude limit remains unchanged.
 
-### PlayerDataCore V2 mailbox wake-ups
+### PlayerDataCore Mailbox V1 API wake-ups
 
 `PlayerDataCore` can optionally bind each active player Record to the embedded Mailbox V1 and use `RecordStoreAcceleration` for cross-server wake-ups. Enable it through the dependencies passed to `PlayerDataCore.new` (for the standard Rojo setup, configure the call in `PlayerData.luau`):
 
@@ -220,7 +220,7 @@ return PlayerDataCore.new({
 
 `MailboxWakeupsEnabled` automatically enables the RecordStore durable queue for PlayerData sessions. `MemoryStoreAccelerationHintsEnabled` requires mailbox wake-ups and adds bounded MemoryStore sorted-map hints alongside MessagingService notifications. Both switches default to `false`, and no external services are initialized by the default PlayerDataCore setup. If the optional acceleration service cannot start, PlayerDataCore keeps the mailbox's durable polling/reconciliation path available and continues player loading.
 
-The wake-up adapter is not a profile-save accelerator: it only signals Mailbox V1 work. MessagingService and MemoryStore hints are advisory and may be lost, duplicated, delayed, or throttled. RecordStore's durable mailbox polling remains the recovery path. A Record whose legacy queue has not drained may reject V2 binding; PlayerDataCore leaves the existing queue handler available rather than discarding queued work.
+The wake-up adapter is not a profile-save accelerator: it only signals Mailbox V1 work. MessagingService and MemoryStore hints are advisory and may be lost, duplicated, delayed, or throttled. RecordStore's durable mailbox polling remains the recovery path. A Record whose legacy queue has not drained may reject mailbox binding; PlayerDataCore leaves the existing queue handler available rather than discarding queued work.
 
 ## Rojo
 
@@ -632,7 +632,7 @@ These operations can read and update the source outbox while the source `Record`
 
 `Record:PruneOutboxAsync(delivered_before_unix, max_events?)` explicitly removes only events with confirmed `delivered` state and `delivered_at` strictly earlier than the cutoff. The cutoff is a Unix timestamp in **seconds**, not milliseconds. Cleanup is bounded (at most 16 events per call); pending, unknown, and blocked events are never pruned by this API. Cleanup is not automatic.
 
-## Opt-in RecordStore V2 non-save services
+## Opt-in RecordStore V1 non-save services
 
 ### Unified service entry point
 
@@ -643,7 +643,7 @@ local initializer = game:GetService("ServerScriptService"):WaitForChild("PlayerD
 local RecordStore = require(initializer:WaitForChild("RecordStore"))
 local RecordStoreServices = require(initializer:WaitForChild("RecordStoreServices"))
 local services = RecordStoreServices.new(RecordStore)
-local v2 = services.V1
+local v1 = services.V1
 
 local PurchaseAuthority = services.Purchases.Authority
 local MaintenanceAdapter = services.Maintenance.DataStoreAdapter
@@ -651,9 +651,9 @@ local ErasureBinding = services.Erasure.ManifestBinding
 local OutboxConsumer = services.Outbox.ConsumerAdapter
 ```
 
-The returned bundle contains `Core`, `V2`, `Acceleration`, `Modules`, `MailboxMigration`, `Purchases`, `Maintenance`, `Erasure`, and `Outbox`. `Modules` exposes every optional service ModuleScript by its source-module name; the grouped fields point to those same module instances. `options.v2` is passed to the V2 constructor, and the acceleration module is registered there by default. The registry does not require the core, so it can safely expose adapters whose type contracts refer back to RecordStore.
+The returned bundle contains `Core`, `V1`, `Acceleration`, `Modules`, `LegacyMailboxMigration`, `Purchases`, `Maintenance`, `Erasure`, and `Outbox`. `Modules` exposes every optional service ModuleScript by its source-module name; the grouped fields point to those same module instances. `options.v1` is passed to the V1 constructor, and the acceleration module is registered there by default. The registry does not require the core, so it can safely expose adapters whose type contracts refer back to RecordStore.
 
-Creating the bundle does **not** start wake-up acceleration, assign `MarketplaceService.ProcessReceipt`, import historical purchases, run maintenance, or execute erasure. Those operations remain explicit and require application-owned configuration, authorization, inventory evidence, and live-platform acceptance. Construct the bundle once per application service graph; create separately configured bundles only when their distinct V2 policy state is intentional.
+Creating the bundle does **not** start wake-up acceleration, assign `MarketplaceService.ProcessReceipt`, import historical purchases, run maintenance, or execute erasure. Those operations remain explicit and require application-owned configuration, authorization, inventory evidence, and live-platform acceptance. Construct the bundle once per application service graph; create separately configured bundles only when their distinct V1 policy state is intentional.
 
 `RecordStoreV1` is a side-effect-free-on-require, opt-in facade for durable cross-profile sagas, versioned migration manifests, profile diagnosis/repair and quarantine records, erasure plans, eventual projections/unique reservations, bounded redacted traces with per-event durability provenance, and resumable maintenance. All storage-facing workflows accept explicit DataStore-like adapters and use bounded records rather than scanning an entire keyspace.
 
@@ -685,7 +685,7 @@ The embedded mailbox exposes `ImportLegacyAsync` and `ImportLegacyDeadLetterAsyn
 
 The freeze marker leaves the original queue content in place and preserves the V2/V3 fields for source verification. Queue updates use `UpdateAsync` and are accepted only when a fresh uncached read proves the marker; an ambiguous response without a matching durable marker is `unknown`. If the added marker would exceed the configured queue limit, or if a malformed/future-version queue or reserved V2 ID is detected, the freeze is rejected without overwriting source data. Existing queue operations fail closed after the marker is installed.
 
-`RecordStoreLegacyMailboxMigrationAdapter.bind(...)` supplies a concrete source adapter using `RecordStore.begin_mailbox_v2_migration_async`, `get_mailbox_v2_migration_status_async`, and `get_mailbox_v2_migration_source_page_async`. The latter performs fresh reads against the existing q2 queue key. The coordinator then coordinates the cutover in bounded steps. Its application adapters must freeze the exact legacy source, prove all old writers are drained, provide bounded active/dead-letter page readers, persist a revision-checked durable checkpoint, and supply a mandatory `verify_complete` callback that checks destination inventory/contents as well as the frozen source counts. The adapter rejects configuration without this callback; count agreement and per-item read-back alone are not treated as proof that the destination contains no extras or duplicates. V2 can be enabled atomically only after that verification succeeds. The coordinator stops at `ready_to_activate`; activation is a separate explicit call. It never deletes the frozen source. The application must configure its activation guard to permit the migration operation while blocking normal V2 enqueue/processing until cutover is approved.
+`RecordStoreLegacyMailboxMigrationAdapter.bind(...)` supplies a concrete source adapter using `RecordStore.begin_mailbox_migration_async`, `get_mailbox_migration_status_async`, and `get_mailbox_migration_source_page_async`. The latter performs fresh reads against the existing q2 queue key. The coordinator then coordinates the cutover in bounded steps. Its application adapters must freeze the exact legacy source, prove all old writers are drained, provide bounded active/dead-letter page readers, persist a revision-checked durable checkpoint, and supply a mandatory `verify_complete` callback that checks destination inventory/contents as well as the frozen source counts. The adapter rejects configuration without this callback; count agreement and per-item read-back alone are not treated as proof that the destination contains no extras or duplicates. The Mailbox V1 API can be activated only after that verification succeeds. The coordinator stops at `ready_to_activate`; activation is a separate explicit call. It never deletes the frozen source. The application must configure its activation guard to permit the migration operation while blocking normal Mailbox V1 enqueue/processing until cutover is approved.
 
 ## Mailbox V1 operations and maintenance
 
