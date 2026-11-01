@@ -7,10 +7,10 @@
       "TypecheckFixtures": {
         "$className": "Folder",
         "ParentFolderPositive": {
-          "$path": "typecheck/fixtures/datamodel/parent-folder.server.luau"
+          "$path": "datamodel/parent-folder.server.luau"
         },
         "ParentClassNegative": {
-          "$path": "typecheck/fixtures/datamodel/parent-class-negative.server.luau"
+          "$path": "datamodel/parent-class-negative.server.luau"
         }
       }
     }
