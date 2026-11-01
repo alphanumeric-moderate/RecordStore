@@ -475,7 +475,7 @@ function Acceleration.new(options)
 			local pending = self.pending_head
 			remove_pending(pending.owner_digest)
 			processed += 1
-			if pending ~= nil and self.owners[owner_digest] == pending.owner and pending.owner.active == true then
+			if pending ~= nil and self.owners[pending.owner_digest] == pending.owner and pending.owner.active == true then
 				local ok = pcall(pending.owner.callback, pending.reason)
 				if ok then self.metrics.callbacks_run += 1 else self.metrics.callback_errors += 1 end
 			end
