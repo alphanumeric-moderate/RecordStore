@@ -1,5 +1,5 @@
 --!strict
 
-local parent: Folder = script.Parent
-local children: { Instance } = parent:GetChildren()
-assert(#children >= 0)
+local part: Part = workspace.TypecheckPart
+local position: Vector3 = part.Position
+assert(position.Magnitude >= 0)
