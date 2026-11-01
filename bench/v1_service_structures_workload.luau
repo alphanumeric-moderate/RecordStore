@@ -41,15 +41,20 @@ local function run_trace_ring()
 	assert(local_trace.code == "success" and #local_trace.events == TRACE_CAPACITY / 16,
 		"trace workload query returned an incorrect number of events")
 
-	local first = tracer:Drain(TRACE_CAPACITY / 2)
-	local second = tracer:Drain(TRACE_CAPACITY)
-	assert(#first == TRACE_CAPACITY / 2 and #second == TRACE_CAPACITY / 2,
-		"trace workload Drain returned incorrect batch sizes")
-
-	local checksum = 0
-	for _, event in ipairs(first) do checksum += event.sequence end
-	for _, event in ipairs(second) do checksum += event.sequence end
 	local first_retained = TRACE_COUNT - TRACE_CAPACITY + 1
+	local checksum = 0
+	local drained = 0
+	while drained < TRACE_CAPACITY do
+		local batch = tracer:Drain(math.min(256, TRACE_CAPACITY - drained))
+		assert(#batch > 0 and #batch <= 256, "trace workload Drain returned an invalid batch")
+		for index, event in ipairs(batch) do
+			assert(event.sequence == first_retained + drained + index - 1,
+				"trace workload Drain changed retained-event order")
+			checksum += event.sequence
+		end
+		drained += #batch
+	end
+	assert(drained == TRACE_CAPACITY, "trace workload Drain did not return the full retained window")
 	local expected = (first_retained + TRACE_COUNT) * TRACE_CAPACITY / 2
 	assert(checksum == expected, "trace workload checksum mismatch")
 	assert(tracer:Stats().retained == 0, "trace workload failed to drain its retained events")

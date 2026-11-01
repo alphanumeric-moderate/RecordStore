@@ -211,7 +211,7 @@ end
 	end
 
 	local RecordStore = {
-	MailboxV2 = {
+	Mailbox = {
 		new = function()
 			error("the mailbox module stub must not be constructed by the PlayerDataCore test harness")
 		end,
@@ -285,11 +285,11 @@ end
 			return {}, "success", nil
 		end
 
-		function record:BindMailboxV2Async(mailbox)
+		function record:BindMailboxAsync(mailbox)
 			if self.State ~= "active" then
 				return "fenced", "record is not active"
 			end
-			self._mailbox_v2 = mailbox
+			self._mailbox = mailbox
 			return "success", nil
 		end
 

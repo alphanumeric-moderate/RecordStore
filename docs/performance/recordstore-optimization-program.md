@@ -15,14 +15,14 @@ This is a staged engineering program, not a blanket rewrite. Every production ch
 - Unknown write outcomes continue to require authoritative verification or reconciliation; never turn uncertainty into a confirmed failure or success.
 - Failed or corrupt loads must not silently create a fresh default profile.
 - Persisted envelope, sidecar, mailbox, receipt, purchase, and erasure formats remain compatible unless a separately reviewed migration is explicitly required.
-- The scheduler and Mailbox V2 implementations remain embedded in RecordStore.luau as required by repository CI.
+- The scheduler and embedded Mailbox implementation remain in RecordStore.luau as required by repository CI. The public mailbox API is V1; its persisted protocol remains V2.
 - No production optimization may depend on benchmark-only Roblox service behavior or assume standalone Lune reproduces live Roblox engine/network costs.
 
 ## Workstreams and order
 
 ### 1. Bounded in-memory service structures
 
-Targets: RecordStoreV2 tracing, read coalescing, local caches, bounded event histories, and optional advisory queues.
+Targets: RecordStoreV1 tracing, read coalescing, local caches, bounded event histories, and optional advisory queues.
 
 Current candidates:
 - Replace front-removal from the process-local trace buffer with a fixed-capacity circular buffer. Preserve chronological reads, newest-event retention, dropped counts, durable flush ordering, and Drain semantics.
@@ -90,4 +90,4 @@ A slice is complete only when:
 
 ## Current first slice
 
-Implement and measure V2's process-local trace ring buffer and read-coalescer cache/expiry improvements. Keep the changes isolated from RecordStore's durable session and mailbox protocols. The existing scheduler metric ring buffers on main are already complete and must not be duplicated.
+Implement and measure the V1 service API's process-local trace ring buffer and read-coalescer cache/expiry improvements. Keep the persisted mailbox protocol at version 2. Keep the changes isolated from RecordStore's durable session and mailbox protocols. The existing scheduler metric ring buffers on main are already complete and must not be duplicated.
