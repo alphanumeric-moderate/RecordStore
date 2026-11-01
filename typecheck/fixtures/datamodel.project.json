@@ -1,0 +1,24 @@
+{
+  "name": "RecordStore-Typecheck-DataModel-Fixtures",
+  "tree": {
+    "$className": "DataModel",
+    "Workspace": {
+      "$className": "Workspace",
+      "TypecheckPart": {
+        "$className": "Part"
+      }
+    },
+    "ServerScriptService": {
+      "$className": "ServerScriptService",
+      "TypecheckFixtures": {
+        "$className": "Folder",
+        "Positive": {
+          "$path": "datamodel/workspace-child-positive.server.luau"
+        },
+        "Negative": {
+          "$path": "datamodel/workspace-child-negative.server.luau"
+        }
+      }
+    }
+  }
+}
