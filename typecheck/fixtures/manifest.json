@@ -10,7 +10,7 @@
       "id": "strict.rejects-invalid-argument",
       "source": "typecheck/fixtures/strict/rejects-invalid-argument.luau",
       "expect": "type-error",
-      "line": 6
+      "line": 7
     },
     {
       "id": "strict.same-scope-loop-control",
@@ -53,7 +53,7 @@
       "id": "solver.issue-2458-optional-parameter-nested-loop",
       "source": "typecheck/fixtures/solver/issue-2458-optional-parameter-nested-loop.luau",
       "expect": "known-type-error",
-      "line": 7,
+      "line": 6,
       "settings": "typecheck/fixtures/settings/new-solver.json",
       "issue": "https://github.com/luau-lang/luau/issues/2458"
     }
