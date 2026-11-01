@@ -30,6 +30,12 @@ benchmarks:
   - name: "scheduler enabled dispatch workload"
     exec: lune run bench/scheduler_enabled_overhead.bench.luau
 
+  - name: "scheduler operation-latency window retention (50,000 observations)"
+    exec: lune run bench/scheduler_metrics_observe.bench.luau
+
+  - name: "scheduler queue-wait window retention (5,000 selections)"
+    exec: lune run bench/scheduler_metrics_wait.bench.luau
+
   - name: "session lifecycle (create/update/save/close/reopen)"
     exec: lune run bench/session_lifecycle.bench.luau
 

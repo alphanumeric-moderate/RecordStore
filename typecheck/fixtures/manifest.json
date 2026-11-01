@@ -1,0 +1,61 @@
+{
+  "schemaVersion": 1,
+  "fixtures": [
+    {
+      "id": "strict.valid-narrowing-and-generic",
+      "source": "typecheck/fixtures/strict/valid-narrowing.luau",
+      "expect": "pass"
+    },
+    {
+      "id": "strict.rejects-invalid-argument",
+      "source": "typecheck/fixtures/strict/rejects-invalid-argument.luau",
+      "expect": "type-error",
+      "line": 7
+    },
+    {
+      "id": "strict.same-scope-loop-control",
+      "source": "typecheck/fixtures/strict/same-scope-loop-control.luau",
+      "expect": "pass",
+      "settings": "typecheck/fixtures/settings/new-solver.json"
+    },
+    {
+      "id": "datamodel.rojo-workspace-child-is-part",
+      "source": "typecheck/fixtures/datamodel/workspace-child-positive.server.luau",
+      "expect": "pass",
+      "settings": "typecheck/fixtures/settings/new-solver-strict-datamodel.json",
+      "sourcemap": "datamodel"
+    },
+    {
+      "id": "datamodel.rejects-wrong-workspace-child-class",
+      "source": "typecheck/fixtures/datamodel/workspace-child-negative.server.luau",
+      "expect": "type-error",
+      "line": 3,
+      "settings": "typecheck/fixtures/settings/new-solver-strict-datamodel.json",
+      "sourcemap": "datamodel"
+    },
+    {
+      "id": "solver.issue-1668-upvalue-refinement-in-loop",
+      "source": "typecheck/fixtures/solver/issue-1668-upvalue-refinement-in-loop.luau",
+      "expect": "known-type-error",
+      "line": 7,
+      "settings": "typecheck/fixtures/settings/new-solver.json",
+      "issue": "https://github.com/luau-lang/luau/issues/1668"
+    },
+    {
+      "id": "solver.issue-2406-optional-function-upvalue-in-loop",
+      "source": "typecheck/fixtures/solver/issue-2406-optional-function-upvalue-in-loop.luau",
+      "expect": "known-type-error",
+      "line": 7,
+      "settings": "typecheck/fixtures/settings/new-solver.json",
+      "issue": "https://github.com/luau-lang/luau/issues/2406"
+    },
+    {
+      "id": "solver.issue-2458-optional-parameter-nested-loop",
+      "source": "typecheck/fixtures/solver/issue-2458-optional-parameter-nested-loop.luau",
+      "expect": "known-type-error",
+      "line": 6,
+      "settings": "typecheck/fixtures/settings/new-solver.json",
+      "issue": "https://github.com/luau-lang/luau/issues/2458"
+    }
+  ]
+}

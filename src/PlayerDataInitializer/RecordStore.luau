@@ -82,6 +82,11 @@ type EmbeddedSchedulerModule = {
 	new: (options: EmbeddedSchedulerOptions?) -> EmbeddedSchedulerGovernor,
 	new_dispatcher: (governor: EmbeddedSchedulerGovernor, options: EmbeddedSchedulerDispatcherOptions?) -> EmbeddedSchedulerDispatcher,
 }
+type SampleWindow = {
+	values: { number },
+	head: number,
+	count: number,
+}
 local RecordStoreScheduler: EmbeddedSchedulerModule = {} :: EmbeddedSchedulerModule
 do
 	local Scheduler = RecordStoreScheduler
@@ -99,6 +104,32 @@ do
 	local function bounded_integer(value: unknown, default_value: number, minimum: number, maximum: number): number
 		local selected = if type(value) == "number" and math.isfinite(value) then value else default_value
 		return math.clamp(math.floor(selected), minimum, maximum)
+	end
+
+	local SAMPLE_WINDOW_CAPACITY = 256
+
+	local function new_sample_window(): SampleWindow
+		return { values = {}, head = 1, count = 0 }
+	end
+
+	local function append_sample(window: SampleWindow, value: number)
+		if window.count < SAMPLE_WINDOW_CAPACITY then
+			local index = (window.head - 1 + window.count) % SAMPLE_WINDOW_CAPACITY + 1
+			window.values[index] = value
+			window.count += 1
+			return
+		end
+		window.values[window.head] = value
+		window.head = window.head % SAMPLE_WINDOW_CAPACITY + 1
+	end
+
+	local function sample_window_values(window: SampleWindow): { number }
+		local values = table.create(window.count)
+		for index = 1, window.count do
+			local source_index = (window.head + index - 2) % SAMPLE_WINDOW_CAPACITY + 1
+			values[index] = window.values[source_index]
+		end
+		return values
 	end
 
 	local function key_count(value: any): number
@@ -241,7 +272,7 @@ do
 			operation_kind_keys = {}, consecutive_errors = {}, circuits = {},
 			stats = { admitted = 0, rejected = 0, completed = 0, released = 0, throttled = 0, errors = 0,
 				scheduled_selected = 0, scheduled_expired = 0, scheduled_overdue = 0, shadow_samples = 0 },
-			scheduler_metrics = { by_lane = {}, wait_ms = {}, wait_by_lane_class = {}, last_shadow = nil },
+			scheduler_metrics = { by_lane = {}, wait_ms = new_sample_window(), wait_by_lane_class = {}, last_shadow = nil },
 		}
 		local limits = { critical = 32, profile_save = 32, profile_release = 32, interactive = 24, messaging = 20, migration = 4, maintenance = 8, tracing = 1 }
 		local function policy_valid(policy: EmbeddedSchedulerDynamicRecord): (boolean, string?)
@@ -382,11 +413,10 @@ do
 				self.latency_ewma[metric_kind] = prior and prior * 0.8 + latency_ms * 0.2 or latency_ms
 				local samples = self.latency_samples_by_operation[metric_kind]
 				if samples == nil then
-					samples = {}
+					samples = new_sample_window()
 					self.latency_samples_by_operation[metric_kind] = samples
 				end
-				samples[#samples + 1] = latency_ms
-				if #samples > 256 then table.remove(samples, 1) end
+				append_sample(samples, latency_ms)
 			end
 			if finite(budget) then
 				self.last_budget = budget
@@ -928,20 +958,19 @@ do
 					bucket = buckets[key]
 					if bucket == nil then
 						bucket = { lane = "other", work_class = "other", service_class = "other",
-							selected = 0, total_wait_ms = 0, max_wait_ms = 0, samples = {} }
+							selected = 0, total_wait_ms = 0, max_wait_ms = 0, samples = new_sample_window() }
 						buckets[key] = bucket
 					end
 				else
 					bucket = { lane = lane, work_class = work_class, service_class = service_class,
-						selected = 0, total_wait_ms = 0, max_wait_ms = 0, samples = {} }
+						selected = 0, total_wait_ms = 0, max_wait_ms = 0, samples = new_sample_window() }
 					buckets[key] = bucket
 				end
 			end
 			bucket.selected += 1
 			bucket.total_wait_ms += age_ms
 			bucket.max_wait_ms = math.max(bucket.max_wait_ms, age_ms)
-			bucket.samples[#bucket.samples + 1] = age_ms
-			if #bucket.samples > 256 then table.remove(bucket.samples, 1) end
+			append_sample(bucket.samples, age_ms)
 		end
 		local function inherit_ready_prerequisites(self: EmbeddedSchedulerDynamicRecord, dependent: EmbeddedSchedulerDynamicRecord, instant: number)
 			if dependent.lane ~= "high" then return end
@@ -989,8 +1018,8 @@ do
 			if cached ~= nil then return cached end
 			local estimate = self.latency_ewma[metric_kind] or 0
 			local samples = self.latency_samples_by_operation[metric_kind]
-			if samples ~= nil and #samples > 0 then
-				local ordered = copy(samples)
+			if samples ~= nil and samples.count > 0 then
+				local ordered = sample_window_values(samples)
 				table.sort(ordered)
 				estimate = math.max(estimate, ordered[math.ceil(#ordered * 0.95)] or 0)
 			end
@@ -1384,8 +1413,7 @@ do
 			item.admission_cost = effective_cost(item, selected_count)
 			item.queued = false
 			local age = math.max(0, now - (item.enqueued_at_ms or now))
-			self.scheduler_metrics.wait_ms[#self.scheduler_metrics.wait_ms + 1] = age
-			if #self.scheduler_metrics.wait_ms > 256 then table.remove(self.scheduler_metrics.wait_ms, 1) end
+			append_sample(self.scheduler_metrics.wait_ms, age)
 			local lane_stats = self.scheduler_metrics.by_lane[item.lane] or { selected = 0, total_wait_ms = 0, max_wait_ms = 0 }
 			lane_stats.selected += 1
 			lane_stats.total_wait_ms += age
@@ -1779,8 +1807,8 @@ do
 		function governor:LeaseRenewalAdvice()
 			local function p95_for(operation: string): number?
 				local source = self.latency_samples_by_operation[operation]
-				if source == nil or #source == 0 then return nil end
-				local samples = copy(source)
+				if source == nil or source.count == 0 then return nil end
+				local samples = sample_window_values(source)
 				table.sort(samples)
 				return samples[math.clamp(math.ceil(#samples * 0.95), 1, #samples)]
 			end
@@ -1805,7 +1833,7 @@ do
 					and (item.expires_at_ms == nil or item.expires_at_ms > now)
 				then oldest_eligible_age_ms = math.max(oldest_eligible_age_ms, now - item.enqueued_at_ms) end
 			end
-			local waits = copy(self.scheduler_metrics.wait_ms)
+			local waits = sample_window_values(self.scheduler_metrics.wait_ms)
 			table.sort(waits)
 			local function percentile(values: any, p: number): number
 				if #values == 0 then return 0 end
@@ -1813,7 +1841,7 @@ do
 			end
 			local wait_by_lane_class = {}
 			for key, bucket in pairs(self.scheduler_metrics.wait_by_lane_class) do
-				local samples = copy(bucket.samples)
+				local samples = sample_window_values(bucket.samples)
 				table.sort(samples)
 				wait_by_lane_class[key] = {
 					lane = bucket.lane, work_class = bucket.work_class, service_class = bucket.service_class,
@@ -1823,7 +1851,7 @@ do
 			end
 			local latency_percentiles_by_operation = {}
 			for operation, samples_source in pairs(self.latency_samples_by_operation) do
-				local samples = copy(samples_source)
+				local samples = sample_window_values(samples_source)
 				table.sort(samples)
 				latency_percentiles_by_operation[operation] = {
 					count = #samples, p50_ms = percentile(samples, 0.50),
@@ -1910,7 +1938,7 @@ do
 				accepted = 0, rejected = 0, completed = 0, retries = 0, retry_deferred = 0,
 				expired = 0, dependency_failed = 0, callback_errors = 0, retry_exhausted = 0,
 				batch_calls = 0, batch_items_requested = 0, batch_items_processed = 0, max_batch_size = 0,
-				batch_utilization_samples = {},
+				batch_utilization_samples = new_sample_window(),
 				outcome_classes = { transient = 0, throttled = 0, permanent = 0, conflict = 0, unknown = 0, success = 0 },
 				max_in_flight = 0, cancelled = 0, last_error = nil, last_outcome_class = nil,
 			},
@@ -2064,10 +2092,7 @@ do
 				local processed_count = math.clamp(math.floor(callback_result.processed_count), 0, requested_count)
 				dispatcher.metrics.batch_items_processed += processed_count
 				local utilization = processed_count / requested_count
-				dispatcher.metrics.batch_utilization_samples[#dispatcher.metrics.batch_utilization_samples + 1] = utilization
-				if #dispatcher.metrics.batch_utilization_samples > 256 then
-					table.remove(dispatcher.metrics.batch_utilization_samples, 1)
-				end
+				append_sample(dispatcher.metrics.batch_utilization_samples, utilization)
 			end
 			if status ~= "success" then
 				callback_ok = true
@@ -2424,7 +2449,7 @@ do
 		end
 		function dispatcher:Stats()
 			local snapshot = copy(self.metrics)
-			local utilization = snapshot.batch_utilization_samples
+			local utilization = sample_window_values(snapshot.batch_utilization_samples)
 			snapshot.batch_utilization_samples = nil
 			table.sort(utilization)
 			local function percentile(p: number): number
