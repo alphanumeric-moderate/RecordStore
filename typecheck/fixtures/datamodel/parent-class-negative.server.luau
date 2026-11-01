@@ -1,3 +1,3 @@
 --!strict
 
-local parent: BasePart = script.Parent
+local model: Model = workspace.TypecheckPart
