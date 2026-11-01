@@ -251,6 +251,7 @@ function Acceleration.new(options)
 		pending.next = nil
 	end
 
+	-- TTL cleanup is timestamp-ordered; capacity eviction must remain insertion-ordered.
 	local seen_order_head = nil
 	local seen_order_tail = nil
 	local seen_count = 0

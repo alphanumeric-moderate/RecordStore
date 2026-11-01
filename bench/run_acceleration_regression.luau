@@ -420,7 +420,7 @@ do
 		"capacity eviction followed timestamp order instead of insertion order")
 	local oldest_inserted_ok = deliver("ttl-boundary")
 	expect(oldest_inserted_ok == true,
-		"the oldest inserted event remained in the deduplication window")
+		"capacity eviction did not remove the oldest inserted event")
 	now_ms = 340003
 	local expired_again_ok = deliver("second-inserted-earlier-time")
 	expect(expired_again_ok == true,
