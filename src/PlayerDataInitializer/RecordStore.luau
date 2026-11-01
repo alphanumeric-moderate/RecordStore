@@ -7506,7 +7506,10 @@ local function backend_metadata_matches(info: BackendInfo?, envelope: Envelope):
 	return true
 end
 
-copy_value = function(value: unknown): JsonValue?
+local function copy_value_internal(
+	value: unknown,
+	shape_validation: { nodes: number, message: string? }?
+): JsonValue?
 	if value == nil then
 		return nil
 	end
@@ -7516,6 +7519,12 @@ copy_value = function(value: unknown): JsonValue?
 	local function clone(current: unknown, depth: number): JsonValue?
 		if current == nil then
 			return nil
+		end
+		if shape_validation ~= nil then
+			shape_validation.nodes += 1
+			if shape_validation.message == nil and shape_validation.nodes > 100000 then
+				shape_validation.message = "value exceeds the maximum node count"
+			end
 		end
 		if depth > 64 then
 			error("value exceeds the maximum nesting depth")
@@ -7527,6 +7536,9 @@ copy_value = function(value: unknown): JsonValue?
 			return current
 		end
 		if type(current) == "string" then
+			if shape_validation ~= nil and shape_validation.message == nil and #current > 4_000_000 then
+				shape_validation.message = "value contains an overlong string"
+			end
 			return current
 		end
 		if typeof(current) == "buffer" then
@@ -7543,6 +7555,8 @@ copy_value = function(value: unknown): JsonValue?
 		active_tables[table_value] = true
 		local has_string_key = false
 		local has_number_key = false
+		local numeric_key_count = 0
+		local max_numeric_key = 0
 		local result_dictionary: { [string]: JsonValue }? = nil
 		local result_array: { JsonValue }? = nil
 
@@ -7577,6 +7591,10 @@ copy_value = function(value: unknown): JsonValue?
 					active_tables[table_value] = nil
 					error("value contains an invalid array index")
 				end
+				numeric_key_count += 1
+				if numeric_key > max_numeric_key then
+					max_numeric_key = numeric_key
+				end
 				local copied = clone(child, depth + 1)
 				if copied == nil then
 					active_tables[table_value] = nil
@@ -7591,6 +7609,14 @@ copy_value = function(value: unknown): JsonValue?
 			end
 		end
 
+		if shape_validation ~= nil
+			and shape_validation.message == nil
+			and numeric_key_count > 0
+			and max_numeric_key ~= numeric_key_count
+		then
+			shape_validation.message = "numeric-keyed tables must be dense arrays"
+		end
+
 		active_tables[table_value] = nil
 		if has_string_key then
 			return result_dictionary
@@ -7602,6 +7628,19 @@ copy_value = function(value: unknown): JsonValue?
 		return empty_result
 	end
 	return clone(value, 1)
+end
+
+copy_value = function(value: unknown): JsonValue?
+	return copy_value_internal(value, nil)
+end
+
+local function copy_value_with_shape_validation(value: unknown): (JsonValue?, string?)
+	local validation: { nodes: number, message: string? } = {
+		nodes = 0,
+		message = nil,
+	}
+	local copied = copy_value_internal(value, validation)
+	return copied, validation.message
 end
 local function encode_non_finite_numbers(
 	value: JsonValue
@@ -8110,13 +8149,19 @@ local function validate_serialized_size(value: unknown): (boolean, string?)
 	return true, nil
 end
 
-local function validate_value(value: JsonValue?, validator: Validator?): (boolean, string?)
+local function validate_value(
+	value: JsonValue?,
+	validator: Validator?,
+	shape_already_validated: boolean?
+): (boolean, string?)
 	if value == nil then
 		return false, "record data cannot be nil"
 	end
-	local shape_ok, shape_message = validate_value_shape(value, nil, nil, nil, true)
-	if not shape_ok then
-		return false, shape_message
+	if shape_already_validated ~= true then
+		local shape_ok, shape_message = validate_value_shape(value, nil, nil, nil, true)
+		if not shape_ok then
+			return false, shape_message
+		end
 	end
 	local safe_value_ok, safe_value = pcall(function()
 		local encoded_value = encode_non_finite_numbers(value)
@@ -13445,14 +13490,17 @@ local function update(self: Record, callback: (JsonValue?) -> JsonValue?): (Resu
 	if next_value == nil then
 		return "validation", "update callback returned nil"
 	end
-	local copy_ok, copied_or_error = pcall(function()
-		return copy_value(next_value)
+	local copy_ok, copied_or_error, shape_message = pcall(function()
+		return copy_value_with_shape_validation(next_value)
 	end)
 	if not copy_ok or copied_or_error == nil then
 		return "validation", "update callback returned invalid data"
 	end
+	if shape_message ~= nil then
+		return "validation", shape_message
+	end
 	local copied = copied_or_error
-	local valid, message = validate_value(copied, state.options.validator)
+	local valid, message = validate_value(copied, state.options.validator, true)
 	if not valid then
 		return "validation", message
 	end
