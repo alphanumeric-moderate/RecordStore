@@ -689,6 +689,8 @@ The freeze marker leaves the original queue content in place and preserves the V
 
 ## Mailbox V1 operations and maintenance
 
+The public mailbox API is version 1 (`RecordStore.Mailbox`). Its persisted queue protocol remains version 2 for compatibility with existing records; legacy V3 queue data is read only by the explicit legacy migration path. `Mailbox.Version` and `Mailbox.ProtocolVersion` expose these separate values. Renaming the public API does not rewrite durable keys, marker strings, or message envelopes.
+
 The embedded Mailbox V1 exposes bounded `RecoverAsync`, `GetStatsAsync`, `ReclaimAsync`, and `MaintenanceAsync` operations. Maintenance sequences recovery, slot reclamation, and a capacity/status read; its report uses `consistency = "bounded_non_linearizable"` and `complete = true` means that bounded sequence finished, not that it captured a linearizable cross-server snapshot. Activation denial is returned before backing-store reads or writes.
 
 ## Opt-in outbox-to-Mailbox V1 delivery

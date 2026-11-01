@@ -49,7 +49,7 @@ local function normalize_config(config: unknown): NormalizedConfig
 		end
 	end
 	if type(fields.get_record) ~= "function" then error("get_record must resolve an active destination profile", 3) end
-	if type(fields.activation_guard) ~= "function" then error("activation_guard is required; Mailbox V2 remains opt-in", 3) end
+	if type(fields.activation_guard) ~= "function" then error("activation_guard is required; Mailbox V1 remains opt-in", 3) end
 	if fields.on_diagnostic ~= nil and type(fields.on_diagnostic) ~= "function" then error("on_diagnostic must be a function", 3) end
 	if fields.encode ~= nil and type(fields.encode) ~= "function" then error("encode must be a function", 3) end
 	local encode = fields.encode or function(value) return HttpService:JSONEncode(value) end
@@ -150,8 +150,8 @@ function OutboxMailboxAdapter.new(config: Config): Processor
 		if not valid then return nil, "fenced", validation_error end
 
 		local guard_ok, allowed, guard_message = pcall(normalized.activation_guard, record, "bind")
-		if not guard_ok then return nil, "unknown", "Mailbox V2 activation guard raised: " .. tostring(allowed) end
-		if allowed ~= true then return nil, "disabled", tostring(guard_message or "Mailbox V2 activation was denied") end
+		if not guard_ok then return nil, "unknown", "Mailbox V1 activation guard raised: " .. tostring(allowed) end
+		if allowed ~= true then return nil, "disabled", tostring(guard_message or "Mailbox V1 activation was denied") end
 
 		local cached = mailboxes[record]
 		if cached ~= nil then return cached, nil, nil end
@@ -163,7 +163,7 @@ function OutboxMailboxAdapter.new(config: Config): Processor
 
 		local function mailbox_guard(operation: string): (boolean, string?)
 			local call_ok, result, message = pcall(normalized.activation_guard, record, operation)
-			if not call_ok then return false, "Mailbox V2 activation guard raised: " .. tostring(result) end
+			if not call_ok then return false, "Mailbox V1 activation guard raised: " .. tostring(result) end
 			return result == true, message
 		end
 		local mailbox_options: any = {
@@ -181,7 +181,7 @@ function OutboxMailboxAdapter.new(config: Config): Processor
 
 		local bind_code, bind_message = record:BindMailboxAsync(mailbox)
 		if bind_code ~= "success" then
-			return nil, bind_code, bind_message or "Record rejected the destination Mailbox V2 binding"
+			return nil, bind_code, bind_message or "Record rejected the destination Mailbox V1 binding"
 		end
 		mailboxes[record] = mailbox
 		return mailbox, nil, nil
@@ -238,7 +238,7 @@ function OutboxMailboxAdapter.new(config: Config): Processor
 				error("destination mailbox accepted an event without a durable message ID", 0)
 			end
 			-- A message ID is necessary but not sufficient as a destination receipt.
-			-- Re-read the canonical record uncached through Mailbox V2 and verify the
+			-- Re-read the canonical record uncached through Mailbox V1 and verify the
 			-- exact event identity and payload before acknowledging the source outbox.
 			local read_ok, snapshot, read_result = pcall(function()
 				return mailbox:GetDeliveryAsync(message_id)

@@ -6254,7 +6254,7 @@ do
 	Mailbox.ProtocolVersion = VERSION
 
 end
---// end embedded mailbox v2 module
+--// end embedded Mailbox V1 API (persisted protocol v2)
 
 type MetadataValue = boolean | number | string
 export type Metadata = { [string]: MetadataValue }

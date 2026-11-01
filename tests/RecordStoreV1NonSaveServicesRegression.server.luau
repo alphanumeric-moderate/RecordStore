@@ -2,10 +2,10 @@
 local Shim = require("./RobloxShim")
 local RecordStore = Shim.load()
 local initializer = game:GetService("ServerScriptService"):WaitForChild("PlayerDataInitializer")
-local V2Module = require(initializer:WaitForChild("RecordStoreV1"))
+local V1Module = require(initializer:WaitForChild("RecordStoreV1"))
 local ServicesModule = require(initializer:WaitForChild("RecordStoreServices"))
-local V1 = V2Module.new(RecordStore, RecordStore.Mailbox)
-local V1Mock = V2Module.new(RecordStore.Mock, RecordStore.Mailbox)
+local V1 = V1Module.new(RecordStore, RecordStore.Mailbox)
+local V1Mock = V1Module.new(RecordStore.Mock, RecordStore.Mailbox)
 
 local function expect(value, message)
 	assert(value, message)
@@ -13,8 +13,8 @@ end
 
 local service_bundle = ServicesModule.new(RecordStore)
 expect(service_bundle.Core == RecordStore, "service registry is bound to a different RecordStore core")
-expect(service_bundle.V2 == nil and service_bundle.Modules.RecordStoreV2 == nil, "superseded V2 facade remained public")
-expect(service_bundle.V1.Version == 1, "service registry did not initialize the V2 API against the core")
+expect(service_bundle.V1 == nil and service_bundle.Modules.RecordStoreV1 == nil, "superseded V1 facade remained public")
+expect(service_bundle.V1.Version == 1, "service registry did not initialize the V1 API against the core")
 for _, name in {
 	"RecordStoreV1",
 	"RecordStoreAcceleration",
@@ -154,7 +154,7 @@ expect(durable_trace.evidence_summary.durable_events == 2
 	and durable_trace.evidence_summary.durable_and_local_events == 1,
 	"durable trace evidence summary did not count unique persisted events consistently")
 
-local transaction_contract_record = RecordStore.Mock.new("V2TransactionContract", "global", "primary", {
+local transaction_contract_record = RecordStore.Mock.new("V1TransactionContract", "global", "primary", {
 	schema_version = 1, transactional_operations_enabled = true,
 })
 local transaction_contract_open, transaction_contract_message = transaction_contract_record:Open({ Balance = 0 })
@@ -191,7 +191,7 @@ local transaction_contract = V1.Transactions.Run(
 	end
 )
 expect(transaction_contract.code == "committed" and transaction_contract.result.Balance == 7,
-	"V2 transaction wrapper did not expose the durable Record transaction result: " .. tostring(transaction_contract.code))
+	"V1 transaction wrapper did not expose the durable Record transaction result: " .. tostring(transaction_contract.code))
 local transaction_contract_duplicate = V1.Transactions.Run(
 	transaction_contract_record, "v2-transaction-contract-001", transaction_contract_request,
 	function(current, request)
@@ -202,11 +202,11 @@ local transaction_contract_duplicate = V1.Transactions.Run(
 	end
 )
 expect(transaction_contract_duplicate.code == "duplicate",
-	"V2 transaction retry did not use the public RecordStore idempotency receipt")
+	"V1 transaction retry did not use the public RecordStore idempotency receipt")
 expect(transaction_reducer_calls == 1 and transaction_contract_record:Get().Balance == 7,
-	"V2 transaction retry reapplied the reducer")
+	"V1 transaction retry reapplied the reducer")
 
-local inbox_contract_record = RecordStore.Mock.new("V2InboxContract", "global", "primary", {
+local inbox_contract_record = RecordStore.Mock.new("V1InboxContract", "global", "primary", {
 	schema_version = 1, transactional_operations_enabled = true,
 })
 local inbox_contract_open, inbox_contract_message = inbox_contract_record:Open({ total = 0 })
@@ -222,7 +222,7 @@ local inbox_contract = V1.Inbox.ApplyBatch(
 	end
 )
 expect(inbox_contract.code == "committed" and inbox_contract.applied == 1,
-	"V2 inbox batch did not commit mutation plus its idempotency receipt: " .. tostring(inbox_contract.code))
+	"V1 inbox batch did not commit mutation plus its idempotency receipt: " .. tostring(inbox_contract.code))
 local inbox_duplicate = V1.Inbox.ApplyBatch(
 	inbox_contract_record, "inbox-contract-batch-001",
 	{ { message_id = "inbox-contract-message-001", message_type = "delta", payload = { amount = 4 }, payload_version = 1 } },
@@ -233,9 +233,9 @@ local inbox_duplicate = V1.Inbox.ApplyBatch(
 	end
 )
 expect(inbox_duplicate.code == "duplicate" and inbox_contract_record:Get().total == 4,
-	"V2 inbox batch replay duplicated its profile mutation")
+	"V1 inbox batch replay duplicated its profile mutation")
 
-local outbox_contract_record = RecordStore.Mock.new("V2OutboxTransactionContract", "global", "primary", {
+local outbox_contract_record = RecordStore.Mock.new("V1OutboxTransactionContract", "global", "primary", {
 	schema_version = 1, transactional_operations_enabled = true,
 })
 local outbox_contract_open, outbox_contract_message = outbox_contract_record:Open({ Balance = 0 })
@@ -252,17 +252,17 @@ local outbox_transaction = V1.Transactions.CommitWithOutbox(
 		type = "balance.changed",
 		payload_version = 1,
 		payload = { amount = 9 },
-		target_store = "V2OutboxTransactionContract",
+		target_store = "V1OutboxTransactionContract",
 		target_scope = "global",
 		target_key = "destination",
 		target_user_id = 456,
 	} }
 )
 expect(outbox_transaction.code == "committed" and outbox_transaction.result.Balance == 9,
-	"V2 outbox transaction did not atomically commit the mutation and intent: " .. tostring(outbox_transaction.code))
+	"V1 outbox transaction did not atomically commit the mutation and intent: " .. tostring(outbox_transaction.code))
 local outbox_events = outbox_contract_record:GetOutboxAsync(4)
 expect(type(outbox_events) == "table" and #outbox_events == 1,
-	"V2 outbox transaction omitted its durable outbox intent")
+	"V1 outbox transaction omitted its durable outbox intent")
 local outbox_revision_before_invalid = outbox_contract_record:GetRevision()
 local invalid_outbox_key = V1.Transactions.CommitWithOutbox(
 	outbox_contract_record, string.rep("x", 65), { reason = "too long", amount = 1 },
@@ -273,13 +273,13 @@ local invalid_outbox_key = V1.Transactions.CommitWithOutbox(
 	end,
 	{ {
 		type = "balance.changed", payload_version = 1, payload = { amount = 1 },
-		target_store = "V2OutboxTransactionContract", target_scope = "global", target_key = "destination",
+		target_store = "V1OutboxTransactionContract", target_scope = "global", target_key = "destination",
 	} }
 )
 expect(invalid_outbox_key.code == "invalid"
 	and outbox_contract_record:GetRevision() == outbox_revision_before_invalid
 	and outbox_contract_record:Get().Balance == 9,
-	"oversized V2 outbox id was not rejected before transaction mutation")
+	"oversized V1 outbox id was not rejected before transaction mutation")
 local outbox_revision_before_unsafe_user = outbox_contract_record:GetRevision()
 local unsafe_outbox_user = V1.Transactions.CommitWithOutbox(
 	outbox_contract_record, "v2-outbox-unsafe-user-id", { reason = "unsafe user", amount = 1 },
@@ -290,16 +290,16 @@ local unsafe_outbox_user = V1.Transactions.CommitWithOutbox(
 	end,
 	{ {
 		type = "balance.changed", payload_version = 1, payload = { amount = 1 },
-		target_store = "V2OutboxTransactionContract", target_scope = "global", target_key = "destination",
+		target_store = "V1OutboxTransactionContract", target_scope = "global", target_key = "destination",
 		target_user_id = 9007199254740992,
 	} }
 )
 expect(unsafe_outbox_user.code == "invalid"
 	and outbox_contract_record:GetRevision() == outbox_revision_before_unsafe_user
 	and outbox_contract_record:Get().Balance == 9,
-	"unsafe V2 outbox destination UserId was not rejected before transaction mutation")
+	"unsafe V1 outbox destination UserId was not rejected before transaction mutation")
 
-local legacy_receipt_record = RecordStore.Mock.new("V2LegacyReceiptSafeInteger", "global", "123", {
+local legacy_receipt_record = RecordStore.Mock.new("V1LegacyReceiptSafeInteger", "global", "123", {
 	schema_version = 1, transactional_operations_enabled = true,
 })
 local legacy_receipt_open, legacy_receipt_open_error = legacy_receipt_record:Open({ Balance = 0 })
@@ -347,10 +347,10 @@ expect(outbox_contract_record:Close() == "closed", "outbox transaction contract 
 expect(inbox_contract_record:Close() == "closed", "inbox contract Record did not close")
 expect(transaction_contract_record:Close() == "closed", "transaction contract Record did not close")
 
-local sender = RecordStore.Mock.new("V2SagaProfiles", "global", "sender", {
+local sender = RecordStore.Mock.new("V1SagaProfiles", "global", "sender", {
 	schema_version = 1, transactional_operations_enabled = true,
 })
-local recipient = RecordStore.Mock.new("V2SagaProfiles", "global", "recipient", {
+local recipient = RecordStore.Mock.new("V1SagaProfiles", "global", "recipient", {
 	schema_version = 1, transactional_operations_enabled = true,
 })
 local sender_open, sender_open_message = sender:Open({ Balance = 100 })
@@ -560,7 +560,7 @@ local function inject_post_commit_unknown(record, suffix)
 end
 
 do
-	local source, target = new_leg_pair("V2SagaReserveResponseLoss")
+	local source, target = new_leg_pair("V1SagaReserveResponseLoss")
 	local source_loss_seen = inject_post_commit_unknown(source, ":reserve")
 	local saga_service = V1.Sagas.new(new_store())
 	local initial = saga_service:TransferAsync("reserve-loss", source, target, 100, {
@@ -583,7 +583,7 @@ do
 end
 
 do
-	local source, target = new_leg_pair("V2SagaCreditResponseLoss")
+	local source, target = new_leg_pair("V1SagaCreditResponseLoss")
 	local credit_loss_seen = inject_post_commit_unknown(target, ":credit")
 	local saga_service = V1.Sagas.new(new_store())
 	local initial = saga_service:TransferAsync("credit-loss", source, target, 10, {
@@ -606,7 +606,7 @@ do
 end
 
 do
-	local source, target = new_leg_pair("V2SagaSettleResponseLoss")
+	local source, target = new_leg_pair("V1SagaSettleResponseLoss")
 	local settle_loss_seen = inject_post_commit_unknown(source, ":settle")
 	local saga_service = V1.Sagas.new(new_store())
 	local initial = saga_service:TransferAsync("settle-loss", source, target, 10, {
@@ -629,7 +629,7 @@ do
 end
 
 do
-	local source, target = new_leg_pair("V2SagaRefundResponseLoss")
+	local source, target = new_leg_pair("V1SagaRefundResponseLoss")
 	local saga_store = new_store()
 	local saga_service = V1.Sagas.new(saga_store)
 	local source_base = source.TransactAsync
@@ -706,7 +706,7 @@ end
 -- Pre-commit uncertainty must retry the same stable operation ID and commit each
 -- transfer leg at most once, just like a response lost after the durable commit.
 do
-	local source, target = new_leg_pair("V2SagaReservePrecommit")
+	local source, target = new_leg_pair("V1SagaReservePrecommit")
 	local fault_seen = inject_precommit_unknown(source, ":reserve")
 	local saga_service = V1.Sagas.new(new_store())
 	local initial = saga_service:TransferAsync("reserve-precommit", source, target, 10, {
@@ -731,7 +731,7 @@ do
 end
 
 do
-	local source, target = new_leg_pair("V2SagaCreditPrecommit")
+	local source, target = new_leg_pair("V1SagaCreditPrecommit")
 	local fault_seen = inject_precommit_unknown(target, ":credit")
 	local saga_service = V1.Sagas.new(new_store())
 	local initial = saga_service:TransferAsync("credit-precommit", source, target, 10, {
@@ -756,7 +756,7 @@ do
 end
 
 do
-	local source, target = new_leg_pair("V2SagaSettlePrecommit")
+	local source, target = new_leg_pair("V1SagaSettlePrecommit")
 	local fault_seen = inject_precommit_unknown(source, ":settle")
 	local saga_service = V1.Sagas.new(new_store())
 	local initial = saga_service:TransferAsync("settle-precommit", source, target, 10, {
@@ -783,7 +783,7 @@ do
 end
 
 do
-	local source, target = new_leg_pair("V2SagaRefundPrecommit")
+	local source, target = new_leg_pair("V1SagaRefundPrecommit")
 	local saga_service = V1.Sagas.new(new_store())
 	local source_base = source.TransactAsync
 	local refund_fault_armed = true
@@ -1639,7 +1639,7 @@ expect(unknown_compaction_store.values.checkpoint.status == "unknown",
 expect(unknown_compaction_store.values.checkpoint.cursor == nil,
 	"compactor advanced its cursor after an unresolved inspection")
 
-local migration_record = RecordStore.Mock.new("V2MigrationProfiles", "global", "profile", {
+local migration_record = RecordStore.Mock.new("V1MigrationProfiles", "global", "profile", {
 	schema_version = 1, transactional_operations_enabled = true,
 })
 local migration_open, migration_open_message = migration_record:Open({
@@ -1666,7 +1666,7 @@ local migrations = V1.Migrations.new({
 	require_durable_manifest = true,
 })
 local migration_registered, migration_register_message = migrations:Register(
-	"V2MigrationProfiles", 0, 1, "cash-v1-upgrade", "revision-1",
+	"V1MigrationProfiles", 0, 1, "cash-v1-upgrade", "revision-1",
 	function(data)
 		local updated = clone(data)
 		updated.cash += 5
@@ -1675,10 +1675,10 @@ local migration_registered, migration_register_message = migrations:Register(
 	function(data) return type(data.cash) == "number", "cash must be numeric" end
 )
 expect(migration_registered == true, "migration registration failed: " .. tostring(migration_register_message))
-local preview = migrations:Preview(migration_record, "V2MigrationProfiles", 1)
+local preview = migrations:Preview(migration_record, "V1MigrationProfiles", 1)
 expect(preview.code == "success" and preview.preview_only == true, "migration preview failed")
 expect(migration_record:Get().cash == 10, "migration preview mutated durable profile data")
-local migrated = migrations:MigrateAsync(migration_record, "V2MigrationProfiles", 1)
+local migrated = migrations:MigrateAsync(migration_record, "V1MigrationProfiles", 1)
 expect(migrated.code == "committed" and migration_record:Get().cash == 15,
 	"transactional migration did not commit its profile transformation")
 local successful_manifest = nil
@@ -1692,21 +1692,21 @@ local durable_migration_status = migrations:GetStatus(successful_manifest.operat
 expect(durable_migration_status.status == "committed",
 	"migration status API disagreed with its durable committed manifest")
 local duplicate_registration, duplicate_registration_message = migrations:Register(
-	"V2MigrationProfiles", 0, 1, "cash-v1-upgrade", "revision-1",
+	"V1MigrationProfiles", 0, 1, "cash-v1-upgrade", "revision-1",
 	function(data) return data end,
 	function(data) return type(data.cash) == "number" end
 )
 expect(duplicate_registration == true and duplicate_registration_message == "duplicate",
 	"same stable migration manifest did not register idempotently")
 
-local failed_migration_record = RecordStore.Mock.new("V2MigrationFailureProfiles", "global", "profile", {
+local failed_migration_record = RecordStore.Mock.new("V1MigrationFailureProfiles", "global", "profile", {
 	schema_version = 1, transactional_operations_enabled = true,
 })
 local failed_migration_open, failed_migration_open_message = failed_migration_record:Open({ cash = 1 })
 expect(failed_migration_open == "created" or failed_migration_open == "loaded",
 	"failure migration profile open failed: " .. tostring(failed_migration_open_message))
 local failed_registration, failed_registration_message = migrations:Register(
-	"V2MigrationFailureProfiles", 0, 1, "cash-v1-invalid", "revision-1",
+	"V1MigrationFailureProfiles", 0, 1, "cash-v1-invalid", "revision-1",
 	function(data)
 		local updated = clone(data)
 		updated.cash = -1
@@ -1715,7 +1715,7 @@ local failed_registration, failed_registration_message = migrations:Register(
 	function() return false, "intentional migration validation rejection" end
 )
 expect(failed_registration == true, "failing migration registration failed: " .. tostring(failed_registration_message))
-local failed_migration = migrations:MigrateAsync(failed_migration_record, "V2MigrationFailureProfiles", 1)
+local failed_migration = migrations:MigrateAsync(failed_migration_record, "V1MigrationFailureProfiles", 1)
 expect(failed_migration.manifest_status == "quarantined",
 	"failed migration was not durably quarantined: " .. tostring(failed_migration.manifest_status))
 local quarantined_manifest = nil
@@ -1725,7 +1725,7 @@ end
 expect(quarantined_manifest ~= nil and quarantined_manifest.status == "quarantined",
 	"failed migration quarantine did not persist")
 local quarantine_resolution = migrations:ResolveQuarantine(
-	"V2MigrationFailureProfiles", "cash-v1-invalid", "revision-1", "operator-1", "reviewed migration validator failure"
+	"V1MigrationFailureProfiles", "cash-v1-invalid", "revision-1", "operator-1", "reviewed migration validator failure"
 )
 expect(quarantine_resolution.code == "committed",
 	"migration quarantine resolution failed: " .. tostring(quarantine_resolution.code))
@@ -1811,7 +1811,7 @@ local quarantined_profile = V1Mock.ProfileDoctor.QuarantineAsync(
 expect(quarantined_profile.code == "committed",
 	"profile quarantine manifest was not committed: " .. tostring(quarantined_profile.code))
 local durable_profile_fence = RecordStore.Mock.get_record_raw(
-	"V2MigrationProfiles", "global", "profile"
+	"V1MigrationProfiles", "global", "profile"
 )
 expect(type(durable_profile_fence) == "table"
 	and durable_profile_fence.implementation_version == 2147483646
@@ -1838,7 +1838,7 @@ expect(profile_quarantine_resolved.code == "committed",
 expect(V1Mock.ProfileDoctor.GetQuarantineStatusAsync(migration_record, profile_quarantine_store).status == "resolved",
 	"profile quarantine resolution was not persisted")
 local released_profile = RecordStore.Mock.get_record_raw(
-	"V2MigrationProfiles", "global", "profile"
+	"V1MigrationProfiles", "global", "profile"
 )
 expect(type(released_profile) == "table"
 	and released_profile.implementation_version ~= 2147483646

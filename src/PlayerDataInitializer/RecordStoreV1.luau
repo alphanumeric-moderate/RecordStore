@@ -4049,7 +4049,7 @@ end
 function V1.new(record_store, mailbox_module, options)
 	options = options or {}
 	if type(record_store) ~= "table" or type(record_store.new) ~= "function" then error("RecordStoreV1 requires RecordStore", 2) end
-	if type(mailbox_module) ~= "table" or type(mailbox_module.new) ~= "function" then error("RecordStoreV1 requires RecordStoreMailboxV2", 2) end
+	if type(mailbox_module) ~= "table" or type(mailbox_module.new) ~= "function" then error("RecordStoreV1 requires RecordStore.Mailbox", 2) end
 	local runtime_governor = shared_runtime_governor(record_store, options.runtime)
 	local runtime_policy = { revision = 1, max_dirty_age_seconds = 60, mode = "normal" }
 	local scheduler_policy_fields = {
@@ -4129,7 +4129,7 @@ function V1.new(record_store, mailbox_module, options)
 	end
 	-- The core RecordStore module owns the one server-local request governor shared by all Records.
 	-- This facade delegates policy application/snapshots to that governor instead of creating a
-	-- second request-admission loop inside V2.
+	-- second request-admission loop inside V1.
 	api.ApplyRuntimePolicy = function(policy)
 		if type(policy) ~= "table" or not finite(policy.revision)
 			or math.floor(policy.revision) ~= policy.revision or policy.revision <= runtime_policy.revision
