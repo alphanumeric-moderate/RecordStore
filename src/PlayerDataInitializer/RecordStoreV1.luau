@@ -976,6 +976,7 @@ local function new_tracer(options)
 				batch[#batch + 1] = copy(event)
 				if #batch >= maximum then return false end
 			end
+			return true
 		end)
 		if #batch == 0 then return { code = "empty", flushed = 0 } end
 		local key = "rv2t-" .. digest(operation_id)
