@@ -369,7 +369,7 @@ do
 		shard_count = 4,
 		max_registered_owners = 4,
 		max_pending_owners = 4,
-		max_seen_events = 2,
+		max_seen_events = 5,
 		now_ms = function() return now_ms end,
 		schedule = function() return true end,
 	})
@@ -400,21 +400,31 @@ do
 	local expired_ok = deliver("ttl-boundary")
 	expect(expired_ok == true,
 		"event did not expire strictly after the TTL boundary")
-	now_ms = 200000
+	now_ms = 100002
 	local first_inserted_ok = deliver("first-inserted")
 	expect(first_inserted_ok == true, "first out-of-order timestamp event was rejected")
-	now_ms = 100000
+	now_ms = 160000
 	local second_inserted_ok = deliver("second-inserted-earlier-time")
 	expect(second_inserted_ok == true, "backwards-clock event was rejected")
-	now_ms = 200001
-	local capacity_third_ok = deliver("capacity-third")
+	now_ms = 180000
+	expect(deliver("third-inserted-middle-time") == true,
+		"third timestamp-ordered event was rejected")
+	now_ms = 210000
+	expect(deliver("fourth-inserted-later-time") == true,
+		"fourth timestamp-ordered event was rejected")
+	now_ms = 220001
+	local capacity_third_ok = deliver("capacity-sixth")
 	expect(capacity_third_ok == true, "capacity test event was rejected")
 	local retained_ok, retained_reason = deliver("second-inserted-earlier-time")
 	expect(retained_ok == false and retained_reason == "duplicate",
 		"capacity eviction followed timestamp order instead of insertion order")
-	local oldest_inserted_ok = deliver("first-inserted")
+	local oldest_inserted_ok = deliver("ttl-boundary")
 	expect(oldest_inserted_ok == true,
 		"the oldest inserted event remained in the deduplication window")
+	now_ms = 340003
+	local expired_again_ok = deliver("second-inserted-earlier-time")
+	expect(expired_again_ok == true,
+		"timestamp-heap expiry did not clear the remaining event window")
 	receiver:Stop()
 end
 
