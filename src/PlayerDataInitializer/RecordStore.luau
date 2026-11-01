@@ -2498,8 +2498,8 @@ do
 
 end
 
-local MailboxV2 = {}
-MailboxV2.__index = MailboxV2
+local Mailbox = {}
+Mailbox.__index = Mailbox
 type EmbeddedMailboxDict = { [string]: unknown }
 type EmbeddedMailboxOwner = {
 	store_name: string,
@@ -2573,7 +2573,7 @@ type EmbeddedMailbox = typeof(setmetatable({} :: {
 	high_priority_streak: number,
 	wakeup_published: number,
 	wakeup_publish_errors: number,
-}, MailboxV2))
+}, Mailbox))
 do
 	local VERSION = 2
 	local MAX_KEY_LENGTH = 50
@@ -2858,7 +2858,7 @@ do
 		return false
 	end
 
-	function MailboxV2.new(store: unknown, owner_value: EmbeddedMailboxOwner, options_value: EmbeddedMailboxOptions?): EmbeddedMailbox
+	function Mailbox.new(store: unknown, owner_value: EmbeddedMailboxOwner, options_value: EmbeddedMailboxOptions?): EmbeddedMailbox
 		local owner, owner_error = valid_owner(owner_value)
 		if owner == nil then
 			error(owner_error or "invalid owner", 2)
@@ -2952,11 +2952,11 @@ do
 			wakeup_published = 0,
 			wakeup_publish_errors = 0,
 		}
-		return setmetatable(self, MailboxV2) :: EmbeddedMailbox
+		return setmetatable(self, Mailbox) :: EmbeddedMailbox
 	end
 
 
-	function MailboxV2._check_activation(self: EmbeddedMailbox, operation: string): EmbeddedMailboxResult?
+	function Mailbox._check_activation(self: EmbeddedMailbox, operation: string): EmbeddedMailboxResult?
 		if self.options.allow_unattested_activation == true then return nil end
 		local guard = self.options.activation_guard
 		if type(guard) ~= "function" then
@@ -2972,7 +2972,7 @@ do
 		return nil
 	end
 
-	function MailboxV2._now(self: EmbeddedMailbox): number
+	function Mailbox._now(self: EmbeddedMailbox): number
 		local value = if self.options.now_ms ~= nil then self.options.now_ms() else now_default()
 		if not is_finite(value) then
 			error("options.now_ms must return finite milliseconds", 2)
@@ -2980,7 +2980,7 @@ do
 		return value
 	end
 
-	function MailboxV2._guid(self: EmbeddedMailbox): (string?, string?)
+	function Mailbox._guid(self: EmbeddedMailbox): (string?, string?)
 		local value
 		if self.options.guid == nil then
 			local call_ok, generated = pcall(function()
@@ -3003,7 +3003,7 @@ do
 		return value, nil
 	end
 
-	function MailboxV2._encode_size(self: EmbeddedMailbox, value: unknown): (number?, string?)
+	function Mailbox._encode_size(self: EmbeddedMailbox, value: unknown): (number?, string?)
 		if self.options.encode == nil then
 			return nil, "a production-compatible encoded-size callback is required"
 		end
@@ -3016,7 +3016,7 @@ do
 		return #result, nil
 	end
 
-	function MailboxV2._get(self: EmbeddedMailbox, key: string): (unknown, string?)
+	function Mailbox._get(self: EmbeddedMailbox, key: string): (unknown, string?)
 		local success, value = pcall(function()
 			return self.store:GetAsync(key)
 		end)
@@ -3026,7 +3026,7 @@ do
 		return value, nil
 	end
 
-	function MailboxV2._get_fresh(self: EmbeddedMailbox, key: string): (unknown, string?)
+	function Mailbox._get_fresh(self: EmbeddedMailbox, key: string): (unknown, string?)
 		local fresh_get = self.store.GetAsyncFresh
 		if type(fresh_get) ~= "function" then
 			return nil, "store does not provide an authoritative uncached read"
@@ -3040,7 +3040,7 @@ do
 		return value, nil
 	end
 
-	function MailboxV2._update(self: EmbeddedMailbox, key: string, transform: (unknown) -> unknown): (unknown, string?)
+	function Mailbox._update(self: EmbeddedMailbox, key: string, transform: (unknown) -> unknown): (unknown, string?)
 		local success, value = pcall(function()
 			return self.store:UpdateAsync(key, function(raw: unknown, key_info: any)
 				local next_value = transform(raw)
@@ -3056,7 +3056,7 @@ do
 		return value, nil
 	end
 
-	function MailboxV2._route_key(self: EmbeddedMailbox, idempotency_key: string?): (string?, string?)
+	function Mailbox._route_key(self: EmbeddedMailbox, idempotency_key: string?): (string?, string?)
 		if idempotency_key ~= nil then
 			if type(idempotency_key) ~= "string" or idempotency_key == "" or #idempotency_key > 256 then
 				return nil, "idempotency_key must be 1 to 256 bytes"
@@ -3070,11 +3070,11 @@ do
 		return result_route_key(self, "m2g-", "generated:" .. guid), nil
 	end
 
-	function MailboxV2._legacy_route_key(self: EmbeddedMailbox, legacy_id: string): string
+	function Mailbox._legacy_route_key(self: EmbeddedMailbox, legacy_id: string): string
 		return result_route_key(self, "m2l-", "legacy-v3:" .. legacy_id)
 	end
 
-	function MailboxV2._route_from_public_id(self: EmbeddedMailbox, message_id: string): string
+	function Mailbox._route_from_public_id(self: EmbeddedMailbox, message_id: string): string
 		local prefix = string.sub(message_id, 1, 4)
 		if prefix == "m2i-" or prefix == "m2g-" or prefix == "m2l-" then
 			return message_id
@@ -3082,21 +3082,21 @@ do
 		return self:_legacy_route_key(message_id)
 	end
 
-	function MailboxV2._manifest_key(self: EmbeddedMailbox, kind: string): string
+	function Mailbox._manifest_key(self: EmbeddedMailbox, kind: string): string
 		local manifest_prefix = prefix_for_kind(kind)
 		return result_route_key(self, manifest_prefix, "manifest:" .. kind)
 	end
 
-	function MailboxV2._segment_key(self: EmbeddedMailbox, kind: string, slot: number, generation: number): string
+	function Mailbox._segment_key(self: EmbeddedMailbox, kind: string, slot: number, generation: number): string
 		local _, segment_prefix = prefix_for_kind(kind)
 		return result_route_key(self, segment_prefix, kind .. ":" .. tostring(slot) .. ":" .. tostring(generation))
 	end
 
-	function MailboxV2._registry_key(self: EmbeddedMailbox, shard: number): string
+	function Mailbox._registry_key(self: EmbeddedMailbox, shard: number): string
 		return result_route_key(self, "pr2-", "preparation-shard:" .. tostring(shard))
 	end
 
-	function MailboxV2._fresh_manifest(self: EmbeddedMailbox, kind: string): EmbeddedMailboxDict
+	function Mailbox._fresh_manifest(self: EmbeddedMailbox, kind: string): EmbeddedMailboxDict
 		local max_slots = if kind == "active" then self.options.max_segments :: number else self.options.dlq_max_segments :: number
 		local slots = table.create(max_slots)
 		for index = 1, max_slots do
@@ -3110,7 +3110,7 @@ do
 		}
 	end
 
-	function MailboxV2._get_manifest(self: EmbeddedMailbox, kind: string): (EmbeddedMailboxDict?, string?)
+	function Mailbox._get_manifest(self: EmbeddedMailbox, kind: string): (EmbeddedMailboxDict?, string?)
 		local key = self:_manifest_key(kind)
 		local current, read_error = self:_get(key)
 		if read_error == nil and current ~= nil then
@@ -3166,7 +3166,7 @@ do
 		return manifest, nil
 	end
 
-	function MailboxV2._set_slot_state(self: EmbeddedMailbox, kind: string, locator: EmbeddedMailboxLocator, expected_state: string, next_state: string, allocation_token: string?): boolean
+	function Mailbox._set_slot_state(self: EmbeddedMailbox, kind: string, locator: EmbeddedMailboxLocator, expected_state: string, next_state: string, allocation_token: string?): boolean
 		local key = self:_manifest_key(kind)
 		local updated, update_error = self:_update(key, function(raw)
 			local manifest = as_dict(raw)
@@ -3196,7 +3196,7 @@ do
 		return slot ~= nil and slot.generation == locator.generation and slot.state == next_state
 	end
 
-	function MailboxV2._finish_allocation(self: EmbeddedMailbox, kind: string, locator: EmbeddedMailboxLocator, token: string): (EmbeddedMailboxLocator?, string?)
+	function Mailbox._finish_allocation(self: EmbeddedMailbox, kind: string, locator: EmbeddedMailboxLocator, token: string): (EmbeddedMailboxLocator?, string?)
 		local segment_template: EmbeddedMailboxDict = {
 			version = VERSION,
 			kind = kind,
@@ -3254,7 +3254,7 @@ do
 		return locator, nil
 	end
 
-	function MailboxV2._reclaim_slot(self: EmbeddedMailbox, kind: string): boolean
+	function Mailbox._reclaim_slot(self: EmbeddedMailbox, kind: string): boolean
 		local manifest, _manifest_error = self:_get_manifest(kind)
 		if manifest == nil then
 			return false
@@ -3422,7 +3422,7 @@ do
 		return false
 	end
 
-	function MailboxV2._open_segment(self: EmbeddedMailbox, kind: string): (EmbeddedMailboxLocator?, string?)
+	function Mailbox._open_segment(self: EmbeddedMailbox, kind: string): (EmbeddedMailboxLocator?, string?)
 		for _attempt = 1, 3 do
 			local manifest, manifest_error = self:_get_manifest(kind)
 			if manifest == nil then
@@ -3541,7 +3541,7 @@ do
 		return nil, "capacity: could not allocate an active segment"
 	end
 
-	function MailboxV2._set_registry_entry(self: EmbeddedMailbox, route: string, token: string, patch: EmbeddedMailboxDict?, remove_entry: boolean?): (EmbeddedMailboxDict?, string?)
+	function Mailbox._set_registry_entry(self: EmbeddedMailbox, route: string, token: string, patch: EmbeddedMailboxDict?, remove_entry: boolean?): (EmbeddedMailboxDict?, string?)
 		local key = self:_registry_key(route_shard(self, route))
 		local updated, update_error = self:_update(key, function(raw)
 			local current = as_dict(raw)
@@ -3593,7 +3593,7 @@ do
 		return entry, nil
 	end
 
-	function MailboxV2._get_registry_entry(self: EmbeddedMailbox, route: string): (EmbeddedMailboxDict?, string?)
+	function Mailbox._get_registry_entry(self: EmbeddedMailbox, route: string): (EmbeddedMailboxDict?, string?)
 		local raw, read_error = self:_get(self:_registry_key(route_shard(self, route)))
 		if read_error ~= nil then
 			return nil, read_error
@@ -3612,7 +3612,7 @@ do
 		return if entries ~= nil then as_dict(entries[route]) else nil, nil
 	end
 
-	function MailboxV2._reserve(self: EmbeddedMailbox, route: string, request_text: string, request: EmbeddedMailboxDict, token: string): (EmbeddedMailboxDict?, string?)
+	function Mailbox._reserve(self: EmbeddedMailbox, route: string, request_text: string, request: EmbeddedMailboxDict, token: string): (EmbeddedMailboxDict?, string?)
 		local shard = route_shard(self, route)
 		local key = self:_registry_key(shard)
 		local maximum = self.options.preparation_max_entries_per_shard :: number
@@ -3703,7 +3703,7 @@ do
 		return nil, "capacity: preparation shard is full; no reservation was accepted"
 	end
 
-	function MailboxV2._update_message(self: EmbeddedMailbox, route: string, transform: (EmbeddedMailboxDict?) -> EmbeddedMailboxDict?): (EmbeddedMailboxDict?, string?)
+	function Mailbox._update_message(self: EmbeddedMailbox, route: string, transform: (EmbeddedMailboxDict?) -> EmbeddedMailboxDict?): (EmbeddedMailboxDict?, string?)
 		local updated, update_error = self:_update(route, function(raw)
 			local current = as_dict(raw)
 			if current ~= nil and not same_owner(current.owner, self.owner) then
@@ -3748,7 +3748,7 @@ do
 		return record, nil
 	end
 
-	function MailboxV2._record_snapshot(self: EmbeddedMailbox, record: EmbeddedMailboxDict): EmbeddedMailboxDict
+	function Mailbox._record_snapshot(self: EmbeddedMailbox, record: EmbeddedMailboxDict): EmbeddedMailboxDict
 		return {
 			Id = if type(record.public_id) == "string" then record.public_id else record.route,
 			Type = record.message_type,
@@ -3835,7 +3835,7 @@ do
 		return true, nil
 	end
 
-	function MailboxV2._ordering_route(self: EmbeddedMailbox, ordering_key: string): string
+	function Mailbox._ordering_route(self: EmbeddedMailbox, ordering_key: string): string
 		return result_route_key(self, "m2o-", "ordering:" .. ordering_key)
 	end
 
@@ -3865,7 +3865,7 @@ do
 		return true
 	end
 
-	function MailboxV2._ensure_ordering_slot(self: EmbeddedMailbox, route: string, ordering_key: string?): (number?, string?)
+	function Mailbox._ensure_ordering_slot(self: EmbeddedMailbox, route: string, ordering_key: string?): (number?, string?)
 		if ordering_key == nil then return nil, nil end
 		local ordering_route = self:_ordering_route(ordering_key)
 		local updated_at = self:_now()
@@ -3939,7 +3939,7 @@ do
 		return sequence :: number, nil
 	end
 
-	function MailboxV2._release_ordering_slot(
+	function Mailbox._release_ordering_slot(
 		self: EmbeddedMailbox,
 		route: string,
 		ordering_key: unknown,
@@ -3996,7 +3996,7 @@ do
 			and (latest_sequence == nil or (expected_sequence ~= nil and latest_sequence ~= expected_sequence))
 	end
 
-	function MailboxV2._reserve_replay_ordering_slot(
+	function Mailbox._reserve_replay_ordering_slot(
 		self: EmbeddedMailbox,
 		route: string,
 		ordering_key: string,
@@ -4084,7 +4084,7 @@ do
 		return sequence :: number, nil
 	end
 
-	function MailboxV2._ensure_replay_ordering_sequence(
+	function Mailbox._ensure_replay_ordering_sequence(
 		self: EmbeddedMailbox,
 		route: string,
 		operation_id: string,
@@ -4124,7 +4124,7 @@ do
 		return canonical_record, nil
 	end
 
-	function MailboxV2._ordering_blocked(self: EmbeddedMailbox, record: EmbeddedMailboxDict, route: string): (boolean, string?)
+	function Mailbox._ordering_blocked(self: EmbeddedMailbox, record: EmbeddedMailboxDict, route: string): (boolean, string?)
 		local ordering_key = record.ordering_key
 		local sequence = record.ordering_sequence
 		if ordering_key == nil then return false, nil end
@@ -4188,7 +4188,7 @@ do
 		return false, nil
 	end
 
-	function MailboxV2._reservation_row(self: EmbeddedMailbox, entry: EmbeddedMailboxDict): EmbeddedMailboxDict
+	function Mailbox._reservation_row(self: EmbeddedMailbox, entry: EmbeddedMailboxDict): EmbeddedMailboxDict
 		return {
 			route = entry.route,
 			placement_generation = entry.placement_generation,
@@ -4196,7 +4196,7 @@ do
 		}
 	end
 
-	function MailboxV2._append_at_locator(self: EmbeddedMailbox, kind: string, locator: EmbeddedMailboxLocator, row: EmbeddedMailboxDict): (string, string?)
+	function Mailbox._append_at_locator(self: EmbeddedMailbox, kind: string, locator: EmbeddedMailboxLocator, row: EmbeddedMailboxDict): (string, string?)
 		local manifest, manifest_error = self:_get_manifest(kind)
 		if manifest == nil then
 			return "unknown", manifest_error
@@ -4278,7 +4278,7 @@ do
 		return "unknown", "index row is not present after append"
 	end
 
-	function MailboxV2._append_index(self: EmbeddedMailbox, kind: string, row: EmbeddedMailboxDict): (EmbeddedMailboxLocator?, string?)
+	function Mailbox._append_index(self: EmbeddedMailbox, kind: string, row: EmbeddedMailboxDict): (EmbeddedMailboxLocator?, string?)
 		local slot_limit = if kind == "active" then self.options.max_segments :: number else self.options.dlq_max_segments :: number
 		for _attempt = 1, slot_limit + 2 do
 			local locator, open_error = self:_open_segment(kind)
@@ -4295,14 +4295,14 @@ do
 		return nil, "capacity: no index segment can accept the row"
 	end
 
-	function MailboxV2._contains_index_row(self: EmbeddedMailbox, kind: string, locator: EmbeddedMailboxLocator, route: string, placement: number): boolean
+	function Mailbox._contains_index_row(self: EmbeddedMailbox, kind: string, locator: EmbeddedMailboxLocator, route: string, placement: number): boolean
 		local value = self:_get(locator.key)
 		local segment = as_dict(value)
 		return segment ~= nil and segment.generation == locator.generation
 			and same_owner(segment.owner, self.owner) and has_row(segment, route, placement)
 	end
 
-	function MailboxV2._locator_from_entry(self: EmbeddedMailbox, entry: EmbeddedMailboxDict): EmbeddedMailboxLocator?
+	function Mailbox._locator_from_entry(self: EmbeddedMailbox, entry: EmbeddedMailboxDict): EmbeddedMailboxLocator?
 		local locator = as_dict(entry.locator)
 		if locator == nil or not is_finite(locator.slot) or not is_finite(locator.generation) then
 			return nil
@@ -4314,7 +4314,7 @@ do
 		}
 	end
 
-	function MailboxV2._resume_reservation(self: EmbeddedMailbox, route: string, initial_entry: EmbeddedMailboxDict): EmbeddedMailboxResult
+	function Mailbox._resume_reservation(self: EmbeddedMailbox, route: string, initial_entry: EmbeddedMailboxDict): EmbeddedMailboxResult
 		local entry = initial_entry
 		local request = as_dict(entry.request)
 		if request == nil or type(entry.request_text) ~= "string" or type(entry.token) ~= "string" then
@@ -4535,7 +4535,7 @@ do
 		return result
 	end
 
-	function MailboxV2.BindWakeups(self: EmbeddedMailbox, wakeups: unknown): (boolean, string?)
+	function Mailbox.BindWakeups(self: EmbeddedMailbox, wakeups: unknown): (boolean, string?)
 		if type(wakeups) ~= "table" or type((wakeups :: EmbeddedMailboxDict).Publish) ~= "function" then
 			return false, "wakeups must expose Publish(owner_identity, reason)"
 		end
@@ -4543,7 +4543,7 @@ do
 		return true, nil
 	end
 
-	function MailboxV2.SetLeaseRenewalScheduler(
+	function Mailbox.SetLeaseRenewalScheduler(
 		self: EmbeddedMailbox,
 		scheduler: unknown
 	): (boolean, string?)
@@ -4554,11 +4554,11 @@ do
 		return true, nil
 	end
 
-	function MailboxV2.GetOwner(self: EmbeddedMailbox): EmbeddedMailboxOwner
+	function Mailbox.GetOwner(self: EmbeddedMailbox): EmbeddedMailboxOwner
 		return clone_owner(self.owner)
 	end
 
-	function MailboxV2.GetActiveRecord(self: EmbeddedMailbox): EmbeddedMailboxActiveRecordLike?
+	function Mailbox.GetActiveRecord(self: EmbeddedMailbox): EmbeddedMailboxActiveRecordLike?
 		return self.options.active_record
 	end
 
@@ -4610,7 +4610,7 @@ do
 		return "success", nil
 	end
 
-	function MailboxV2.EnqueueAsync(self: EmbeddedMailbox, message_type: string, payload: unknown, enqueue_options: EmbeddedMailboxDict?): EmbeddedMailboxResult
+	function Mailbox.EnqueueAsync(self: EmbeddedMailbox, message_type: string, payload: unknown, enqueue_options: EmbeddedMailboxDict?): EmbeddedMailboxResult
 		local activation = self:_check_activation("enqueue")
 		if activation ~= nil then return activation end
 		if type(message_type) ~= "string" or message_type == "" or #message_type > 100 then
@@ -4866,7 +4866,7 @@ do
 		return ok("duplicate", legacy_id, self:_record_snapshot(current), nil)
 	end
 
-	function MailboxV2.ImportLegacyAsync(
+	function Mailbox.ImportLegacyAsync(
 		self: EmbeddedMailbox,
 		legacy_message: unknown,
 		migration_id: string
@@ -4904,7 +4904,7 @@ do
 		return publish_after_enqueue(self, result)
 	end
 
-	function MailboxV2.ImportLegacyDeadLetterAsync(
+	function Mailbox.ImportLegacyDeadLetterAsync(
 		self: EmbeddedMailbox,
 		legacy_message: unknown,
 		migration_id: string
@@ -4986,7 +4986,7 @@ do
 		return completed
 	end
 
-	function MailboxV2.GetDeliveryAsync(self: EmbeddedMailbox, message_id: string): (EmbeddedMailboxDict?, EmbeddedMailboxResult)
+	function Mailbox.GetDeliveryAsync(self: EmbeddedMailbox, message_id: string): (EmbeddedMailboxDict?, EmbeddedMailboxResult)
 		if type(message_id) ~= "string" or #message_id == 0 or #message_id > MAX_KEY_LENGTH then
 			return nil, ok("invalid", message_id, nil, "message_id must be a valid V2 or legacy message ID")
 		end
@@ -5023,7 +5023,7 @@ do
 		end
 		return nil, ok("not_found", message_id, nil, "no canonical message or active preparation is present")
 	end
-	function MailboxV2._rows(self: EmbeddedMailbox, kind: string): ({ EmbeddedMailboxDict }, string?)
+	function Mailbox._rows(self: EmbeddedMailbox, kind: string): ({ EmbeddedMailboxDict }, string?)
 		local manifest, manifest_error = self:_get_manifest(kind)
 		if manifest == nil then
 			return {}, manifest_error
@@ -5063,7 +5063,7 @@ do
 		return result, nil
 	end
 
-	function MailboxV2.GetQueueAsync(self: EmbeddedMailbox): ({ EmbeddedMailboxDict }, EmbeddedMailboxResult)
+	function Mailbox.GetQueueAsync(self: EmbeddedMailbox): ({ EmbeddedMailboxDict }, EmbeddedMailboxResult)
 		local rows, rows_error = self:_rows("active")
 		if rows_error ~= nil then
 			return {}, ok(storage_error_code(rows_error), nil, nil, rows_error)
@@ -5142,7 +5142,7 @@ do
 		return result, ok("success", nil, nil, nil)
 	end
 
-	function MailboxV2._finish_acknowledgement(self: EmbeddedMailbox, route: string, token: string): EmbeddedMailboxResult
+	function Mailbox._finish_acknowledgement(self: EmbeddedMailbox, route: string, token: string): EmbeddedMailboxResult
 		local completed_at = self:_now()
 		local finished, finish_error = self:_update_message(route, function(current)
 			if current == nil or current.state ~= "acknowledging" or current.claim_token ~= token then
@@ -5171,7 +5171,7 @@ do
 		return ok("unknown", route, self:_record_snapshot(finished), "acknowledgement terminal state was not confirmed")
 	end
 
-	function MailboxV2._finish_dead_letter(self: EmbeddedMailbox, route: string): EmbeddedMailboxResult
+	function Mailbox._finish_dead_letter(self: EmbeddedMailbox, route: string): EmbeddedMailboxResult
 		local record_value, read_error = self:_get(route)
 		local record = as_dict(record_value)
 		if read_error ~= nil or record == nil then
@@ -5231,7 +5231,7 @@ do
 		return ok("dead_lettered", route, self:_record_snapshot(terminal), nil)
 	end
 
-	function MailboxV2._claim(self: EmbeddedMailbox, route: string): (EmbeddedMailboxDict?, EmbeddedMailboxResult)
+	function Mailbox._claim(self: EmbeddedMailbox, route: string): (EmbeddedMailboxDict?, EmbeddedMailboxResult)
 		local current_value, current_error = self:_get(route)
 		if current_error ~= nil then
 			return nil, ok("unknown", route, nil, "canonical claim read failed: " .. current_error)
@@ -5352,7 +5352,7 @@ do
 	end
 
 
-	function MailboxV2.RenewClaimAsync(self: EmbeddedMailbox, message_id: string, claim_token: string): EmbeddedMailboxResult
+	function Mailbox.RenewClaimAsync(self: EmbeddedMailbox, message_id: string, claim_token: string): EmbeddedMailboxResult
 		if type(message_id) ~= "string" or message_id == "" or #message_id > MAX_KEY_LENGTH then
 			return ok("invalid", message_id, nil, "message_id must be a valid v2 key")
 		end
@@ -5426,7 +5426,7 @@ do
 		return ok("renewed", message_id, self:_record_snapshot(renewed), nil)
 	end
 
-	function MailboxV2._complete_claim(self: EmbeddedMailbox, route: string, token: string): EmbeddedMailboxResult
+	function Mailbox._complete_claim(self: EmbeddedMailbox, route: string, token: string): EmbeddedMailboxResult
 		local transition_now = self:_now()
 		local transition, transition_error = self:_update_message(route, function(current)
 			if current == nil or current.state ~= "claimed" or current.claim_token ~= token then
@@ -5452,7 +5452,7 @@ do
 		return self:_finish_acknowledgement(route, token)
 	end
 
-	function MailboxV2._retry_claim(self: EmbeddedMailbox, route: string, token: string, reason: string): EmbeddedMailboxResult
+	function Mailbox._retry_claim(self: EmbeddedMailbox, route: string, token: string, reason: string): EmbeddedMailboxResult
 		local now = self:_now()
 		local updated, update_error = self:_update_message(route, function(current)
 			if current == nil or current.state ~= "claimed" or current.claim_token ~= token then
@@ -5667,7 +5667,7 @@ do
 		return ok("empty", nil, nil, nil)
 	end
 
-	function MailboxV2.ProcessNextAsync(self: EmbeddedMailbox, handler: (unknown, EmbeddedMailboxDict, EmbeddedMailboxHandlerContext?) -> (unknown, string?)): EmbeddedMailboxResult
+	function Mailbox.ProcessNextAsync(self: EmbeddedMailbox, handler: (unknown, EmbeddedMailboxDict, EmbeddedMailboxHandlerContext?) -> (unknown, string?)): EmbeddedMailboxResult
 		local activation = self:_check_activation("process")
 		if activation ~= nil then return activation end
 		if self.processing then return ok("busy", nil, nil, "a ProcessNextAsync call is already running on this mailbox instance") end
@@ -5679,7 +5679,7 @@ do
 		return result :: EmbeddedMailboxResult
 	end
 
-	function MailboxV2.RecoverAsync(self: EmbeddedMailbox): EmbeddedMailboxResult
+	function Mailbox.RecoverAsync(self: EmbeddedMailbox): EmbeddedMailboxResult
 		local activation = self:_check_activation("recover")
 		if activation ~= nil then return activation end
 		local capacity_blocked_preparations = 0
@@ -5836,7 +5836,7 @@ do
 		return ok("success", nil, recovery_metadata, nil)
 	end
 
-	function MailboxV2.GetDeadLettersAsync(self: EmbeddedMailbox, cursor: string?, page_size: number?): ({ EmbeddedMailboxDict }, string?, EmbeddedMailboxResult)
+	function Mailbox.GetDeadLettersAsync(self: EmbeddedMailbox, cursor: string?, page_size: number?): ({ EmbeddedMailboxDict }, string?, EmbeddedMailboxResult)
 		local rows, rows_error = self:_rows("dlq")
 		if rows_error ~= nil then
 			return {}, nil, ok(storage_error_code(rows_error), nil, nil, rows_error)
@@ -5885,7 +5885,7 @@ do
 		return page, next_cursor, ok("success", nil, nil, nil)
 	end
 
-	function MailboxV2.ReplayDeadLetterAsync(self: EmbeddedMailbox, message_id: string, operation_id: string): EmbeddedMailboxResult
+	function Mailbox.ReplayDeadLetterAsync(self: EmbeddedMailbox, message_id: string, operation_id: string): EmbeddedMailboxResult
 		local activation = self:_check_activation("replay")
 		if activation ~= nil then return activation end
 		local route = self:_route_from_public_id(message_id)
@@ -5958,7 +5958,7 @@ do
 		return ok("accepted", message_id, self:_record_snapshot(ready), nil)
 	end
 
-	function MailboxV2.DiscardDeadLetterAsync(self: EmbeddedMailbox, message_id: string, expected_replay_count: number): EmbeddedMailboxResult
+	function Mailbox.DiscardDeadLetterAsync(self: EmbeddedMailbox, message_id: string, expected_replay_count: number): EmbeddedMailboxResult
 		local activation = self:_check_activation("discard")
 		if activation ~= nil then return activation end
 		local route = self:_route_from_public_id(message_id)
@@ -5982,7 +5982,7 @@ do
 		return ok("discarded", message_id, self:_record_snapshot(discarded), nil)
 	end
 
-	function MailboxV2.GetStatsAsync(self: EmbeddedMailbox): (EmbeddedMailboxDict, EmbeddedMailboxResult)
+	function Mailbox.GetStatsAsync(self: EmbeddedMailbox): (EmbeddedMailboxDict, EmbeddedMailboxResult)
 		local queue, queue_result = self:GetQueueAsync()
 		if queue_result.code ~= "success" then
 			return {}, queue_result
@@ -6059,7 +6059,7 @@ do
 		}, ok("success", nil, nil, nil)
 	end
 
-	function MailboxV2.ReclaimAsync(self: EmbeddedMailbox): EmbeddedMailboxResult
+	function Mailbox.ReclaimAsync(self: EmbeddedMailbox): EmbeddedMailboxResult
 		local activation = self:_check_activation("maintenance")
 		if activation ~= nil then return activation end
 		local reclaimed_active = self:_reclaim_slot("active")
@@ -6067,7 +6067,7 @@ do
 		return ok(if reclaimed_active or reclaimed_dlq then "success" else "empty", nil, nil, nil)
 	end
 
-	function MailboxV2.MaintenanceAsync(self: EmbeddedMailbox): (EmbeddedMailboxDict, EmbeddedMailboxResult)
+	function Mailbox.MaintenanceAsync(self: EmbeddedMailbox): (EmbeddedMailboxDict, EmbeddedMailboxResult)
 		local activation = self:_check_activation("maintenance")
 		if activation ~= nil then return {}, activation end
 
@@ -6246,11 +6246,12 @@ do
 		self.delay_update_key = key
 	end
 
-	function MailboxV2.MockStore()
+	function Mailbox.MockStore()
 		return MockStore.new()
 	end
 
-	MailboxV2.Version = VERSION
+	Mailbox.Version = 1
+	Mailbox.ProtocolVersion = VERSION
 
 end
 --// end embedded mailbox v2 module
@@ -6976,8 +6977,8 @@ type InternalState = {
 	next_queue_poll: number,
 	busy: boolean,
 	queue_busy: boolean,
-	mailbox_v2_binding: boolean,
-	mailbox_v2: EmbeddedMailbox?,
+	mailbox_binding: boolean,
+	mailbox: EmbeddedMailbox?,
 	save_requested: boolean,
 	shutdown: boolean,
 	retired: boolean,
@@ -7059,7 +7060,7 @@ export type Record = {
 	GetIdentity: (self: Record) -> { [string]: unknown },
 	GetMailboxOwner: (self: Record) -> { [string]: unknown },
 	CreateMailboxStoreAdapter: (self: Record) -> (unknown?, ResultCode, string?),
-	BindMailboxV2Async: (self: Record, mailbox: unknown) -> (ResultCode, string?),
+	BindMailboxAsync: (self: Record, mailbox: unknown) -> (ResultCode, string?),
 	EnqueueAsync: (self: Record, message_type: string, data: JsonValue?, enqueue_options: { [string]: unknown }?) -> (ResultCode, string?),
 	ProcessQueueAsync: (self: Record, max_messages: number?) -> (ResultCode, string?),
 	GetQueueAsync: (self: Record) -> ({ QueueMessage }, ResultCode, string?),
@@ -7074,8 +7075,8 @@ export type Record = {
 
 local IMPLEMENTATION_VERSION = 2
 local QUEUE_IMPLEMENTATION_VERSION = 3
-local MAILBOX_V2_FREEZE_VERSION = QUEUE_IMPLEMENTATION_VERSION + 1
-local MAILBOX_V2_FREEZE_MARKER = "RecordStore.MailboxV2Freeze.v1"
+local MAILBOX_FREEZE_VERSION = QUEUE_IMPLEMENTATION_VERSION + 1
+local MAILBOX_FREEZE_MARKER = "RecordStore.MailboxV2Freeze.v1"
 local LEGACY_QUEUE_RETIRED_MARKER = "RecordStore.LegacyQueueRetired.v1"
 local DEFAULT_AUTOSAVE_INTERVAL = 300
 local DEFAULT_LEASE_DURATION = 180
@@ -9547,10 +9548,10 @@ local function parse_queue_envelope(
 		if owner_name ~= expected_owner.name or owner_scope ~= expected_owner.scope or owner_key ~= expected_owner.key then
 			return nil, "durable queue belongs to a different record identity", true
 		end
-		if implementation_version == MAILBOX_V2_FREEZE_VERSION
-			and get_string_field(raw, "migration_marker") == MAILBOX_V2_FREEZE_MARKER
+		if implementation_version == MAILBOX_FREEZE_VERSION
+			and get_string_field(raw, "migration_marker") == MAILBOX_FREEZE_MARKER
 		then
-			return nil, "durable queue is frozen for Mailbox V2 migration; legacy queue writes are disabled", false
+			return nil, "durable queue is frozen for Mailbox migration; legacy queue writes are disabled", false
 		end
 		return nil, "durable queue uses an unsupported future implementation version", false
 	end
@@ -9668,7 +9669,7 @@ local function read_queue_after_update(
 		local detail = parse_message or "durable queue is corrupt"
 		local code: ResultCode = if owner_mismatch then "conflict"
 			elseif string.find(detail, "unsupported future implementation version", 1, true) ~= nil then "future_schema"
-			elseif string.find(detail, "frozen for Mailbox V2 migration", 1, true) ~= nil then "migration"
+			elseif string.find(detail, "frozen for Mailbox migration", 1, true) ~= nil then "migration"
 			else "corrupt"
 		return nil, code, detail
 	end
@@ -9715,7 +9716,7 @@ local function legacy_queue_retirement_status(
 		return false, nil, nil
 	end
 	local version = get_string_field(marker, "implementation_version")
-	if version ~= MAILBOX_V2_FREEZE_VERSION then
+	if version ~= MAILBOX_FREEZE_VERSION then
 		return false, "future_schema", "legacy queue retirement marker uses an unsupported future version"
 	end
 	local owner = get_string_field(marker, "owner")
@@ -9772,7 +9773,7 @@ local function ensure_legacy_queue_clear(
 		local messages = parse_legacy_queue_envelope(current_raw)
 		if messages == nil or #messages > 0 then return nil end
 		return {
-			implementation_version = MAILBOX_V2_FREEZE_VERSION,
+			implementation_version = MAILBOX_FREEZE_VERSION,
 			migration_marker = LEGACY_QUEUE_RETIRED_MARKER,
 			owner = owner,
 			source_implementation_version = 1,
@@ -9846,7 +9847,7 @@ local function queue_size_error(queue: QueueEnvelope, max_bytes: number): string
 	return nil
 end
 
-type MailboxV2MigrationStatus = {
+type MailboxMigrationStatus = {
 	MigrationId: string,
 	FrozenAt: number,
 	SourceImplementationVersion: number,
@@ -9854,7 +9855,7 @@ type MailboxV2MigrationStatus = {
 	DeadLetterCount: number,
 }
 
-type MailboxV2MigrationContext = {
+type MailboxMigrationContext = {
 	backend: Backend,
 	owner: QueueOwner,
 	migration_id: string,
@@ -9862,7 +9863,7 @@ type MailboxV2MigrationContext = {
 	max_bytes: number,
 }
 
-local function mailbox_v2_migration_context(
+local function mailbox_migration_context(
 	name: string,
 	scope: string,
 	key: string,
@@ -9871,7 +9872,7 @@ local function mailbox_v2_migration_context(
 	max_queue_bytes: number?,
 	operation_deadline: number?,
 	mock: boolean
-): (MailboxV2MigrationContext?, ResultCode?, string?)
+): (MailboxMigrationContext?, ResultCode?, string?)
 	local valid_identity, identity_error = validate_store_identity(name, scope, key)
 	if not valid_identity then return nil, "invalid", identity_error end
 	if type(migration_id) ~= "string" or migration_id == "" or #migration_id > 96 then
@@ -9898,7 +9899,7 @@ local function mailbox_v2_migration_context(
 	}, nil, nil
 end
 
-local function has_reserved_mailbox_v2_ids(queue: QueueEnvelope): boolean
+local function has_reserved_mailbox_ids(queue: QueueEnvelope): boolean
 	for _, item in ipairs(queue.messages) do
 		local prefix = string.sub(item.id, 1, 4)
 		if prefix == "m2i-" or prefix == "m2g-" or prefix == "m2l-" then return true end
@@ -9910,40 +9911,40 @@ local function has_reserved_mailbox_v2_ids(queue: QueueEnvelope): boolean
 	return false
 end
 
-local function inspect_mailbox_v2_freeze_marker(
+local function inspect_mailbox_freeze_marker(
 	raw: unknown,
 	owner: QueueOwner,
 	migration_id: string
-): (QueueEnvelope?, MailboxV2MigrationStatus?, ResultCode?, string?)
+): (QueueEnvelope?, MailboxMigrationStatus?, ResultCode?, string?)
 	if type(raw) ~= "table" then
-		return nil, nil, "migration", "legacy durable queue is not frozen for Mailbox V2"
+		return nil, nil, "migration", "legacy durable queue is not frozen for Mailbox"
 	end
 	local marker = raw :: { [string]: unknown }
 	local version = get_string_field(marker, "implementation_version")
-	if version ~= MAILBOX_V2_FREEZE_VERSION
-		or get_string_field(marker, "migration_marker") ~= MAILBOX_V2_FREEZE_MARKER
+	if version ~= MAILBOX_FREEZE_VERSION
+		or get_string_field(marker, "migration_marker") ~= MAILBOX_FREEZE_MARKER
 	then
 		if type(version) == "number" and version > QUEUE_IMPLEMENTATION_VERSION then
 			return nil, nil, "future_schema", "queue has an unsupported future migration marker version"
 		end
-		return nil, nil, "migration", "legacy durable queue has not been frozen for Mailbox V2"
+		return nil, nil, "migration", "legacy durable queue has not been frozen for Mailbox"
 	end
 	local marker_owner = get_string_field(marker, "owner")
 	if type(marker_owner) ~= "table" then
-		return nil, nil, "corrupt", "Mailbox V2 freeze marker has no owner"
+		return nil, nil, "corrupt", "Mailbox freeze marker has no owner"
 	end
 	local owner_name = get_string_field(marker_owner, "name")
 	local owner_scope = get_string_field(marker_owner, "scope")
 	local owner_key = get_string_field(marker_owner, "key")
 	if type(owner_name) ~= "string" or type(owner_scope) ~= "string" or type(owner_key) ~= "string" then
-		return nil, nil, "corrupt", "Mailbox V2 freeze owner is malformed"
+		return nil, nil, "corrupt", "Mailbox freeze owner is malformed"
 	end
 	if owner_name ~= owner.name or owner_scope ~= owner.scope or owner_key ~= owner.key then
 		return nil, nil, "conflict", "frozen queue belongs to a different record identity"
 	end
 	local stored_migration_id = get_string_field(marker, "migration_id")
 	if type(stored_migration_id) ~= "string" or stored_migration_id == "" or #stored_migration_id > 96 then
-		return nil, nil, "corrupt", "Mailbox V2 freeze marker has an invalid migration ID"
+		return nil, nil, "corrupt", "Mailbox freeze marker has an invalid migration ID"
 	end
 	if stored_migration_id ~= migration_id then
 		return nil, nil, "conflict", "legacy queue is frozen by a different migration ID"
@@ -9954,7 +9955,7 @@ local function inspect_mailbox_v2_freeze_marker(
 		or type(source_version_raw) ~= "number"
 		or (source_version_raw ~= 2 and source_version_raw ~= QUEUE_IMPLEMENTATION_VERSION)
 	then
-		return nil, nil, "corrupt", "Mailbox V2 freeze metadata is malformed"
+		return nil, nil, "corrupt", "Mailbox freeze metadata is malformed"
 	end
 	local frozen_at = frozen_at_raw
 	local source_version = source_version_raw
@@ -9969,7 +9970,7 @@ local function inspect_mailbox_v2_freeze_marker(
 	if queue == nil then
 		return nil, nil, if owner_mismatch then "conflict" else "corrupt", parse_error or "frozen source queue is invalid"
 	end
-	local status: MailboxV2MigrationStatus = {
+	local status: MailboxMigrationStatus = {
 		MigrationId = stored_migration_id,
 		FrozenAt = frozen_at,
 		SourceImplementationVersion = source_version,
@@ -9979,7 +9980,7 @@ local function inspect_mailbox_v2_freeze_marker(
 	return queue, status, nil, nil
 end
 
-local function build_mailbox_v2_freeze_candidate(
+local function build_mailbox_freeze_candidate(
 	raw: unknown,
 	owner: QueueOwner,
 	migration_id: string,
@@ -9988,10 +9989,10 @@ local function build_mailbox_v2_freeze_candidate(
 ): (unknown?, ResultCode?, string?)
 	if type(raw) == "table" then
 		local marker = raw :: { [string]: unknown }
-		if get_string_field(marker, "implementation_version") == MAILBOX_V2_FREEZE_VERSION
-			and get_string_field(marker, "migration_marker") == MAILBOX_V2_FREEZE_MARKER
+		if get_string_field(marker, "implementation_version") == MAILBOX_FREEZE_VERSION
+			and get_string_field(marker, "migration_marker") == MAILBOX_FREEZE_MARKER
 		then
-			local _, _, existing_code, existing_message = inspect_mailbox_v2_freeze_marker(marker, owner, migration_id)
+			local _, _, existing_code, existing_message = inspect_mailbox_freeze_marker(marker, owner, migration_id)
 			if existing_code == nil then return nil, nil, nil end
 			return nil, normalize_result_code(existing_code) or "migration", existing_message
 		end
@@ -10005,8 +10006,8 @@ local function build_mailbox_v2_freeze_candidate(
 		end
 		return nil, "corrupt", parse_error or "legacy queue failed validation; no freeze marker was written"
 	end
-	if has_reserved_mailbox_v2_ids(queue) then
-		return nil, "conflict", "legacy queue contains an ID in a reserved Mailbox V2 namespace; source was not frozen"
+	if has_reserved_mailbox_ids(queue) then
+		return nil, "conflict", "legacy queue contains an ID in a reserved Mailbox namespace; source was not frozen"
 	end
 	if type(raw) == "table" then
 		local original = raw :: { [string]: unknown }
@@ -10030,8 +10031,8 @@ local function build_mailbox_v2_freeze_candidate(
 		}
 		source_version = QUEUE_IMPLEMENTATION_VERSION
 	end
-	source.implementation_version = MAILBOX_V2_FREEZE_VERSION
-	source.migration_marker = MAILBOX_V2_FREEZE_MARKER
+	source.implementation_version = MAILBOX_FREEZE_VERSION
+	source.migration_marker = MAILBOX_FREEZE_MARKER
 	source.migration_id = migration_id
 	source.source_implementation_version = source_version
 	source.frozen_at = frozen_at
@@ -10041,7 +10042,7 @@ local function build_mailbox_v2_freeze_candidate(
 	return source, nil, nil
 end
 
-local function begin_mailbox_v2_migration_internal(
+local function begin_mailbox_migration_internal(
 	name: string,
 	scope: string,
 	key: string,
@@ -10051,7 +10052,7 @@ local function begin_mailbox_v2_migration_internal(
 	operation_deadline: number?,
 	mock: boolean
 ): (ResultCode, string?)
-	local context, context_error, context_message = mailbox_v2_migration_context(
+	local context, context_error, context_message = mailbox_migration_context(
 		name, scope, key, migration_id, queue_store_name, max_queue_bytes, operation_deadline, mock
 	)
 	if context == nil then return normalize_result_code(context_error) or "invalid", context_message end
@@ -10061,7 +10062,7 @@ local function begin_mailbox_v2_migration_internal(
 	end
 
 	local _, _, update_code, update_message = backend_update(context.backend, function(current_raw)
-		local candidate = build_mailbox_v2_freeze_candidate(
+		local candidate = build_mailbox_freeze_candidate(
 			current_raw, context.owner, context.migration_id, frozen_at, context.max_bytes
 		)
 		return candidate
@@ -10070,14 +10071,14 @@ local function begin_mailbox_v2_migration_internal(
 	
 	local fresh, _, read_code, read_message = backend_get(context.backend, false, context.deadline, nil)
 	if read_code ~= nil then
-		return "unknown", "could not verify Mailbox V2 freeze marker: " .. (read_message or read_code)
+		return "unknown", "could not verify Mailbox freeze marker: " .. (read_message or read_code)
 	end
 	local _, status, inspect_code, inspect_message =
-		inspect_mailbox_v2_freeze_marker(fresh, context.owner, context.migration_id)
+		inspect_mailbox_freeze_marker(fresh, context.owner, context.migration_id)
 	if status ~= nil then return "success", nil end
 	if inspect_code == "conflict" then return "conflict", inspect_message end
 
-	local _, candidate_code, candidate_message = build_mailbox_v2_freeze_candidate(
+	local _, candidate_code, candidate_message = build_mailbox_freeze_candidate(
 		fresh, context.owner, context.migration_id, frozen_at, context.max_bytes
 	)
 	if candidate_code ~= nil then return normalize_result_code(candidate_code) or "migration", candidate_message end
@@ -10085,7 +10086,7 @@ local function begin_mailbox_v2_migration_internal(
 	return "unknown", "freeze update returned without a durable freeze marker"
 end
 
-local function get_mailbox_v2_migration_status_internal(
+local function get_mailbox_migration_status_internal(
 	name: string,
 	scope: string,
 	key: string,
@@ -10094,20 +10095,20 @@ local function get_mailbox_v2_migration_status_internal(
 	max_queue_bytes: number?,
 	operation_deadline: number?,
 	mock: boolean
-): (MailboxV2MigrationStatus?, ResultCode, string?)
-	local context, context_error, context_message = mailbox_v2_migration_context(
+): (MailboxMigrationStatus?, ResultCode, string?)
+	local context, context_error, context_message = mailbox_migration_context(
 		name, scope, key, migration_id, queue_store_name, max_queue_bytes, operation_deadline, mock
 	)
 	if context == nil then return nil, normalize_result_code(context_error) or "invalid", context_message end
 	local raw, _, code, message = backend_get(context.backend, false, context.deadline, nil)
 	if code ~= nil then return nil, normalize_result_code(code) or "unknown", message end
 	local _, status, marker_code, marker_message =
-		inspect_mailbox_v2_freeze_marker(raw, context.owner, context.migration_id)
+		inspect_mailbox_freeze_marker(raw, context.owner, context.migration_id)
 	if status == nil then return nil, normalize_result_code(marker_code) or "migration", marker_message end
 	return status, "success", nil
 end
 
-local function get_mailbox_v2_migration_source_page_internal(
+local function get_mailbox_migration_source_page_internal(
 	name: string,
 	scope: string,
 	key: string,
@@ -10136,14 +10137,14 @@ local function get_mailbox_v2_migration_source_page_internal(
 		end
 		offset = parsed
 	end
-	local context, context_error, context_message = mailbox_v2_migration_context(
+	local context, context_error, context_message = mailbox_migration_context(
 		name, scope, key, migration_id, queue_store_name, max_queue_bytes, operation_deadline, mock
 	)
 	if context == nil then return nil, nil, false, normalize_result_code(context_error) or "invalid", context_message end
 	local raw, _, code, message = backend_get(context.backend, false, context.deadline, nil)
 	if code ~= nil then return nil, nil, false, normalize_result_code(code) or "unknown", message end
 	local queue, _, marker_code, marker_message =
-		inspect_mailbox_v2_freeze_marker(raw, context.owner, context.migration_id)
+		inspect_mailbox_freeze_marker(raw, context.owner, context.migration_id)
 	if queue == nil then return nil, nil, false, normalize_result_code(marker_code) or "migration", marker_message end
 	local source: { any } = if kind == "active" then queue.messages else queue.dead_letters
 	if offset > #source then return nil, nil, false, "conflict", "migration cursor exceeds the frozen source length" end
@@ -10176,29 +10177,29 @@ local function get_mailbox_v2_migration_source_page_internal(
 	return page, if complete then nil else tostring(next_offset), complete, "success", nil
 end
 
-local function mailbox_v2_migration_api(mock: boolean)
+local function mailbox_migration_api(mock: boolean)
 	return {
-		begin_mailbox_v2_migration_async = function(
+		begin_mailbox_migration_async = function(
 			name: string, scope: string, key: string, migration_id: string,
 			queue_store_name: string?, max_queue_bytes: number?, operation_deadline: number?
 		): (ResultCode, string?)
-			return begin_mailbox_v2_migration_internal(
+			return begin_mailbox_migration_internal(
 				name, scope, key, migration_id, queue_store_name, max_queue_bytes, operation_deadline, mock
 			)
 		end,
-		get_mailbox_v2_migration_status_async = function(
+		get_mailbox_migration_status_async = function(
 			name: string, scope: string, key: string, migration_id: string,
 			queue_store_name: string?, max_queue_bytes: number?, operation_deadline: number?
-		): (MailboxV2MigrationStatus?, ResultCode, string?)
-			return get_mailbox_v2_migration_status_internal(
+		): (MailboxMigrationStatus?, ResultCode, string?)
+			return get_mailbox_migration_status_internal(
 				name, scope, key, migration_id, queue_store_name, max_queue_bytes, operation_deadline, mock
 			)
 		end,
-		get_mailbox_v2_migration_source_page_async = function(
+		get_mailbox_migration_source_page_async = function(
 			name: string, scope: string, key: string, migration_id: string, kind: string,
 			cursor: string?, limit: number, queue_store_name: string?, max_queue_bytes: number?, operation_deadline: number?
 		): ({ [number]: { [string]: unknown } }?, string?, boolean, ResultCode, string?)
-			return get_mailbox_v2_migration_source_page_internal(
+			return get_mailbox_migration_source_page_internal(
 				name, scope, key, migration_id, kind, cursor, limit,
 				queue_store_name, max_queue_bytes, operation_deadline, mock
 			)
@@ -13643,7 +13644,7 @@ local function message(self: Record, message_type: string, data: JsonValue?): (R
 end
 
 local function mailbox_bound_for_state(state: InternalState): (EmbeddedMailbox?, ResultCode?, string?)
-	local mailbox = state.mailbox_v2
+	local mailbox = state.mailbox
 	if mailbox == nil then return nil, nil, nil end
 	if type(mailbox) ~= "table" or type(mailbox.GetOwner) ~= "function"
 		or type(mailbox.GetActiveRecord) ~= "function" or type(mailbox.EnqueueAsync) ~= "function"
@@ -13674,7 +13675,7 @@ local function mailbox_bound_for_state(state: InternalState): (EmbeddedMailbox?,
 	return mailbox, nil, nil
 end
 
-local function map_mailbox_v2_result(code: unknown): ResultCode
+local function map_mailbox_result(code: unknown): ResultCode
 	if code == "success" then return "success" end
 	if code == "accepted" then return "enqueued" end
 	if code == "processed" or code == "dead_lettered" then return "processed" end
@@ -13865,10 +13866,10 @@ end
 local function enqueue(self: Record, message_type: string, data: JsonValue?, enqueue_options: { [string]: unknown }?): (ResultCode, string?)
 	local state = private[self]
 	if state == nil then return "invalid", "record does not exist" end
-	if state.mailbox_v2_binding then return "busy", "V2 mailbox binding is checking the legacy queue" end
+	if state.mailbox_binding then return "busy", "V2 mailbox binding is checking the legacy queue" end
 	if state.state ~= "active" then return "fenced", "record is not actively owned" end
 	if state.takeover_requested then return "closing", "session takeover has been requested" end
-	if state.mailbox_v2 ~= nil then
+	if state.mailbox ~= nil then
 		local mailbox, bound_code, bound_message = mailbox_bound_for_state(state)
 		if mailbox == nil then return normalize_result_code(bound_code) or "fenced", bound_message end
 		local call_ok, result = pcall(function() return mailbox:EnqueueAsync(message_type, data, enqueue_options) end)
@@ -13879,7 +13880,7 @@ local function enqueue(self: Record, message_type: string, data: JsonValue?, enq
 		if result_table.code == "accepted" then observe(state, "v2_enqueue", "success", message_type); return "enqueued", nil end
 		if result_table.code == "duplicate" then observe(state, "v2_enqueue", "duplicate", message_type); return "duplicate", nil end
 		local message = if type(result_table.error) == "string" then result_table.error else "V2 mailbox enqueue returned " .. result_table.code
-		return map_mailbox_v2_result(result_table.code), message
+		return map_mailbox_result(result_table.code), message
 	end
 	if enqueue_options ~= nil then return "invalid", "enqueue_options require a bound V2 mailbox" end
 	return enqueue_internal(state, message_type, data)
@@ -13888,16 +13889,16 @@ end
 local function process_queue(self: Record, max_messages: number?): (ResultCode, string?)
 	local state = private[self]
 	if state == nil then return "invalid", "record does not exist" end
-	if state.mailbox_v2_binding then return "busy", "V2 mailbox binding is checking the legacy queue" end
-	if state.mailbox_v2 == nil then return process_queue_internal(state, max_messages or 1) end
+	if state.mailbox_binding then return "busy", "V2 mailbox binding is checking the legacy queue" end
+	if state.mailbox == nil then return process_queue_internal(state, max_messages or 1) end
 	return process_queue_v2(self, state, max_messages or 1)
 end
 
 local function get_queue(self: Record): ({ QueueMessage }, ResultCode, string?)
 	local state = private[self]
 	if state == nil then return {}, "invalid", "record does not exist" end
-	if state.mailbox_v2_binding and state.mailbox_v2 ~= nil then return {}, "busy", "V2 mailbox binding is checking the legacy queue" end
-	if state.mailbox_v2 ~= nil then
+	if state.mailbox_binding and state.mailbox ~= nil then return {}, "busy", "V2 mailbox binding is checking the legacy queue" end
+	if state.mailbox ~= nil then
 		local mailbox, bound_code, bound_message = mailbox_bound_for_state(state)
 		if mailbox == nil then return {}, normalize_result_code(bound_code) or "fenced", bound_message end
 		local call_ok, rows, result = pcall(function() return mailbox:GetQueueAsync() end)
@@ -13906,7 +13907,7 @@ local function get_queue(self: Record): ({ QueueMessage }, ResultCode, string?)
 		end
 		if result.code ~= "success" then
 			local message = if type(result.error) == "string" then result.error else "V2 queue read returned " .. result.code
-			return {}, map_mailbox_v2_result(result.code), message
+			return {}, map_mailbox_result(result.code), message
 		end
 		local projected: { QueueMessage } = {}
 		for _, row in ipairs(rows) do
@@ -14026,7 +14027,7 @@ process_queue_v2 = function(self: Record, state: InternalState, max_messages: nu
 				return "budget" :: ResultCode, if type(result.error) == "string" then result.error else "V2 handler failed and retry was scheduled"
 			end
 			if result.code == "expired" or result.code == "ordered" then continue end
-			return map_mailbox_v2_result(result.code), if type(result.error) == "string" then result.error else "V2 mailbox processing returned " .. result.code
+			return map_mailbox_result(result.code), if type(result.error) == "string" then result.error else "V2 mailbox processing returned " .. result.code
 		end
 		if processed == 0 then return "empty" :: ResultCode, "" end
 		return "processed" :: ResultCode, tostring(processed)
@@ -14037,16 +14038,16 @@ process_queue_v2 = function(self: Record, state: InternalState, max_messages: nu
 	return final_code :: ResultCode, final_message
 end
 
-local function bind_mailbox_v2_async(self: Record, mailbox: unknown): (ResultCode, string?)
+local function bind_mailbox_async(self: Record, mailbox: unknown): (ResultCode, string?)
 	local state = private[self]
 	if state == nil then return "invalid", "record does not exist" end
 	if state.state ~= "active" then return "fenced", "V2 mailbox binding requires an active Record" end
 	if state.takeover_requested then return "closing", "session takeover has been requested" end
-	if state.mailbox_v2 ~= nil then
-		if (state.mailbox_v2 :: unknown) == mailbox then return "success", nil end
+	if state.mailbox ~= nil then
+		if (state.mailbox :: unknown) == mailbox then return "success", nil end
 		return "conflict", "this Record is already bound to a different V2 mailbox"
 	end
-	if state.queue_busy or state.busy or state.mailbox_v2_binding then
+	if state.queue_busy or state.busy or state.mailbox_binding then
 		return "busy", "Record has another operation in flight; V2 mailbox binding was not attempted"
 	end
 	if state.options.durable_queue_enabled == false then
@@ -14084,21 +14085,21 @@ local function bind_mailbox_v2_async(self: Record, mailbox: unknown): (ResultCod
 		for _, user_id in ipairs(state.user_ids) do if user_id == owner.user_id then found = true; break end end
 		if not found then return "fenced", "V2 mailbox UserId does not match persisted Record UserIds" end
 	end
-	state.mailbox_v2_binding = true
+	state.mailbox_binding = true
 	state.queue_busy = true
 	local inspect_ok, legacy_queue, queue_code, queue_message = pcall(get_queue, self)
 	state.queue_busy = false
-	if not inspect_ok then state.mailbox_v2_binding = false; return "unknown", "could not inspect the legacy queue: " .. tostring(legacy_queue) end
-	if queue_code ~= "success" then state.mailbox_v2_binding = false; return normalize_result_code(queue_code) or "unknown", queue_message or "could not verify the legacy queue" end
+	if not inspect_ok then state.mailbox_binding = false; return "unknown", "could not inspect the legacy queue: " .. tostring(legacy_queue) end
+	if queue_code ~= "success" then state.mailbox_binding = false; return normalize_result_code(queue_code) or "unknown", queue_message or "could not verify the legacy queue" end
 	if type(legacy_queue) ~= "table" or #legacy_queue > 0 then
-		state.mailbox_v2_binding = false
+		state.mailbox_binding = false
 		return "busy", "legacy queue contains pending messages; drain it before binding the V2 mailbox"
 	end
-	state.mailbox_v2 = mailbox_instance
-	state.mailbox_v2_binding = false
+	state.mailbox = mailbox_instance
+	state.mailbox_binding = false
 	local configured, configure_error = install_mailbox_renewal_scheduler(self, state, mailbox_instance)
 	if not configured then
-		state.mailbox_v2 = nil
+		state.mailbox = nil
 		return "invalid", configure_error or "failed to install V2 mailbox lease-renewal scheduling"
 	end
 	return "success", nil
@@ -16610,8 +16611,8 @@ local function make_record(name: string, scope: string, key: string, options: Op
 		next_queue_poll = math.huge,
 		busy = false,
 		queue_busy = false,
-		mailbox_v2_binding = false,
-		mailbox_v2 = nil,
+		mailbox_binding = false,
+		mailbox = nil,
 		save_requested = false,
 		shutdown = false,
 		retired = false,
@@ -16708,7 +16709,7 @@ local function make_record(name: string, scope: string, key: string, options: Op
 		MessageAsync = message,
 		GetMailboxOwner = get_mailbox_owner,
 		CreateMailboxStoreAdapter = mailbox_store_adapter,
-		BindMailboxV2Async = bind_mailbox_v2_async,
+		BindMailboxAsync = bind_mailbox_async,
 		EnqueueAsync = enqueue,
 		ProcessQueueAsync = process_queue,
 		GetQueueAsync = get_queue,
@@ -17155,8 +17156,8 @@ local function run_scheduled_record_work(record: Record, state: InternalState, n
 
 	if state.state == "active"
 		and state.options.durable_queue_enabled ~= false
-		and ((state.mailbox_v2 ~= nil and (state.options.on_queue_message_async ~= nil or state.options.on_queue_message ~= nil))
-			or (state.mailbox_v2 == nil and state.options.on_queue_message ~= nil))
+		and ((state.mailbox ~= nil and (state.options.on_queue_message_async ~= nil or state.options.on_queue_message ~= nil))
+			or (state.mailbox == nil and state.options.on_queue_message ~= nil))
 		and slot.pending.queue_poll ~= true
 		and (state.queue_hint or now >= state.next_queue_poll)
 	then
@@ -20043,11 +20044,11 @@ RecordStore.enqueue_async = (function()
 	end
 end)();
 
-(function(mailbox_v2_migration_production)
-	RecordStore.begin_mailbox_v2_migration_async = mailbox_v2_migration_production.begin_mailbox_v2_migration_async
-	RecordStore.get_mailbox_v2_migration_status_async = mailbox_v2_migration_production.get_mailbox_v2_migration_status_async
-	RecordStore.get_mailbox_v2_migration_source_page_async = mailbox_v2_migration_production.get_mailbox_v2_migration_source_page_async
-end)(mailbox_v2_migration_api(false))
+(function(mailbox_migration_production)
+	RecordStore.begin_mailbox_migration_async = mailbox_migration_production.begin_mailbox_migration_async
+	RecordStore.get_mailbox_migration_status_async = mailbox_migration_production.get_mailbox_migration_status_async
+	RecordStore.get_mailbox_migration_source_page_async = mailbox_migration_production.get_mailbox_migration_source_page_async
+end)(mailbox_migration_api(false))
 
 RecordStore.new = (function()
 	local normalize_options = RecordStore._internals.normalize_options
@@ -20450,7 +20451,7 @@ RecordStore.Mock = (function()
 		return closing
 	end
 
-	local mock_mailbox_v2_migration_api = mailbox_v2_migration_api(true)
+	local mock_mailbox_migration_api = mailbox_migration_api(true)
 	local Mock = {
 		new = mock_new,
 		new_client = mock_new_client,
@@ -20525,9 +20526,9 @@ RecordStore.Mock = (function()
 		enqueue_async = function(name: string, scope: string, key: string, message_type: string, data: JsonValue?, queue_store_name: string?, operation_deadline: number?): (ResultCode, string?)
 			return enqueue_mock(name, scope, key, message_type, data, queue_store_name, operation_deadline)
 		end,
-		begin_mailbox_v2_migration_async = mock_mailbox_v2_migration_api.begin_mailbox_v2_migration_async,
-		get_mailbox_v2_migration_status_async = mock_mailbox_v2_migration_api.get_mailbox_v2_migration_status_async,
-		get_mailbox_v2_migration_source_page_async = mock_mailbox_v2_migration_api.get_mailbox_v2_migration_source_page_async,
+		begin_mailbox_migration_async = mock_mailbox_migration_api.begin_mailbox_migration_async,
+		get_mailbox_migration_status_async = mock_mailbox_migration_api.get_mailbox_migration_status_async,
+		get_mailbox_migration_source_page_async = mock_mailbox_migration_api.get_mailbox_migration_source_page_async,
 		seed_queue_raw = function(name: string, scope: string, key: string, value: unknown, queue_store_name: string?): (ResultCode, string?)
 			return mock_seed_queue_value(name, scope, key, value, false, queue_store_name)
 		end,
@@ -20593,7 +20594,7 @@ RecordStore.Mock = (function()
 
 	return Mock
 end)()
-RecordStore.MailboxV2 = MailboxV2
+RecordStore.Mailbox = Mailbox
 RecordStore.is_retryable_result = is_retryable_result
 RecordStore.get_diagnostic_code = get_diagnostic_code
 

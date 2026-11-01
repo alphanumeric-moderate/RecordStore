@@ -1,8 +1,8 @@
 --!nocheck
--- Opt-in durable messaging v2 service layer. Requiring this module has no side effects.
+-- Canonical optional RecordStore V1 service layer. Requiring this module has no side effects.
 -- Cross-key workflows are sagas, indexes are eventual, and local scheduling is not durable.
 
-local V2 = {}
+local V1 = {}
 local MAX_REQUEST_BYTES = 16384
 local MAX_BATCH_ITEMS = 16
 local MAX_INBOX_RECEIPTS = 128
@@ -4046,10 +4046,10 @@ local function new_maintenance()
 	return service
 end
 
-function V2.new(record_store, mailbox_module, options)
+function V1.new(record_store, mailbox_module, options)
 	options = options or {}
-	if type(record_store) ~= "table" or type(record_store.new) ~= "function" then error("RecordStoreV2 requires RecordStore", 2) end
-	if type(mailbox_module) ~= "table" or type(mailbox_module.new) ~= "function" then error("RecordStoreV2 requires RecordStoreMailboxV2", 2) end
+	if type(record_store) ~= "table" or type(record_store.new) ~= "function" then error("RecordStoreV1 requires RecordStore", 2) end
+	if type(mailbox_module) ~= "table" or type(mailbox_module.new) ~= "function" then error("RecordStoreV1 requires RecordStoreMailboxV2", 2) end
 	local runtime_governor = shared_runtime_governor(record_store, options.runtime)
 	local runtime_policy = { revision = 1, max_dirty_age_seconds = 60, mode = "normal" }
 	local scheduler_policy_fields = {
@@ -4066,7 +4066,7 @@ function V2.new(record_store, mailbox_module, options)
 		shadow_algorithm = true, shadow_enabled = true, shadow_sample_rate = true,
 	}
 	local api = {
-		Version = 2,
+		Version = 1,
 		DeliveryGuarantee = "at-least-once",
 		OrderingContract = "strict ordering_key is not enabled; priority is a hint among eligible messages",
 		Canonicalize = canonical,
@@ -4092,7 +4092,7 @@ function V2.new(record_store, mailbox_module, options)
 						end
 				else
 						merged_options.activation_guard = function()
-							return false, "Mailbox V2 activation requires an application-supplied guard"
+							return false, "Mailbox activation requires an application-supplied guard"
 						end
 					end
 				end
@@ -4209,7 +4209,7 @@ function V2.new(record_store, mailbox_module, options)
 	api.Acceleration = options.acceleration_module
 	api.BindMailboxWakeups = function(accelerator, owner, mailbox, handler, max_messages_per_wake)
 		if type(accelerator) ~= "table" or type(accelerator.Register) ~= "function" then
-			return false, "an initialized RecordStoreV2Acceleration instance is required"
+			return false, "an initialized RecordStoreAcceleration instance is required"
 		end
 		if type(mailbox) ~= "table" or type(mailbox.ProcessNextAsync) ~= "function" or type(mailbox.BindWakeups) ~= "function" then
 			return false, "mailbox must expose ProcessNextAsync and BindWakeups"
@@ -4230,6 +4230,6 @@ function V2.new(record_store, mailbox_module, options)
 	return api
 end
 
-V2.canonical = canonical
-V2.fingerprint = function(value) local ok, material = pcall(canonical, value); return if ok then digest(material) else nil end
-return V2
+V1.canonical = canonical
+V1.fingerprint = function(value) local ok, material = pcall(canonical, value); return if ok then digest(material) else nil end
+return V1

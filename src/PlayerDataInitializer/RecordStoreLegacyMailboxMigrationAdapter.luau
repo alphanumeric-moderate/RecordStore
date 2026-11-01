@@ -1,5 +1,5 @@
 --!strict
--- Concrete source bridge for RecordStoreMailboxV2Migration.
+-- Concrete source bridge for RecordStoreLegacyMailboxMigration.
 -- The existing q2 record is frozen in place; application-owned checkpoint CAS,
 -- old-worker drain proof and the V2 activation gate remain explicit requirements.
 
@@ -20,7 +20,7 @@ type Config = {
 	legacy_writers_drained: (string) -> (boolean, string?),
 	load_checkpoint: (string) -> (any?, string?),
 	save_checkpoint: (string, number?, any) -> (boolean, string?),
-	activate_v2: (string) -> (boolean, string?),
+	activate_mailbox: (string) -> (boolean, string?),
 	verify_complete: (string, number, number) -> (boolean, string?),
 }
 
@@ -32,11 +32,11 @@ function Adapter.bind(config: Config)
 	if type(config) ~= "table" then error("migration adapter config must be a table", 2) end
 	local record_store = config.record_store
 	if type(record_store) ~= "table"
-		or type(record_store.begin_mailbox_v2_migration_async) ~= "function"
-		or type(record_store.get_mailbox_v2_migration_status_async) ~= "function"
-		or type(record_store.get_mailbox_v2_migration_source_page_async) ~= "function"
+		or type(record_store.begin_mailbox_migration_async) ~= "function"
+		or type(record_store.get_mailbox_migration_status_async) ~= "function"
+		or type(record_store.get_mailbox_migration_source_page_async) ~= "function"
 	then
-		error("record_store does not expose the Mailbox V2 migration source APIs", 2)
+		error("record_store does not expose the Mailbox migration source APIs", 2)
 	end
 	if type(config.store_name) ~= "string" or config.store_name == ""
 		or type(config.scope) ~= "string"
@@ -45,7 +45,7 @@ function Adapter.bind(config: Config)
 	then
 		error("store_name, scope, profile_key and migration_id are required", 2)
 	end
-	for _, field in ipairs({ "legacy_writers_drained", "load_checkpoint", "save_checkpoint", "activate_v2", "verify_complete" }) do
+	for _, field in ipairs({ "legacy_writers_drained", "load_checkpoint", "save_checkpoint", "activate_mailbox", "verify_complete" }) do
 		if type(config[field]) ~= "function" then error(field .. " callback is required", 2) end
 	end
 	local function args()
@@ -56,7 +56,7 @@ function Adapter.bind(config: Config)
 		if migration_id ~= config.migration_id then return nil, nil, false, "migration ID mismatch" end
 		local name, scope, key, id, queue_store, max_bytes, deadline = args()
 		local items, next_cursor, complete, status, message =
-			record_store.get_mailbox_v2_migration_source_page_async(
+			record_store.get_mailbox_migration_source_page_async(
 				name, scope, key, id, kind, cursor, limit, queue_store, max_bytes, deadline
 			)
 		if status ~= "success" then return nil, nil, false, fail_result(status, message) end
@@ -65,7 +65,7 @@ function Adapter.bind(config: Config)
 	local function freeze_legacy(migration_id: string): (boolean, string?)
 		if migration_id ~= config.migration_id then return false, "migration ID mismatch" end
 		local name, scope, key, id, queue_store, max_bytes, deadline = args()
-		local status, message = record_store.begin_mailbox_v2_migration_async(
+		local status, message = record_store.begin_mailbox_migration_async(
 			name, scope, key, id, queue_store, max_bytes, deadline
 		)
 		return status == "success", if status == "success" then nil else fail_result(status, message)
@@ -73,7 +73,7 @@ function Adapter.bind(config: Config)
 	local function verify_source_frozen(migration_id: string): (boolean, string?)
 		if migration_id ~= config.migration_id then return false, "migration ID mismatch" end
 		local name, scope, key, id, queue_store, max_bytes, deadline = args()
-		local snapshot, status, message = record_store.get_mailbox_v2_migration_status_async(
+		local snapshot, status, message = record_store.get_mailbox_migration_status_async(
 			name, scope, key, id, queue_store, max_bytes, deadline
 		)
 		if status ~= "success" or snapshot == nil then return false, fail_result(status, message) end
@@ -91,7 +91,7 @@ function Adapter.bind(config: Config)
 	local function verify_complete(migration_id: string, active_count: number, dead_letter_count: number): (boolean, string?)
 		if migration_id ~= config.migration_id then return false, "migration ID mismatch" end
 		local name, scope, key, id, queue_store, max_bytes, deadline = args()
-		local snapshot, status, message = record_store.get_mailbox_v2_migration_status_async(
+		local snapshot, status, message = record_store.get_mailbox_migration_status_async(
 			name, scope, key, id, queue_store, max_bytes, deadline
 		)
 		if status ~= "success" or snapshot == nil then return false, fail_result(status, message) end
@@ -117,7 +117,7 @@ function Adapter.bind(config: Config)
 		load_checkpoint = config.load_checkpoint,
 		save_checkpoint = config.save_checkpoint,
 		verify_complete = verify_complete,
-		activate_v2 = config.activate_v2,
+		activate_mailbox = config.activate_mailbox,
 	}
 end
 
