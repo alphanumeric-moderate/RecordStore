@@ -31,8 +31,8 @@ expect(raw_v1_options.acceleration_module == nil, "bundle mutated the caller's V
 expect(bundle.V1.Acceleration == bundle.Acceleration, "default acceleration module was not forwarded to V1")
 
 local namespaces = {
-	MailboxMigration = {
-		Runner = "RecordStoreLegacyMailboxMigration", Adapter = "RecordStoreLegacyMailboxMigrationAdapter",
+	LegacyMailboxMigration = {
+		Runner = "RecordStoreLegacyLegacyMailboxMigration", Adapter = "RecordStoreLegacyLegacyMailboxMigrationAdapter",
 	},
 	Purchases = {
 		Authority = "PurchaseDataStoreAuthority", MigrationRunner = "PurchaseAuthorityMigrationRunner",

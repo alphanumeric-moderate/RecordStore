@@ -154,4 +154,4 @@ no_ttl:GetAsync("instant")
 no_ttl:GetAsync("instant")
 expect(ttl_zero_calls == 2, "zero-TTL read coalescer retained an expired entry")
 
-print("[v2-service-structures] trace ring wraparound/drain and read-coalescer isolation/eviction passed")
+print("[v1-service-structures] trace ring wraparound/drain and read-coalescer isolation/eviction passed")

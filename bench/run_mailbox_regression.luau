@@ -64,7 +64,7 @@ do
 	local accepted = pcall(function()
 		Mailbox.new(Mailbox.MockStore(), unsafe_owner, {})
 	end)
-	assert(not accepted, "embedded Mailbox V2 accepted an owner UserId beyond the safe-integer range")
+	assert(not accepted, "embedded Mailbox V1 accepted an owner UserId beyond the safe-integer range")
 end
 
 local function enqueue(mailbox, message_type, idempotency_key, ordering_key, priority, available_at)

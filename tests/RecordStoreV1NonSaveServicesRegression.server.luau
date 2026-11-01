@@ -13,7 +13,8 @@ end
 
 local service_bundle = ServicesModule.new(RecordStore)
 expect(service_bundle.Core == RecordStore, "service registry is bound to a different RecordStore core")
-expect(service_bundle.V1.Version == 2, "service registry did not initialize the V2 API against the core")
+expect(service_bundle.V2 == nil and service_bundle.Modules.RecordStoreV2 == nil, "superseded V2 facade remained public")
+expect(service_bundle.V1.Version == 1, "service registry did not initialize the V2 API against the core")
 for _, name in {
 	"RecordStoreV1",
 	"RecordStoreAcceleration",
