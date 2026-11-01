@@ -697,7 +697,9 @@ do
 	end)
 	assert(update_result == "success", update_message)
 
-	task.wait(0.06)
+	local dirty_age_started = os.clock()
+	while os.clock() - dirty_age_started < 0.06 do
+	end
 	local status = record:GetDurabilityStatus()
 	assert(status.dirty == true, "the cutoff fixture must retain an unsaved mutation")
 	assert(status.dirty_age_slo_exceeded == true,
@@ -1222,3 +1224,77 @@ end
 RecordStore.Mock.reset()
 
 print("[PASS] Unknown-save recovery and durability status preserve logical write identity, fencing, and tracked direct-data mutations.")
+
+RecordStore.Mock.reset()
+do
+	local fake_now = DateTime.now().UnixTimestampMillis / 1000 + 1
+	RecordStore.Mock.set_test_clock(function()
+		return fake_now
+	end)
+	local store_name = "RecordStore_UnknownSaveRecoveryRegression"
+	local scope = "global"
+	local key = "isolated-two-client-takeover"
+	local first = open_test_record(key)
+	local first_before = RecordStore.Mock.get_record_raw(store_name, scope, key) :: { [string]: any }
+	local first_generation = first_before.fencing_generation
+	local first_token = ((first_before.session :: { [string]: any }).token) :: string
+	local update_result, update_message = first:Update(function(data)
+		(data :: { [string]: RecordStore.JsonValue }).coins = 20
+		return data
+	end)
+	assert(update_result == "success", update_message)
+	RecordStore.Mock.set_update_failures(1, "unknown", "injected pre-commit release failure for owner A")
+	RecordStore.Mock.set_get_failures(100, "hold owner A release verification")
+	assert(first:Close() == "unknown", "owner A should retain an unresolved release before takeover")
+	assert(first.State == "unknown", "owner A should remain uncertain before takeover")
+	fake_now += 181
+	RecordStore.Mock.set_get_failures(0)
+
+	local second = RecordStore.Mock.new_client(store_name, scope, key, {
+		schema_version = 1,
+		autosave_interval = 1000,
+		lease_duration = 180,
+		lease_renewal = 60,
+		operation_deadline = 2,
+		retry_attempts = 1,
+	})
+	local second_open, second_message = second:Open({ coins = 0, label = "new-default" })
+	assert(second_open == "loaded", second_message)
+	local after_second_open = RecordStore.Mock.get_record_raw(store_name, scope, key) :: { [string]: any }
+	local second_session = after_second_open.session :: { [string]: any }
+	local second_generation = after_second_open.fencing_generation
+	local second_token = second_session.token
+	assert(second_generation == first_generation + 1, "independent owner B did not advance the fencing generation")
+	assert(second_token ~= first_token, "independent owner B reused owner A's session token")
+	assert(second.State == "active", "owner B did not become the active local session")
+
+	local first_reconcile, first_reconcile_message = RecordStore.Mock.reconcile(first)
+	assert(first_reconcile == "fenced", "owner A reconciliation was not fenced by owner B's real Open")
+	assert(first.State == "fenced", "owner A became active after owner B acquired the key")
+	local after_stale_reconcile = RecordStore.Mock.get_record_raw(store_name, scope, key) :: { [string]: any }
+	assert(after_stale_reconcile.fencing_generation == second_generation,
+		"owner A reconciliation changed owner B's fencing generation")
+	assert(after_stale_reconcile.write_id == after_second_open.write_id,
+		"owner A reconciliation replaced owner B's durable write identity")
+	assert(((after_stale_reconcile.session :: { [string]: any }).token) == second_token,
+		"owner A reconciliation replaced owner B's session token")
+	assert((after_stale_reconcile.data :: { [string]: any }).coins == 10,
+		"owner A reconciliation overwrote the durable pre-takeover snapshot")
+
+	local second_update, second_update_message = second:Update(function(data)
+		(data :: { [string]: RecordStore.JsonValue }).coins = 77
+		return data
+	end)
+	assert(second_update == "success", second_update_message)
+	assert(second:Save("owner-b-confirmation") == "saved", "owner B could not save after stale owner A reconciliation")
+	local final = RecordStore.Mock.get_record_raw(store_name, scope, key) :: { [string]: any }
+	assert(final.fencing_generation == second_generation, "owner A invalidated owner B after B's save")
+	local last_saved = second:GetLastSaved()
+	assert(last_saved ~= nil and final.write_id == last_saved.WriteId, "owner B's latest saved write ID was not durable")
+	assert(((final.session :: { [string]: any }).token) == second_token,
+		"owner B's session was lost after save")
+	assert((final.data :: { [string]: any }).coins == 77,
+		"owner B's confirmed data was overwritten after takeover")
+	assert(second:Close() == "closed", "owner B failed to close after successful takeover")
+	RecordStore.Mock.set_test_clock(nil)
+end

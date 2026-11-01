@@ -62,8 +62,9 @@ local function resolve_api(): any
 		or type(loaded.div) ~= "function"
 		or type(loaded.sign) ~= "function"
 		or type(loaded.isWide) ~= "function"
+		or type(loaded.isPrecise) ~= "function"
 	then
-		error("ReplicatedStorage.CodeNum does not expose the required 0.5 API", 2)
+		error("ReplicatedStorage.CodeNum does not expose the required 0.6 API", 2)
 	end
 
 	cached_api = loaded
@@ -127,11 +128,11 @@ end
 local function to_value(value: any): any
 	local api = resolve_api()
 	if type(value) == "string" then
-		if string.sub(value, 1, 4) == "CN1|" then
+		if string.match(value, "^CN[12]|") ~= nil then
 			return api.decode(value)
 		end
 		return api.parse(value)
-	elseif type(value) == "number" or api.isWide(value) then
+	elseif type(value) == "number" or api.isWide(value) or api.isPrecise(value) then
 		return value
 	elseif type(value) == "table" then
 		local ok = pcall(api.toString, value)

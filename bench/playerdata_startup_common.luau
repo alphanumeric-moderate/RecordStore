@@ -1,4 +1,5 @@
 --!nocheck
+-- Measures module initialization with zero players; profiles and legacy migration are not opened.
 
 local fs = require("@lune/fs")
 local luau = require("@lune/luau")
@@ -32,6 +33,23 @@ local function make_signal()
 end
 
 local function cold_start(eager_codenum_value)
+	local scheduler_state = {
+		enabled = false,
+		policy = {
+			revision = 1,
+			algorithm = "fifo",
+			shadow_algorithm = "weighted",
+			shadow_enabled = false,
+			shadow_sample_rate = 0,
+		},
+		rollout = {
+			revision = 1,
+			percent = 0,
+			salt = "initial",
+			cohort_included = false,
+		},
+	}
+	local scheduler_calls = { snapshot = 0, policy = 0, rollout = 0, enable = 0 }
 	local parent = {}
 	local modules = {}
 
@@ -100,6 +118,34 @@ local function cold_start(eager_codenum_value)
 
 		if module.Name == "RecordStore" then
 			local record_store_stub = {}
+			function record_store_stub.get_scheduler_snapshot()
+				scheduler_calls.snapshot += 1
+				return {
+					enabled = scheduler_state.enabled,
+					policy = table.clone(scheduler_state.policy),
+					rollout = table.clone(scheduler_state.rollout),
+				}
+			end
+			function record_store_stub.configure_scheduler_policy(policy)
+				scheduler_calls.policy += 1
+				scheduler_state.policy = table.clone(policy)
+				return "success", nil
+			end
+			function record_store_stub.configure_scheduler_rollout(rollout)
+				scheduler_calls.rollout += 1
+				scheduler_state.rollout = {
+					revision = rollout.revision,
+					percent = rollout.percent,
+					salt = rollout.salt,
+					cohort_included = rollout.percent == 100,
+				}
+				return "success", nil
+			end
+			function record_store_stub.set_scheduler_enabled(enabled)
+				scheduler_calls.enable += 1
+				scheduler_state.enabled = enabled
+				return true, nil
+			end
 			cache[module] = record_store_stub
 			return record_store_stub
 		end
@@ -139,6 +185,17 @@ local function cold_start(eager_codenum_value)
 
 	initializer()
 
+	assert(scheduler_calls.snapshot >= 2,
+		"startup did not inspect and verify the advanced scheduler configuration")
+	assert(scheduler_calls.policy == 1 and scheduler_calls.rollout == 1 and scheduler_calls.enable == 1,
+		"startup did not configure the production scheduler capabilities exactly once")
+	assert(scheduler_state.enabled == true
+		and scheduler_state.policy.algorithm == "drr"
+		and scheduler_state.policy.shadow_enabled == true
+		and scheduler_state.rollout.percent == 100
+		and scheduler_state.rollout.cohort_included == true,
+		"startup benchmark scheduler fixture did not reach the configured production state")
+
 	assert(
 		require_counts.CodeNumValue == (eager_codenum_value and 1 or 0),
 		"optional CodeNumValue module-load count does not match the selected startup path"
@@ -153,6 +210,6 @@ return function(eager_codenum_value)
 	end
 
 	print(if eager_codenum_value
-		then "[PlayerData startup] eager CodeNumValue dependency passed"
-		else "[PlayerData startup] lazy optional CodeNumValue dependency passed")
+		then "[PlayerData module initialization] eager optional CodeNumValue require passed"
+		else "[PlayerData module initialization] lazy optional CodeNumValue require passed")
 end

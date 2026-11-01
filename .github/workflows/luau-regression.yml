@@ -33,9 +33,13 @@ jobs:
           rm lune.zip
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
-      - name: Regression - CodeNum 0.5 range
+      - name: Regression - CodeNum 0.6 range and precise arithmetic
         timeout-minutes: 2
         run: timeout --signal=TERM --kill-after=5s 60s lune run bench/run_codenum_regression_tests.luau
+
+      - name: Regression - CodeNumValue legacy migration and payload preservation
+        timeout-minutes: 2
+        run: timeout --signal=TERM --kill-after=5s 60s lune run bench/codenumvalue_migration.bench.luau
 
       - name: Regression - CodeNumValue persistence
         timeout-minutes: 2
