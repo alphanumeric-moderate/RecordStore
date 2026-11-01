@@ -2,8 +2,8 @@
 local Shim = require("./RobloxShim")
 local RecordStore = Shim.load()
 local initializer = Shim.environment.game:GetService("ServerScriptService"):WaitForChild("PlayerDataInitializer")
-local V2Module = Shim.environment.require(initializer:WaitForChild("RecordStoreV2"))
-local V2 = V2Module.new(RecordStore, RecordStore.MailboxV2)
+local V1Module = Shim.environment.require(initializer:WaitForChild("RecordStoreV1"))
+local V1 = V1Module.new(RecordStore, RecordStore.Mailbox)
 
 local TRACE_COUNT = 40000
 local TRACE_CAPACITY = 2048
@@ -12,7 +12,7 @@ local CACHE_CAPACITY = 128
 
 local function run_trace_ring()
 	local next_id = 0
-	local tracer = V2.Tracing.new({
+	local tracer = V1.Tracing.new({
 		max_events = TRACE_CAPACITY,
 		success_sample_every = 1,
 		new_event_id = function()
@@ -53,13 +53,13 @@ local function run_trace_ring()
 	local expected = (first_retained + TRACE_COUNT) * TRACE_CAPACITY / 2
 	assert(checksum == expected, "trace workload checksum mismatch")
 	assert(tracer:Stats().retained == 0, "trace workload failed to drain its retained events")
-	print(string.format("[v2-trace-ring] events=%d capacity=%d dropped=%d checksum=%.0f",
+	print(string.format("[v1-trace-ring] events=%d capacity=%d dropped=%d checksum=%.0f",
 		TRACE_COUNT, TRACE_CAPACITY, stats.dropped, checksum))
 end
 
 local function run_read_coalescer()
 	local fetch_count = 0
-	local cache = V2.ReadCoalescer.new(function(key)
+	local cache = V1.ReadCoalescer.new(function(key)
 		fetch_count += 1
 		return { key = key, payload = { serial = fetch_count } }
 	end, {
@@ -103,7 +103,7 @@ local function run_read_coalescer()
 	for index = CACHE_COUNT - CACHE_CAPACITY + 1, CACHE_COUNT do expected += index end
 	expected += CACHE_COUNT + 1
 	assert(checksum == expected, "read-coalescer workload checksum mismatch")
-	print(string.format("[v2-read-coalescer] requests=%d capacity=%d evictions=%d checksum=%.0f",
+	print(string.format("[v1-read-coalescer] requests=%d capacity=%d evictions=%d checksum=%.0f",
 		CACHE_COUNT, CACHE_CAPACITY, stats.evictions, checksum))
 end
 

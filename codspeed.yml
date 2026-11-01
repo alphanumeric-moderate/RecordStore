@@ -37,10 +37,10 @@ benchmarks:
     exec: lune run bench/scheduler_metrics_wait.bench.luau
 
   - name: "V1 process-local trace ring (40,000 events)"
-    exec: lune run bench/v2_trace_ring.bench.luau
+    exec: lune run bench/v1_trace_ring.bench.luau
 
   - name: "V1 read coalescer cache churn (20,000 keys)"
-    exec: lune run bench/v2_read_coalescer.bench.luau
+    exec: lune run bench/v1_read_coalescer.bench.luau
 
   - name: "session lifecycle (create/update/save/close/reopen)"
     exec: lune run bench/session_lifecycle.bench.luau
