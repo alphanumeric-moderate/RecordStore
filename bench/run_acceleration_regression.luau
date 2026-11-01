@@ -409,9 +409,12 @@ do
 	now_ms = 200001
 	local capacity_third_ok = deliver("capacity-third")
 	expect(capacity_third_ok == true, "capacity test event was rejected")
-	local oldest_inserted_ok, oldest_inserted_reason = deliver("first-inserted")
-	expect(oldest_inserted_ok == true and oldest_inserted_reason ~= "duplicate",
+	local retained_ok, retained_reason = deliver("second-inserted-earlier-time")
+	expect(retained_ok == false and retained_reason == "duplicate",
 		"capacity eviction followed timestamp order instead of insertion order")
+	local oldest_inserted_ok = deliver("first-inserted")
+	expect(oldest_inserted_ok == true,
+		"the oldest inserted event remained in the deduplication window")
 	receiver:Stop()
 end
 
