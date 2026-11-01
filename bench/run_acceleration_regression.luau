@@ -390,8 +390,8 @@ do
 		})
 	end
 	now_ms = 0
-	expect(deliver("ttl-boundary").code ~= "invalid",
-		"first TTL event was rejected")
+	local first_ok = deliver("ttl-boundary")
+	expect(first_ok == true, "first TTL event was rejected")
 	now_ms = 120000
 	local boundary_ok, boundary_reason = deliver("ttl-boundary")
 	expect(boundary_ok == false and boundary_reason == "duplicate",
@@ -401,14 +401,14 @@ do
 	expect(expired_ok == true,
 		"event did not expire strictly after the TTL boundary")
 	now_ms = 200000
-	expect(deliver("first-inserted").code ~= "invalid",
-		"first out-of-order timestamp event was rejected")
+	local first_inserted_ok = deliver("first-inserted")
+	expect(first_inserted_ok == true, "first out-of-order timestamp event was rejected")
 	now_ms = 100000
-	expect(deliver("second-inserted-earlier-time").code ~= "invalid",
-		"backwards-clock event was rejected")
+	local second_inserted_ok = deliver("second-inserted-earlier-time")
+	expect(second_inserted_ok == true, "backwards-clock event was rejected")
 	now_ms = 200001
-	expect(deliver("capacity-third").code ~= "invalid",
-		"capacity test event was rejected")
+	local capacity_third_ok = deliver("capacity-third")
+	expect(capacity_third_ok == true, "capacity test event was rejected")
 	local oldest_inserted_ok, oldest_inserted_reason = deliver("first-inserted")
 	expect(oldest_inserted_ok == true and oldest_inserted_reason ~= "duplicate",
 		"capacity eviction followed timestamp order instead of insertion order")
