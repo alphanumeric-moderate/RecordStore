@@ -142,3 +142,18 @@ jobs:
           test "${#modules[@]}" -gt 0
           printf 'Analyzing %s Luau source modules using declared modes\n' "${#modules[@]}"
           luau-lsp analyze --platform=roblox --definitions=/tmp/globalTypes.d.luau --sourcemap=/tmp/sourcemap.json "${modules[@]}"
+
+      - name: Generate the fixture DataModel sourcemap
+        run: |
+          set -euo pipefail
+          rojo sourcemap typecheck/fixtures/datamodel.project.json --include-non-scripts --output /tmp/typecheck-datamodel-sourcemap.json
+          test -s /tmp/typecheck-datamodel-sourcemap.json
+
+      - name: Evaluate strict typing, DataModel, and solver fixtures
+        run: |
+          set -euo pipefail
+          python3 bench/run_luau_typecheck_fixtures.py \
+            --luau-lsp "$HOME/.local/bin/luau-lsp" \
+            --definitions /tmp/globalTypes.d.luau \
+            --datamodel-sourcemap /tmp/typecheck-datamodel-sourcemap.json \
+            --report /tmp/luau-typecheck-fixtures.json
