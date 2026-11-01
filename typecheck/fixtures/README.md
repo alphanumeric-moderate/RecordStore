@@ -15,6 +15,12 @@ python3 bench/run_luau_typecheck_fixtures.py \
   --report /tmp/luau-typecheck-fixtures.json
 ```
 
+## Additional new-solver source analysis
+
+The CI workflow runs a second analyzer pass over every source module whose declared mode is `--!strict`, excluding the pinned `src/AlyaNum` dependency. This pass enables `luau-lsp.fflags.enableNewSolver` through `typecheck/fixtures/settings/new-solver.json`; it does not rewrite or downgrade the modules' declared modes.
+
+To reproduce this pass locally, first install the pinned versions and generate the main project sourcemap as shown in `.github/workflows/luau-typecheck.yml`, then run the same module selection and `luau-lsp analyze` command from the workflow. The pass is an external analyzer check, not proof of exact parity with the Luau solver embedded in Roblox Studio.
+
 ## Fixture contract
 
 - `pass`: valid strict Luau must produce no analyzer errors.
