@@ -16,12 +16,12 @@ local function clone(value)
 	return copy
 end
 
-local function load_adapter(name, core, v2)
+local function load_adapter(name, core, v1)
 	local environment = table.clone(Shim.environment)
 	environment.script = { Parent = { WaitForChild = function(_self, module_name) return module_name end } }
 	environment.require = function(module_name)
 		if module_name == "RecordStore" then return core end
-		if module_name == "RecordStoreV2" then return v2 end
+		if module_name == "RecordStoreV1" then return v1 end
 		error("unexpected adapter dependency: " .. tostring(module_name))
 	end
 	return luau.load(fs.readFile("src/PlayerDataInitializer/" .. name .. ".luau"), {
@@ -39,7 +39,7 @@ local function make_destination()
 	function record:GetIdentity() return self.identity end
 	function record:GetMailboxOwner() return { store_name = "Destination", scope = "global", profile_key = "player-123" } end
 	function record:CreateMailboxStoreAdapter() self.storage_calls += 1; return {}, "success" end
-	function record:BindMailboxV2Async() return "success" end
+	function record:BindMailboxAsync() return "success" end
 	return record
 end
 
@@ -64,7 +64,7 @@ local function make_producer()
 		expect(message_id == "message-1", "producer read a different destination receipt")
 		return clone(self.snapshot), { code = "success" }
 	end
-	local core = { MailboxV2 = { new = function() f.creates += 1; return f.mailbox end } }
+	local core = { Mailbox = { new = function() f.creates += 1; return f.mailbox end } }
 	f.module = load_adapter("RecordStoreOutboxMailboxAdapter", core)
 	f.config = {
 		get_record = function() f.lookups += 1; return f.record end,
@@ -156,7 +156,7 @@ local producer_failures = {
 	{ name = "guard throws", category = "destination_mailbox_unavailable",
 		setup = function(f) f.guard_error = true end },
 	{ name = "binding unknown", category = "destination_mailbox_unavailable",
-		setup = function(f) f.record.BindMailboxV2Async = function() return "unknown", "response lost" end end },
+		setup = function(f) f.record.BindMailboxAsync = function() return "unknown", "response lost" end end },
 	{ name = "enqueue throws", category = "destination_enqueue_unknown",
 		setup = function(f) f.mailbox.EnqueueAsync = function() error("enqueue failure") end end },
 	{ name = "enqueue malformed", category = "destination_enqueue_unknown",
@@ -224,7 +224,7 @@ local function make_consumer()
 		local handled = handler(f.envelope, f.snapshot, f.context)
 		return { code = if handled then "processed" else "retry_scheduled", message_id = f.snapshot.Id }
 	end
-	local core = { MailboxV2 = { new = function() return f.mailbox end } }
+	local core = { Mailbox = { new = function() return f.mailbox end } }
 	local inbox = {
 		ApplyAsync = function(record, message, reducer)
 			expect(record == f.record and message.message_id == "event-1", "Inbox lost destination/source identity")
@@ -241,11 +241,11 @@ local function make_consumer()
 			return f.prune_result or { code = "committed", pruned = 3 }
 		end,
 	}
-	local v2 = { new = function(supplied_core, mailbox)
-		expect(supplied_core == core and mailbox == core.MailboxV2, "consumer used a different core/mailbox")
+	local v1 = { new = function(supplied_core, mailbox)
+		expect(supplied_core == core and mailbox == core.Mailbox, "consumer used a different core/mailbox")
 		return { Inbox = inbox }
 	end }
-	f.module = load_adapter("RecordStoreOutboxConsumerAdapter", core, v2)
+	f.module = load_adapter("RecordStoreOutboxConsumerAdapter", core, v1)
 	f.config = {
 		activation_guard = function() return true end,
 		handlers = { CreditBalance = { payload_version = 1, reduce = function(current, payload, context)
