@@ -1,7 +1,7 @@
 --!strict
 local RecordStore = require(script.Parent:WaitForChild("RecordStore"))
 local HttpService = game:GetService("HttpService")
-local MailboxV2 = (RecordStore :: any).MailboxV2
+local Mailbox = (RecordStore :: any).Mailbox
 
 local OutboxMailboxAdapter = {}
 
@@ -173,13 +173,13 @@ function OutboxMailboxAdapter.new(config: Config): Processor
 			sender_job_id = game.JobId,
 		}
 		local create_ok, mailbox = pcall(function()
-			return MailboxV2.new(store, record:GetMailboxOwner(), mailbox_options)
+			return Mailbox.new(store, record:GetMailboxOwner(), mailbox_options)
 		end)
 		if not create_ok or type(mailbox) ~= "table" then
 			return nil, "invalid", "could not create destination mailbox: " .. tostring(mailbox)
 		end
 
-		local bind_code, bind_message = record:BindMailboxV2Async(mailbox)
+		local bind_code, bind_message = record:BindMailboxAsync(mailbox)
 		if bind_code ~= "success" then
 			return nil, bind_code, bind_message or "Record rejected the destination Mailbox V2 binding"
 		end

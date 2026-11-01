@@ -3,8 +3,8 @@
 -- Call ProcessBatchAsync directly from a worker/maintenance loop. Do not call it
 -- from Record:ProcessQueueAsync, because that API holds the Record queue mutex.
 local RecordStore = require(script.Parent:WaitForChild("RecordStore"))
-local RecordStoreV2Factory = require(script.Parent:WaitForChild("RecordStoreV2"))
-local MailboxV2 = (RecordStore :: any).MailboxV2
+local RecordStoreV1Factory = require(script.Parent:WaitForChild("RecordStoreV1"))
+local Mailbox = (RecordStore :: any).Mailbox
 
 local OutboxConsumerAdapter = {}
 
@@ -248,7 +248,7 @@ end
 
 function OutboxConsumerAdapter.new(config: Config): Processor
 	local normalized = normalize_config(config)
-	local RecordStoreV2 = RecordStoreV2Factory.new(RecordStore, MailboxV2)
+	local RecordStoreV1 = RecordStoreV1Factory.new(RecordStore, Mailbox)
 	local mailboxes = (setmetatable({}, { __mode = "k" }) :: any)
 
 	local function resolve_mailbox(record: RecordStore.Record): (any?, string?, string?)
@@ -277,7 +277,7 @@ function OutboxConsumerAdapter.new(config: Config): Processor
 		local owner_ok, owner = pcall(function() return record:GetMailboxOwner() end)
 		if not owner_ok or type(owner) ~= "table" then return nil, "fenced", "destination mailbox owner could not be read" end
 		local create_ok, mailbox = pcall(function()
-			return MailboxV2.new(store, owner, {
+			return Mailbox.new(store, owner, {
 				active_record = record,
 				activation_guard = mailbox_guard,
 				sender_job_id = game.JobId,
@@ -361,7 +361,7 @@ function OutboxConsumerAdapter.new(config: Config): Processor
 				event_context
 			)
 		end
-		local inbox_result = RecordStoreV2.Inbox.ApplyAsync(record, {
+		local inbox_result = RecordStoreV1.Inbox.ApplyAsync(record, {
 			message_id = event.source_event_id,
 			message_type = snapshot.Type,
 			payload_version = event.payload_version,
@@ -470,7 +470,7 @@ function OutboxConsumerAdapter.new(config: Config): Processor
 				return { code = "invalid", message = "max_items must be an integer from 1 to 16" }
 			end
 			local ok, result = pcall(function()
-				return RecordStoreV2.Inbox.PruneReceipts(record, older_than_unix, maximum, operation_id)
+				return RecordStoreV1.Inbox.PruneReceipts(record, older_than_unix, maximum, operation_id)
 			end)
 			if not ok or type(result) ~= "table" or type(result.code) ~= "string" then
 				local detail = if ok then "Inbox receipt pruning returned no structured result" else tostring(result)
