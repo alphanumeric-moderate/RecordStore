@@ -150,13 +150,17 @@ jobs:
             while IFS= read -r path; do
               mode="$(awk '
                 /^[[:space:]]*$/ { next }
-                /^--/ {
-                  if (substr($0, 1, 3) == "--!") {
-                    print
+                /^--!/ {
+                  if ($0 ~ /^--!strict([[:space:]]|$)/) {
+                    print "--!strict"
+                    exit
+                  }
+                  if ($0 ~ /^--!(nonstrict|nocheck)([[:space:]]|$)/) {
                     exit
                   }
                   next
                 }
+                /^--/ { next }
                 { exit }
               ' "$path")"
               if [[ "$mode" == "--!strict" ]]; then
