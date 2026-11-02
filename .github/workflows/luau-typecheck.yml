@@ -105,7 +105,17 @@ jobs:
                   print("Separate implementation files must not remain:")
                   print("\n".join(separate))
               raise SystemExit(1)
-          print("Scheduler and Mailbox V1 API implementations are embedded in RecordStore.luau; the persisted mailbox protocol remains v2")
+          queue_version = re.search(r"^local QUEUE_IMPLEMENTATION_VERSION = (\\d+)$", source, re.MULTILINE)
+          queue_contract = [
+              "implementation_version = QUEUE_IMPLEMENTATION_VERSION,",
+              "implementation_version ~= 2 and implementation_version ~= QUEUE_IMPLEMENTATION_VERSION",
+          ]
+          missing_queue_contract = [item for item in queue_contract if item not in source]
+          if queue_version is None or missing_queue_contract:
+              print("Embedded Mailbox queue version or v2 compatibility contract is missing")
+              print("\\n".join(missing_queue_contract))
+              raise SystemExit(1)
+          print(f"Scheduler and Mailbox V1 API implementations are embedded in RecordStore.luau; new durable queue envelopes use implementation version {queue_version.group(1)} and version-2 envelopes remain readable for compatibility")
           PY
 
       - name: Require explicit types at Studio solver-sensitive boundaries
