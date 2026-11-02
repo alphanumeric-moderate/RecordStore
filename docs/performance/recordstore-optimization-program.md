@@ -15,7 +15,7 @@ This is a staged engineering program, not a blanket rewrite. Every production ch
 - Unknown write outcomes continue to require authoritative verification or reconciliation; never turn uncertainty into a confirmed failure or success.
 - Failed or corrupt loads must not silently create a fresh default profile.
 - Persisted envelope, sidecar, mailbox, receipt, purchase, and erasure formats remain compatible unless a separately reviewed migration is explicitly required.
-- The scheduler and embedded Mailbox implementation remain in RecordStore.luau as required by repository CI. The public mailbox API is V1; its persisted protocol remains V2.
+- The scheduler and embedded Mailbox implementation remain in RecordStore.luau as required by repository CI. The public mailbox API is V1. New durable queue envelopes use implementation version 3; version-2 envelopes remain readable for compatibility and migration.
 - No production optimization may depend on benchmark-only Roblox service behavior or assume standalone Lune reproduces live Roblox engine/network costs.
 
 ## Workstreams and order
@@ -90,4 +90,4 @@ A slice is complete only when:
 
 ## Current first slice
 
-Implement and measure the V1 service API's process-local trace ring buffer and read-coalescer cache/expiry improvements. Keep the persisted mailbox protocol at version 2. Keep the changes isolated from RecordStore's durable session and mailbox protocols. The existing scheduler metric ring buffers on main are already complete and must not be duplicated.
+Implement and measure the V1 service API's process-local trace ring buffer and read-coalescer cache/expiry improvements. Keep the durable queue implementation at version 3 and preserve the existing version-2 read/migration compatibility path. Keep the changes isolated from RecordStore's durable session and mailbox protocols. The existing scheduler metric ring buffers on main are already complete and must not be duplicated.
