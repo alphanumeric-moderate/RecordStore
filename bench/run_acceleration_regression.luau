@@ -2,7 +2,7 @@
 -- Wake-up acceleration regressions. Hints remain advisory; durable mailbox
 -- polling must recover work regardless of notification outcomes.
 local Simulator = require("./DeterministicCrashSimulator")
-local Acceleration = require("../src/PlayerDataInitializer/RecordStoreV2Acceleration")
+local Acceleration = require("../src/PlayerDataInitializer/RecordStoreAcceleration")
 
 local function expect(value, message)
 	assert(value, message)

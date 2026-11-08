@@ -298,10 +298,11 @@ runner_store.data.Profile_2 = {
 	maintenance_job_id = "maintenance-runner-integration",
 }
 local RecordStore = Shim.load()
-local V2Module = luau.load(fs.readFile("src/PlayerDataInitializer/RecordStoreV2.luau"), {
-	debugName = "RecordStoreV2",
+local V1Module = luau.load(fs.readFile("src/PlayerDataInitializer/RecordStoreV1.luau"), {
+	debugName = "RecordStoreV1",
+	environment = Shim.environment,
 })()
-local V2 = V2Module.new(RecordStore, RecordStore.MailboxV2)
+local V1 = V1Module.new(RecordStore, RecordStore.Mailbox)
 local Runner = luau.load(fs.readFile("src/PlayerDataInitializer/RecordStoreMaintenanceRunner.luau"), {
 	debugName = "RecordStoreMaintenanceRunner",
 })()
@@ -311,7 +312,7 @@ local runner_config = make_config(service, {
 runner_config.job_id = "maintenance-runner-integration"
 runner_config.catalog_revision = "runner-inventory-v1"
 runner_config.checkpoint_key = "maintenance-runner-integration"
-runner_config.maintenance = V2.Maintenance
+runner_config.maintenance = V1.Maintenance
 runner_config.maintenance_runner = Runner
 local runner_adapter = AdapterModule.new(runner_config)
 local runner = runner_adapter:NewRunner()

@@ -1,10 +1,10 @@
 --!strict
--- Opt-in destination consumer for outbox events forwarded through Mailbox V2.
+-- Opt-in destination consumer for outbox events forwarded through Mailbox V1.
 -- Call ProcessBatchAsync directly from a worker/maintenance loop. Do not call it
 -- from Record:ProcessQueueAsync, because that API holds the Record queue mutex.
 local RecordStore = require(script.Parent:WaitForChild("RecordStore"))
-local RecordStoreV2Factory = require(script.Parent:WaitForChild("RecordStoreV2"))
-local MailboxV2 = (RecordStore :: any).MailboxV2
+local RecordStoreV1Factory = require(script.Parent:WaitForChild("RecordStoreV1"))
+local Mailbox = (RecordStore :: any).Mailbox
 
 local OutboxConsumerAdapter = {}
 
@@ -170,7 +170,7 @@ local function validate_record(record: RecordStore.Record): ({ [string]: unknown
 		or type(record.IsOpen) ~= "function" or type(record.GetIdentity) ~= "function"
 		or type(record.GetMailboxOwner) ~= "function" or type(record.CreateMailboxStoreAdapter) ~= "function"
 	then
-		return nil, "destination must be a Record with identity and Mailbox V2 adapter APIs"
+		return nil, "destination must be a Record with identity and Mailbox V1 adapter APIs"
 	end
 	local ok, state, is_open, identity = pcall(function()
 		return record:GetState(), record:IsOpen(), record:GetIdentity()
@@ -218,7 +218,7 @@ local function validate_envelope(
 		return nil, "causation_id must be a non-empty string of at most 256 bytes"
 	end
 	local event_type = message.Type
-	if not valid_text(event_type, 100) then return nil, "Mailbox V2 event type is malformed" end
+	if not valid_text(event_type, 100) then return nil, "Mailbox V1 event type is malformed" end
 	if destination_store_name ~= record_identity.store_name
 		or destination_scope ~= record_identity.scope
 		or destination_profile_key ~= record_identity.profile_key
@@ -248,7 +248,7 @@ end
 
 function OutboxConsumerAdapter.new(config: Config): Processor
 	local normalized = normalize_config(config)
-	local RecordStoreV2 = RecordStoreV2Factory.new(RecordStore, MailboxV2)
+	local RecordStoreV1 = RecordStoreV1Factory.new(RecordStore, Mailbox)
 	local mailboxes = (setmetatable({}, { __mode = "k" }) :: any)
 
 	local function resolve_mailbox(record: RecordStore.Record): (any?, string?, string?)
@@ -277,7 +277,7 @@ function OutboxConsumerAdapter.new(config: Config): Processor
 		local owner_ok, owner = pcall(function() return record:GetMailboxOwner() end)
 		if not owner_ok or type(owner) ~= "table" then return nil, "fenced", "destination mailbox owner could not be read" end
 		local create_ok, mailbox = pcall(function()
-			return MailboxV2.new(store, owner, {
+			return Mailbox.new(store, owner, {
 				active_record = record,
 				activation_guard = mailbox_guard,
 				sender_job_id = game.JobId,
@@ -317,7 +317,7 @@ function OutboxConsumerAdapter.new(config: Config): Processor
 			or type(snapshot.Attempts) ~= "number" or not math.isfinite(snapshot.Attempts)
 			or snapshot.Attempts < 0 or math.floor(snapshot.Attempts) ~= snapshot.Attempts
 		then
-			return false, "Mailbox V2 message snapshot is malformed"
+			return false, "Mailbox V1 message snapshot is malformed"
 		end
 		if type(handler_context) == "table" then
 			local context_methods = handler_context :: { [string]: unknown }
@@ -361,7 +361,7 @@ function OutboxConsumerAdapter.new(config: Config): Processor
 				event_context
 			)
 		end
-		local inbox_result = RecordStoreV2.Inbox.ApplyAsync(record, {
+		local inbox_result = RecordStoreV1.Inbox.ApplyAsync(record, {
 			message_id = event.source_event_id,
 			message_type = snapshot.Type,
 			payload_version = event.payload_version,
@@ -402,12 +402,12 @@ function OutboxConsumerAdapter.new(config: Config): Processor
 			if mailbox == nil then return { code = mailbox_code or "unknown", message = mailbox_message } end
 			local ok, result = pcall(function()
 				return mailbox:ProcessNextAsync(function(payload, snapshot, handler_context)
-					if type(snapshot) ~= "table" then return false, "Mailbox V2 returned a malformed snapshot" end
+					if type(snapshot) ~= "table" then return false, "Mailbox V1 returned a malformed snapshot" end
 					return process_event(record, identity, payload, snapshot, handler_context)
 				end)
 			end)
 			if not ok or type(result) ~= "table" or type(result.code) ~= "string" then
-				local detail = if ok then "Mailbox V2 consumer returned no structured result" else tostring(result)
+				local detail = if ok then "Mailbox V1 consumer returned no structured result" else tostring(result)
 				emit(normalized, "destination_consumer_unknown", nil, "unknown", detail)
 				return { code = "unknown", message = detail }
 			end
@@ -470,7 +470,7 @@ function OutboxConsumerAdapter.new(config: Config): Processor
 				return { code = "invalid", message = "max_items must be an integer from 1 to 16" }
 			end
 			local ok, result = pcall(function()
-				return RecordStoreV2.Inbox.PruneReceipts(record, older_than_unix, maximum, operation_id)
+				return RecordStoreV1.Inbox.PruneReceipts(record, older_than_unix, maximum, operation_id)
 			end)
 			if not ok or type(result) ~= "table" or type(result.code) ~= "string" then
 				local detail = if ok then "Inbox receipt pruning returned no structured result" else tostring(result)

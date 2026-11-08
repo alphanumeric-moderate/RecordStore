@@ -1,7 +1,7 @@
 --!nocheck
 -- Isolated CPU workloads for the optional wake-up acceleration data structures.
 -- MessagingService is a local stub; no Roblox network or durable storage is used.
-local Acceleration = require("../src/PlayerDataInitializer/RecordStoreV2Acceleration")
+local Acceleration = require("../src/PlayerDataInitializer/RecordStoreAcceleration")
 
 local PENDING_OWNER_COUNT = 512
 local PENDING_PASSES = 64

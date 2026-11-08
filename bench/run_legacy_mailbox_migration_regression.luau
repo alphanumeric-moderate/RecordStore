@@ -2,8 +2,8 @@
 local Shim = require("./RobloxShim")
 local serde = require("@lune/serde")
 local initializer = Shim.environment.game:GetService("ServerScriptService"):WaitForChild("PlayerDataInitializer")
-local Runner = Shim.environment.require(initializer:WaitForChild("RecordStoreMailboxV2Migration"))
-local Adapter = Shim.environment.require(initializer:WaitForChild("RecordStoreMailboxV2MigrationAdapter"))
+local Runner = Shim.environment.require(initializer:WaitForChild("RecordStoreLegacyMailboxMigration"))
+local Adapter = Shim.environment.require(initializer:WaitForChild("RecordStoreLegacyMailboxMigrationAdapter"))
 
 local function expect(value, message)
 	assert(value, message)
@@ -79,7 +79,7 @@ local function fixture(options)
 		checkpoint = nil,
 		save_calls = 0,
 		activation_calls = 0,
-		v2_enabled = false,
+		mailbox_enabled = false,
 		fail_import_once = settings.fail_import_once == true,
 		lose_import_response_once = settings.lose_import_response_once == true,
 		lose_page_checkpoint_response = settings.lose_page_checkpoint_response == true,
@@ -183,9 +183,9 @@ local function fixture(options)
 				and dead_count == #state.dead_source,
 				"source/destination counts or completion evidence did not reconcile"
 		end,
-		activate_v2 = function()
+		activate_mailbox = function()
 			state.activation_calls += 1
-			state.v2_enabled = true
+			state.mailbox_enabled = true
 			return true
 		end,
 		now_ms = function() return 1800000000000 + state.save_calls end,
@@ -226,8 +226,8 @@ do
 	expect(third.code == "ready_to_activate" and third.checkpoint.dead_letter_count == 1,
 		"terminal dead-letter page did not enter the activation gate")
 	local blocked = runner:Activate()
-	expect(blocked.code == "complete" and state.v2_enabled and state.activation_calls == 1,
-		"verified migration did not activate V2")
+	expect(blocked.code == "complete" and state.mailbox_enabled and state.activation_calls == 1,
+		"verified migration did not activate V1")
 	local final = runner:GetStatus()
 	expect(final ~= nil and final.phase == "activated" and final.revision == 5
 		and final.active_count == 2 and final.dead_letter_count == 1,
@@ -298,7 +298,7 @@ do
 		expect(status.code == "progress", "migration did not reach the completion gate")
 	end
 	local blocked = runner:Activate()
-	expect(blocked.code == "blocked" and not state.v2_enabled and state.activation_calls == 0
+	expect(blocked.code == "blocked" and not state.mailbox_enabled and state.activation_calls == 0
 		and state.checkpoint.phase == "ready_to_activate",
 		"migration activated without independent completion verification")
 end
@@ -306,11 +306,11 @@ end
 do
 	local fake_status = { MigrationId = "migration-adapter-contract" }
 	local fake_store = {
-		begin_mailbox_v2_migration_async = function() return "success", nil end,
-		get_mailbox_v2_migration_status_async = function()
+		begin_mailbox_migration_async = function() return "success", nil end,
+		get_mailbox_migration_status_async = function()
 			return copy(fake_status), "success", nil
 		end,
-		get_mailbox_v2_migration_source_page_async = function()
+		get_mailbox_migration_source_page_async = function()
 			return {}, nil, true, "success", nil
 		end,
 	}
@@ -324,7 +324,7 @@ do
 		legacy_writers_drained = function() return true end,
 		load_checkpoint = function() return nil end,
 		save_checkpoint = function() return true end,
-		activate_v2 = function() return true end,
+		activate_mailbox = function() return true end,
 		verify_complete = function() return true end,
 	})
 	local invalid, invalid_message = adapter.verify_source_frozen("migration-adapter-contract")
@@ -438,9 +438,9 @@ do -- The concrete bridge must preserve source locators and gate completion proo
 	local snapshot = { MigrationId = "bridge", FrozenAt = 0, SourceImplementationVersion = 2,
 		ActiveCount = 3, DeadLetterCount = 2 }
 	local store = {
-		begin_mailbox_v2_migration_async = function(...) calls.freeze = table.pack(...); return status, "source unavailable" end,
-		get_mailbox_v2_migration_status_async = function(...) calls.status = table.pack(...); return copy(snapshot), status, "source unavailable" end,
-		get_mailbox_v2_migration_source_page_async = function(...)
+		begin_mailbox_migration_async = function(...) calls.freeze = table.pack(...); return status, "source unavailable" end,
+		get_mailbox_migration_status_async = function(...) calls.status = table.pack(...); return copy(snapshot), status, "source unavailable" end,
+		get_mailbox_migration_source_page_async = function(...)
 			calls.page = table.pack(...)
 			return { { id = "source-row" } }, "next", false, status, "source unavailable"
 		end,
@@ -450,7 +450,7 @@ do -- The concrete bridge must preserve source locators and gate completion proo
 		migration_id = "bridge", mailbox = {}, queue_store_name = "LegacyQueue",
 		max_queue_bytes = 1000, operation_deadline = 7,
 		legacy_writers_drained = function() return true end, load_checkpoint = function() return nil end,
-		save_checkpoint = function() return true end, activate_v2 = function() return true end,
+		save_checkpoint = function() return true end, activate_mailbox = function() return true end,
 		verify_complete = function(id, active, dead)
 			verification_calls += 1
 			expect(id == "bridge" and active == 3 and dead == 2, "completion proof lost count/identity")
@@ -489,11 +489,11 @@ do -- The concrete bridge must preserve source locators and gate completion proo
 		"uncertain source state passed a migration gate")
 end
 
-print("[MailboxV2Migration] pagination, import identity, replay, source bridge and migration recovery regressions passed")
+print("[MailboxV1Migration] pagination, import identity, replay, source bridge and migration recovery regressions passed")
 
 -- Verify the coordinator and real importer agree on legacy casing and precedence.
 do
-	local Mailbox = Shim.load().MailboxV2
+	local Mailbox = Shim.load().Mailbox
 	for _, variant in ipairs({ "uppercase", "nonfinite-lowercase", "lowercase-priority", "defaults" }) do
 		local active = { Id = "active-" .. variant, Type = "award", Data = { amount = 3 }, CreatedAt = 100,
 			Attempts = 2, TotalAttempts = 5, ReplayCount = 1 }

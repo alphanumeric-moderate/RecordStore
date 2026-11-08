@@ -113,6 +113,35 @@ task.wait(0.1)
 assert(saved_records[saved_key].kills == previous_kills,
 	"PlayerData.Set should persist the restored baseline after recovery")
 
+-- A newer same-field mutation arriving during an uncertain write must win over
+-- the detached batch when the original write is restored through reconciliation.
+local interleaved_original_update = record.Update
+local interleaved_older_value = previous_kills + 31
+local interleaved_newer_value = previous_kills + 32
+record.Update = function(self, _transform)
+	local accepted, rejection = controller.Set(player, "kills", interleaved_newer_value)
+	assert(accepted, rejection)
+	self.State = "unknown"
+	return "unknown", "injected ambiguous write after a newer PlayerData mutation"
+end
+kills.Value = interleaved_older_value
+task.wait(0.1)
+assert(saved_records[saved_key].kills == previous_kills,
+	"uncertain interleaved update must not persist either queued value")
+assert(kills.Value == interleaved_newer_value,
+	"newer in-flight PlayerData mutation was not retained in the runtime value")
+record.Update = interleaved_original_update
+record.State = "active"
+record_options.on_event("reconcile", record.Key, "success", nil)
+task.wait(0.1)
+assert(saved_records[saved_key].kills == interleaved_newer_value,
+	"reconciliation did not preserve the newest same-field PlayerData mutation")
+success, message = controller.Set(player, "kills", previous_kills)
+assert(success, message)
+task.wait(0.1)
+assert(saved_records[saved_key].kills == previous_kills,
+	"PlayerData.Set did not persist the restored value after interleaved recovery")
+
 -- A removed cached value must trigger a safe child lookup rather than being reused.
 local lookups_before_removed_value = get_find_first_child_calls()
 kills:Destroy()
@@ -261,10 +290,10 @@ for _, scenario in ipairs({ "constructor_yields", "success", "failure", "error",
 		QueueMessageHandler = function() return true end,
 		MessagingService = {},
 		HttpService = {},
-		RecordStoreV2 = { new = function()
+		RecordStoreV1 = { new = function()
 			return { Mailbox = { new = function() end }, Canonicalize = function() end }
 		end },
-		RecordStoreV2Acceleration = { new = function()
+		RecordStoreAcceleration = { new = function()
 			if scenario == "constructor_yields" then coroutine.yield() end
 			return acceleration
 		end },
@@ -291,7 +320,7 @@ for _, scenario in ipairs({ "constructor_yields", "success", "failure", "error",
 	assert(harness.get_record_options() == nil, "player loading began after shutdown: " .. scenario)
 end
 
--- V2 mailbox wake-ups are opt-in, handler-backed, and cleaned up with each session.
+-- V1 mailbox API wake-ups (persisted protocol v2) are opt-in, handler-backed, and cleaned up with each session.
 do
 	local default_harness = create_harness(true)
 	local default_options = default_harness.get_record_options()
@@ -344,12 +373,12 @@ do
 		end,
 	}
 	local captured_mailbox_options = nil
-	local fake_v2_factory = {
+	local fake_v1_factory = {
 		new = function(_record_store, mailbox_module, options)
 			assert(type(mailbox_module) == "table" and type(mailbox_module.new) == "function",
-				"PlayerDataCore did not supply the embedded Mailbox V2 module")
+				"PlayerDataCore did not supply the embedded Mailbox module")
 			assert(options.acceleration_module == fake_acceleration_factory,
-				"PlayerDataCore did not pass the acceleration adapter to RecordStoreV2")
+				"PlayerDataCore did not pass the acceleration adapter to RecordStoreV1")
 			local api = {
 				Canonicalize = function(owner)
 					return owner.profile_key
@@ -382,8 +411,8 @@ do
 		MemoryStoreService = memory_store_service,
 		HttpService = http_service,
 		ServerId = "playerdata-mailbox-regression",
-		RecordStoreV2 = fake_v2_factory,
-		RecordStoreV2Acceleration = fake_acceleration_factory,
+		RecordStoreV1 = fake_v1_factory,
+		RecordStoreAcceleration = fake_acceleration_factory,
 		QueueMessageHandler = function(
 			message_player,
 			message_type,
@@ -417,9 +446,9 @@ do
 	assert(type(wakeup_record_options.on_queue_message) == "function",
 		"legacy durable-queue polling handler was not installed")
 	assert(type(wakeup_record_options.on_queue_message_async) == "function",
-		"asynchronous V2 queue handler was not installed")
+		"asynchronous queue handler was not installed")
 	assert(acceleration_options ~= nil and acceleration_options.enabled == true,
-		"PlayerDataCore did not enable the V2 acceleration adapter")
+		"PlayerDataCore did not enable the mailbox acceleration adapter")
 	assert(acceleration_options.enable_memory_store == true
 		and acceleration_options.memory_store_service == memory_store_service,
 		"PlayerDataCore did not enable MemoryStore acceleration hints")
@@ -427,17 +456,17 @@ do
 		and acceleration_options.http_service == http_service
 		and acceleration_options.server_id == "playerdata-mailbox-regression",
 		"PlayerDataCore did not pass its injected Roblox services to acceleration")
-	assert(wakeup_record_options ~= nil and wakeup_harness.record._mailbox_v2 ~= nil,
-		"PlayerDataCore did not bind a V2 mailbox to the active Record")
+	assert(wakeup_record_options ~= nil and wakeup_harness.record._mailbox ~= nil,
+		"PlayerDataCore did not bind the Mailbox API instance to the active Record")
 	assert(captured_mailbox_options ~= nil
 		and captured_mailbox_options.active_record == wakeup_harness.record,
 		"PlayerDataCore did not bind the mailbox to the exact active Record")
 	local active_allowed, active_guard_error = captured_mailbox_options.activation_guard("enqueue")
 	assert(active_allowed == true, active_guard_error)
-	assert(wakeup_harness.record._mailbox_v2.wakeups == fake_acceleration,
-		"PlayerDataCore did not bind the wake-up adapter to Mailbox V2")
+	assert(wakeup_harness.record._mailbox.wakeups == fake_acceleration,
+		"PlayerDataCore did not bind the wake-up adapter to the embedded Mailbox API")
 	assert(registration ~= nil and registration.Connected,
-		"PlayerDataCore did not register the V2 mailbox wake-up callback")
+		"PlayerDataCore did not register the mailbox wake-up callback")
 
 	local legacy_ok, legacy_error = wakeup_record_options.on_queue_message(
 		"AwardKill", { amount = 2 }, 1, "legacy-message-1", "legacy-server", 123

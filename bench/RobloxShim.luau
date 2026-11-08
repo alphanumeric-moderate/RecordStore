@@ -102,7 +102,7 @@ local loaded_mailbox_module: any = nil
 local loaded_receipt_processor: any = nil
 local loaded_outbox_mailbox_adapter: any = nil
 local loaded_outbox_consumer_adapter: any = nil
-local loaded_recordstore_v2: any = nil
+local loaded_recordstore_v1: any = nil
 local loaded_player_data_erasure: any = nil
 local loaded_application_inventory: any = nil
 local loaded_erasure_manifest_binding: any = nil
@@ -116,17 +116,17 @@ local loaded_recordstore_sha256: any = nil
 local loaded_maintenance_roblox_adapter: any = nil
 local loaded_maintenance_atomic_tombstone: any = nil
 local loaded_maintenance_manifest_binding: any = nil
-local loaded_mailbox_v2_migration_runner: any = nil
-local loaded_mailbox_v2_migration_adapter: any = nil
+local loaded_legacy_mailbox_migration_runner: any = nil
+local loaded_legacy_mailbox_migration_adapter: any = nil
 local loaded_recordstore_services: any = nil
-local loaded_recordstore_v2_acceleration: any = nil
+local loaded_recordstore_acceleration: any = nil
 local loaded_maintenance_runner: any = nil
 local loaded_maintenance_datastore_adapter: any = nil
 
 local RecordStoreInstance = table.freeze({ Name = "RecordStore", ClassName = "ModuleScript" })
 local RecordStoreServicesInstance = table.freeze({ Name = "RecordStoreServices", ClassName = "ModuleScript" })
-local RecordStoreV2Instance = table.freeze({ Name = "RecordStoreV2", ClassName = "ModuleScript" })
-local RecordStoreV2AccelerationInstance = table.freeze({ Name = "RecordStoreV2Acceleration", ClassName = "ModuleScript" })
+local RecordStoreV1Instance = table.freeze({ Name = "RecordStoreV1", ClassName = "ModuleScript" })
+local RecordStoreAccelerationInstance = table.freeze({ Name = "RecordStoreAcceleration", ClassName = "ModuleScript" })
 local RecordStoreMaintenanceRunnerInstance = table.freeze({ Name = "RecordStoreMaintenanceRunner", ClassName = "ModuleScript" })
 local RecordStoreMaintenanceDataStoreAdapterInstance = table.freeze({ Name = "RecordStoreMaintenanceDataStoreAdapter", ClassName = "ModuleScript" })
 local PurchaseReceiptProcessorInstance = table.freeze({ Name = "PurchaseReceiptProcessor", ClassName = "ModuleScript" })
@@ -145,18 +145,18 @@ local RecordStoreSHA256Instance = table.freeze({ Name = "RecordStoreSHA256", Cla
 local RecordStoreMaintenanceRobloxAdapterInstance = table.freeze({ Name = "RecordStoreMaintenanceRobloxAdapter", ClassName = "ModuleScript" })
 local RecordStoreMaintenanceAtomicTombstoneInstance = table.freeze({ Name = "RecordStoreMaintenanceAtomicTombstone", ClassName = "ModuleScript" })
 local RecordStoreMaintenanceManifestBindingInstance = table.freeze({ Name = "RecordStoreMaintenanceManifestBinding", ClassName = "ModuleScript" })
-local RecordStoreMailboxV2MigrationInstance = table.freeze({ Name = "RecordStoreMailboxV2Migration", ClassName = "ModuleScript" })
-local RecordStoreMailboxV2MigrationAdapterInstance = table.freeze({ Name = "RecordStoreMailboxV2MigrationAdapter", ClassName = "ModuleScript" })
+local RecordStoreLegacyMailboxMigrationInstance = table.freeze({ Name = "RecordStoreLegacyMailboxMigration", ClassName = "ModuleScript" })
+local RecordStoreLegacyMailboxMigrationAdapterInstance = table.freeze({ Name = "RecordStoreLegacyMailboxMigrationAdapter", ClassName = "ModuleScript" })
 local PlayerDataInitializer = {
 	RecordStore = RecordStoreInstance,
 	RecordStoreServices = RecordStoreServicesInstance,
-	RecordStoreV2Acceleration = RecordStoreV2AccelerationInstance,
+	RecordStoreAcceleration = RecordStoreAccelerationInstance,
 	RecordStoreMaintenanceRunner = RecordStoreMaintenanceRunnerInstance,
 	RecordStoreMaintenanceDataStoreAdapter = RecordStoreMaintenanceDataStoreAdapterInstance,
 	PurchaseReceiptProcessor = PurchaseReceiptProcessorInstance,
 	RecordStoreOutboxMailboxAdapter = OutboxMailboxAdapterInstance,
 	RecordStoreOutboxConsumerAdapter = OutboxConsumerAdapterInstance,
-	RecordStoreV2 = RecordStoreV2Instance,
+	RecordStoreV1 = RecordStoreV1Instance,
 	PlayerDataErasure = PlayerDataErasureInstance,
 	RecordStoreApplicationInventory = RecordStoreApplicationInventoryInstance,
 	PlayerDataErasureManifestBinding = PlayerDataErasureManifestBindingInstance,
@@ -170,8 +170,8 @@ local PlayerDataInitializer = {
 	RecordStoreMaintenanceRobloxAdapter = RecordStoreMaintenanceRobloxAdapterInstance,
 	RecordStoreMaintenanceAtomicTombstone = RecordStoreMaintenanceAtomicTombstoneInstance,
 	RecordStoreMaintenanceManifestBinding = RecordStoreMaintenanceManifestBindingInstance,
-	RecordStoreMailboxV2Migration = RecordStoreMailboxV2MigrationInstance,
-	RecordStoreMailboxV2MigrationAdapter = RecordStoreMailboxV2MigrationAdapterInstance,
+	RecordStoreLegacyMailboxMigration = RecordStoreLegacyMailboxMigrationInstance,
+	RecordStoreLegacyMailboxMigrationAdapter = RecordStoreLegacyMailboxMigrationAdapterInstance,
 }
 function PlayerDataInitializer:WaitForChild(name: string): any
 	local child = self[name]
@@ -189,7 +189,7 @@ local function load_scheduler(): any
 	if loaded_scheduler_module ~= nil then return loaded_scheduler_module end
 	local source = fs.readFile(SOURCE_PATH)
 	local scheduler_declaration = "local RecordStoreScheduler: EmbeddedSchedulerModule = {} :: EmbeddedSchedulerModule"
-	local mailbox_declaration = "local MailboxV2 = {}"
+	local mailbox_declaration = "local Mailbox = {}"
 	local scheduler_position = string.find(source, scheduler_declaration, 1, true)
 	local mailbox_position = string.find(source, mailbox_declaration, 1, true)
 	assert(scheduler_position ~= nil and mailbox_position ~= nil and mailbox_position > scheduler_position,
@@ -204,7 +204,7 @@ local function load_scheduler(): any
 end
 local function load_mailbox(): any
 	if loaded_mailbox_module ~= nil then return loaded_mailbox_module end
-	loaded_mailbox_module = Shim.load().MailboxV2
+	loaded_mailbox_module = Shim.load().Mailbox
 	return loaded_mailbox_module
 end
 local function load_record_store(source_path: string?): any
@@ -219,14 +219,14 @@ local function load_record_store(source_path: string?): any
 	return loaded_module
 end
 
-local function load_recordstore_v2(): any
-	if loaded_recordstore_v2 ~= nil then return loaded_recordstore_v2 end
-	local chunk = luau.load(fs.readFile("src/PlayerDataInitializer/RecordStoreV2.luau"), {
-		debugName = "RecordStoreV2",
+local function load_recordstore_v1(): any
+	if loaded_recordstore_v1 ~= nil then return loaded_recordstore_v1 end
+	local chunk = luau.load(fs.readFile("src/PlayerDataInitializer/RecordStoreV1.luau"), {
+		debugName = "RecordStoreV1",
 		environment = Shim.environment,
 	})
-	loaded_recordstore_v2 = chunk()
-	return loaded_recordstore_v2
+	loaded_recordstore_v1 = chunk()
+	return loaded_recordstore_v1
 end
 
 local function load_recordstore_services(): any
@@ -240,15 +240,15 @@ local function load_recordstore_services(): any
 	return loaded_recordstore_services
 end
 
-local function load_recordstore_v2_acceleration(): any
-	if loaded_recordstore_v2_acceleration ~= nil then return loaded_recordstore_v2_acceleration end
+local function load_recordstore_acceleration(): any
+	if loaded_recordstore_acceleration ~= nil then return loaded_recordstore_acceleration end
 	local module_environment = table.clone(Shim.environment)
 	module_environment.script = { Parent = PlayerDataInitializer }
-	local chunk = luau.load(fs.readFile("src/PlayerDataInitializer/RecordStoreV2Acceleration.luau"), {
-		debugName = "RecordStoreV2Acceleration", environment = module_environment,
+	local chunk = luau.load(fs.readFile("src/PlayerDataInitializer/RecordStoreAcceleration.luau"), {
+		debugName = "RecordStoreAcceleration", environment = module_environment,
 	})
-	loaded_recordstore_v2_acceleration = chunk()
-	return loaded_recordstore_v2_acceleration
+	loaded_recordstore_acceleration = chunk()
+	return loaded_recordstore_acceleration
 end
 
 local function load_outbox_mailbox_adapter(): any
@@ -305,26 +305,26 @@ local function load_purchase_authority_migration_runner(): any
 	return loaded_purchase_authority_migration_runner
 end
 
-local function load_mailbox_v2_migration_runner(): any
-	if loaded_mailbox_v2_migration_runner ~= nil then return loaded_mailbox_v2_migration_runner end
+local function load_legacy_mailbox_migration_runner(): any
+	if loaded_legacy_mailbox_migration_runner ~= nil then return loaded_legacy_mailbox_migration_runner end
 	local module_environment = table.clone(Shim.environment)
 	module_environment.script = { Parent = PlayerDataInitializer }
-	local chunk = luau.load(fs.readFile("src/PlayerDataInitializer/RecordStoreMailboxV2Migration.luau"), {
-		debugName = "RecordStoreMailboxV2Migration", environment = module_environment,
+	local chunk = luau.load(fs.readFile("src/PlayerDataInitializer/RecordStoreLegacyMailboxMigration.luau"), {
+		debugName = "RecordStoreLegacyMailboxMigration", environment = module_environment,
 	})
-	loaded_mailbox_v2_migration_runner = chunk()
-	return loaded_mailbox_v2_migration_runner
+	loaded_legacy_mailbox_migration_runner = chunk()
+	return loaded_legacy_mailbox_migration_runner
 end
 
-local function load_mailbox_v2_migration_adapter(): any
-	if loaded_mailbox_v2_migration_adapter ~= nil then return loaded_mailbox_v2_migration_adapter end
+local function load_legacy_mailbox_migration_adapter(): any
+	if loaded_legacy_mailbox_migration_adapter ~= nil then return loaded_legacy_mailbox_migration_adapter end
 	local module_environment = table.clone(Shim.environment)
 	module_environment.script = { Parent = PlayerDataInitializer }
-	local chunk = luau.load(fs.readFile("src/PlayerDataInitializer/RecordStoreMailboxV2MigrationAdapter.luau"), {
-		debugName = "RecordStoreMailboxV2MigrationAdapter", environment = module_environment,
+	local chunk = luau.load(fs.readFile("src/PlayerDataInitializer/RecordStoreLegacyMailboxMigrationAdapter.luau"), {
+		debugName = "RecordStoreLegacyMailboxMigrationAdapter", environment = module_environment,
 	})
-	loaded_mailbox_v2_migration_adapter = chunk()
-	return loaded_mailbox_v2_migration_adapter
+	loaded_legacy_mailbox_migration_adapter = chunk()
+	return loaded_legacy_mailbox_migration_adapter
 end
 
 local function load_purchase_inventory_manifest(): any
@@ -514,7 +514,7 @@ local game = {
 local function shim_require(target: any)
 	if target == RecordStoreInstance then return load_record_store() end
 	if target == RecordStoreServicesInstance then return load_recordstore_services() end
-	if target == RecordStoreV2AccelerationInstance then return load_recordstore_v2_acceleration() end
+	if target == RecordStoreAccelerationInstance then return load_recordstore_acceleration() end
 	if target == RecordStoreMaintenanceRunnerInstance then return load_maintenance_runner() end
 	if target == RecordStoreMaintenanceDataStoreAdapterInstance then return load_maintenance_datastore_adapter() end
 	if target == PurchaseReceiptProcessorInstance then
@@ -522,14 +522,14 @@ local function shim_require(target: any)
 	end
 	if target == OutboxMailboxAdapterInstance then return load_outbox_mailbox_adapter() end
 	if target == OutboxConsumerAdapterInstance then return load_outbox_consumer_adapter() end
-	if target == RecordStoreV2Instance then return load_recordstore_v2() end
+	if target == RecordStoreV1Instance then return load_recordstore_v1() end
 	if target == PlayerDataErasureInstance then return load_player_data_erasure() end
 	if target == RecordStoreApplicationInventoryInstance then return load_application_inventory() end
 	if target == PlayerDataErasureManifestBindingInstance then return load_erasure_manifest_binding() end
 	if target == PurchaseDataStoreAuthorityInstance then return load_purchase_datastore_authority() end
 	if target == PurchaseAuthorityMigrationRunnerInstance then return load_purchase_authority_migration_runner() end
-	if target == RecordStoreMailboxV2MigrationInstance then return load_mailbox_v2_migration_runner() end
-	if target == RecordStoreMailboxV2MigrationAdapterInstance then return load_mailbox_v2_migration_adapter() end
+	if target == RecordStoreLegacyMailboxMigrationInstance then return load_legacy_mailbox_migration_runner() end
+	if target == RecordStoreLegacyMailboxMigrationAdapterInstance then return load_legacy_mailbox_migration_adapter() end
 	if target == RecordStoreSHA256Instance then return load_recordstore_sha256() end
 	if target == PurchaseInventoryManifestInstance then return load_purchase_inventory_manifest() end
 	if target == PurchaseEntitlementAuthorityInstance then return load_purchase_entitlement_authority() end

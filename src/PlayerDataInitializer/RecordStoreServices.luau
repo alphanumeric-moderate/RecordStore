@@ -1,11 +1,11 @@
 --!strict
 local Services = {}
 
--- This registry remains separate from RecordStore to keep the require graph acyclic.
-local V2Factory = require(script.Parent.RecordStoreV2)
-local Acceleration = require(script.Parent.RecordStoreV2Acceleration)
-local MailboxMigration = require(script.Parent.RecordStoreMailboxV2Migration)
-local MailboxMigrationAdapter = require(script.Parent.RecordStoreMailboxV2MigrationAdapter)
+-- The registry remains separate from RecordStore to keep the require graph acyclic.
+local V1Factory = require(script.Parent.RecordStoreV1)
+local Acceleration = require(script.Parent.RecordStoreAcceleration)
+local LegacyMailboxMigration = require(script.Parent.RecordStoreLegacyMailboxMigration)
+local LegacyMailboxMigrationAdapter = require(script.Parent.RecordStoreLegacyMailboxMigrationAdapter)
 local PurchaseAuthority = require(script.Parent.PurchaseDataStoreAuthority)
 local PurchaseMigrationRunner = require(script.Parent.PurchaseAuthorityMigrationRunner)
 local PurchaseManifest = require(script.Parent.PurchaseInventoryManifest)
@@ -31,27 +31,27 @@ function Services.new(record_store: any, raw_options: any?): any
 	end
 
 	local core = record_store
-	if type(core) ~= "table" or type(core.new) ~= "function" or type(core.MailboxV2) ~= "table" then
-		error("RecordStore service bundle requires the core RecordStore and embedded Mailbox V2", 2)
+	if type(core) ~= "table" or type(core.new) ~= "function" or type(core.Mailbox) ~= "table" then
+		error("RecordStore service bundle requires the core RecordStore and embedded Mailbox", 2)
 	end
 
 	local options = raw_options or {}
-	local raw_v2_options = options.v2
-	if raw_v2_options ~= nil and type(raw_v2_options) ~= "table" then
-		error("RecordStore service option 'v2' must be a table", 2)
+	local raw_v1_options = options.v1
+	if raw_v1_options ~= nil and type(raw_v1_options) ~= "table" then
+		error("RecordStore service option 'v1' must be a table", 2)
 	end
 
-	local v2_options = table.clone(raw_v2_options or {})
-	if v2_options.acceleration_module == nil then
-		v2_options.acceleration_module = Acceleration
+	local v1_options = table.clone(raw_v1_options or {})
+	if v1_options.acceleration_module == nil then
+		v1_options.acceleration_module = Acceleration
 	end
-	local v2 = V2Factory.new(core, core.MailboxV2, v2_options)
+	local v1 = V1Factory.new(core, core.Mailbox, v1_options)
 
 	local modules = table.freeze({
-		RecordStoreV2 = V2Factory,
-		RecordStoreV2Acceleration = Acceleration,
-		RecordStoreMailboxV2Migration = MailboxMigration,
-		RecordStoreMailboxV2MigrationAdapter = MailboxMigrationAdapter,
+		RecordStoreV1 = V1Factory,
+		RecordStoreAcceleration = Acceleration,
+		RecordStoreLegacyMailboxMigration = LegacyMailboxMigration,
+		RecordStoreLegacyMailboxMigrationAdapter = LegacyMailboxMigrationAdapter,
 		PurchaseDataStoreAuthority = PurchaseAuthority,
 		PurchaseAuthorityMigrationRunner = PurchaseMigrationRunner,
 		PurchaseInventoryManifest = PurchaseManifest,
@@ -74,12 +74,12 @@ function Services.new(record_store: any, raw_options: any?): any
 
 	return table.freeze({
 		Core = core,
-		V2 = v2,
+		V1 = v1,
 		Acceleration = Acceleration,
 		Modules = modules,
-		MailboxMigration = table.freeze({
-			Runner = MailboxMigration,
-			Adapter = MailboxMigrationAdapter,
+		LegacyMailboxMigration = table.freeze({
+			Runner = LegacyMailboxMigration,
+			Adapter = LegacyMailboxMigrationAdapter,
 		}),
 		Purchases = table.freeze({
 			Authority = PurchaseAuthority,

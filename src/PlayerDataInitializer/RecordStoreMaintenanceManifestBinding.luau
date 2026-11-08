@@ -331,7 +331,7 @@ function Binder.bind(
 	if type(runtime.maintenance) ~= "table" or type(runtime.maintenance.NewCompactor) ~= "function"
 		or type(runtime.maintenance_runner) ~= "table" or type(runtime.maintenance_runner.new) ~= "function"
 	then
-		return nil, nil, "RecordStoreV2 maintenance and maintenance runner APIs are required"
+		return nil, nil, "RecordStoreV1 maintenance and maintenance runner APIs are required"
 	end
 	if runtime.mode ~= nil and runtime.mode ~= "dry_run" and runtime.mode ~= "execute" then
 		return nil, nil, "maintenance mode must be dry_run or execute"

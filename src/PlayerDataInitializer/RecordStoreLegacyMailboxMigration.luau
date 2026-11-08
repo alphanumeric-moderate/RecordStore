@@ -1,5 +1,5 @@
 --!strict
--- Bounded V3-to-V2 mailbox migration coordinator.
+-- Bounded legacy mailbox migration coordinator.
 -- The application owns every legacy storage layout, source freeze/writer fence,
 -- durable compare-and-swap checkpoint, inventory verification, and activation gate.
 -- This module never deletes the legacy source.
@@ -31,7 +31,7 @@ type Config = {
 	load_checkpoint: (string) -> (Checkpoint?, string?),
 	save_checkpoint: (string, number?, Checkpoint) -> (boolean, string?),
 	verify_complete: (string, number, number) -> (boolean, string?),
-	activate_v2: (string) -> (boolean, string?),
+	activate_mailbox: (string) -> (boolean, string?),
 	now_ms: (() -> number)?,
 	page_size: number?,
 }
@@ -174,7 +174,7 @@ function Runner.new(config: Config)
 	for _, field in ipairs({
 		"freeze_legacy", "legacy_writers_drained", "verify_source_frozen",
 		"read_active_page", "read_dead_letter_page", "load_checkpoint",
-		"save_checkpoint", "verify_complete", "activate_v2",
+		"save_checkpoint", "verify_complete", "activate_mailbox",
 	}) do
 		if type(config[field]) ~= "function" then error(field .. " callback is required", 2) end
 	end
@@ -196,7 +196,7 @@ function Runner.new(config: Config)
 		load_checkpoint = config.load_checkpoint,
 		save_checkpoint = config.save_checkpoint,
 		verify_complete = config.verify_complete,
-		activate_v2 = config.activate_v2,
+		activate_mailbox = config.activate_mailbox,
 		now_ms = now_ms,
 		page_size = page_size,
 		busy = false,
@@ -427,9 +427,9 @@ function Runner.new(config: Config)
 			if not verify_ok or verification ~= true then
 				return { code = "blocked", message = if type(verify_message) == "string" then verify_message else "destination/source inventory verification failed" }
 			end
-			local activate_ok, activated, activate_message = adapter_call(self.activate_v2, self.migration_id)
+			local activate_ok, activated, activate_message = adapter_call(self.activate_mailbox, self.migration_id)
 			if not activate_ok or activated ~= true then
-				return { code = "unknown", message = if type(activate_message) == "string" then activate_message else "V2 activation outcome is not confirmed" }
+				return { code = "unknown", message = if type(activate_message) == "string" then activate_message else "Mailbox activation outcome is not confirmed" }
 			end
 			local now = self.now_ms()
 			if not finite(now) or now < 0 then return { code = "unknown", message = "clock returned an invalid timestamp" } end

@@ -1,12 +1,12 @@
 --!strict
 --!optimize 2
---[[ PlayerDataCore-specific adapter for RecordStoreV2's durable erasure coordinator
+--[[ PlayerDataCore-specific adapter for RecordStoreV1's durable erasure coordinator
  This covers the deterministic PlayerDataCore profile key only. applications must add
  every other user-associated key family before claiming exhaustive RTBF coverage ]]
 
 local Players = game:GetService("Players")
 local RecordStore = require(script.Parent.RecordStore)
-local RecordStoreV2Factory = require(script.Parent.RecordStoreV2)
+local RecordStoreV1Factory = require(script.Parent.RecordStoreV1)
 
 type ErasureItem = {
 	name: string,
@@ -27,7 +27,7 @@ type Family = {
 
 type Options = {
 	record_store: any?,
-	record_store_v2: any?,
+	record_store_v1: any?,
 	profile_store_name: string?,
 	mailbox_module: any?,
 	profile_scope: string?,
@@ -72,7 +72,7 @@ local function new(manifest_store: any, options: Options?): any
 	end
 	local config: Options = if options == nil then {} else table.clone(options)
 	local record_store = config.record_store or RecordStore
-	local record_store_v2 = config.record_store_v2 or RecordStoreV2Factory
+	local record_store_v1 = config.record_store_v1 or RecordStoreV1Factory
 	local profile_store_name = config.profile_store_name or DEFAULT_PROFILE_STORE
 	local profile_scope = if config.profile_scope == nil then DEFAULT_PROFILE_SCOPE else config.profile_scope
 	local key_prefix = config.key_prefix or DEFAULT_KEY_PREFIX
@@ -109,12 +109,12 @@ local function new(manifest_store: any, options: Options?): any
 	then
 		error("RecordStore must expose the permanent erasure fence and historical purge APIs", 2)
 	end
-	if type(record_store_v2) ~= "table" or type(record_store_v2.new) ~= "function" then
-		error("RecordStoreV2 factory is unavailable", 2)
+	if type(record_store_v1) ~= "table" or type(record_store_v1.new) ~= "function" then
+		error("RecordStoreV1 factory is unavailable", 2)
 	end
-	local mailbox = config.mailbox_module or record_store.MailboxV2 or RecordStore.MailboxV2
+	local mailbox = config.mailbox_module or record_store.Mailbox or RecordStore.Mailbox
 	if type(mailbox) ~= "table" or type(mailbox.new) ~= "function" then
-		error("RecordStore must expose its MailboxV2 module", 2)
+		error("RecordStore must expose its Mailbox module", 2)
 	end
 
 	local function resolve_key(user_id: number): string
@@ -285,7 +285,7 @@ local function new(manifest_store: any, options: Options?): any
 		families[#families + 1] = additional
 	end
 
-	local v2 = record_store_v2.new(record_store, mailbox)
+	local v2 = record_store_v1.new(record_store, mailbox)
 	return v2.Erasure.new(manifest_store, families, {
 		verify_templates = config.verify_templates,
 		require_inventory_attestation = true,

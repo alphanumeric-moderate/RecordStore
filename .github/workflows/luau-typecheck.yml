@@ -79,19 +79,19 @@ jobs:
           source = (root / "RecordStore.luau").read_text()
           forbidden = [
               r"require\s*\(\s*script\.Parent\.RecordStoreScheduler\s*\)",
-              r"require\s*\(\s*script\.Parent\.MailboxV2\s*\)",
+              r"require\s*\(\s*script\.Parent\.Mailbox\s*\)",
           ]
           required_declarations = [
               "local RecordStoreScheduler: EmbeddedSchedulerModule = {} :: EmbeddedSchedulerModule",
-              "local MailboxV2 = {}",
-              "function MailboxV2.new(",
+              "local Mailbox = {}",
+              "function Mailbox.new(",
           ]
           violations = [pattern for pattern in forbidden if re.search(pattern, source)]
           missing = [declaration for declaration in required_declarations if source.count(declaration) != 1]
           separate = [
               str(path) for path in (
                   root / "RecordStoreScheduler.luau",
-                  root / "MailboxV2.luau",
+                  root / "Mailbox.luau",
               ) if path.exists()
           ]
           if violations or missing or separate:
@@ -105,7 +105,17 @@ jobs:
                   print("Separate implementation files must not remain:")
                   print("\n".join(separate))
               raise SystemExit(1)
-          print("Scheduler and Mailbox V2 implementations are embedded in RecordStore.luau")
+          queue_version = re.search(r"^local QUEUE_IMPLEMENTATION_VERSION = (\d+)$", source, re.MULTILINE)
+          queue_contract = [
+              "implementation_version = QUEUE_IMPLEMENTATION_VERSION,",
+              "implementation_version ~= 2 and implementation_version ~= QUEUE_IMPLEMENTATION_VERSION",
+          ]
+          missing_queue_contract = [item for item in queue_contract if item not in source]
+          if queue_version is None or missing_queue_contract:
+              print("Embedded Mailbox queue version or v2 compatibility contract is missing")
+              print("\n".join(missing_queue_contract))
+              raise SystemExit(1)
+          print(f"Scheduler and Mailbox V1 API implementations are embedded in RecordStore.luau; new durable queue envelopes use implementation version {queue_version.group(1)} and version-2 envelopes remain readable for compatibility")
           PY
 
       - name: Require explicit types at Studio solver-sensitive boundaries
@@ -142,6 +152,40 @@ jobs:
           test "${#modules[@]}" -gt 0
           printf 'Analyzing %s Luau source modules using declared modes\n' "${#modules[@]}"
           luau-lsp analyze --platform=roblox --definitions=/tmp/globalTypes.d.luau --sourcemap=/tmp/sourcemap.json "${modules[@]}"
+
+      - name: Type-check strict production modules with the new solver
+        run: |
+          set -euo pipefail
+          mapfile -t strict_modules < <(
+            while IFS= read -r path; do
+              mode="$(awk '
+                /^[[:space:]]*$/ { next }
+                /^--!/ {
+                  if ($0 ~ /^--!strict([[:space:]]|$)/) {
+                    print "--!strict"
+                    exit
+                  }
+                  if ($0 ~ /^--!(nonstrict|nocheck)([[:space:]]|$)/) {
+                    exit
+                  }
+                  next
+                }
+                /^--/ { next }
+                { exit }
+              ' "$path")"
+              if [[ "$mode" == "--!strict" ]]; then
+                printf '%s\n' "$path"
+              fi
+            done < <(find src -type f -name '*.luau' ! -path 'src/AlyaNum/*' -print | sort)
+          )
+          test "${#strict_modules[@]}" -gt 0
+          printf 'Analyzing %s strict Luau source modules with the new solver\n' "${#strict_modules[@]}"
+          luau-lsp analyze \
+            --platform=roblox \
+            --definitions=/tmp/globalTypes.d.luau \
+            --sourcemap=/tmp/sourcemap.json \
+            --settings=typecheck/fixtures/settings/new-solver.json \
+            "${strict_modules[@]}"
 
       - name: Generate the fixture DataModel sourcemap
         run: |
