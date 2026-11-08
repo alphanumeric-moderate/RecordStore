@@ -493,7 +493,7 @@ print("[MailboxV1Migration] pagination, import identity, replay, source bridge a
 
 -- Verify the coordinator and real importer agree on legacy casing and precedence.
 do
-	local Mailbox = Shim.load().MailboxV1
+	local Mailbox = Shim.load().Mailbox
 	for _, variant in ipairs({ "uppercase", "nonfinite-lowercase", "lowercase-priority", "defaults" }) do
 		local active = { Id = "active-" .. variant, Type = "award", Data = { amount = 3 }, CreatedAt = 100,
 			Attempts = 2, TotalAttempts = 5, ReplayCount = 1 }
