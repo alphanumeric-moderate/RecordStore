@@ -214,8 +214,9 @@ function Acceleration.new(options)
 		max_registered_owners = max_registered, max_pending_owners = max_pending, max_callbacks_per_pump = max_callbacks,
 		max_memory_hint_slots = memory_slots, memory_hint_ttl_seconds = memory_ttl,
 		memory_poll_interval_ms = poll_ms, max_seen_events = seen_limit,
-		owners = {}, owner_count = 0, pending = {}, pending_order = {}, pump_scheduled = false,
-		subscriptions = {}, seen_events = {}, seen_order = {}, sequence = 0,
+		owners = {}, owner_count = 0, pending = {}, pending_head = nil, pending_tail = nil,
+		pending_count = 0, pump_scheduled = false,
+		subscriptions = {}, seen_events = {}, sequence = 0,
 		metrics = {
 			published = 0, publish_errors = 0, memory_write_errors = 0, memory_poll_errors = 0,
 			memory_remove_errors = 0, received = 0, invalid_messages = 0, coalesced = 0, dropped_at_capacity = 0,
@@ -228,29 +229,162 @@ function Acceleration.new(options)
 	end
 
 	local function remove_pending(owner_digest)
-		self.pending[owner_digest] = nil
-		for index = #self.pending_order, 1, -1 do
-			if self.pending_order[index] == owner_digest then table.remove(self.pending_order, index) end
+		local pending = self.pending[owner_digest]
+		if pending == nil then return end
+
+		local previous = pending.previous
+		local following = pending.next
+		if previous ~= nil then
+			previous.next = following
+		else
+			self.pending_head = following
 		end
+		if following ~= nil then
+			following.previous = previous
+		else
+			self.pending_tail = previous
+		end
+
+		self.pending[owner_digest] = nil
+		self.pending_count -= 1
+		pending.previous = nil
+		pending.next = nil
+	end
+
+	-- TTL cleanup is timestamp-ordered; capacity eviction must remain insertion-ordered.
+	local seen_order_head = nil
+	local seen_order_tail = nil
+	local seen_count = 0
+	local seen_sequence = 0
+	local seen_heap = {}
+
+	local function seen_heap_less(left, right)
+		if left.at_ms ~= right.at_ms then return left.at_ms < right.at_ms end
+		return left.sequence < right.sequence
+	end
+
+	local function seen_heap_swap(left_index, right_index)
+		local left = seen_heap[left_index]
+		local right = seen_heap[right_index]
+		seen_heap[left_index] = right
+		seen_heap[right_index] = left
+		left.heap_index = right_index
+		right.heap_index = left_index
+	end
+
+	local function seen_heap_sift_up(index)
+		while index > 1 do
+			local parent = math.floor(index / 2)
+			if not seen_heap_less(seen_heap[index], seen_heap[parent]) then break end
+			seen_heap_swap(index, parent)
+			index = parent
+		end
+	end
+
+	local function seen_heap_sift_down(index)
+		while true do
+			local left = index * 2
+			if left > #seen_heap then break end
+			local right = left + 1
+			local smallest = left
+			if right <= #seen_heap and seen_heap_less(seen_heap[right], seen_heap[left]) then
+				smallest = right
+			end
+			if not seen_heap_less(seen_heap[smallest], seen_heap[index]) then break end
+			seen_heap_swap(index, smallest)
+			index = smallest
+		end
+	end
+
+	local function seen_heap_push(entry)
+		local index = #seen_heap + 1
+		seen_heap[index] = entry
+		entry.heap_index = index
+		seen_heap_sift_up(index)
+	end
+
+	local function seen_heap_remove(entry)
+		local index = entry.heap_index
+		if index == nil then return end
+
+		local last_index = #seen_heap
+		local last = seen_heap[last_index]
+		seen_heap[last_index] = nil
+		entry.heap_index = nil
+		if index == last_index then return end
+
+		seen_heap[index] = last
+		last.heap_index = index
+		local parent = math.floor(index / 2)
+		if index > 1 and seen_heap_less(last, seen_heap[parent]) then
+			seen_heap_sift_up(index)
+		else
+			seen_heap_sift_down(index)
+		end
+	end
+
+	local function remove_seen(entry)
+		seen_heap_remove(entry)
+		if self.seen_events[entry.id] == entry then
+			self.seen_events[entry.id] = nil
+		end
+
+		local previous = entry.previous
+		local following = entry.next
+		if previous ~= nil then
+			previous.next = following
+		else
+			seen_order_head = following
+		end
+		if following ~= nil then
+			following.previous = previous
+		else
+			seen_order_tail = previous
+		end
+
+		seen_count -= 1
+		entry.previous = nil
+		entry.next = nil
 	end
 
 	local function remember_event(event_id)
 		local now = self.now_ms()
 		if not finite(now) then return false, "clock_invalid" end
-		for index = #self.seen_order, 1, -1 do
-			local old = self.seen_order[index]
-			if now >= old.at_ms and now - old.at_ms > SEEN_EVENT_TTL_MS then
-				self.seen_events[old.id] = nil
-				table.remove(self.seen_order, index)
+
+		while true do
+			local oldest_by_time = seen_heap[1]
+			if oldest_by_time == nil then break end
+			if now < oldest_by_time.at_ms
+				or now - oldest_by_time.at_ms <= SEEN_EVENT_TTL_MS
+			then
+				break
 			end
+			remove_seen(oldest_by_time)
 		end
+
 		if self.seen_events[event_id] ~= nil then return false, "duplicate" end
-		if #self.seen_order >= self.max_seen_events then
-			local old = table.remove(self.seen_order, 1)
-			self.seen_events[old.id] = nil
+		if seen_count >= self.max_seen_events and seen_order_head ~= nil then
+			remove_seen(seen_order_head)
 		end
-		self.seen_events[event_id] = now
-		table.insert(self.seen_order, { id = event_id, at_ms = now })
+
+		seen_sequence += 1
+		local entry = {
+			id = event_id,
+			at_ms = now,
+			sequence = seen_sequence,
+			previous = seen_order_tail,
+			next = nil,
+			heap_index = nil,
+		}
+		if seen_order_tail ~= nil then
+			seen_order_tail.next = entry
+		else
+			seen_order_head = entry
+		end
+		seen_order_tail = entry
+		seen_count += 1
+		self.seen_events[event_id] = entry
+		seen_heap_push(entry)
 		return true, nil
 	end
 
@@ -274,12 +408,25 @@ function Acceleration.new(options)
 			self.metrics.coalesced += 1
 			return true, "coalesced"
 		end
-		if #self.pending_order >= self.max_pending_owners then
+		if self.pending_count >= self.max_pending_owners then
 			self.metrics.dropped_at_capacity += 1
 			return false, "capacity"
 		end
-		self.pending[owner_digest] = { reason = reason, owner = owner }
-		table.insert(self.pending_order, owner_digest)
+		local pending = {
+			owner_digest = owner_digest,
+			reason = reason,
+			owner = owner,
+			previous = self.pending_tail,
+			next = nil,
+		}
+		if self.pending_tail ~= nil then
+			self.pending_tail.next = pending
+		else
+			self.pending_head = pending
+		end
+		self.pending_tail = pending
+		self.pending[owner_digest] = pending
+		self.pending_count += 1
 		if not self.pump_scheduled then
 			self.pump_scheduled = true
 			local generation = self.generation
@@ -325,17 +472,16 @@ function Acceleration.new(options)
 		self.pump_scheduled = false
 		if not self.running then return end
 		local processed = 0
-		while #self.pending_order > 0 and processed < self.max_callbacks_per_pump do
-			local owner_digest = table.remove(self.pending_order, 1)
-			local pending = self.pending[owner_digest]
-			self.pending[owner_digest] = nil
+		while self.pending_head ~= nil and processed < self.max_callbacks_per_pump do
+			local pending = self.pending_head
+			remove_pending(pending.owner_digest)
 			processed += 1
-			if pending ~= nil and self.owners[owner_digest] == pending.owner and pending.owner.active == true then
+			if pending ~= nil and self.owners[pending.owner_digest] == pending.owner and pending.owner.active == true then
 				local ok = pcall(pending.owner.callback, pending.reason)
 				if ok then self.metrics.callbacks_run += 1 else self.metrics.callback_errors += 1 end
 			end
 		end
-		if #self.pending_order > 0 and not self.pump_scheduled then
+		if self.pending_head ~= nil and not self.pump_scheduled then
 			self.pump_scheduled = true
 			local generation = self.generation
 			local scheduled = schedule_callback(0, function()
@@ -500,7 +646,9 @@ function Acceleration.new(options)
 		for _, connection in ipairs(self.subscriptions) do disconnect(connection) end
 		self.subscriptions = {}
 		self.pending = {}
-		self.pending_order = {}
+		self.pending_head = nil
+		self.pending_tail = nil
+		self.pending_count = 0
 		self.pump_scheduled = false
 		return true
 	end
@@ -510,7 +658,7 @@ function Acceleration.new(options)
 		for key, value in pairs(self.metrics) do metrics[key] = value end
 		return {
 			enabled = self.enabled, running = self.running, registered_owners = self.owner_count,
-			pending_owners = #self.pending_order, shard_count = self.shard_count,
+			pending_owners = self.pending_count, shard_count = self.shard_count,
 			memory_store_enabled = self.memory_map ~= nil, metrics = metrics,
 		}
 	end
