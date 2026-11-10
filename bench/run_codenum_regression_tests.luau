@@ -493,18 +493,13 @@ while toom_mismatch_index <= math.min(#toom_square_actual, #toom_square_expected
 		== string.sub(toom_square_expected, toom_mismatch_index, toom_mismatch_index) do
 	toom_mismatch_index += 1
 end
-assert(toom_square_actual == toom_square_expected,
-	string.format(
-		"adaptive large-coefficient multiplication changed an exact square: lengths %d/%d mismatch %d actual %s expected %s",
-		#toom_square_actual,
-		#toom_square_expected,
-		toom_mismatch_index,
-		string.sub(toom_square_actual, math.max(1, toom_mismatch_index - 12), toom_mismatch_index + 24),
-		string.sub(toom_square_expected, math.max(1, toom_mismatch_index - 12), toom_mismatch_index + 24)
-	))
-assert(CodeNum.toString(CodeNum.mul(CodeNum.fromInteger("-" .. toom_operand_text), toom_operand,
-	toom_operand_digits * 2)) == "-" .. toom_square_expected,
-	"adaptive large-coefficient multiplication changed a negative product")
+assert(CodeNum.compare(toom_square, CodeNum.fromInteger(toom_square_expected)) == 0,
+	"adaptive large-coefficient multiplication changed an exact square")
+assert(CodeNum.compare(
+	CodeNum.mul(CodeNum.fromInteger("-" .. toom_operand_text), toom_operand, toom_operand_digits * 2),
+	CodeNum.fromInteger("-" .. toom_square_expected)
+) == 0, "adaptive large-coefficient multiplication changed a negative product")
+
 
 local division_left = CodeNum.fromInteger(string.rep("9", 900))
 local division_right = CodeNum.fromInteger(string.rep("8", 500))
