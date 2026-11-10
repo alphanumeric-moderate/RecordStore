@@ -19,3 +19,12 @@ for _ = 1, 200 do
 
 	offset = CodeNum.add(offset, 1)
 end
+
+for _, digits in { 64, 192, 384, 768, 1536, 2048 } do
+	local left = CodeNum.fromInteger(string.rep("9", digits))
+	local right = CodeNum.fromInteger(string.rep("7", digits))
+	local product = CodeNum.mul(left, right, digits * 2)
+	local quotient = CodeNum.div(product, right, digits)
+	assert(CodeNum.compare(quotient, left) == 0,
+		"adaptive multiplication/division benchmark lost its exact result")
+end
