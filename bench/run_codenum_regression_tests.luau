@@ -478,7 +478,7 @@ for _, operation in invalid_precision_operations do
 end
 
 
-local toom_operand_digits = 1000
+local toom_operand_digits = 1600
 local toom_operand_text = string.rep("9", toom_operand_digits)
 local toom_operand = CodeNum.fromInteger(toom_operand_text)
 local toom_square = CodeNum.mul(toom_operand, toom_operand, toom_operand_digits * 2)
