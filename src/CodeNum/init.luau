@@ -1283,7 +1283,10 @@ local function roundDecimalDigits(digits: string, precision: number, tinyAdjustm
 	if roundUp then
 		kept = decimalAddSmall(kept, 1)
 	end
-	return kept, drotype SignedDecimalLimbs = {
+	return kept, dropped
+end
+
+type SignedDecimalLimbs = {
 	sign: number,
 	limbs: DecimalLimbs,
 }
@@ -1877,9 +1880,6 @@ local function divideDecimalLimbs(dividend: DecimalLimbs, divisor: DecimalLimbs)
 	releaseDecimalLimbs(normalizedDividend)
 	releaseDecimalLimbs(normalizedDivisor)
 	return trimDecimalLimbs(quotient), trimDecimalLimbs(remainder)
-end
-
-der)
 end
 
 local function parseDecimalParts(text: string): DecimalParts
