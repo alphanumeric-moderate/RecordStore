@@ -484,7 +484,7 @@ local toom_operand = CodeNum.fromInteger(toom_operand_text)
 local toom_square = CodeNum.mul(toom_operand, toom_operand, toom_operand_digits * 2)
 local toom_square_expected = string.rep("9", toom_operand_digits - 1)
 	.. "8"
-	.. string.rep("0", toom_operand_digits - 2)
+	.. string.rep("0", toom_operand_digits - 1)
 	.. "1"
 assert(CodeNum.toString(toom_square) == toom_square_expected,
 	"adaptive large-coefficient multiplication changed an exact square")
