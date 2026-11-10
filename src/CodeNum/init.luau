@@ -1,3 +1,4 @@
+--!native
 --!strict
 --!optimize 2
 
@@ -1285,8 +1286,56 @@ local function roundDecimalDigits(digits: string, precision: number, tinyAdjustm
 	return kept, dropped
 end
 
+type SignedDecimalLimbs = {
+	sign: number,
+	limbs: DecimalLimbs,
+}
+
+local DECIMAL_LIMB_POOL: {DecimalLimbs} = {}
+local DECIMAL_LIMB_POOL_COUNT = 0
+local DECIMAL_LIMB_POOL_MAX_ENTRIES = 24
+local DECIMAL_LIMB_POOL_MAX_LENGTH = 2048
+local DECIMAL_KARATSUBA_THRESHOLD = 40
+local DECIMAL_TOOM4_THRESHOLD = 192
+
+local function acquireDecimalLimbs(capacity: number, zeroFill: boolean?): DecimalLimbs
+	local result: DecimalLimbs
+	if DECIMAL_LIMB_POOL_COUNT > 0 then
+		result = DECIMAL_LIMB_POOL[DECIMAL_LIMB_POOL_COUNT]
+		DECIMAL_LIMB_POOL[DECIMAL_LIMB_POOL_COUNT] = nil :: any
+		DECIMAL_LIMB_POOL_COUNT -= 1
+		table.clear(result)
+	else
+		result = table.create(capacity) :: DecimalLimbs
+	end
+	if zeroFill then
+		for index = 1, capacity do
+			result[index] = 0
+		end
+	end
+	return result
+end
+
+local function releaseDecimalLimbs(values: DecimalLimbs)
+	local length = #values
+	if length <= DECIMAL_LIMB_POOL_MAX_LENGTH
+		and DECIMAL_LIMB_POOL_COUNT < DECIMAL_LIMB_POOL_MAX_ENTRIES then
+		table.clear(values)
+		DECIMAL_LIMB_POOL_COUNT += 1
+		DECIMAL_LIMB_POOL[DECIMAL_LIMB_POOL_COUNT] = values
+	end
+end
+
+local function copyDecimalLimbs(source: DecimalLimbs): DecimalLimbs
+	local result = acquireDecimalLimbs(#source)
+	for index = 1, #source do
+		result[index] = source[index]
+	end
+	return result
+end
+
 local function decimalStringToLimbs(digits: string): DecimalLimbs
-	local limbs: DecimalLimbs = table.create(math.ceil(#digits / 7)) :: DecimalLimbs
+	local limbs = acquireDecimalLimbs(math.ceil(#digits / 7))
 	local finish = #digits
 	while finish > 0 do
 		local start = math.max(1, finish - 6)
@@ -1299,9 +1348,12 @@ local function decimalStringToLimbs(digits: string): DecimalLimbs
 	return limbs
 end
 
+@native
 local function trimDecimalLimbs(limbs: DecimalLimbs): DecimalLimbs
-	while #limbs > 1 and limbs[#limbs] == 0 do
-		table.remove(limbs, #limbs)
+	local length = #limbs
+	while length > 1 and limbs[length] == 0 do
+		limbs[length] = nil
+		length -= 1
 	end
 	return limbs
 end
@@ -1316,6 +1368,7 @@ local function decimalLimbsToString(limbs: DecimalLimbs): string
 	return table.concat(pieces)
 end
 
+@native
 local function compareDecimalLimbs(a: DecimalLimbs, b: DecimalLimbs): number
 	trimDecimalLimbs(a)
 	trimDecimalLimbs(b)
@@ -1330,9 +1383,10 @@ local function compareDecimalLimbs(a: DecimalLimbs, b: DecimalLimbs): number
 	return 0
 end
 
+@native
 local function addDecimalLimbs(a: DecimalLimbs, b: DecimalLimbs): DecimalLimbs
 	local length = math.max(#a, #b)
-	local result: DecimalLimbs = table.create(length + 1, 0) :: DecimalLimbs
+	local result = acquireDecimalLimbs(length + 1, true)
 	local carry = 0
 	for index = 1, length do
 		local sum = (a[index] or 0) + (b[index] or 0) + carry
@@ -1350,8 +1404,9 @@ local function addDecimalLimbs(a: DecimalLimbs, b: DecimalLimbs): DecimalLimbs
 	return trimDecimalLimbs(result)
 end
 
+@native
 local function subtractDecimalLimbs(a: DecimalLimbs, b: DecimalLimbs): DecimalLimbs
-	local result: DecimalLimbs = table.create(#a, 0) :: DecimalLimbs
+	local result = acquireDecimalLimbs(#a, true)
 	local borrow = 0
 	for index = 1, #a do
 		local difference = a[index] - (b[index] or 0) - borrow
@@ -1364,88 +1419,466 @@ local function subtractDecimalLimbs(a: DecimalLimbs, b: DecimalLimbs): DecimalLi
 		result[index] = difference
 	end
 	if borrow ~= 0 then
+		releaseDecimalLimbs(result)
 		error("CodeNum: internal coefficient subtraction underflow", 3)
 	end
 	return trimDecimalLimbs(result)
 end
 
+@native
 local function multiplyDecimalLimbsSmall(a: DecimalLimbs, multiplier: number): DecimalLimbs
 	if multiplier == 0 then
-		return { 0 }
+		local zero = acquireDecimalLimbs(1)
+		zero[1] = 0
+		return zero
 	end
-	local result: DecimalLimbs = table.create(#a + 2, 0) :: DecimalLimbs
+	local result = acquireDecimalLimbs(#a + 2, true)
 	local carry = 0
 	for index = 1, #a do
 		local product = a[index] * multiplier + carry
-		result[index] = product % DECIMAL_LIMB_BASE
-		carry = math.floor(product / DECIMAL_LIMB_BASE)
+		local quotient = math.floor(product / DECIMAL_LIMB_BASE)
+		result[index] = product - quotient * DECIMAL_LIMB_BASE
+		carry = quotient
 	end
 	local index = #a + 1
 	while carry > 0 do
-		result[index] = carry % DECIMAL_LIMB_BASE
-		carry = math.floor(carry / DECIMAL_LIMB_BASE)
+		local quotient = math.floor(carry / DECIMAL_LIMB_BASE)
+		result[index] = carry - quotient * DECIMAL_LIMB_BASE
+		carry = quotient
 		index += 1
 	end
 	return trimDecimalLimbs(result)
 end
 
-local function multiplyDecimalLimbs(a: DecimalLimbs, b: DecimalLimbs): DecimalLimbs
-	local result: DecimalLimbs = table.create(#a + #b + 1, 0) :: DecimalLimbs
+@native
+local function divideDecimalLimbsSmallInPlace(values: DecimalLimbs, divisor: number): number
+	if divisor <= 0 then
+		error("CodeNum: internal coefficient division by a non-positive integer", 3)
+	end
+	if divisor == 1 then
+		return 0
+	end
+	local inverse = 1 / divisor
+	local remainder = 0
+	for index = #values, 1, -1 do
+		local current = remainder * DECIMAL_LIMB_BASE + values[index]
+		local quotient = math.floor(current * inverse)
+		if quotient * divisor > current then
+			quotient -= 1
+		end
+		if quotient < DECIMAL_LIMB_BASE - 1
+			and (quotient + 1) * divisor <= current then
+			quotient += 1
+		end
+		remainder = current - quotient * divisor
+		values[index] = quotient
+	end
+	trimDecimalLimbs(values)
+	return remainder
+end
+
+local function sliceDecimalLimbs(source: DecimalLimbs, first: number, last: number): DecimalLimbs
+	local startIndex = math.max(1, first)
+	local endIndex = math.min(#source, last)
+	if startIndex > endIndex then
+		local zero = acquireDecimalLimbs(1)
+		zero[1] = 0
+		return zero
+	end
+	local result = acquireDecimalLimbs(endIndex - startIndex + 1)
+	for index = startIndex, endIndex do
+		result[#result + 1] = source[index]
+	end
+	return trimDecimalLimbs(result)
+end
+
+local function isZeroDecimalLimbs(values: DecimalLimbs): boolean
+	return #values == 1 and values[1] == 0
+end
+
+local function makeSignedDecimalLimbs(sign: number, limbs: DecimalLimbs): SignedDecimalLimbs
+	trimDecimalLimbs(limbs)
+	return {
+		sign = if isZeroDecimalLimbs(limbs) then 0 else if sign < 0 then -1 else 1,
+		limbs = limbs,
+	}
+end
+
+local function copySignedDecimalLimbs(value: SignedDecimalLimbs): SignedDecimalLimbs
+	return makeSignedDecimalLimbs(value.sign, copyDecimalLimbs(value.limbs))
+end
+
+local function releaseSignedDecimalLimbs(value: SignedDecimalLimbs)
+	releaseDecimalLimbs(value.limbs)
+end
+
+local function addSignedDecimalLimbs(
+	a: SignedDecimalLimbs,
+	b: SignedDecimalLimbs,
+	subtractB: boolean?
+): SignedDecimalLimbs
+	local bSign = if subtractB then -b.sign else b.sign
+	if a.sign == 0 then
+		return makeSignedDecimalLimbs(bSign, copyDecimalLimbs(b.limbs))
+	elseif bSign == 0 then
+		return copySignedDecimalLimbs(a)
+	elseif a.sign == bSign then
+		return makeSignedDecimalLimbs(a.sign, addDecimalLimbs(a.limbs, b.limbs))
+	end
+
+	local comparison = compareDecimalLimbs(a.limbs, b.limbs)
+	if comparison == 0 then
+		local zero = acquireDecimalLimbs(1)
+		zero[1] = 0
+		return makeSignedDecimalLimbs(0, zero)
+	elseif comparison > 0 then
+		return makeSignedDecimalLimbs(a.sign, subtractDecimalLimbs(a.limbs, b.limbs))
+	end
+	return makeSignedDecimalLimbs(bSign, subtractDecimalLimbs(b.limbs, a.limbs))
+end
+
+local function multiplySignedDecimalLimbsSmall(value: SignedDecimalLimbs, multiplier: number): SignedDecimalLimbs
+	if value.sign == 0 or multiplier == 0 then
+		local zero = acquireDecimalLimbs(1)
+		zero[1] = 0
+		return makeSignedDecimalLimbs(0, zero)
+	end
+	local magnitude = multiplyDecimalLimbsSmall(value.limbs, math.abs(multiplier))
+	return makeSignedDecimalLimbs(value.sign * (if multiplier < 0 then -1 else 1), magnitude)
+end
+
+local function signedLinearCombination(
+	values: {SignedDecimalLimbs},
+	weights: {number},
+	denominator: number
+): SignedDecimalLimbs
+	local zero = acquireDecimalLimbs(1)
+	zero[1] = 0
+	local accumulator = makeSignedDecimalLimbs(0, zero)
+	for index = 1, #weights do
+		local term = multiplySignedDecimalLimbsSmall(values[index], weights[index])
+		local nextValue = addSignedDecimalLimbs(accumulator, term)
+		releaseSignedDecimalLimbs(accumulator)
+		releaseSignedDecimalLimbs(term)
+		accumulator = nextValue
+	end
+	local remainder = divideDecimalLimbsSmallInPlace(accumulator.limbs, denominator)
+	if remainder ~= 0 then
+		releaseSignedDecimalLimbs(accumulator)
+		error("CodeNum: Toom-4 interpolation lost exact divisibility", 3)
+	end
+	if accumulator.sign < 0 then
+		releaseSignedDecimalLimbs(accumulator)
+		error("CodeNum: Toom-4 interpolation produced a negative coefficient", 3)
+	end
+	return accumulator
+end
+
+local multiplyDecimalLimbs: (DecimalLimbs, DecimalLimbs) -> DecimalLimbs
+
+@native
+local function multiplyDecimalLimbsBasecase(a: DecimalLimbs, b: DecimalLimbs): DecimalLimbs
+	local result = acquireDecimalLimbs(#a + #b + 1, true)
 	for aIndex = 1, #a do
 		local carry = 0
 		for bIndex = 1, #b do
 			local index = aIndex + bIndex - 1
 			local product = result[index] + a[aIndex] * b[bIndex] + carry
-			result[index] = product % DECIMAL_LIMB_BASE
-			carry = math.floor(product / DECIMAL_LIMB_BASE)
+			local quotient = math.floor(product / DECIMAL_LIMB_BASE)
+			result[index] = product - quotient * DECIMAL_LIMB_BASE
+			carry = quotient
 		end
 		local index = aIndex + #b
 		while carry > 0 do
 			local sum = result[index] + carry
-			result[index] = sum % DECIMAL_LIMB_BASE
-			carry = math.floor(sum / DECIMAL_LIMB_BASE)
+			local quotient = math.floor(sum / DECIMAL_LIMB_BASE)
+			result[index] = sum - quotient * DECIMAL_LIMB_BASE
+			carry = quotient
 			index += 1
 		end
 	end
 	return trimDecimalLimbs(result)
 end
 
+local function addShiftedDecimalLimbs(result: DecimalLimbs, value: DecimalLimbs, offset: number)
+	local carry = 0
+	local index = offset + 1
+	for valueIndex = 1, #value do
+		local sum = result[index] + value[valueIndex] + carry
+		local quotient = math.floor(sum / DECIMAL_LIMB_BASE)
+		result[index] = sum - quotient * DECIMAL_LIMB_BASE
+		carry = quotient
+		index += 1
+	end
+	while carry > 0 do
+		local sum = result[index] + carry
+		local quotient = math.floor(sum / DECIMAL_LIMB_BASE)
+		result[index] = sum - quotient * DECIMAL_LIMB_BASE
+		carry = quotient
+		index += 1
+	end
+end
+
+local function multiplyDecimalLimbsKaratsuba(a: DecimalLimbs, b: DecimalLimbs): DecimalLimbs
+	local split = math.floor(math.max(#a, #b) / 2)
+	local aLow = sliceDecimalLimbs(a, 1, split)
+	local aHigh = sliceDecimalLimbs(a, split + 1, #a)
+	local bLow = sliceDecimalLimbs(b, 1, split)
+	local bHigh = sliceDecimalLimbs(b, split + 1, #b)
+
+	local z0 = multiplyDecimalLimbs(aLow, bLow)
+	local z2 = multiplyDecimalLimbs(aHigh, bHigh)
+	local sumA = addDecimalLimbs(aLow, aHigh)
+	local sumB = addDecimalLimbs(bLow, bHigh)
+	local sumProduct = multiplyDecimalLimbs(sumA, sumB)
+	local withoutLow = subtractDecimalLimbs(sumProduct, z0)
+	local cross = subtractDecimalLimbs(withoutLow, z2)
+
+	local result = acquireDecimalLimbs(#a + #b + 2, true)
+	addShiftedDecimalLimbs(result, z0, 0)
+	addShiftedDecimalLimbs(result, cross, split)
+	addShiftedDecimalLimbs(result, z2, split * 2)
+
+	releaseDecimalLimbs(aLow)
+	releaseDecimalLimbs(aHigh)
+	releaseDecimalLimbs(bLow)
+	releaseDecimalLimbs(bHigh)
+	releaseDecimalLimbs(z0)
+	releaseDecimalLimbs(z2)
+	releaseDecimalLimbs(sumA)
+	releaseDecimalLimbs(sumB)
+	releaseDecimalLimbs(sumProduct)
+	releaseDecimalLimbs(withoutLow)
+	releaseDecimalLimbs(cross)
+	return trimDecimalLimbs(result)
+end
+
+local function evaluateToom4(chunks: {DecimalLimbs}, point: number): SignedDecimalLimbs
+	local result = makeSignedDecimalLimbs(1, copyDecimalLimbs(chunks[1]))
+	local power = 1
+	for index = 2, 4 do
+		power *= point
+		local termMagnitude = multiplyDecimalLimbsSmall(chunks[index], math.abs(power))
+		local term = makeSignedDecimalLimbs(if power < 0 then -1 else 1, termMagnitude)
+		local nextValue = addSignedDecimalLimbs(result, term)
+		releaseSignedDecimalLimbs(result)
+		releaseSignedDecimalLimbs(term)
+		result = nextValue
+	end
+	return result
+end
+
+local function multiplyDecimalLimbsToom4(a: DecimalLimbs, b: DecimalLimbs): DecimalLimbs
+	local chunkSize = math.ceil(math.max(#a, #b) / 4)
+	local aChunks: {DecimalLimbs} = table.create(4) :: {DecimalLimbs}
+	local bChunks: {DecimalLimbs} = table.create(4) :: {DecimalLimbs}
+	for index = 1, 4 do
+		local first = (index - 1) * chunkSize + 1
+		local last = index * chunkSize
+		aChunks[index] = sliceDecimalLimbs(a, first, last)
+		bChunks[index] = sliceDecimalLimbs(b, first, last)
+	end
+
+	local y0 = makeSignedDecimalLimbs(1, multiplyDecimalLimbs(aChunks[1], bChunks[1]))
+	local yInfinity = makeSignedDecimalLimbs(1, multiplyDecimalLimbs(aChunks[4], bChunks[4]))
+	local points = { 1, -1, 2, -2, 3 }
+	local powers6 = { 1, 1, 64, 64, 729 }
+	local evaluatedProducts: {SignedDecimalLimbs} = table.create(5) :: {SignedDecimalLimbs}
+	for index, point in points do
+		local evaluatedA = evaluateToom4(aChunks, point)
+		local evaluatedB = evaluateToom4(bChunks, point)
+		evaluatedProducts[index] = makeSignedDecimalLimbs(
+			evaluatedA.sign * evaluatedB.sign,
+			multiplyDecimalLimbs(evaluatedA.limbs, evaluatedB.limbs)
+		)
+		releaseSignedDecimalLimbs(evaluatedA)
+		releaseSignedDecimalLimbs(evaluatedB)
+	end
+
+	local interpolationValues: {SignedDecimalLimbs} = table.create(6) :: {SignedDecimalLimbs}
+	interpolationValues[1] = copySignedDecimalLimbs(y0)
+	for index = 1, 5 do
+		local scaledInfinity = multiplySignedDecimalLimbsSmall(yInfinity, powers6[index])
+		interpolationValues[index + 1] = addSignedDecimalLimbs(
+			evaluatedProducts[index],
+			scaledInfinity,
+			true
+		)
+		releaseSignedDecimalLimbs(scaledInfinity)
+	end
+
+	local weights = {
+		{ -40, 120, -60, -30, 6, 4 },
+		{ -150, 80, 80, -5, -5, 0 },
+		{ 50, -70, -5, 35, -5, -5 },
+		{ 30, -20, -20, 5, 5, 0 },
+		{ -10, 10, 5, -5, -1, 1 },
+	}
+	local coefficients: {SignedDecimalLimbs} = table.create(7) :: {SignedDecimalLimbs}
+	coefficients[1] = copySignedDecimalLimbs(y0)
+	for index = 1, 5 do
+		coefficients[index + 1] = signedLinearCombination(interpolationValues, weights[index], 120)
+	end
+	coefficients[7] = copySignedDecimalLimbs(yInfinity)
+
+	local result = acquireDecimalLimbs(#a + #b + 2, true)
+	for index = 1, 7 do
+		local coefficient = coefficients[index]
+		addShiftedDecimalLimbs(result, coefficient.limbs, (index - 1) * chunkSize)
+		releaseSignedDecimalLimbs(coefficient)
+	end
+
+	releaseSignedDecimalLimbs(y0)
+	releaseSignedDecimalLimbs(yInfinity)
+	for index = 1, 5 do
+		releaseSignedDecimalLimbs(evaluatedProducts[index])
+	end
+	for index = 1, 6 do
+		releaseSignedDecimalLimbs(interpolationValues[index])
+	end
+	for index = 1, 4 do
+		releaseDecimalLimbs(aChunks[index])
+		releaseDecimalLimbs(bChunks[index])
+	end
+	return trimDecimalLimbs(result)
+end
+
+local function multiplyDecimalLimbsBlocked(a: DecimalLimbs, b: DecimalLimbs): DecimalLimbs
+	local longer = if #a >= #b then a else b
+	local shorter = if #a >= #b then b else a
+	local chunkSize = #shorter
+	local result = acquireDecimalLimbs(#a + #b + 2, true)
+	for first = 1, #longer, chunkSize do
+		local chunk = sliceDecimalLimbs(longer, first, first + chunkSize - 1)
+		local partial = multiplyDecimalLimbs(chunk, shorter)
+		addShiftedDecimalLimbs(result, partial, first - 1)
+		releaseDecimalLimbs(chunk)
+		releaseDecimalLimbs(partial)
+	end
+	return trimDecimalLimbs(result)
+end
+
+multiplyDecimalLimbs = function(a: DecimalLimbs, b: DecimalLimbs): DecimalLimbs
+	trimDecimalLimbs(a)
+	trimDecimalLimbs(b)
+	local smallerLength = math.min(#a, #b)
+	local largerLength = math.max(#a, #b)
+	if smallerLength < DECIMAL_KARATSUBA_THRESHOLD then
+		return multiplyDecimalLimbsBasecase(a, b)
+	elseif largerLength > smallerLength * 2 then
+		return multiplyDecimalLimbsBlocked(a, b)
+	elseif largerLength >= DECIMAL_TOOM4_THRESHOLD then
+		return multiplyDecimalLimbsToom4(a, b)
+	end
+	return multiplyDecimalLimbsKaratsuba(a, b)
+end
+
 local function divideDecimalLimbs(dividend: DecimalLimbs, divisor: DecimalLimbs): (DecimalLimbs, DecimalLimbs)
-	if #divisor == 1 and divisor[1] == 0 then
+	if isZeroDecimalLimbs(divisor) then
 		error("CodeNum: internal coefficient division by zero", 3)
 	end
-	local quotient: DecimalLimbs = table.create(#dividend, 0) :: DecimalLimbs
-	local remainder: DecimalLimbs = { 0 }
-	for index = #dividend, 1, -1 do
-		local shifted: DecimalLimbs = table.create(#remainder + 1) :: DecimalLimbs
-		shifted[1] = dividend[index]
-		for limbIndex = 1, #remainder do
-			shifted[limbIndex + 1] = remainder[limbIndex]
-		end
-		remainder = trimDecimalLimbs(shifted)
-
-		local low = 0
-		local high = DECIMAL_LIMB_BASE - 1
-		local quotientDigit = 0
-		while low <= high do
-			local candidate = math.floor((low + high) / 2)
-			local product = multiplyDecimalLimbsSmall(divisor, candidate)
-			local comparison = compareDecimalLimbs(product, remainder)
-			if comparison <= 0 then
-				quotientDigit = candidate
-				low = candidate + 1
-			else
-				high = candidate - 1
-			end
-		end
-		quotient[index] = quotientDigit
-		if quotientDigit > 0 then
-			remainder = subtractDecimalLimbs(
-				remainder,
-				multiplyDecimalLimbsSmall(divisor, quotientDigit)
-			)
-		end
+	if compareDecimalLimbs(dividend, divisor) < 0 then
+		local quotient = acquireDecimalLimbs(1)
+		quotient[1] = 0
+		return quotient, copyDecimalLimbs(dividend)
 	end
+	if #divisor == 1 then
+		local quotient = copyDecimalLimbs(dividend)
+		local remainder = divideDecimalLimbsSmallInPlace(quotient, divisor[1])
+		local remainderLimbs = acquireDecimalLimbs(1)
+		remainderLimbs[1] = remainder
+		return trimDecimalLimbs(quotient), remainderLimbs
+	end
+
+	local normalization = math.floor(DECIMAL_LIMB_BASE / (divisor[#divisor] + 1))
+	local normalizedDividend = multiplyDecimalLimbsSmall(dividend, normalization)
+	local normalizedDivisor = multiplyDecimalLimbsSmall(divisor, normalization)
+	local divisorLength = #normalizedDivisor
+	local quotientOffset = #normalizedDividend - divisorLength
+	for index = #normalizedDividend + 1, quotientOffset + divisorLength + 1 do
+		normalizedDividend[index] = 0
+	end
+
+	local quotient = acquireDecimalLimbs(quotientOffset + 1, true)
+	local inverseTop = 1 / normalizedDivisor[divisorLength]
+	for offset = quotientOffset, 0, -1 do
+		local top = normalizedDividend[offset + divisorLength + 1] * DECIMAL_LIMB_BASE
+			+ normalizedDividend[offset + divisorLength]
+		local quotientDigit = math.floor(top * inverseTop)
+		if quotientDigit >= DECIMAL_LIMB_BASE then
+			quotientDigit = DECIMAL_LIMB_BASE - 1
+		end
+		while quotientDigit > 0
+			and quotientDigit * normalizedDivisor[divisorLength] > top do
+			quotientDigit -= 1
+		end
+		while quotientDigit < DECIMAL_LIMB_BASE - 1
+			and (quotientDigit + 1) * normalizedDivisor[divisorLength] <= top do
+			quotientDigit += 1
+		end
+		local remainderEstimate = top - quotientDigit * normalizedDivisor[divisorLength]
+
+		while remainderEstimate < DECIMAL_LIMB_BASE
+			and quotientDigit * normalizedDivisor[divisorLength - 1]
+				> remainderEstimate * DECIMAL_LIMB_BASE
+					+ normalizedDividend[offset + divisorLength - 1] do
+			quotientDigit -= 1
+			remainderEstimate += normalizedDivisor[divisorLength]
+		end
+
+		local borrow = 0
+		for index = 1, divisorLength do
+			local product = quotientDigit * normalizedDivisor[index] + borrow
+			local productHigh = math.floor(product / DECIMAL_LIMB_BASE)
+			local productLow = product - productHigh * DECIMAL_LIMB_BASE
+			local difference = normalizedDividend[offset + index] - productLow
+			borrow = productHigh
+			if difference < 0 then
+				difference += DECIMAL_LIMB_BASE
+				borrow += 1
+			end
+			normalizedDividend[offset + index] = difference
+		end
+
+		local topDifference = normalizedDividend[offset + divisorLength + 1] - borrow
+		if topDifference < 0 then
+			quotientDigit -= 1
+			local carry = 0
+			for index = 1, divisorLength do
+				local sum = normalizedDividend[offset + index]
+					+ normalizedDivisor[index] + carry
+				if sum >= DECIMAL_LIMB_BASE then
+					sum -= DECIMAL_LIMB_BASE
+					carry = 1
+				else
+					carry = 0
+				end
+				normalizedDividend[offset + index] = sum
+			end
+			topDifference += carry
+		end
+		if topDifference < 0 or topDifference >= DECIMAL_LIMB_BASE then
+			releaseDecimalLimbs(quotient)
+			releaseDecimalLimbs(normalizedDividend)
+			releaseDecimalLimbs(normalizedDivisor)
+			error("CodeNum: normalized division correction invariant failed", 3)
+		end
+		normalizedDividend[offset + divisorLength + 1] = topDifference
+		quotient[offset + 1] = quotientDigit
+	end
+
+	local remainder = sliceDecimalLimbs(normalizedDividend, 1, divisorLength)
+	local unnormalizationRemainder = divideDecimalLimbsSmallInPlace(remainder, normalization)
+	if unnormalizationRemainder ~= 0 then
+		releaseDecimalLimbs(quotient)
+		releaseDecimalLimbs(remainder)
+		releaseDecimalLimbs(normalizedDividend)
+		releaseDecimalLimbs(normalizedDivisor)
+		error("CodeNum: normalized division remainder was not exactly reversible", 3)
+	end
+
+	releaseDecimalLimbs(normalizedDividend)
+	releaseDecimalLimbs(normalizedDivisor)
 	return trimDecimalLimbs(quotient), trimDecimalLimbs(remainder)
 end
 
@@ -1893,9 +2326,13 @@ local function preciseMultiplyOperands(
 		end
 		return zero
 	end
-	local product = decimalLimbsToString(
-		multiplyDecimalLimbs(decimalStringToLimbs(aParts.digits), decimalStringToLimbs(bParts.digits))
-	)
+	local aLimbs = decimalStringToLimbs(aParts.digits)
+	local bLimbs = decimalStringToLimbs(bParts.digits)
+	local productLimbs = multiplyDecimalLimbs(aLimbs, bLimbs)
+	local product = decimalLimbsToString(productLimbs)
+	releaseDecimalLimbs(aLimbs)
+	releaseDecimalLimbs(bLimbs)
+	releaseDecimalLimbs(productLimbs)
 	local expIsBig, expSmall, expSign, expLength, expData = exponentAdd(
 		aParts.expIsBig, aParts.expSmall, aParts.expSign, aParts.expLength, aParts.expData,
 		bParts.expIsBig, bParts.expSmall, bParts.expSign, bParts.expLength, bParts.expData,
@@ -1965,15 +2402,19 @@ local function preciseDivideOperands(
 	if #numeratorText > MAX_PRECISE_TEMP_DIGITS or #denominatorText > MAX_PRECISE_TEMP_DIGITS then
 		error("CodeNum: precise division exceeds temporary coefficient capacity", 3)
 	end
-	local quotient, remainder = divideDecimalLimbs(
-		decimalStringToLimbs(numeratorText),
-		decimalStringToLimbs(denominatorText)
-	)
+	local numerator = decimalStringToLimbs(numeratorText)
+	local denominator = decimalStringToLimbs(denominatorText)
+	local quotient, remainder = divideDecimalLimbs(numerator, denominator)
+	releaseDecimalLimbs(numerator)
+
 	local twiceRemainder = multiplyDecimalLimbsSmall(remainder, 2)
-	local roundingComparison = compareDecimalLimbs(twiceRemainder, decimalStringToLimbs(denominatorText))
+	local roundingComparison = compareDecimalLimbs(twiceRemainder, denominator)
+	releaseDecimalLimbs(twiceRemainder)
 	local lastDigit = quotient[1] % 10
 	if roundingComparison > 0 or (roundingComparison == 0 and lastDigit % 2 == 1) then
-		quotient = addDecimalLimbs(quotient, { 1 })
+		local incrementedQuotient = addDecimalLimbs(quotient, { 1 })
+		releaseDecimalLimbs(quotient)
+		quotient = incrementedQuotient
 	end
 
 	local bNegIsBig, bNegSmall, bNegSign = negateExponent(
@@ -1990,10 +2431,14 @@ local function preciseDivideOperands(
 		nil
 	)
 	local resultWasRounded = aParts.wasRounded or bParts.wasRounded
-		or compareDecimalLimbs(remainder, { 0 }) ~= 0
+		or not isZeroDecimalLimbs(remainder)
+	local resultDigits = decimalLimbsToString(quotient)
+	releaseDecimalLimbs(quotient)
+	releaseDecimalLimbs(remainder)
+	releaseDecimalLimbs(denominator)
 	return makePrecise(
 		aParts.sign * bParts.sign,
-		decimalLimbsToString(quotient),
+		resultDigits,
 		scaleIsBig, scaleSmall, scaleSign, scaleLength, scaleData,
 		precision, destination, nil, resultWasRounded
 	)

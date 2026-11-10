@@ -477,4 +477,53 @@ for _, operation in invalid_precision_operations do
 	assert(not pcall(operation), "invalid precision was accepted by an arithmetic operation")
 end
 
+
+local toom_operand_digits = 1600
+local toom_operand_text = string.rep("9", toom_operand_digits)
+local toom_operand = CodeNum.fromInteger(toom_operand_text)
+local toom_square = CodeNum.mul(toom_operand, toom_operand, toom_operand_digits * 2)
+local toom_square_expected = string.rep("9", toom_operand_digits - 1)
+	.. "8"
+	.. string.rep("0", toom_operand_digits - 1)
+	.. "1"
+local toom_square_actual = CodeNum.toString(toom_square)
+local toom_mismatch_index = 1
+while toom_mismatch_index <= math.min(#toom_square_actual, #toom_square_expected)
+	and string.sub(toom_square_actual, toom_mismatch_index, toom_mismatch_index)
+		== string.sub(toom_square_expected, toom_mismatch_index, toom_mismatch_index) do
+	toom_mismatch_index += 1
+end
+assert(CodeNum.compare(toom_square, CodeNum.fromInteger(toom_square_expected)) == 0,
+	"adaptive large-coefficient multiplication changed an exact square")
+assert(CodeNum.compare(
+	CodeNum.mul(CodeNum.fromInteger("-" .. toom_operand_text), toom_operand, toom_operand_digits * 2),
+	CodeNum.fromInteger("-" .. toom_square_expected)
+) == 0, "adaptive large-coefficient multiplication changed a negative product")
+
+
+local division_left = CodeNum.fromInteger(string.rep("9", 900))
+local division_right = CodeNum.fromInteger(string.rep("8", 500))
+local division_product = CodeNum.mul(division_left, division_right, 1400)
+local division_recovered = CodeNum.div(division_product, division_right, 900)
+assert(CodeNum.compare(division_recovered, division_left) == 0,
+	"normalized multiprecision division did not recover an exact quotient")
+
+local division_left_large = CodeNum.fromInteger(string.rep("7", 1900))
+local division_right_large = CodeNum.fromInteger(string.rep("9", 1900))
+local division_product_large = CodeNum.mul(division_left_large, division_right_large, 3800)
+local division_recovered_large = CodeNum.div(division_product_large, division_right_large, 1900)
+assert(CodeNum.compare(division_recovered_large, division_left_large) == 0,
+	"large normalized division failed across the multi-limb quotient path")
+
+for iteration = 1, 12 do
+	local leftDigits = 100 + iteration * 73
+	local rightDigits = 80 + iteration * 41
+	local leftValue = CodeNum.fromInteger(string.rep("9", leftDigits))
+	local rightValue = CodeNum.fromInteger(string.rep("7", rightDigits))
+	local productValue = CodeNum.mul(leftValue, rightValue, leftDigits + rightDigits)
+	local quotientValue = CodeNum.div(productValue, rightValue, leftDigits)
+	assert(CodeNum.compare(quotientValue, leftValue) == 0,
+		"pooled adaptive arithmetic changed a repeated multiply/divide result")
+end
+
 print("[CodeNum 0.6.0] native, Wide, precise arithmetic, range, codec, and register regressions passed")
