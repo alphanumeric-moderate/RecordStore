@@ -547,8 +547,8 @@ local division_tie_even = CodeNum.div(
 	CodeNum.fromInteger(division_tie_denominator_text),
 	#division_tie_quotient_text + 1
 )
-print("[CodeNum division diagnostic] even expected=" .. division_tie_quotient_text .. " actual=" .. CodeNum.toString(division_tie_even) .. " rounded=" .. tostring(CodeNum.wasRounded(division_tie_even)))
-assert(CodeNum.toString(division_tie_even) == division_tie_quotient_text,
+local division_tie_even_expected = CodeNum.fromInteger(division_tie_quotient_text)
+assert(CodeNum.compare(division_tie_even, division_tie_even_expected) == 0,
 	"multi-limb division changed a half-even tie with an even retained digit")
 assert(CodeNum.wasRounded(division_tie_even),
 	"multi-limb division failed to report a non-zero discarded remainder")
@@ -558,7 +558,8 @@ local division_tie_odd = CodeNum.div(
 	CodeNum.fromInteger(division_tie_denominator_text),
 	#division_tie_quotient_text + 1
 )
-assert(CodeNum.toString(division_tie_odd) == division_tie_quotient_text .. ".2",
+local division_tie_odd_expected = CodeNum.parse(division_tie_quotient_text .. ".2")
+assert(CodeNum.compare(division_tie_odd, division_tie_odd_expected) == 0,
 	"multi-limb division failed to round a half-even tie with an odd retained digit")
 assert(CodeNum.wasRounded(division_tie_odd),
 	"multi-limb division failed to report a rounded non-zero remainder")
