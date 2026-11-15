@@ -547,6 +547,7 @@ local division_tie_even = CodeNum.div(
 	CodeNum.fromInteger(division_tie_denominator_text),
 	#division_tie_quotient_text + 1
 )
+print("[CodeNum division diagnostic] even expected=" .. division_tie_quotient_text .. " actual=" .. CodeNum.toString(division_tie_even) .. " rounded=" .. tostring(CodeNum.wasRounded(division_tie_even)))
 assert(CodeNum.toString(division_tie_even) == division_tie_quotient_text,
 	"multi-limb division changed a half-even tie with an even retained digit")
 assert(CodeNum.wasRounded(division_tie_even),
