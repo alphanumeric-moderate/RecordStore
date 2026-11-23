@@ -61,6 +61,34 @@ assert(record:Get().negative == -math.huge)
 assert(math.isnan(record:Get().not_a_number))
 ```
 
+## Record mutations
+
+`Record:Update(callback)` remains the general-purpose mutation API. It gives the callback an isolated working copy and detaches the returned value before publication, so callbacks may perform arbitrary supported table mutations without sharing caller-owned references.
+
+`Record:Patch(operations)` is an opt-in path-based alternative for table-backed record roots. It applies a non-empty, dense list of at most 128 operations in order. Each path contains 1 to 64 string dictionary keys or positive integer array indices.
+
+```lua
+local status, message = record:Patch({
+    { op = "set", path = { "Stats", "Coins" }, value = 125 },
+    { op = "set", path = { "Inventory", 1, "Count" }, value = 5 },
+    { op = "remove", path = { "Settings", "Music" } },
+    { op = "remove", path = { "Tags", 2 } },
+})
+assert(status == "success", message)
+```
+
+Patch operations have these rules:
+
+- Intermediate path segments must refer to existing tables. A `set` may add or replace a dictionary field; on arrays it may replace an existing element or append at the next index only.
+- `remove` requires an existing field or array element. Removing an array element compacts the array and shifts later elements left.
+- Root replacement/removal is not supported. The record root must be a table.
+- Operations are sequential but atomic with respect to publication: invalid paths, invalid values, shape failures, or custom-validator rejection leave the current record data unchanged.
+- Values supplied to `set` are defensively copied. The resulting public `Record.Data` tree remains isolated from previous public references; Patch does not expose shared copy-on-write subtrees.
+- The implementation copies the root and each touched ancestor only on first write. Weak-key summaries for private immutable subtrees cache node count, maximum depth, non-finite presence, and a conservative serialized-size lower bound.
+- The lower bound can reject an oversized result early but never authorizes persistence. Patch still builds a detached public data tree, runs the configured validator, and uses exact JSON encoding as the final size authority. Public `Record.Data` mutations are not trusted by the cache; external-mutation tracking validates and rebuilds the private baseline.
+
+Use `Patch` when a mutation can be expressed as a small set of explicit path operations, especially when a large profile changes only a few paths. Use `Update` when a callback or arbitrary structural edits are more natural. Both APIs share persistence, change-observation, dirty tracking, and save scheduling semantics; `Update` retains its existing contract.
+
 ## PlayerData modules
 
 The repository also includes:

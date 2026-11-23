@@ -45,6 +45,98 @@ local good_policy, policy_error = policy:SetPolicy({
 })
 assert(good_policy, "valid policy was rejected: " .. tostring(policy_error))
 
+-- FIFO tracks the earliest eligible item without materializing a candidate row for each queue entry.
+-- The configured high-lane burst still yields to normal work, but only when lower-priority work exists.
+local fifo_burst = new_scheduler()
+local fifo_burst_policy = fifo_burst:Stats().policy
+assert(fifo_burst:SetPolicy({
+	revision = fifo_burst_policy.revision + 1,
+	algorithm = "fifo",
+	high_burst = 2,
+}), "FIFO burst policy was rejected")
+enqueue(fifo_burst, { id = "fifo-high-first", owner_id = "fifo-high-owner-1", lane = "high" })
+enqueue(fifo_burst, { id = "fifo-high-second", owner_id = "fifo-high-owner-2", lane = "high" })
+enqueue(fifo_burst, { id = "fifo-high-third", owner_id = "fifo-high-owner-3", lane = "high" })
+enqueue(fifo_burst, { id = "fifo-normal", owner_id = "fifo-normal-owner", lane = "normal" })
+take(fifo_burst, "fifo-high-first")
+take(fifo_burst, "fifo-high-second")
+take(fifo_burst, "fifo-normal")
+take(fifo_burst, "fifo-high-third")
+
+-- Without non-high work, the high-burst guard must not strand eligible high-lane items.
+local fifo_high_only = new_scheduler()
+local fifo_high_policy = fifo_high_only:Stats().policy
+assert(fifo_high_only:SetPolicy({
+	revision = fifo_high_policy.revision + 1,
+	algorithm = "fifo",
+	high_burst = 2,
+}), "FIFO high-only policy was rejected")
+for index = 1, 3 do
+	enqueue(fifo_high_only, {
+		id = "fifo-high-only-" .. tostring(index),
+		owner_id = "fifo-high-only-owner-" .. tostring(index),
+		lane = "high",
+	})
+end
+take(fifo_high_only, "fifo-high-only-1")
+take(fifo_high_only, "fifo-high-only-2")
+take(fifo_high_only, "fifo-high-only-3")
+
+-- Weighted and deadline candidate selection must preserve high-burst fallback.
+for _, algorithm in ipairs({ "weighted", "deadline" }) do
+	local burst = new_scheduler()
+	local burst_policy = burst:Stats().policy
+	assert(burst:SetPolicy({
+		revision = burst_policy.revision + 1,
+		algorithm = algorithm,
+		high_burst = 1,
+	}), algorithm .. " high-burst policy was rejected")
+	enqueue(burst, {
+		id = algorithm .. "-high-first",
+		owner_id = algorithm .. "-high-owner-1",
+		lane = "high",
+		service_class = "normal",
+	})
+	enqueue(burst, {
+		id = algorithm .. "-high-second",
+		owner_id = algorithm .. "-high-owner-2",
+		lane = "high",
+		service_class = "normal",
+	})
+	enqueue(burst, {
+		id = algorithm .. "-normal-after-burst",
+		owner_id = algorithm .. "-normal-owner",
+		lane = "normal",
+		service_class = "normal",
+	})
+	take(burst, algorithm .. "-high-first")
+	take(burst, algorithm .. "-normal-after-burst")
+	take(burst, algorithm .. "-high-second")
+end
+
+-- DRR uses the same high-burst exclusion while retaining deterministic lane rotation.
+local drr_high_burst = new_scheduler()
+local drr_high_burst_policy = drr_high_burst:Stats().policy
+assert(drr_high_burst:SetPolicy({
+	revision = drr_high_burst_policy.revision + 1,
+	algorithm = "drr",
+	high_burst = 1,
+}), "DRR high-burst policy was rejected")
+enqueue(drr_high_burst, {
+	id = "drr-high-first",
+	owner_id = "a-high-owner",
+	lane = "high",
+	service_class = "normal",
+})
+enqueue(drr_high_burst, {
+	id = "drr-normal-after-burst",
+	owner_id = "z-norm-owner",
+	lane = "normal",
+	service_class = "normal",
+})
+take(drr_high_burst, "drr-high-first")
+take(drr_high_burst, "drr-normal-after-burst")
+
 -- DRR shares service across equally weighted owner/work-class lanes.
 local fair = new_scheduler()
 for index = 1, 5 do
@@ -1819,6 +1911,121 @@ end
 assert(read_only_read_ran, "explicitly non-mutating work was blocked in read-only mode")
 assert(read_only_governor:Stats().stats.rejected >= 1, "read-only rejection was not measured")
 read_only_dispatcher:Close()
+
+-- Cached terminal-admission preflight must be invalidated by a policy revision.
+do
+	local revisioned_preflight = new_scheduler()
+	local available_at = now_ms + 10
+	enqueue(revisioned_preflight, {
+		id = "revisioned-admission-preflight",
+		owner_id = "revisioned-admission-owner",
+		lane = "normal",
+		work_class = "maintenance",
+		operation_class = "tracing",
+		mutating = true,
+		available_at_ms = available_at,
+	})
+	local early_item, early_status = revisioned_preflight:TakeNext()
+	assert(early_item == nil and early_status == "empty"
+		and revisioned_preflight:Stats().queue_items == 1,
+		"future-due work did not remain queued after its initial admission preflight")
+
+	local policy = revisioned_preflight:Stats().policy
+	assert(revisioned_preflight:SetPolicy({
+		revision = policy.revision + 1,
+		mode = "read_only",
+	}), "read-only policy change was rejected")
+	now_ms = available_at
+	local rejected_item, rejected_status = revisioned_preflight:TakeNext()
+	assert(rejected_item ~= nil and rejected_status == "admission_rejected"
+		and rejected_item.terminal_result.code == "read_only",
+		"cached preflight ignored a policy revision that made queued mutation terminal")
+	assert(rejected_item.admission_preflight_policy_revision == nil
+		and rejected_item.admission_preflight_batch_count == nil
+		and rejected_item.admission_preflight_terminal_result == nil,
+		"internal admission-cache metadata leaked into the returned work item")
+	assert(revisioned_preflight:Stats().queue_items == 0,
+		"policy-revision admission rejection left the terminal item queued")
+end
+
+-- Admission preflight caching preserves bounded operation-metric registration order.
+do
+	local metric_order = new_scheduler()
+	for index = 1, 21 do
+		enqueue(metric_order, {
+			id = "metric-order-" .. tostring(index),
+			owner_id = "metric-order-owner-" .. tostring(index),
+			lane = "normal",
+			work_class = "maintenance",
+			operation_class = "custom-operation-" .. tostring(index),
+			available_at_ms = now_ms + 10,
+		})
+	end
+	assert(next(metric_order.operation_kind_keys) == nil,
+		"Enqueue registered operation metric labels before queue preflight")
+	local selected, status = metric_order:TakeNext()
+	assert(selected == nil and status == "empty",
+		"future-due metric-order fixture unexpectedly selected work")
+	assert(metric_order.operation_kind_keys["custom-operation-21"] == "custom-operation-21"
+		and metric_order.operation_kind_keys["custom-operation-3"] == "custom-operation-3"
+		and metric_order.operation_kind_keys["custom-operation-2"] == nil
+		and metric_order.operation_kind_keys["custom-operation-1"] == nil,
+		"cached admission preflight changed bounded operation-metric registration order")
+end
+
+-- Batchable items defer metric registration until batch sizing during TakeNext.
+do
+	local batch_metric_order = new_scheduler()
+	enqueue(batch_metric_order, {
+		id = "batch-metric-order",
+		owner_id = "batch-metric-order-owner",
+		lane = "normal",
+		work_class = "maintenance",
+		operation_class = "custom-batch-operation",
+		batchable = true,
+		batch_size = 4,
+		batch_backlog = 4,
+		available_at_ms = now_ms + 10,
+	})
+	assert(next(batch_metric_order.operation_kind_keys) == nil,
+		"batchable Enqueue registered an operation metric before selected batch sizing")
+	local selected, status = batch_metric_order:TakeNext()
+	assert(selected == nil and status == "empty"
+		and batch_metric_order.operation_kind_keys["custom-batch-operation"] == "custom-batch-operation",
+		"batchable preflight did not register its operation metric during TakeNext")
+end
+
+-- A transient circuit opening is not a cached terminal admission result.
+do
+	local transient_preflight = new_scheduler()
+	for _ = 1, 5 do
+		transient_preflight:Observe("tracing", false, 1, "transient")
+	end
+	enqueue(transient_preflight, {
+		id = "transient-circuit-preflight",
+		owner_id = "transient-circuit-owner",
+		lane = "normal",
+		work_class = "maintenance",
+		operation_class = "tracing",
+	})
+	local circuit_blocked_item, circuit_blocked_status = transient_preflight:TakeNext()
+	assert(circuit_blocked_item == nil and circuit_blocked_status == "empty"
+		and transient_preflight:Stats().queue_items == 1,
+		"open circuit incorrectly turned transient admission backpressure into terminal rejection")
+	local circuit_cooldown_ms = transient_preflight:Stats().policy.circuit_cooldown_ms
+	now_ms += circuit_cooldown_ms + 1
+	local recovered_item, recovered_status = transient_preflight:TakeNext()
+	assert(recovered_item ~= nil and recovered_status == "success"
+		and recovered_item.id == "transient-circuit-preflight",
+		"transient circuit preflight remained terminal after its cooldown elapsed")
+	local probe = transient_preflight:Admit("maintenance", "tracing", 1, true, false)
+	assert(probe.code == "admitted" and probe.probe == true,
+		"recovered circuit did not reserve a half-open probe")
+	transient_preflight:Observe("tracing", true, 1)
+	assert(transient_preflight:Release(probe), "successful half-open probe did not release its admission ticket")
+	assert(transient_preflight:MarkCompleted(recovered_item.id, "committed"),
+		"recovered circuit work did not complete")
+end
 
 -- Budget backpressure retains work and resumes after a fresh budget observation.
 local budget_governor = new_scheduler()

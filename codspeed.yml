@@ -84,4 +84,22 @@ benchmarks:
   - name: "wake-up acceleration event deduplication and capacity retention (10,000 messages)"
     exec: lune run bench/acceleration_event_dedup.bench.luau
 
+  - name: "scheduler first-selection scaling (128 to 8192 queued items)"
+    exec: lune run bench/scheduler_backlog_scaling.bench.luau
+
+  - name: "RecordStore Update copy and validation (large profile, 32 updates)"
+    exec: lune run bench/update_validation_pipeline.bench.luau
+
+  - name: "RecordStore Patch copy and validation (large profile, 32 updates)"
+    exec: lune run bench/patch_update_pipeline.bench.luau
+
+  - name: "PlayerData.Set path lookup"
+    exec: lune run bench/playerdata_set_paths.bench.luau
+
+  - name: "V2 process-local trace ring (40,000 events)"
+    exec: lune run bench/v2_trace_ring.bench.luau
+
+  - name: "V2 read coalescer cache churn (20,000 keys)"
+    exec: lune run bench/v2_read_coalescer.bench.luau
+
 # Correctness regressions run in luau-regression.yml; do not instrument them as performance benchmarks.

@@ -1042,8 +1042,8 @@ local function new(dependencies: Dependencies?): Controller
 				acceleration_module = acceleration_factory,
 			})
 			if type(v2_api) ~= "table"
-				or type(v2_api.Mailbox) ~= "table"
-				or type(v2_api.Mailbox.new) ~= "function"
+				or type(v2_api.MailboxV2) ~= "table"
+				or type(v2_api.MailboxV2.new) ~= "function"
 				or type(v2_api.Canonicalize) ~= "function"
 			then
 				error("RecordStoreV2 returned an incomplete mailbox wake-up API")
@@ -1181,7 +1181,7 @@ local function new(dependencies: Dependencies?): Controller
 		end
 
 		local mailbox_call_ok, mailbox = pcall(function()
-			return recordstore_v2.Mailbox.new(store, owner, {
+			return recordstore_v2.MailboxV2.new(store, owner, {
 				active_record = record,
 				activation_guard = function(_operation: string)
 					local allowed = sessions[player] == record
@@ -1364,8 +1364,8 @@ local function new(dependencies: Dependencies?): Controller
 				end
 			end
 
-			local batch = table.clone(pending)
-			table.clear(pending)
+			local batch = pending
+			pending_changes[record] = {}
 			local call_ok, result, message = pcall(function()
 				return record:Update(function(current)
 					if type(current) ~= "table" then

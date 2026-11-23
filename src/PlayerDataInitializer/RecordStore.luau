@@ -441,7 +441,7 @@ do
 			end
 			return true
 		end
-		local function admission_decision(self: EmbeddedSchedulerDynamicRecord, work_class: any, request_kind: any, cost: any, mutating: any, critical_override: any, dimensions: any): (EmbeddedSchedulerDynamicRecord, boolean, boolean)
+		local function admission_decision(self: EmbeddedSchedulerDynamicRecord, work_class: any, request_kind: any, cost: any, mutating: any, critical_override: any, dimensions: any, register_operation_kind: boolean?, skip_terminal_checks: boolean?): (EmbeddedSchedulerDynamicRecord, boolean, boolean)
 			if work_class == nil then work_class = "interactive" end
 			if request_kind == nil then request_kind = "default" end
 			if cost == nil then cost = 1 end
@@ -461,67 +461,75 @@ do
 			if not valid_text(request_kind, 128) then
 				return { code = "invalid", terminal = true, message = "request_kind must be 1..128 bytes" }, false, false
 			end
-			request_kind = operation_metric_key(self, request_kind)
-			if not finite(cost) or math.floor(cost) ~= cost or cost < 1 or cost > self.policy.max_item_cost then
-				return { code = "invalid", terminal = true, message = "cost must be an integer within max_item_cost" }, false, false
+			if register_operation_kind ~= false then
+				request_kind = operation_metric_key(self, request_kind)
 			end
-			if dimensions == nil then
-				dimensions = estimate_dimensions({ operation_class = request_kind })
-			elseif type(dimensions) ~= "table" then
-				return { code = "invalid", terminal = true, message = "dimensions must be a table" }, false, false
-			end
-			for field in pairs(dimensions) do
-				if field ~= "read_units" and field ~= "write_units"
-					and field ~= "estimated_bytes" and field ~= "handler_slots"
-				then
-					return { code = "invalid", terminal = true, message = "unsupported admission dimension: " .. tostring(field) }, false, false
-				end
-			end
-			if dimensions.read_units == nil or dimensions.write_units == nil
-				or dimensions.estimated_bytes == nil or dimensions.handler_slots == nil
-			then
-				return {
-					code = "invalid", terminal = true,
-					message = "dimensions must explicitly provide read_units, write_units, estimated_bytes, and handler_slots",
-				}, false, false
-			end
-			local read_units = dimensions.read_units
-			local write_units = dimensions.write_units
-			local estimated_bytes = dimensions.estimated_bytes
-			local handler_slots = dimensions.handler_slots
-			if not finite(read_units) or read_units < 0 or math.floor(read_units) ~= read_units
-				or not finite(write_units) or write_units < 0 or math.floor(write_units) ~= write_units
-				or not finite(estimated_bytes) or estimated_bytes < 0 or math.floor(estimated_bytes) ~= estimated_bytes
-				or not finite(handler_slots) or handler_slots < 1 or math.floor(handler_slots) ~= handler_slots
-			then
-				return { code = "invalid", terminal = true, message = "invalid multi-dimensional admission estimate" }, false, false
-			end
-			if read_units > self.policy.max_read_units_in_flight then
-				return { code = "capacity", terminal = true, message = "work item exceeds the StandardRead admission cap" }, false, true
-			end
-			if write_units > self.policy.max_write_units_in_flight then
-				return { code = "capacity", terminal = true, message = "work item exceeds the StandardWrite admission cap" }, false, true
-			end
-			if estimated_bytes > self.policy.max_estimated_bytes_in_flight then
-				return { code = "capacity", terminal = true, message = "work item exceeds the estimated byte admission cap" }, false, true
-			end
-			if handler_slots > self.policy.max_handler_slots_in_flight then
-				return { code = "capacity", terminal = true, message = "work item exceeds the handler-slot admission cap" }, false, true
-			end
+			local read_units = if type(dimensions) == "table" then dimensions.read_units else nil
+			local write_units = if type(dimensions) == "table" then dimensions.write_units else nil
+			local estimated_bytes = if type(dimensions) == "table" then dimensions.estimated_bytes else nil
+			local handler_slots = if type(dimensions) == "table" then dimensions.handler_slots else nil
 			local critical = critical_override == true or work_class == "critical"
 				or work_class == "profile_save" or work_class == "profile_release"
-			local class_limit = math.min(limits[work_class] or limits.interactive, self.policy.max_in_flight)
-			if cost > self.policy.max_in_flight then
-				return { code = "capacity", terminal = true, message = "work item cost exceeds max_in_flight" }, false, true
-			end
-			if cost > class_limit then
-				return { code = "capacity", terminal = true, message = "work item cost exceeds its work-class admission cap" }, false, true
-			end
-			if self.policy.mode == "read_only" and mutating and not critical then
-				return { code = "read_only", terminal = true, message = "mutating noncritical work is disabled" }, false, true
-			end
-			if self.policy.mode == "reject_noncritical" and not critical then
-				return { code = "backpressure", terminal = true, message = "scheduler policy rejects noncritical work" }, false, true
+			if skip_terminal_checks ~= true then
+				if not finite(cost) or math.floor(cost) ~= cost or cost < 1 or cost > self.policy.max_item_cost then
+					return { code = "invalid", terminal = true, message = "cost must be an integer within max_item_cost" }, false, false
+				end
+				if dimensions == nil then
+					dimensions = estimate_dimensions({ operation_class = request_kind })
+				elseif type(dimensions) ~= "table" then
+					return { code = "invalid", terminal = true, message = "dimensions must be a table" }, false, false
+				end
+				for field in pairs(dimensions) do
+					if field ~= "read_units" and field ~= "write_units"
+						and field ~= "estimated_bytes" and field ~= "handler_slots"
+					then
+						return { code = "invalid", terminal = true, message = "unsupported admission dimension: " .. tostring(field) }, false, false
+					end
+				end
+				if dimensions.read_units == nil or dimensions.write_units == nil
+					or dimensions.estimated_bytes == nil or dimensions.handler_slots == nil
+				then
+					return {
+						code = "invalid", terminal = true,
+						message = "dimensions must explicitly provide read_units, write_units, estimated_bytes, and handler_slots",
+					}, false, false
+				end
+				read_units = dimensions.read_units
+				write_units = dimensions.write_units
+				estimated_bytes = dimensions.estimated_bytes
+				handler_slots = dimensions.handler_slots
+				if not finite(read_units) or read_units < 0 or math.floor(read_units) ~= read_units
+					or not finite(write_units) or write_units < 0 or math.floor(write_units) ~= write_units
+					or not finite(estimated_bytes) or estimated_bytes < 0 or math.floor(estimated_bytes) ~= estimated_bytes
+					or not finite(handler_slots) or handler_slots < 1 or math.floor(handler_slots) ~= handler_slots
+				then
+					return { code = "invalid", terminal = true, message = "invalid multi-dimensional admission estimate" }, false, false
+				end
+				if read_units > self.policy.max_read_units_in_flight then
+					return { code = "capacity", terminal = true, message = "work item exceeds the StandardRead admission cap" }, false, true
+				end
+				if write_units > self.policy.max_write_units_in_flight then
+					return { code = "capacity", terminal = true, message = "work item exceeds the StandardWrite admission cap" }, false, true
+				end
+				if estimated_bytes > self.policy.max_estimated_bytes_in_flight then
+					return { code = "capacity", terminal = true, message = "work item exceeds the estimated byte admission cap" }, false, true
+				end
+				if handler_slots > self.policy.max_handler_slots_in_flight then
+					return { code = "capacity", terminal = true, message = "work item exceeds the handler-slot admission cap" }, false, true
+				end
+				local class_limit = math.min(limits[work_class] or limits.interactive, self.policy.max_in_flight)
+				if cost > self.policy.max_in_flight then
+					return { code = "capacity", terminal = true, message = "work item cost exceeds max_in_flight" }, false, true
+				end
+				if cost > class_limit then
+					return { code = "capacity", terminal = true, message = "work item cost exceeds its work-class admission cap" }, false, true
+				end
+				if self.policy.mode == "read_only" and mutating and not critical then
+					return { code = "read_only", terminal = true, message = "mutating noncritical work is disabled" }, false, true
+				end
+				if self.policy.mode == "reject_noncritical" and not critical then
+					return { code = "backpressure", terminal = true, message = "scheduler policy rejects noncritical work" }, false, true
+				end
 			end
 			local circuit = self.circuits[request_kind]
 			local probe_needed = false
@@ -1050,8 +1058,18 @@ do
 				.. component(item.service_class or "best_effort")
 		end
 		local function choose_index(self: EmbeddedSchedulerDynamicRecord, algorithm: any, renewal_mode: any): (number?, boolean)
-			local now, eligible = now_ms(), {}
+			local fifo_fast_path = algorithm == "fifo" and renewal_mode ~= true and renewal_mode ~= "critical"
+			local drr_candidate_mode = algorithm ~= "fifo" and algorithm ~= "weighted" and algorithm ~= "deadline"
+				and renewal_mode ~= true and renewal_mode ~= "critical"
+			local now = now_ms()
 			local urgent_fallback = self.urgent_streak >= self.policy.urgent_deadline_burst
+			local eligible: { number }? = if fifo_fast_path then nil else {}
+			local eligible_batch_counts: { [number]: number }? = if drr_candidate_mode then {} else nil
+			local fifo_best_index: number? = nil
+			local fifo_best_enqueued_at = math.huge
+			local fifo_best_non_high_index: number? = nil
+			local fifo_best_non_high_enqueued_at = math.huge
+			local fifo_has_non_high = false
 			for _, dependent in ipairs(self.queue) do
 				if dependent.lane == "high" and #(dependent.dependencies or {}) > 0 then
 					inherit_ready_prerequisites(self, dependent, now)
@@ -1080,12 +1098,44 @@ do
 						and (uses_critical_reserve(item) or owner_active < self.policy.max_per_owner_in_flight)
 					then
 						local batch_count = selected_batch_size(self, item)
-						local admission = admission_decision(self,
-							item.work_class, item.operation_class, effective_cost(item, batch_count), item.mutating ~= false,
-							item.service_class == "critical" or item.lane == "lease_renewal", estimate_dimensions(item, batch_count)
+						local admission_preflight_current = item.admission_preflight_policy_revision == self.policy.revision
+							and item.admission_preflight_batch_count == batch_count
+							and item.admission_preflight_terminal_result == false
+						local admission = admission_decision(
+							self,
+							item.work_class,
+							item.operation_class,
+							effective_cost(item, batch_count),
+							item.mutating ~= false,
+							item.service_class == "critical" or item.lane == "lease_renewal",
+							estimate_dimensions(item, batch_count),
+							nil,
+							admission_preflight_current
 						)
 						if admission.code == "admitted" then
-							eligible[#eligible + 1] = { index = index, item = item, effective_lane = effective_lane, batch_count = batch_count }
+							if fifo_fast_path then
+								local enqueued_at = item.enqueued_at_ms
+								if fifo_best_index == nil or enqueued_at < fifo_best_enqueued_at then
+									fifo_best_index = index
+									fifo_best_enqueued_at = enqueued_at
+								end
+								if effective_lane ~= "high" then
+									if fifo_best_non_high_index == nil or enqueued_at < fifo_best_non_high_enqueued_at then
+										fifo_best_non_high_index = index
+										fifo_best_non_high_enqueued_at = enqueued_at
+									end
+								end
+								if effective_lane ~= "high" and effective_lane ~= "lease_renewal" then
+									fifo_has_non_high = true
+								end
+							else
+								local candidate_indices = eligible :: { number }
+								candidate_indices[#candidate_indices + 1] = index
+								if drr_candidate_mode and batch_count ~= nil then
+									local batch_counts = eligible_batch_counts :: { [number]: number }
+									batch_counts[index] = batch_count
+								end
+							end
 						elseif finite(admission.retry_after_ms) then
 							if admission.budget_limited then
 								self.stats.rejected += 1
@@ -1097,51 +1147,72 @@ do
 					end
 				end
 			end
-			if #eligible == 0 then return nil, false end
+			if fifo_fast_path then
+				if fifo_best_index == nil then return nil, false end
+				if self.high_streak >= self.policy.high_burst and fifo_has_non_high then
+					return fifo_best_non_high_index, urgent_fallback
+				end
+				return fifo_best_index, urgent_fallback
+			end
+			if eligible == nil or #eligible == 0 then return nil, false end
 			if self.high_streak >= self.policy.high_burst then
 				local has_non_high = false
-				for _, row in ipairs(eligible) do
-					if row.effective_lane ~= "high" and row.effective_lane ~= "lease_renewal" then
+				for _, candidate_index in ipairs(eligible) do
+					local candidate_item = self.queue[candidate_index]
+					local candidate_lane = scheduled_lane(candidate_item, now)
+					if candidate_lane ~= "high" and candidate_lane ~= "lease_renewal" then
 						has_non_high = true
 						break
 					end
 				end
 				if has_non_high then
-					local filtered = {}
-					for _, row in ipairs(eligible) do if row.effective_lane ~= "high" then filtered[#filtered + 1] = row end end
-					eligible = filtered
+					local write_index = 1
+					local eligible_count = #eligible
+					for read_index = 1, eligible_count do
+						local candidate_index = eligible[read_index]
+						if scheduled_lane(self.queue[candidate_index], now) ~= "high" then
+							eligible[write_index] = candidate_index
+							write_index += 1
+						end
+					end
+					for clear_index = write_index, eligible_count do
+						eligible[clear_index] = nil
+					end
 				end
 			end
-			if renewal_mode == true then
-				local best
-				for _, row in ipairs(eligible) do
-					if best == nil or item_precedes(row.item, best.item, now) then best = row end
+			if renewal_mode == true or renewal_mode == "critical" then
+				local best_index: number? = nil
+				for _, candidate_index in ipairs(eligible) do
+					local item = self.queue[candidate_index]
+					if best_index == nil or item_precedes(item, self.queue[best_index], now) then
+						best_index = candidate_index
+					end
 				end
-				return best and best.index or nil, urgent_fallback
-			elseif renewal_mode == "critical" then
-				local best
-				for _, row in ipairs(eligible) do
-					if best == nil or item_precedes(row.item, best.item, now) then best = row end
-				end
-				return best and best.index or nil, urgent_fallback
+				return best_index, urgent_fallback
 			end
 			if algorithm == "fifo" then
-				local best
-				for _, row in ipairs(eligible) do
-					if best == nil or row.item.enqueued_at_ms < best.item.enqueued_at_ms then best = row end
+				local best_index: number? = nil
+				local best_enqueued_at = math.huge
+				for _, candidate_index in ipairs(eligible) do
+					local item = self.queue[candidate_index]
+					if best_index == nil or item.enqueued_at_ms < best_enqueued_at then
+						best_index = candidate_index
+						best_enqueued_at = item.enqueued_at_ms
+					end
 				end
-				return best and best.index or nil, urgent_fallback
+				return best_index, urgent_fallback
 			elseif algorithm == "weighted" or algorithm == "deadline" then
-				local best, best_score
+				local best_index: number? = nil
+				local best_score: number? = nil
 				local service_time_estimates = {}
-				for _, row in ipairs(eligible) do
-					local item = row.item
+				for _, candidate_index in ipairs(eligible) do
+					local item = self.queue[candidate_index]
 					local age = math.min(60000, math.max(0, now - item.enqueued_at_ms))
 					local slack = if finite(item.deadline_ms)
 						then item.deadline_ms - now - estimated_service_time_ms(self, item, service_time_estimates)
 						else 60000
 					local urgency_score = if self.urgent_streak >= self.policy.urgent_deadline_burst then 0 else slack
-					local lane = row.effective_lane
+					local lane = scheduled_lane(item, now)
 					local lane_weight = if lane == "lease_renewal" then 8 elseif lane == "high" then 4 elseif lane == "normal" then 2 else 1
 					local service_rank = if item.service_class == "critical" then 4 elseif item.service_class == "interactive" then 3 elseif item.service_class == "normal" then 2 elseif item.service_class == "bulk" then 1 else 0
 					local deadline_bonus = math.clamp(urgency_score, -499, 499)
@@ -1149,18 +1220,22 @@ do
 					local score = if algorithm == "deadline"
 						then -service_rank * 1000 - lane_weight * 1000 + deadline_bonus - age * 0.25
 						else -lane_weight * 1000 - service_rank * 500 - age * 0.25 + weighted_deadline_bonus
-					if best_score == nil or score < best_score then best, best_score = row, score end
+					if best_score == nil or score < best_score then
+						best_index = candidate_index
+						best_score = score
+					end
 				end
-				return best and best.index or nil, urgent_fallback
+				return best_index, urgent_fallback
 			end
 			local lane_rows, lane_keys = {}, {}
-			for _, row in ipairs(eligible) do
-				local key = lane_key(row.item, now)
+			for _, candidate_index in ipairs(eligible) do
+				local item = self.queue[candidate_index]
+				local key = lane_key(item, now)
 				if lane_rows[key] == nil then
 					lane_rows[key] = {}
 					lane_keys[#lane_keys + 1] = key
 				end
-				lane_rows[key][#lane_rows[key] + 1] = row
+				lane_rows[key][#lane_rows[key] + 1] = candidate_index
 			end
 			table.sort(lane_keys)
 			local lane_count = #lane_keys
@@ -1179,30 +1254,44 @@ do
 					local lane_index = ((start_index + offset - 1) % lane_count) + 1
 					local key = lane_keys[lane_index]
 					local rows = lane_rows[key]
-					local lane = rows[1].effective_lane
+					local first_item = self.queue[rows[1]]
+					local lane = scheduled_lane(first_item, now)
 					local lane_weight = if lane == "lease_renewal" then 4 elseif lane == "high" then 4 elseif lane == "normal" then 2 else 1
-					local service_class = rows[1].item.service_class or "best_effort"
+					local service_class = first_item.service_class or "best_effort"
 					local service_weight = if service_class == "critical" then 4 elseif service_class == "interactive" then 3
 						elseif service_class == "normal" then 2 else 1
 					local weight = lane_weight * service_weight
 					self.drr_deficit[key] = math.min(self.policy.max_item_cost * 2, (self.drr_deficit[key] or 0) + self.policy.drr_quantum * weight)
-					local best = rows[1]
+					local best_index = rows[1]
+					local best_item = self.queue[best_index]
 					local has_urgent = false
-					for _, row in ipairs(rows) do
-						if finite(row.item.deadline_ms) and row.item.deadline_ms - now <= 5000 then has_urgent = true end
+					for _, candidate_index in ipairs(rows) do
+						local item = self.queue[candidate_index]
+						if finite(item.deadline_ms) and item.deadline_ms - now <= 5000 then has_urgent = true end
 					end
 					if has_urgent and self.urgent_streak < self.policy.urgent_deadline_burst then
-						for _, row in ipairs(rows) do if item_precedes(row.item, best.item, now) then best = row end end
+						for _, candidate_index in ipairs(rows) do
+							local item = self.queue[candidate_index]
+							if item_precedes(item, best_item, now) then
+								best_index = candidate_index
+								best_item = item
+							end
+						end
 					else
-						for _, row in ipairs(rows) do
-							if row.item.enqueued_at_ms < best.item.enqueued_at_ms then best = row end
+						for _, candidate_index in ipairs(rows) do
+							local item = self.queue[candidate_index]
+							if item.enqueued_at_ms < best_item.enqueued_at_ms then
+								best_index = candidate_index
+								best_item = item
+							end
 						end
 					end
-					local cost = effective_cost(best.item, best.batch_count)
+					local batch_count = if eligible_batch_counts ~= nil then eligible_batch_counts[best_index] else nil
+					local cost = effective_cost(best_item, batch_count)
 					if cost <= self.drr_deficit[key] then
 						self.drr_deficit[key] -= cost
 						self.drr_cursor_key = key
-						return best.index, urgent_fallback
+						return best_index, urgent_fallback
 					end
 				end
 			end
@@ -1301,6 +1390,25 @@ do
 			value.requested_cost = if finite(value.cost) then value.cost else nil
 			value.cost = effective_cost(value)
 			if value.cost > self.policy.max_item_cost then return { code = "invalid", message = "estimated scheduler cost exceeds max_item_cost" } end
+			if value.batchable == true then
+				value.admission_preflight_policy_revision = nil
+				value.admission_preflight_batch_count = nil
+				value.admission_preflight_terminal_result = nil
+			else
+				local preflight_admission, _, _ = admission_decision(
+					self,
+					value.work_class,
+					value.operation_class,
+					effective_cost(value),
+					value.mutating ~= false,
+					value.service_class == "critical" or value.lane == "lease_renewal",
+					estimate_dimensions(value),
+					false
+				)
+				value.admission_preflight_policy_revision = self.policy.revision
+				value.admission_preflight_batch_count = nil
+				value.admission_preflight_terminal_result = if preflight_admission.terminal then preflight_admission else false
+			end
 			value.queued = true
 			self.known[value.id] = value
 			retain_dependencies(self, value)
@@ -1326,6 +1434,11 @@ do
 			end
 			self.retry_cooldown_until[owner_id] = latest_due
 		end
+		local function clear_admission_preflight(item: any)
+			item.admission_preflight_policy_revision = nil
+			item.admission_preflight_batch_count = nil
+			item.admission_preflight_terminal_result = nil
+		end
 		function governor:CancelQueued(id, message)
 			if not valid_text(id, 128) then return nil, "invalid id" end
 			local item = self.known[id]
@@ -1346,6 +1459,7 @@ do
 				message = if type(message) == "string" and message ~= "" then string.sub(message :: string, 1, 200)
 					else "scheduled work was cancelled before it started",
 			}
+			clear_admission_preflight(item)
 			return item, nil
 		end
 		function governor:TakeNext(renewal_mode)
@@ -1371,6 +1485,7 @@ do
 					self.known[item.id] = nil
 					refresh_owner_retry_cooldown(self, item.owner_id)
 					remember_terminal(self, item.id, "dependency_failed")
+					clear_admission_preflight(item)
 					return item, "dependency_failed"
 				elseif item.expires_at_ms and item.expires_at_ms <= now then
 					table.remove(self.queue, index)
@@ -1381,19 +1496,39 @@ do
 					self.known[item.id] = nil
 					refresh_owner_retry_cooldown(self, item.owner_id)
 					remember_terminal(self, item.id, "expired")
+					clear_admission_preflight(item)
 					return item, "expired"
 				else
+					if item.batchable ~= true then
+						operation_metric_key(self, item.operation_class or "default")
+					end
 					local batch_count = selected_batch_size(self, item)
-					local admission = admission_decision(self,
-						item.work_class, item.operation_class, effective_cost(item, batch_count), item.mutating ~= false,
-						item.service_class == "critical" or item.lane == "lease_renewal", estimate_dimensions(item, batch_count)
-					)
-					if admission.terminal then
+					local admission_terminal_result = item.admission_preflight_terminal_result
+					if item.admission_preflight_policy_revision ~= self.policy.revision
+						or item.admission_preflight_batch_count ~= batch_count
+						or admission_terminal_result == nil
+					then
+						local admission = admission_decision(
+							self,
+							item.work_class,
+							item.operation_class,
+							effective_cost(item, batch_count),
+							item.mutating ~= false,
+							item.service_class == "critical" or item.lane == "lease_renewal",
+							estimate_dimensions(item, batch_count)
+						)
+						admission_terminal_result = if admission.terminal then admission else false
+						item.admission_preflight_policy_revision = self.policy.revision
+						item.admission_preflight_batch_count = batch_count
+						item.admission_preflight_terminal_result = admission_terminal_result
+					end
+					if type(admission_terminal_result) == "table" then
 						self.stats.rejected += 1
 						table.remove(self.queue, index)
 						item.queued = false
-						item.terminal_result = admission
+						item.terminal_result = admission_terminal_result
 						self.known[item.id] = item
+						clear_admission_preflight(item)
 						return item, "admission_rejected"
 					end
 				end
@@ -6671,6 +6806,10 @@ export type TransactionReceiptStatus = {
 	expires_at: number?,
 }
 
+export type PatchOperation =
+	{ op: "set", path: { string | number }, value: JsonValue }
+	| { op: "remove", path: { string | number } }
+
 export type TransactionOptions = {
 	request: JsonValue?,
 	receipt_retention_seconds: number?,
@@ -6977,7 +7116,7 @@ type InternalState = {
 	busy: boolean,
 	queue_busy: boolean,
 	mailbox_v2_binding: boolean,
-	mailbox_v2: EmbeddedMailbox?,
+	mailbox: EmbeddedMailbox?,
 	save_requested: boolean,
 	shutdown: boolean,
 	retired: boolean,
@@ -7046,6 +7185,7 @@ export type Record = {
 	UpdateMetadata: (self: Record, callback: (Metadata) -> Metadata) -> (ResultCode, string?),
 	Touch: (self: Record) -> (ResultCode, string?),
 	Update: (self: Record, callback: (JsonValue?) -> JsonValue?) -> (ResultCode, string?),
+	Patch: (self: Record, operations: { PatchOperation }) -> (ResultCode, string?),
 	Reconcile: (self: Record, template: JsonValue) -> (ResultCode, string?),
 	Save: (self: Record, reason: string?) -> (ResultCode, string?),
 	TransactAsync: (self: Record, operation_id: string, reducer: TransactionReducer, options: TransactionOptions) -> (JsonValue?, TransactionStatus, string?),
@@ -7148,7 +7288,7 @@ local mock_get_failure_message: string? = nil
 local close_internal: (state: InternalState, shutdown: boolean) -> (ResultCode, string?)
 local complete_deferred_takeover: (state: InternalState) -> ()
 local process_queue_internal: (state: InternalState, max_messages: number) -> (ResultCode, string?)
-local copy_value: (value: unknown) -> JsonValue?
+local copy_value: (value: unknown, shape_validation: { nodes: number, message: string?, has_non_finite_numbers: boolean }?) -> JsonValue?
 local track_external_data_mutation: (state: InternalState) -> ()
 local messaging_enabled: (state: InternalState) -> boolean
 local publish_record_message: (state: InternalState, kind: string, message_type: string?, data: JsonValue?, generation: number?, target_job_id: string?, target_token: string?, request_id: string?, handoff_status: HandoffStatus?, requester_job_id: string?) -> (boolean, string?)
@@ -7399,25 +7539,25 @@ local function validate_value_shape(value: unknown, max_depth: number?, max_node
 		if current == nil then
 			return true, nil
 		end
-		if type(current) == "number" then
-			if not math.isfinite(current) and allow_non_finite_numbers ~= true then
+		local current_type = type(current)
+		if current_type == "number" then
+			local numeric_value = current :: number
+			if not math.isfinite(numeric_value) and allow_non_finite_numbers ~= true then
 				return false, "value contains a non-finite number"
 			end
 			return true, nil
-		end
-		if type(current) == "string" then
-			if #current > string_limit then
+		elseif current_type == "string" then
+			local string_value = current :: string
+			if #string_value > string_limit then
 				return false, "value contains an overlong string"
 			end
 			return true, nil
-		end
-		if type(current) == "boolean" or type(current) == "buffer" then
+		elseif current_type == "boolean" or current_type == "buffer" then
 			return true, nil
+		elseif current_type ~= "table" then
+			return false, "value contains an unsupported type: " .. current_type
 		end
-		if type(current) ~= "table" then
-			return false, "value contains an unsupported type: " .. type(current)
-		end
-		local table_value = current :: { [string | number]: unknown }
+		local table_value = current :: any
 		if active_tables[table_value] then
 			return false, "value contains a cyclic table"
 		end
@@ -7426,18 +7566,20 @@ local function validate_value_shape(value: unknown, max_depth: number?, max_node
 		local numeric_keys = 0
 		local max_numeric_key = 0
 		for key, child in table_value do
-			if type(key) ~= "string" and type(key) ~= "number" then
+			local key_type = type(key)
+			if key_type ~= "string" and key_type ~= "number" then
 				active_tables[table_value] = nil
 				return false, "value contains an unsupported table key type"
 			end
-			if type(key) == "number" then
-				if not math.isfinite(key) or math.floor(key) ~= key or key < 1 then
+			if key_type == "number" then
+				local numeric_key = key :: number
+				if not math.isfinite(numeric_key) or math.floor(numeric_key) ~= numeric_key or numeric_key < 1 then
 					active_tables[table_value] = nil
 					return false, "numeric table keys must be positive integers"
 				end
 				numeric_keys += 1
-				if key > max_numeric_key then
-					max_numeric_key = key
+				if numeric_key > max_numeric_key then
+					max_numeric_key = numeric_key
 				end
 			else
 				string_keys += 1
@@ -7506,7 +7648,10 @@ local function backend_metadata_matches(info: BackendInfo?, envelope: Envelope):
 	return true
 end
 
-copy_value = function(value: unknown): JsonValue?
+copy_value = function(
+	value: unknown,
+	shape_validation: { nodes: number, message: string?, has_non_finite_numbers: boolean }?
+): JsonValue?
 	if value == nil then
 		return nil
 	end
@@ -7517,22 +7662,38 @@ copy_value = function(value: unknown): JsonValue?
 		if current == nil then
 			return nil
 		end
+		if shape_validation ~= nil then
+			if shape_validation.message ~= nil then
+				return nil
+			end
+			shape_validation.nodes += 1
+			if shape_validation.nodes > 100000 then
+				shape_validation.message = "value exceeds the maximum node count"
+				return nil
+			end
+		end
 		if depth > 64 then
 			error("value exceeds the maximum nesting depth")
 		end
-		if type(current) == "boolean" then
-			return current
-		end
-		if type(current) == "number" then
-			return current
-		end
-		if type(current) == "string" then
-			return current
-		end
-		if typeof(current) == "buffer" then
-			return buffer.fromstring(buffer.tostring(current))
-		end
-		if type(current) ~= "table" then
+		local current_type = type(current)
+		if current_type == "boolean" then
+			return current :: boolean
+		elseif current_type == "number" then
+			local numeric_value = current :: number
+			if shape_validation ~= nil and not math.isfinite(numeric_value) then
+				shape_validation.has_non_finite_numbers = true
+			end
+			return numeric_value
+		elseif current_type == "string" then
+			local string_value = current :: string
+			if shape_validation ~= nil and #string_value > 4_000_000 then
+				shape_validation.message = "value contains an overlong string"
+				return nil
+			end
+			return string_value
+		elseif current_type == "buffer" then
+			return buffer.fromstring(buffer.tostring(current :: buffer))
+		elseif current_type ~= "table" then
 			error("value contains an unsupported type")
 		end
 
@@ -7543,6 +7704,8 @@ copy_value = function(value: unknown): JsonValue?
 		active_tables[table_value] = true
 		local has_string_key = false
 		local has_number_key = false
+		local numeric_key_count = 0
+		local max_numeric_key = 0
 		local result_dictionary: { [string]: JsonValue }? = nil
 		local result_array: { JsonValue }? = nil
 
@@ -7577,6 +7740,10 @@ copy_value = function(value: unknown): JsonValue?
 					active_tables[table_value] = nil
 					error("value contains an invalid array index")
 				end
+				numeric_key_count += 1
+				if numeric_key > max_numeric_key then
+					max_numeric_key = numeric_key
+				end
 				local copied = clone(child, depth + 1)
 				if copied == nil then
 					active_tables[table_value] = nil
@@ -7591,6 +7758,14 @@ copy_value = function(value: unknown): JsonValue?
 			end
 		end
 
+		if shape_validation ~= nil
+			and shape_validation.message == nil
+			and numeric_key_count > 0
+			and max_numeric_key ~= numeric_key_count
+		then
+			shape_validation.message = "numeric-keyed tables must be dense arrays"
+		end
+
 		active_tables[table_value] = nil
 		if has_string_key then
 			return result_dictionary
@@ -7603,11 +7778,13 @@ copy_value = function(value: unknown): JsonValue?
 	end
 	return clone(value, 1)
 end
+
+
 local function encode_non_finite_numbers(
 	value: JsonValue
 ): (JsonValue, { NonFiniteNumberMarker })
 	local markers: { NonFiniteNumberMarker } = {}
-	local path: { NonFinitePathSegment } = {}
+	local path: { string | number } = {}
 
 	local function encode(current: JsonValue, depth: number): (JsonValue, boolean)
 		if depth > 64 then
@@ -7628,14 +7805,25 @@ local function encode_non_finite_numbers(
 				kind = "negative_infinity"
 			end
 
+			local marker_path: { NonFinitePathSegment } = table.create(depth - 1)
+			for path_index = 1, depth - 1 do
+				local key = path[path_index]
+				local segment: NonFinitePathSegment
+				if type(key) == "string" then
+					segment = { kind = "string", key = key }
+				else
+					segment = { kind = "number", key = key :: number }
+				end
+				marker_path[path_index] = segment
+			end
 			markers[#markers + 1] = {
-				path = table.clone(path),
+				path = marker_path,
 				kind = kind,
 			}
 			return 0, true
 		end
 
-		if typeof(current) == "buffer" or type(current) ~= "table" then
+		if type(current) ~= "table" then
 			return current, false
 		end
 
@@ -7656,11 +7844,9 @@ local function encode_non_finite_numbers(
 				error("value contains mixed table keys")
 			end
 
-			path[#path + 1] = if is_dictionary_key
-				then { kind = "string", key = key :: string }
-				else { kind = "number", key = key :: number }
+			path[depth] = key
 			local encoded_child, child_changed = encode(child, depth + 1)
-			path[#path] = nil
+			path[depth] = nil
 
 			if child_changed then
 				if result == nil then
@@ -8110,15 +8296,25 @@ local function validate_serialized_size(value: unknown): (boolean, string?)
 	return true, nil
 end
 
-local function validate_value(value: JsonValue?, validator: Validator?): (boolean, string?)
+local function validate_value(
+	value: JsonValue?,
+	validator: Validator?,
+	shape_already_validated: boolean?,
+	non_finite_numbers_absent: boolean?
+): (boolean, string?)
 	if value == nil then
 		return false, "record data cannot be nil"
 	end
-	local shape_ok, shape_message = validate_value_shape(value, nil, nil, nil, true)
-	if not shape_ok then
-		return false, shape_message
+	if shape_already_validated ~= true then
+		local shape_ok, shape_message = validate_value_shape(value, nil, nil, nil, true)
+		if not shape_ok then
+			return false, shape_message
+		end
 	end
 	local safe_value_ok, safe_value = pcall(function()
+		if non_finite_numbers_absent == true then
+			return value
+		end
 		local encoded_value = encode_non_finite_numbers(value)
 		return encoded_value
 	end)
@@ -8144,6 +8340,38 @@ local function validate_value(value: JsonValue?, validator: Validator?): (boolea
 		end
 	end
 	return true, nil
+end
+
+prepared_envelope_cache._copy_with_shape = function(value: unknown): (JsonValue?, string?, boolean)
+	if value == nil then
+		return nil, "record data cannot be nil", false
+	end
+
+	local shape_validation = {
+		nodes = 0,
+		message = nil,
+		has_non_finite_numbers = false,
+	}
+	local copy_ok, copied_or_error = pcall(copy_value, value, shape_validation)
+	if shape_validation.message ~= nil then
+		return nil, shape_validation.message, false
+	end
+	if not copy_ok or copied_or_error == nil then
+		local shape_call_ok, shape_ok, shape_message = pcall(
+			validate_value_shape,
+			value,
+			nil,
+			nil,
+			nil,
+			true
+		)
+		if shape_call_ok and not shape_ok then
+			return nil, shape_message, false
+		end
+		return nil, "value could not be copied", false
+	end
+
+	return copied_or_error, nil, not shape_validation.has_non_finite_numbers
 end
 
 local function validate_store_identity(name: string, scope: string, key: string): (boolean, string?)
@@ -11066,10 +11294,19 @@ local function save_internal(state: InternalState, reason: string?, operation_de
 		return "fenced", "session token is missing"
 	end
 	local session_token: string = token
-	local snapshot = copy_value(state.data)
+	local snapshot, copy_error, non_finite_numbers_absent = prepared_envelope_cache._copy_with_shape(state.data)
+	if snapshot == nil then
+		observe(state, "save", "validation", copy_error)
+		return "validation", copy_error
+	end
 	local captured_change_sequence = state.change_sequence
-	local valid, validation_error = validate_value(snapshot, state.options.validator)
-	if not valid then
+	local snapshot_valid, validation_error = validate_value(
+		snapshot,
+		state.options.validator,
+		true,
+		non_finite_numbers_absent
+	)
+	if not snapshot_valid then
 		observe(state, "save", "validation", validation_error)
 		return "validation", validation_error
 	end
@@ -13445,14 +13682,23 @@ local function update(self: Record, callback: (JsonValue?) -> JsonValue?): (Resu
 	if next_value == nil then
 		return "validation", "update callback returned nil"
 	end
+	local shape_validation = { nodes = 0, message = nil, has_non_finite_numbers = false }
 	local copy_ok, copied_or_error = pcall(function()
-		return copy_value(next_value)
+		return copy_value(next_value, shape_validation)
 	end)
+	if shape_validation.message ~= nil then
+		return "validation", shape_validation.message
+	end
 	if not copy_ok or copied_or_error == nil then
 		return "validation", "update callback returned invalid data"
 	end
 	local copied = copied_or_error
-	local valid, message = validate_value(copied, state.options.validator)
+	local valid, message = validate_value(
+		copied,
+		state.options.validator,
+		true,
+		not shape_validation.has_non_finite_numbers
+	)
 	if not valid then
 		return "validation", message
 	end
@@ -13472,6 +13718,7 @@ local function update(self: Record, callback: (JsonValue?) -> JsonValue?): (Resu
 	sync_public(self, skip_sync_external_mutation_check)
 	return "success", nil
 end
+
 
 local function reconcile(self: Record, template: JsonValue): (ResultCode, string?)
 	local state = private[self]
@@ -16195,7 +16442,7 @@ local function detach_public_data_for_release(state: InternalState): (boolean, s
 		detached_data = copy_or_error
 	end
 	state.data = detached_data
-	state.public_data_source = copy_value(detached_data)
+	state.public_data_source = nil
 	state.public_data_detached = true
 	if type(state.public_record) == "table" then
 		local public_record = state.public_record :: { Data: unknown }
@@ -16243,9 +16490,18 @@ close_internal = function(state: InternalState, shutdown: boolean): (ResultCode,
 	local expected_revision = state.revision
 	local target_revision = expected_revision + 1
 	track_external_data_mutation(state)
-	local snapshot = copy_value(state.data)
-	local valid, validation_error = validate_value(snapshot, state.options.validator)
-	if not valid then
+	local snapshot, copy_error, non_finite_numbers_absent = prepared_envelope_cache._copy_with_shape(state.data)
+	if snapshot == nil then
+		observe(state, "close", "validation", copy_error)
+		return "validation", copy_error
+	end
+	local snapshot_valid, validation_error = validate_value(
+		snapshot,
+		state.options.validator,
+		true,
+		non_finite_numbers_absent
+	)
+	if not snapshot_valid then
 		observe(state, "close", "validation", validation_error)
 		return "validation", validation_error
 	end
@@ -16493,7 +16749,7 @@ local function open(self: Record, default_data: JsonValue?, recreate: boolean?):
 	return normalize_result_code(result) or "unknown", message
 end
 
-local function make_record(name: string, scope: string, key: string, options: Options, mock: boolean, transact_engine: (Record, string, string, TransactionReducer, TransactionOptions?, string?, JsonValue?, { OutboxEventSpec }?) -> (JsonValue?, TransactionStatus, string?), transaction_status_engine: (Record, string, JsonValue) -> TransactionReceiptStatus, instance_id: string?): Record
+local function make_record(name: string, scope: string, key: string, options: Options, mock: boolean, transact_engine: (Record, string, string, TransactionReducer, TransactionOptions?, string?, JsonValue?, { OutboxEventSpec }?) -> (JsonValue?, TransactionStatus, string?), transaction_status_engine: (Record, string, JsonValue) -> TransactionReceiptStatus, instance_id: string?, patch_method: (self: Record, operations: { PatchOperation }) -> (ResultCode, string?)): Record
 	local mode = if mock then "mock" else "live"
 	local id = if instance_id == nil
 		then HttpService:JSONEncode({ mode, name, scope, key })
@@ -16572,8 +16828,8 @@ local function make_record(name: string, scope: string, key: string, options: Op
 		next_queue_poll = math.huge,
 		busy = false,
 		queue_busy = false,
-		mailbox_v2_binding = false,
-		mailbox_v2 = nil,
+		mailbox_binding = false,
+		mailbox = nil,
 		save_requested = false,
 		shutdown = false,
 		retired = false,
@@ -16632,6 +16888,7 @@ local function make_record(name: string, scope: string, key: string, options: Op
 		UpdateMetadata = update_metadata,
 		Touch = touch,
 		Update = update,
+		Patch = patch_method,
 		Reconcile = reconcile,
 		Save = save,
 		TransactAsync = function(self: Record, operation_id: string, reducer: TransactionReducer, options: TransactionOptions)
@@ -17374,6 +17631,443 @@ end
 end)())
 
 RecordStore._internals = {}
+RecordStore._internals.patch = (function()
+	local MAX_PATCH_OPERATIONS = 128
+	local MAX_PATCH_NODES = 100000
+	local MAX_PATCH_DEPTH = 64
+	local PATCH_SUMMARY_SIZE_RADIX = MAX_DATASTORE_BYTES + 1
+	local subtree_summaries: { [any]: number } = setmetatable({}, { __mode = "k" }) :: any
+
+	-- Shape summaries occupy the high digits; the low digits are a reject-only encoded-size lower bound.
+	local function pack_subtree_summary(
+		node_count: number,
+		max_depth: number,
+		has_non_finite_numbers: boolean,
+		minimum_encoded_bytes: number
+	): number
+		local shape_summary = node_count * 256 + max_depth * 2 + (if has_non_finite_numbers then 1 else 0)
+		return shape_summary * PATCH_SUMMARY_SIZE_RADIX + minimum_encoded_bytes
+	end
+
+	local function subtree_shape_summary(summary: number): number
+		return math.floor(summary / PATCH_SUMMARY_SIZE_RADIX)
+	end
+
+	local function subtree_minimum_encoded_bytes(summary: number): number
+		local shape_summary = subtree_shape_summary(summary)
+		return summary - shape_summary * PATCH_SUMMARY_SIZE_RADIX
+	end
+
+	local function datastore_size_limit_message(): string
+		return ("serialized value exceeds the %d byte DataStore limit"):format(MAX_DATASTORE_BYTES)
+	end
+
+	local function minimum_encoded_string_bytes(value: string): number
+		local ascii_bytes = 0
+		for index = 1, #value do
+			if string.byte(value, index) < 128 then
+				ascii_bytes += 1
+				if ascii_bytes > MAX_DATASTORE_BYTES then
+					return MAX_DATASTORE_BYTES + 1
+				end
+			end
+		end
+		return ascii_bytes
+	end
+
+	local function summarize_patch_value(
+		value: unknown,
+		active_tables: { [any]: boolean }
+	): (number?, string?)
+		local value_type = type(value)
+		if value_type == "number" then
+			return pack_subtree_summary(1, 1, not math.isfinite(value :: number), 1), nil
+		elseif value_type == "string" then
+			local string_value = value :: string
+			if #string_value > 4_000_000 then
+				return nil, "value contains an overlong string"
+			end
+			return pack_subtree_summary(1, 1, false, minimum_encoded_string_bytes(string_value)), nil
+		elseif value_type == "boolean" or value_type == "buffer" then
+			return pack_subtree_summary(1, 1, false, 1), nil
+		elseif value_type ~= "table" then
+			return nil, "value contains an unsupported type"
+		end
+
+		local table_value = value :: any
+		local cached_summary = subtree_summaries[table_value]
+		if cached_summary ~= nil then
+			return cached_summary, nil
+		end
+		if active_tables[table_value] then
+			return nil, "value contains a cyclic table"
+		end
+
+		active_tables[table_value] = true
+		local node_count = 1
+		local max_depth = 1
+		local has_non_finite_numbers = false
+		local minimum_encoded_bytes = 2
+		local has_string_key = false
+		local has_number_key = false
+		local numeric_key_count = 0
+		local max_numeric_key = 0
+
+		for key, child in table_value do
+			local key_type = type(key)
+			if key_type == "string" then
+				has_string_key = true
+				minimum_encoded_bytes += minimum_encoded_string_bytes(key :: string)
+				if minimum_encoded_bytes > MAX_DATASTORE_BYTES then
+					active_tables[table_value] = nil
+					return nil, datastore_size_limit_message()
+				end
+			elseif key_type == "number" then
+				local numeric_key = key :: number
+				if not math.isfinite(numeric_key)
+					or math.floor(numeric_key) ~= numeric_key
+					or numeric_key < 1
+				then
+					active_tables[table_value] = nil
+					return nil, "numeric table keys must be positive integers"
+				end
+				has_number_key = true
+				numeric_key_count += 1
+				if numeric_key > max_numeric_key then
+					max_numeric_key = numeric_key
+				end
+			else
+				active_tables[table_value] = nil
+				return nil, "value contains an unsupported table key type"
+			end
+
+			local child_summary, child_message = summarize_patch_value(child, active_tables)
+			if child_summary == nil then
+				active_tables[table_value] = nil
+				return nil, child_message
+			end
+			local child_shape_summary = subtree_shape_summary(child_summary)
+			node_count += math.floor(child_shape_summary / 256)
+			if node_count > MAX_PATCH_NODES then
+				active_tables[table_value] = nil
+				return nil, "value exceeds the maximum node count"
+			end
+
+			local child_depth = math.floor((child_shape_summary % 256) / 2)
+			if child_depth + 1 > max_depth then
+				max_depth = child_depth + 1
+				if max_depth > MAX_PATCH_DEPTH then
+					active_tables[table_value] = nil
+					return nil, "value exceeds the maximum nesting depth"
+				end
+			end
+			if child_shape_summary % 2 == 1 then
+				has_non_finite_numbers = true
+			end
+
+			minimum_encoded_bytes += subtree_minimum_encoded_bytes(child_summary)
+			if minimum_encoded_bytes > MAX_DATASTORE_BYTES then
+				active_tables[table_value] = nil
+				return nil, datastore_size_limit_message()
+			end
+		end
+
+		if has_string_key and has_number_key then
+			active_tables[table_value] = nil
+			return nil, "tables cannot mix string and numeric keys"
+		end
+		if numeric_key_count > 0 and max_numeric_key ~= numeric_key_count then
+			active_tables[table_value] = nil
+			return nil, "numeric-keyed tables must be dense arrays"
+		end
+
+		active_tables[table_value] = nil
+		local summary = pack_subtree_summary(node_count, max_depth, has_non_finite_numbers, minimum_encoded_bytes)
+		subtree_summaries[table_value] = summary
+		return summary, nil
+	end
+
+	local function clone_trusted_patch_value(value: any): any
+		local value_type = type(value)
+		if value_type == "table" then
+			local copied = table.clone(value)
+			for key, child in value do
+				local child_type = type(child)
+				if child_type == "table" then
+					copied[key] = clone_trusted_patch_value(child)
+				elseif child_type == "buffer" then
+					copied[key] = buffer.fromstring(buffer.tostring(child :: buffer))
+				end
+			end
+			return copied
+		elseif value_type == "buffer" then
+			return buffer.fromstring(buffer.tostring(value :: buffer))
+		end
+		return value
+	end
+
+	local function apply_patch_operations(
+		base: JsonValue?,
+		operations: unknown
+	): (JsonValue?, ResultCode, string?)
+		if type(base) ~= "table" then
+			return nil, "invalid", "patch requires table-backed record data"
+		end
+		if type(operations) ~= "table" then
+			return nil, "invalid", "patch operations must be an array"
+		end
+	
+		local operation_array = operations :: any
+		local operation_count = 0
+		local maximum_operation_index = 0
+		for key in next, operation_array do
+			if type(key) ~= "number" or not math.isfinite(key)
+				or math.floor(key) ~= key or key < 1 or key > MAX_PATCH_OPERATIONS
+			then
+				return nil, "invalid", "patch operations must be a dense array of at most 128 entries"
+			end
+			operation_count += 1
+			if key > maximum_operation_index then maximum_operation_index = key end
+		end
+		if operation_count == 0 or operation_count ~= maximum_operation_index then
+			return nil, "invalid", "patch operations must be a non-empty dense array"
+		end
+	
+		local current_root: any = table.clone(base)
+		local owned_tables: { [any]: boolean } = { [current_root] = true }
+		for operation_index = 1, operation_count do
+			local raw_operation = rawget(operation_array, operation_index)
+			if type(raw_operation) ~= "table" then
+				return nil, "invalid", "patch operation must be a table"
+			end
+			local operation = raw_operation :: any
+			local operation_name = rawget(operation, "op")
+			if operation_name ~= "set" and operation_name ~= "remove" then
+				return nil, "invalid", "patch operation must use op 'set' or 'remove'"
+			end
+			for key in next, operation do
+				if key ~= "op" and key ~= "path" and not (operation_name == "set" and key == "value") then
+					return nil, "invalid", "patch operation contains an unsupported field"
+				end
+			end
+	
+			local raw_path = rawget(operation, "path")
+			if type(raw_path) ~= "table" then
+				return nil, "invalid", "patch path must be a non-empty array"
+			end
+			local path_array = raw_path :: any
+			local path_count = 0
+			local maximum_path_index = 0
+			for key in next, path_array do
+				if type(key) ~= "number" or not math.isfinite(key)
+					or math.floor(key) ~= key or key < 1 or key > 64
+				then
+					return nil, "invalid", "patch path must be a dense array of at most 64 segments"
+				end
+				path_count += 1
+				if key > maximum_path_index then maximum_path_index = key end
+			end
+			if path_count == 0 or path_count ~= maximum_path_index then
+				return nil, "invalid", "patch path must be a non-empty dense array"
+			end
+	
+			local path: { string | number } = table.create(path_count) :: { string | number }
+			for path_index = 1, path_count do
+				local segment = rawget(path_array, path_index)
+				if type(segment) == "string" then
+					if #(segment :: string) > 4_000_000 then
+						return nil, "invalid", "patch path contains an overlong string segment"
+					end
+					path[path_index] = segment :: string
+				elseif type(segment) == "number" then
+					local numeric_segment = segment :: number
+					if not math.isfinite(numeric_segment) or math.floor(numeric_segment) ~= numeric_segment
+						or numeric_segment < 1 or numeric_segment > 100_001
+					then
+						return nil, "invalid", "numeric patch path segments must be positive array indices"
+					end
+					path[path_index] = numeric_segment
+				else
+					return nil, "invalid", "patch path segments must be strings or positive integers"
+				end
+			end
+	
+			local copied_payload: JsonValue? = nil
+			if operation_name == "set" then
+				local raw_payload = rawget(operation, "value")
+				if raw_payload == nil then
+					return nil, "invalid", "set patch operations require a non-nil value"
+				end
+				local payload_shape = { nodes = 0, message = nil, has_non_finite_numbers = false }
+				local copy_ok, payload_or_error = pcall(function()
+					return copy_value(raw_payload, payload_shape)
+				end)
+				if payload_shape.message ~= nil then
+					return nil, "validation", payload_shape.message
+				end
+				if not copy_ok or payload_or_error == nil then
+					return nil, "validation", "patch value is invalid"
+				end
+				copied_payload = payload_or_error
+			end
+	
+			local target_cursor: any = current_root
+			for path_index = 1, path_count - 1 do
+				local segment = path[path_index]
+				local first_key = next(target_cursor)
+				local parent_kind = if first_key == nil then "empty"
+					elseif type(first_key) == "string" then "dictionary"
+					elseif type(first_key) == "number" then "array"
+					else "invalid"
+				if parent_kind == "invalid" or parent_kind == "empty" then
+					return nil, "invalid", "patch path references a missing parent table"
+				end
+				if parent_kind == "dictionary" and type(segment) ~= "string" then
+					return nil, "invalid", "string path segments are required for dictionary tables"
+				end
+				if parent_kind == "array" and type(segment) ~= "number" then
+					return nil, "invalid", "numeric path segments are required for array tables"
+				end
+				if parent_kind == "array" and (segment :: number) > #target_cursor then
+					return nil, "invalid", "patch path references a missing array item"
+				end
+				local source_child = rawget(target_cursor, segment)
+				if type(source_child) ~= "table" then
+					return nil, "invalid", "patch path intermediate segments must reference existing tables"
+				end
+				local target_child: any = source_child
+				if owned_tables[target_child] ~= true then
+					target_child = table.clone(source_child)
+					target_cursor[segment] = target_child
+					owned_tables[target_child] = true
+				end
+				target_cursor = target_child
+			end
+	
+			local leaf = path[path_count]
+			local first_leaf_key = next(target_cursor)
+			local leaf_kind = if first_leaf_key == nil then "empty"
+				elseif type(first_leaf_key) == "string" then "dictionary"
+				elseif type(first_leaf_key) == "number" then "array"
+				else "invalid"
+			if leaf_kind == "invalid" then
+				return nil, "invalid", "patch path reached a table with unsupported keys"
+			end
+	
+			if leaf_kind == "dictionary" then
+				if type(leaf) ~= "string" then
+					return nil, "invalid", "string path segments are required for dictionary tables"
+				end
+				if operation_name == "set" then
+					target_cursor[leaf] = copied_payload
+				else
+					if rawget(target_cursor, leaf) == nil then
+						return nil, "invalid", "remove patch path does not exist"
+					end
+					target_cursor[leaf] = nil
+				end
+			elseif leaf_kind == "array" then
+				if type(leaf) ~= "number" then
+					return nil, "invalid", "numeric path segments are required for array tables"
+				end
+				local array_index = leaf :: number
+				local array_length = #target_cursor
+				if operation_name == "set" then
+					if array_index > array_length + 1 then
+						return nil, "invalid", "array set may replace an item or append at the next index"
+					end
+					target_cursor[array_index] = copied_payload
+				else
+					if array_index > array_length then
+						return nil, "invalid", "remove patch path does not exist"
+					end
+					table.remove(target_cursor, array_index)
+				end
+			else
+				if operation_name ~= "set" then
+					return nil, "invalid", "remove patch path does not exist"
+				end
+				if type(leaf) == "string" then
+					target_cursor[leaf] = copied_payload
+				elseif type(leaf) == "number" and (leaf :: number) == 1 then
+					target_cursor[1] = copied_payload
+				else
+					return nil, "invalid", "an empty table may only be initialized at a string key or array index 1"
+				end
+			end
+	
+		end
+	
+		return current_root :: JsonValue, "success", nil
+	end
+	
+	return function(self: Record, operations: { PatchOperation }): (ResultCode, string?)
+		local state = private[self]
+		local transaction_recovery = state ~= nil and state.state == "unknown" and state.pending_transaction ~= nil
+		if state ~= nil then
+			track_external_data_mutation(state)
+		end
+		if state == nil or (state.state ~= "active" and not transaction_recovery) then
+			return "fenced", "record is not actively owned"
+		end
+		local backpressure = scheduler_activation.mutation_backpressure_reason(state)
+		if backpressure ~= nil then
+			return "capacity", backpressure
+		end
+		if state.takeover_requested then
+			return "closing", "session takeover has been requested"
+		end
+		if state.busy then
+			state.save_requested = true
+			return "busy", "record has a durable operation in flight"
+		end
+	
+		local next_root, patch_result, patch_message = apply_patch_operations(state.public_data_source, operations)
+		if patch_result ~= "success" or next_root == nil then
+			return patch_result :: ResultCode, patch_message
+		end
+	
+		local root_summary, summary_message = summarize_patch_value(next_root, {})
+		if root_summary == nil then
+			return "validation", summary_message or "patch result contains invalid data"
+		end
+		local copy_ok, copied_or_error = pcall(function()
+			return clone_trusted_patch_value(next_root)
+		end)
+		if not copy_ok or copied_or_error == nil then
+			return "validation", "patch result contains invalid data"
+		end
+		local copied = copied_or_error :: JsonValue
+		local valid, message = validate_value(
+			copied,
+			state.options.validator,
+			true,
+			subtree_shape_summary(root_summary) % 2 == 0
+		)
+		if not valid then
+			return "validation", message
+		end
+	
+		local old_data = state.data
+		local skip_sync_external_mutation_check = state.options.on_event == nil and next(state.change_observers) == nil
+		state.data = copied
+		state.public_data_source = next_root
+		self.Data = state.data
+		state.change_sequence += 1
+		mark_dirty(state)
+		local operation_id = HttpService:GenerateGUID(false)
+		state.current_operation_id = operation_id
+		enqueue_change_observation(state, old_data, copied, operation_id, "patch")
+		state.save_requested = true
+		state.next_autosave = now_local()
+		state.last_observed = now_unix()
+		observe(state, "patch", "success", nil)
+		sync_public(self, skip_sync_external_mutation_check)
+		return "success", nil
+	end
+end)()
+
+
 RecordStore._internals.transact = (function()
 	local protocol = prepared_envelope_cache._sidecar_protocol
 	local DEFAULT_RECEIPT_RETENTION_SECONDS = 30 * 24 * 60 * 60
@@ -20012,6 +20706,7 @@ end)();
 end)(mailbox_v2_migration_api(false))
 
 RecordStore.new = (function()
+	local patch_method = (RecordStore._internals :: any).patch :: (self: Record, operations: { PatchOperation }) -> (ResultCode, string?)
 	local normalize_options = RecordStore._internals.normalize_options
 	local transact_engine = RecordStore._internals.transact :: (Record, string, string, TransactionReducer, TransactionOptions?, string?, JsonValue?, { OutboxEventSpec }?) -> (JsonValue?, TransactionStatus, string?)
 	local transaction_status_engine = (RecordStore._internals :: { [string]: any }).get_transaction_status :: (Record, string, JsonValue) -> TransactionReceiptStatus
@@ -20032,13 +20727,14 @@ RecordStore.new = (function()
 	if valid_options == nil then
 		error("normalized options are missing", 2)
 	end
-	local record = make_record(name, scope, key, valid_options, false, transact_engine, transaction_status_engine)
+	local record = make_record(name, scope, key, valid_options, false, transact_engine, transaction_status_engine, nil, patch_method)
 	start_scheduler()
 	return record
 	end
 end)()
 
 RecordStore.Mock = (function()
+	local patch_method = (RecordStore._internals :: any).patch :: (self: Record, operations: { PatchOperation }) -> (ResultCode, string?)
 	local normalize_options = RecordStore._internals.normalize_options
 	local transact_engine = RecordStore._internals.transact :: (Record, string, string, TransactionReducer, TransactionOptions?, string?, JsonValue?, { OutboxEventSpec }?) -> (JsonValue?, TransactionStatus, string?)
 	local transaction_status_engine = (RecordStore._internals :: { [string]: any }).get_transaction_status :: (Record, string, JsonValue) -> TransactionReceiptStatus
@@ -20064,7 +20760,7 @@ RecordStore.Mock = (function()
 		valid_options.messaging_enabled = false
 		valid_options.takeover_enabled = false
 		start_scheduler()
-		return make_record(name, scope, key, valid_options, true, transact_engine, transaction_status_engine)
+		return make_record(name, scope, key, valid_options, true, transact_engine, transaction_status_engine, nil, patch_method)
 	end
 
 	local function mock_new_client(name: string, scope: string, key: string, options: Options): Record
@@ -20089,7 +20785,7 @@ RecordStore.Mock = (function()
 		start_scheduler()
 		return make_record(
 			name, scope, key, valid_options, true, transact_engine, transaction_status_engine,
-			("mock-client-%d"):format(mock_client_sequence)
+			("mock-client-%d"):format(mock_client_sequence), patch_method
 		)
 	end
 
