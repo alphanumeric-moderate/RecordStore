@@ -1763,7 +1763,7 @@ do
 			end
 			local selected_item = self.queue[index]
 			if selected_item == nil then return nil, "empty" end
-			local selected_count = selected_batch_size(self, selected_item)
+			local selected_count = selected_batch_size(self, selected_item, self.selection_scratch.batch_dimensions)
 			local item = table.remove(self.queue, index)
 			if item == nil then return nil, "empty" end
 			item.admission_batch_size = selected_count
