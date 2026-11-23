@@ -114,6 +114,28 @@ for _, algorithm in ipairs({ "weighted", "deadline" }) do
 	take(burst, algorithm .. "-high-second")
 end
 
+-- When a lane contains an urgent item, DRR still compares every item using the
+-- deadline/age ordering; an older non-urgent item may correctly precede it.
+local aged_drr = new_scheduler()
+enqueue(aged_drr, {
+	id = "aged-drr-item",
+	owner_id = "aged-drr-owner",
+	lane = "normal",
+	work_class = "aged-drr-work",
+	service_class = "normal",
+	deadline_ms = now_ms + 66_000,
+})
+now_ms += 60_000
+enqueue(aged_drr, {
+	id = "urgent-drr-item",
+	owner_id = "aged-drr-owner",
+	lane = "normal",
+	work_class = "aged-drr-work",
+	service_class = "normal",
+	deadline_ms = now_ms + 4_000,
+})
+take(aged_drr, "aged-drr-item")
+
 -- DRR uses the same high-burst exclusion while retaining deterministic lane rotation.
 local drr_high_burst = new_scheduler()
 local drr_high_burst_policy = drr_high_burst:Stats().policy
