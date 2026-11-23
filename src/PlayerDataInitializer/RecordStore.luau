@@ -155,6 +155,19 @@ do
 
 	local MAX_SCHEDULER_COPY_NODES = 4096
 
+	local function new_scheduler_selection_scratch(): EmbeddedSchedulerDynamicRecord
+		return {
+			eligible = {},
+			eligible_batch_counts = {},
+			service_time_estimates = {},
+			lane_rows = {},
+			lane_keys = {},
+			lane_row_pool = {},
+			lane_has_urgent = {},
+			lane_oldest_index = {},
+		}
+	end
+
 	local function copy_bounded(value: any, maximum_nodes: number): any
 		local seen = {}
 		local nodes = 0
@@ -273,6 +286,7 @@ do
 			stats = { admitted = 0, rejected = 0, completed = 0, released = 0, throttled = 0, errors = 0,
 				scheduled_selected = 0, scheduled_expired = 0, scheduled_overdue = 0, shadow_samples = 0 },
 			scheduler_metrics = { by_lane = {}, wait_ms = new_sample_window(), wait_by_lane_class = {}, last_shadow = nil },
+			selection_scratch = new_scheduler_selection_scratch(),
 		}
 		local limits = { critical = 32, profile_save = 32, profile_release = 32, interactive = 24, messaging = 20, migration = 4, maintenance = 8, tracing = 1 }
 		local function policy_valid(policy: EmbeddedSchedulerDynamicRecord): (boolean, string?)
@@ -1061,10 +1075,36 @@ do
 			local fifo_fast_path = algorithm == "fifo" and renewal_mode ~= true and renewal_mode ~= "critical"
 			local drr_candidate_mode = algorithm ~= "fifo" and algorithm ~= "weighted" and algorithm ~= "deadline"
 				and renewal_mode ~= true and renewal_mode ~= "critical"
+			local scratch = self.selection_scratch
+			local eligible_buffer = scratch.eligible
+			local eligible_batch_counts_buffer = scratch.eligible_batch_counts
+			local service_time_estimates = scratch.service_time_estimates
+			local lane_rows = scratch.lane_rows
+			local lane_keys = scratch.lane_keys
+			local lane_row_pool = scratch.lane_row_pool
+			local lane_has_urgent = scratch.lane_has_urgent
+			local lane_oldest_index = scratch.lane_oldest_index
+			table.clear(eligible_buffer)
+			table.clear(eligible_batch_counts_buffer)
+			table.clear(service_time_estimates)
+			for lane_position = 1, #lane_keys do
+				local previous_key = lane_keys[lane_position]
+				local previous_row = lane_rows[previous_key]
+				if previous_row ~= nil then
+					table.clear(previous_row)
+					lane_row_pool[#lane_row_pool + 1] = previous_row
+					lane_rows[previous_key] = nil
+				end
+				lane_has_urgent[previous_key] = nil
+				lane_oldest_index[previous_key] = nil
+			end
+			table.clear(lane_keys)
 			local now = now_ms()
 			local urgent_fallback = self.urgent_streak >= self.policy.urgent_deadline_burst
-			local eligible: { number }? = if fifo_fast_path then nil else {}
-			local eligible_batch_counts: { [number]: number }? = if drr_candidate_mode then {} else nil
+			local eligible: { number }? = if fifo_fast_path then nil else eligible_buffer
+			local eligible_batch_counts: { [number]: number }? =
+				if drr_candidate_mode then eligible_batch_counts_buffer else nil
+			local eligible_has_non_high = false
 			local fifo_best_index: number? = nil
 			local fifo_best_enqueued_at = math.huge
 			local fifo_best_non_high_index: number? = nil
@@ -1131,6 +1171,9 @@ do
 							else
 								local candidate_indices = eligible :: { number }
 								candidate_indices[#candidate_indices + 1] = index
+								if effective_lane ~= "high" and effective_lane ~= "lease_renewal" then
+									eligible_has_non_high = true
+								end
 								if drr_candidate_mode and batch_count ~= nil then
 									local batch_counts = eligible_batch_counts :: { [number]: number }
 									batch_counts[index] = batch_count
@@ -1155,29 +1198,18 @@ do
 				return fifo_best_index, urgent_fallback
 			end
 			if eligible == nil or #eligible == 0 then return nil, false end
-			if self.high_streak >= self.policy.high_burst then
-				local has_non_high = false
-				for _, candidate_index in ipairs(eligible) do
-					local candidate_item = self.queue[candidate_index]
-					local candidate_lane = scheduled_lane(candidate_item, now)
-					if candidate_lane ~= "high" and candidate_lane ~= "lease_renewal" then
-						has_non_high = true
-						break
+			if self.high_streak >= self.policy.high_burst and eligible_has_non_high then
+				local write_index = 1
+				local eligible_count = #eligible
+				for read_index = 1, eligible_count do
+					local candidate_index = eligible[read_index]
+					if scheduled_lane(self.queue[candidate_index], now) ~= "high" then
+						eligible[write_index] = candidate_index
+						write_index += 1
 					end
 				end
-				if has_non_high then
-					local write_index = 1
-					local eligible_count = #eligible
-					for read_index = 1, eligible_count do
-						local candidate_index = eligible[read_index]
-						if scheduled_lane(self.queue[candidate_index], now) ~= "high" then
-							eligible[write_index] = candidate_index
-							write_index += 1
-						end
-					end
-					for clear_index = write_index, eligible_count do
-						eligible[clear_index] = nil
-					end
+				for clear_index = write_index, eligible_count do
+					eligible[clear_index] = nil
 				end
 			end
 			if renewal_mode == true or renewal_mode == "critical" then
@@ -1204,7 +1236,6 @@ do
 			elseif algorithm == "weighted" or algorithm == "deadline" then
 				local best_index: number? = nil
 				local best_score: number? = nil
-				local service_time_estimates = {}
 				for _, candidate_index in ipairs(eligible) do
 					local item = self.queue[candidate_index]
 					local age = math.min(60000, math.max(0, now - item.enqueued_at_ms))
@@ -1227,15 +1258,32 @@ do
 				end
 				return best_index, urgent_fallback
 			end
-			local lane_rows, lane_keys = {}, {}
 			for _, candidate_index in ipairs(eligible) do
 				local item = self.queue[candidate_index]
 				local key = lane_key(item, now)
-				if lane_rows[key] == nil then
-					lane_rows[key] = {}
+				local row = lane_rows[key]
+				if row == nil then
+					local pool_count = #lane_row_pool
+					if pool_count > 0 then
+						row = lane_row_pool[pool_count]
+						lane_row_pool[pool_count] = nil
+					else
+						row = {}
+					end
+					lane_rows[key] = row
 					lane_keys[#lane_keys + 1] = key
+					lane_has_urgent[key] = false
+					lane_oldest_index[key] = candidate_index
+				else
+					local oldest_index = lane_oldest_index[key]
+					if item.enqueued_at_ms < self.queue[oldest_index].enqueued_at_ms then
+						lane_oldest_index[key] = candidate_index
+					end
 				end
-				lane_rows[key][#lane_rows[key] + 1] = candidate_index
+				if finite(item.deadline_ms) and item.deadline_ms - now <= 5000 then
+					lane_has_urgent[key] = true
+				end
+				row[#row + 1] = candidate_index
 			end
 			table.sort(lane_keys)
 			local lane_count = #lane_keys
@@ -1262,30 +1310,20 @@ do
 						elseif service_class == "normal" then 2 else 1
 					local weight = lane_weight * service_weight
 					self.drr_deficit[key] = math.min(self.policy.max_item_cost * 2, (self.drr_deficit[key] or 0) + self.policy.drr_quantum * weight)
-					local best_index = rows[1]
-					local best_item = self.queue[best_index]
-					local has_urgent = false
-					for _, candidate_index in ipairs(rows) do
-						local item = self.queue[candidate_index]
-						if finite(item.deadline_ms) and item.deadline_ms - now <= 5000 then has_urgent = true end
-					end
-					if has_urgent and self.urgent_streak < self.policy.urgent_deadline_burst then
-						for _, candidate_index in ipairs(rows) do
+					local best_index = lane_oldest_index[key]
+					if lane_has_urgent[key] and self.urgent_streak < self.policy.urgent_deadline_burst then
+						best_index = rows[1]
+						local best_item = self.queue[best_index]
+						for row_index = 2, #rows do
+							local candidate_index = rows[row_index]
 							local item = self.queue[candidate_index]
 							if item_precedes(item, best_item, now) then
 								best_index = candidate_index
 								best_item = item
 							end
 						end
-					else
-						for _, candidate_index in ipairs(rows) do
-							local item = self.queue[candidate_index]
-							if item.enqueued_at_ms < best_item.enqueued_at_ms then
-								best_index = candidate_index
-								best_item = item
-							end
-						end
 					end
+					local best_item = self.queue[best_index]
 					local batch_count = if eligible_batch_counts ~= nil then eligible_batch_counts[best_index] else nil
 					local cost = effective_cost(best_item, batch_count)
 					if cost <= self.drr_deficit[key] then
@@ -1695,6 +1733,7 @@ do
 				policy = copy(self.policy), in_flight = self.in_flight, by_class = copy(self.by_class),
 				active_tickets = copy(self.active_tickets),
 				wake_heap = copy(self.wake_heap), wake_sequence = self.wake_sequence,
+				selection_scratch = new_scheduler_selection_scratch(),
 				read_units_in_flight = self.read_units_in_flight, write_units_in_flight = self.write_units_in_flight,
 				estimated_bytes_in_flight = self.estimated_bytes_in_flight, handler_slots_in_flight = self.handler_slots_in_flight,
 				request_budgets = copy(self.request_budgets),
