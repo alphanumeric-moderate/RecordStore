@@ -1101,7 +1101,8 @@ do
 			table.clear(lane_keys)
 			local now = now_ms()
 			local urgent_fallback = self.urgent_streak >= self.policy.urgent_deadline_burst
-			local eligible: { number }? = if fifo_fast_path then nil else eligible_buffer
+			local eligible: { number }? =
+				if fifo_fast_path or drr_candidate_mode then nil else eligible_buffer
 			local eligible_batch_counts: { [number]: number }? =
 				if drr_candidate_mode then eligible_batch_counts_buffer else nil
 			local eligible_has_non_high = false
@@ -1168,15 +1169,43 @@ do
 								if effective_lane ~= "high" and effective_lane ~= "lease_renewal" then
 									fifo_has_non_high = true
 								end
+							elseif drr_candidate_mode then
+								if effective_lane ~= "high" and effective_lane ~= "lease_renewal" then
+									eligible_has_non_high = true
+								end
+								local key = lane_key(item, now)
+								local row = lane_rows[key]
+								if row == nil then
+									local pool_count = #lane_row_pool
+									if pool_count > 0 then
+										row = lane_row_pool[pool_count]
+										lane_row_pool[pool_count] = nil
+									else
+										row = {}
+									end
+									lane_rows[key] = row
+									lane_keys[#lane_keys + 1] = key
+									lane_has_urgent[key] = false
+									lane_oldest_index[key] = index
+								else
+									local oldest_index = lane_oldest_index[key]
+									if item.enqueued_at_ms < self.queue[oldest_index].enqueued_at_ms then
+										lane_oldest_index[key] = index
+									end
+								end
+								if finite(item.deadline_ms) and item.deadline_ms - now <= 5000 then
+									lane_has_urgent[key] = true
+								end
+								row[#row + 1] = index
+								if batch_count ~= nil then
+									local batch_counts = eligible_batch_counts :: { [number]: number }
+									batch_counts[index] = batch_count
+								end
 							else
 								local candidate_indices = eligible :: { number }
 								candidate_indices[#candidate_indices + 1] = index
 								if effective_lane ~= "high" and effective_lane ~= "lease_renewal" then
 									eligible_has_non_high = true
-								end
-								if drr_candidate_mode and batch_count ~= nil then
-									local batch_counts = eligible_batch_counts :: { [number]: number }
-									batch_counts[index] = batch_count
 								end
 							end
 						elseif finite(admission.retry_after_ms) then
@@ -1196,6 +1225,81 @@ do
 					return fifo_best_non_high_index, urgent_fallback
 				end
 				return fifo_best_index, urgent_fallback
+			end
+			if drr_candidate_mode then
+				if #lane_keys == 0 then return nil, false end
+				if self.high_streak >= self.policy.high_burst and eligible_has_non_high then
+					local write_index = 1
+					local lane_key_count = #lane_keys
+					for read_index = 1, lane_key_count do
+						local key = lane_keys[read_index]
+						local rows = lane_rows[key]
+						local first_item = self.queue[rows[1]]
+						if scheduled_lane(first_item, now) ~= "high" then
+							lane_keys[write_index] = key
+							write_index += 1
+						else
+							table.clear(rows)
+							lane_row_pool[#lane_row_pool + 1] = rows
+							lane_rows[key] = nil
+							lane_has_urgent[key] = nil
+							lane_oldest_index[key] = nil
+						end
+					end
+					for clear_index = write_index, lane_key_count do
+						lane_keys[clear_index] = nil
+					end
+				end
+				if #lane_keys == 0 then return nil, false end
+				table.sort(lane_keys)
+				local lane_count = #lane_keys
+				local start_index = 1
+				if self.drr_cursor_key ~= nil then
+					for i, key in ipairs(lane_keys) do
+						if key == self.drr_cursor_key then
+							start_index = (i % lane_count) + 1
+							break
+						end
+					end
+				end
+				local rounds = math.ceil(self.policy.max_item_cost / self.policy.drr_quantum) + 2
+				for _ = 1, rounds do
+					for offset = 0, lane_count - 1 do
+						local lane_index = ((start_index + offset - 1) % lane_count) + 1
+						local key = lane_keys[lane_index]
+						local rows = lane_rows[key]
+						local first_item = self.queue[rows[1]]
+						local lane = scheduled_lane(first_item, now)
+						local lane_weight = if lane == "lease_renewal" then 4 elseif lane == "high" then 4 elseif lane == "normal" then 2 else 1
+						local service_class = first_item.service_class or "best_effort"
+						local service_weight = if service_class == "critical" then 4 elseif service_class == "interactive" then 3
+							elseif service_class == "normal" then 2 else 1
+						local weight = lane_weight * service_weight
+						self.drr_deficit[key] = math.min(self.policy.max_item_cost * 2, (self.drr_deficit[key] or 0) + self.policy.drr_quantum * weight)
+						local best_index = lane_oldest_index[key]
+						if lane_has_urgent[key] and self.urgent_streak < self.policy.urgent_deadline_burst then
+							best_index = rows[1]
+							local best_item = self.queue[best_index]
+							for row_index = 2, #rows do
+								local candidate_index = rows[row_index]
+								local item = self.queue[candidate_index]
+								if item_precedes(item, best_item, now) then
+									best_index = candidate_index
+									best_item = item
+								end
+							end
+						end
+						local best_item = self.queue[best_index]
+						local batch_count = eligible_batch_counts ~= nil and eligible_batch_counts[best_index] or nil
+						local cost = effective_cost(best_item, batch_count)
+						if cost <= self.drr_deficit[key] then
+							self.drr_deficit[key] -= cost
+							self.drr_cursor_key = key
+							return best_index, urgent_fallback
+						end
+					end
+				end
+				return nil, false
 			end
 			if eligible == nil or #eligible == 0 then return nil, false end
 			if self.high_streak >= self.policy.high_burst and eligible_has_non_high then
@@ -1257,81 +1361,6 @@ do
 					end
 				end
 				return best_index, urgent_fallback
-			end
-			for _, candidate_index in ipairs(eligible) do
-				local item = self.queue[candidate_index]
-				local key = lane_key(item, now)
-				local row = lane_rows[key]
-				if row == nil then
-					local pool_count = #lane_row_pool
-					if pool_count > 0 then
-						row = lane_row_pool[pool_count]
-						lane_row_pool[pool_count] = nil
-					else
-						row = {}
-					end
-					lane_rows[key] = row
-					lane_keys[#lane_keys + 1] = key
-					lane_has_urgent[key] = false
-					lane_oldest_index[key] = candidate_index
-				else
-					local oldest_index = lane_oldest_index[key]
-					if item.enqueued_at_ms < self.queue[oldest_index].enqueued_at_ms then
-						lane_oldest_index[key] = candidate_index
-					end
-				end
-				if finite(item.deadline_ms) and item.deadline_ms - now <= 5000 then
-					lane_has_urgent[key] = true
-				end
-				row[#row + 1] = candidate_index
-			end
-			table.sort(lane_keys)
-			local lane_count = #lane_keys
-			local start_index = 1
-			if self.drr_cursor_key ~= nil then
-				for i, key in ipairs(lane_keys) do
-					if key == self.drr_cursor_key then
-						start_index = (i % lane_count) + 1
-						break
-					end
-				end
-			end
-			local rounds = math.ceil(self.policy.max_item_cost / self.policy.drr_quantum) + 2
-			for _ = 1, rounds do
-				for offset = 0, lane_count - 1 do
-					local lane_index = ((start_index + offset - 1) % lane_count) + 1
-					local key = lane_keys[lane_index]
-					local rows = lane_rows[key]
-					local first_item = self.queue[rows[1]]
-					local lane = scheduled_lane(first_item, now)
-					local lane_weight = if lane == "lease_renewal" then 4 elseif lane == "high" then 4 elseif lane == "normal" then 2 else 1
-					local service_class = first_item.service_class or "best_effort"
-					local service_weight = if service_class == "critical" then 4 elseif service_class == "interactive" then 3
-						elseif service_class == "normal" then 2 else 1
-					local weight = lane_weight * service_weight
-					self.drr_deficit[key] = math.min(self.policy.max_item_cost * 2, (self.drr_deficit[key] or 0) + self.policy.drr_quantum * weight)
-					local best_index = lane_oldest_index[key]
-					if lane_has_urgent[key] and self.urgent_streak < self.policy.urgent_deadline_burst then
-						best_index = rows[1]
-						local best_item = self.queue[best_index]
-						for row_index = 2, #rows do
-							local candidate_index = rows[row_index]
-							local item = self.queue[candidate_index]
-							if item_precedes(item, best_item, now) then
-								best_index = candidate_index
-								best_item = item
-							end
-						end
-					end
-					local best_item = self.queue[best_index]
-					local batch_count = if eligible_batch_counts ~= nil then eligible_batch_counts[best_index] else nil
-					local cost = effective_cost(best_item, batch_count)
-					if cost <= self.drr_deficit[key] then
-						self.drr_deficit[key] -= cost
-						self.drr_cursor_key = key
-						return best_index, urgent_fallback
-					end
-				end
 			end
 			return nil, false
 		end
