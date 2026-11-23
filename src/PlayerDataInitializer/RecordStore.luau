@@ -216,7 +216,7 @@ do
 		local defaults = operation_dimension_defaults[request_kind] or operation_dimension_defaults.default
 		local multiplier: number = if item.batchable == true and type(batch_count) == "number" and math.isfinite(batch_count)
 			then math.clamp(math.floor(batch_count), 1, 16) else 1
-		local result = reusable_result or {}
+		local result: EmbeddedSchedulerDynamicRecord = if reusable_result ~= nil then reusable_result else {}
 		result.read_units = math.max(defaults.read, if finite(item.read_units) then item.read_units else 0) * multiplier
 		result.write_units = math.max(defaults.write, if finite(item.write_units) then item.write_units else 0) * multiplier
 		result.estimated_bytes = math.max(defaults.bytes, if finite(item.estimated_bytes) then item.estimated_bytes else 0) * multiplier
@@ -635,7 +635,7 @@ do
 			if (self.by_class[work_class] or 0) + cost > math.min(limits[work_class] or limits.interactive, self.policy.max_in_flight) then
 				return { code = "capacity", transient = true, message = "work-class cap reached" }, false, true
 			end
-			local result = reusable_result or {}
+			local result: EmbeddedSchedulerDynamicRecord = if reusable_result ~= nil then reusable_result else {}
 			if reusable_result ~= nil then table.clear(result) end
 			result.code = "admitted"
 			result.work_class = work_class
