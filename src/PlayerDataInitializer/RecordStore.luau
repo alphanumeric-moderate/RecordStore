@@ -160,6 +160,8 @@ do
 			eligible = {},
 			eligible_batch_counts = {},
 			service_time_estimates = {},
+			dimensions = {},
+			admission_result = {},
 			lane_rows = {},
 			lane_keys = {},
 			lane_row_pool = {},
@@ -204,18 +206,22 @@ do
 		batch = { read = 1, write = 1, bytes = 65536, handlers = 1 },
 	}
 
-	local function estimate_dimensions(item: EmbeddedSchedulerDynamicRecord, batch_count: number?): EmbeddedSchedulerDynamicRecord
+	local function estimate_dimensions(
+		item: EmbeddedSchedulerDynamicRecord,
+		batch_count: number?,
+		reusable_result: EmbeddedSchedulerDynamicRecord?
+	): EmbeddedSchedulerDynamicRecord
 		local request_kind = if type(item.operation_class) == "string" then item.operation_class
 			elseif type(item.work_class) == "string" then item.work_class else "default"
 		local defaults = operation_dimension_defaults[request_kind] or operation_dimension_defaults.default
 		local multiplier: number = if item.batchable == true and type(batch_count) == "number" and math.isfinite(batch_count)
 			then math.clamp(math.floor(batch_count), 1, 16) else 1
-		return {
-			read_units = math.max(defaults.read, if finite(item.read_units) then item.read_units else 0) * multiplier,
-			write_units = math.max(defaults.write, if finite(item.write_units) then item.write_units else 0) * multiplier,
-			estimated_bytes = math.max(defaults.bytes, if finite(item.estimated_bytes) then item.estimated_bytes else 0) * multiplier,
-			handler_slots = math.max(defaults.handlers, if finite(item.handler_slots) then item.handler_slots else 1),
-		}
+		local result = reusable_result or {}
+		result.read_units = math.max(defaults.read, if finite(item.read_units) then item.read_units else 0) * multiplier
+		result.write_units = math.max(defaults.write, if finite(item.write_units) then item.write_units else 0) * multiplier
+		result.estimated_bytes = math.max(defaults.bytes, if finite(item.estimated_bytes) then item.estimated_bytes else 0) * multiplier
+		result.handler_slots = math.max(defaults.handlers, if finite(item.handler_slots) then item.handler_slots else 1)
+		return result
 	end
 
 	local MAX_CUSTOM_OPERATION_KIND_KEYS = 19
@@ -455,7 +461,18 @@ do
 			end
 			return true
 		end
-		local function admission_decision(self: EmbeddedSchedulerDynamicRecord, work_class: any, request_kind: any, cost: any, mutating: any, critical_override: any, dimensions: any, register_operation_kind: boolean?, skip_terminal_checks: boolean?): (EmbeddedSchedulerDynamicRecord, boolean, boolean)
+		local function admission_decision(
+			self: EmbeddedSchedulerDynamicRecord,
+			work_class: any,
+			request_kind: any,
+			cost: any,
+			mutating: any,
+			critical_override: any,
+			dimensions: any,
+			register_operation_kind: boolean?,
+			skip_terminal_checks: boolean?,
+			reusable_result: EmbeddedSchedulerDynamicRecord?
+		): (EmbeddedSchedulerDynamicRecord, boolean, boolean)
 			if work_class == nil then work_class = "interactive" end
 			if request_kind == nil then request_kind = "default" end
 			if cost == nil then cost = 1 end
@@ -618,14 +635,18 @@ do
 			if (self.by_class[work_class] or 0) + cost > math.min(limits[work_class] or limits.interactive, self.policy.max_in_flight) then
 				return { code = "capacity", transient = true, message = "work-class cap reached" }, false, true
 			end
-			return {
-				code = "admitted", work_class = work_class, request_kind = request_kind,
-				cost = cost, critical = critical,
-				dimensions = {
-					read_units = read_units, write_units = write_units,
-					estimated_bytes = estimated_bytes, handler_slots = handler_slots,
-				},
-			}, probe_needed, false
+			local result = reusable_result or {}
+			if reusable_result ~= nil then table.clear(result) end
+			result.code = "admitted"
+			result.work_class = work_class
+			result.request_kind = request_kind
+			result.cost = cost
+			result.critical = critical
+			result.dimensions = if reusable_result ~= nil then dimensions else {
+				read_units = read_units, write_units = write_units,
+				estimated_bytes = estimated_bytes, handler_slots = handler_slots,
+			}
+			return result, probe_needed, false
 		end
 		function governor:CanAdmit(work_class, request_kind, cost, mutating, critical_override, dimensions)
 			local decision = admission_decision(self, work_class, request_kind, cost, mutating, critical_override, dimensions)
@@ -1048,10 +1069,18 @@ do
 			cache[metric_kind] = estimate
 			return estimate
 		end
-		local function effective_cost(item: EmbeddedSchedulerDynamicRecord, batch_count: number?): number
+		local function effective_cost(
+			item: EmbeddedSchedulerDynamicRecord,
+			batch_count: number?,
+			prepared_dimensions: EmbeddedSchedulerDynamicRecord?
+		): number
 			local default_batch_count = if item.batchable == true
 				then math.min(item.batch_size or 1, item.batch_backlog or item.batch_size or 1) else nil
-			local dimensions = estimate_dimensions(item, if batch_count ~= nil then batch_count else default_batch_count)
+			local dimensions = prepared_dimensions or estimate_dimensions(
+				item,
+				if batch_count ~= nil then batch_count else default_batch_count,
+				nil
+			)
 			local estimated = math.max(
 				1,
 				dimensions.read_units + dimensions.write_units,
@@ -1142,16 +1171,19 @@ do
 						local admission_preflight_current = item.admission_preflight_policy_revision == self.policy.revision
 							and item.admission_preflight_batch_count == batch_count
 							and item.admission_preflight_terminal_result == false
+						local dimensions = estimate_dimensions(item, batch_count, scratch.dimensions)
+						local candidate_cost = effective_cost(item, batch_count, dimensions)
 						local admission = admission_decision(
 							self,
 							item.work_class,
 							item.operation_class,
-							effective_cost(item, batch_count),
+							candidate_cost,
 							item.mutating ~= false,
 							item.service_class == "critical" or item.lane == "lease_renewal",
-							estimate_dimensions(item, batch_count),
+							dimensions,
 							nil,
-							admission_preflight_current
+							admission_preflight_current,
+							scratch.admission_result
 						)
 						if admission.code == "admitted" then
 							if fifo_fast_path then
