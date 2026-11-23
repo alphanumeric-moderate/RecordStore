@@ -1141,6 +1141,37 @@ do
 		owner_retry_cooldown:Reschedule(after_completion.id, now_ms + 10)
 	assert(third_rescheduled and third_retry_due == latest_retry_due,
 		"new same-owner retries bypassed an already queued cooldown")
+
+	local latest_cancelled, latest_cancel_error = owner_retry_cooldown:CancelQueued(second_active.id)
+	assert(latest_cancelled ~= nil and latest_cancel_error == nil,
+		"latest queued retry could not be cancelled")
+	assert(owner_retry_cooldown.retry_cooldown_until[owner_id] == earlier_retry_due,
+		"removing the latest retry did not reveal the remaining owner cooldown")
+	assert(owner_retry_cooldown.retry_heaps_by_owner[owner_id] ~= nil
+		and owner_retry_cooldown.retry_heaps_by_owner[owner_id].positions[second_active.id] == nil,
+		"cancelled retry remained in the owner retry index")
+
+	local earlier_cancelled, earlier_cancel_error = owner_retry_cooldown:CancelQueued(first_active.id)
+	assert(earlier_cancelled ~= nil and earlier_cancel_error == nil,
+		"remaining queued retry could not be cancelled")
+	assert(owner_retry_cooldown.retry_cooldown_until[owner_id] == nil
+		and owner_retry_cooldown.retry_heaps_by_owner[owner_id] == nil,
+		"empty owner retry index retained a stale cooldown")
+
+	local fresh_after_cancellation = {
+		id = "retry-cooldown-after-cancellation",
+		owner_id = owner_id,
+		lane = "normal",
+		work_class = "cooldown-test",
+	}
+	enqueue(owner_retry_cooldown, fresh_after_cancellation)
+	local fresh_active, fresh_status = owner_retry_cooldown:TakeNext()
+	assert(fresh_status == "success" and fresh_active.id == fresh_after_cancellation.id,
+		"fresh same-owner work could not be selected after cancelling all retries")
+	local fresh_rescheduled, _, fresh_retry_due =
+		owner_retry_cooldown:Reschedule(fresh_active.id, now_ms + 10)
+	assert(fresh_rescheduled and fresh_retry_due == now_ms + 10,
+		"cancelled retry cooldown continued to delay a fresh retry")
 end
 
 -- Explicit throttled retries respect retry_after_ms, use the class-specific backoff,
