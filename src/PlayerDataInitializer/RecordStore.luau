@@ -1396,6 +1396,8 @@ do
 			end
 			return nil, false
 		end
+		local index_retry_item: (EmbeddedSchedulerDynamicRecord, EmbeddedSchedulerDynamicRecord) -> ()
+
 		function governor:Enqueue(item, protect_critical_queue)
 			if protect_critical_queue ~= nil and type(protect_critical_queue) ~= "boolean" then
 				return { code = "invalid", message = "protect_critical_queue must be boolean" }
@@ -1556,7 +1558,7 @@ do
 			end
 			return index
 		end
-		local function index_retry_item(self: EmbeddedSchedulerDynamicRecord, item: EmbeddedSchedulerDynamicRecord)
+		index_retry_item = function(self: EmbeddedSchedulerDynamicRecord, item: EmbeddedSchedulerDynamicRecord)
 			if item.is_retry ~= true or not valid_text(item.owner_id, 512) or not valid_text(item.id, 128) then return end
 			local owner_heap = self.retry_heaps_by_owner[item.owner_id]
 			if owner_heap == nil then
