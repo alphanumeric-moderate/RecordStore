@@ -1767,7 +1767,8 @@ do
 			local item = table.remove(self.queue, index)
 			if item == nil then return nil, "empty" end
 			item.admission_batch_size = selected_count
-			item.admission_cost = effective_cost(item, selected_count)
+			local selected_dimensions = estimate_dimensions(item, selected_count, self.selection_scratch.dimensions)
+			item.admission_cost = effective_cost(item, selected_count, selected_dimensions)
 			item.queued = false
 			local age = math.max(0, now - (item.enqueued_at_ms or now))
 			append_sample(self.scheduler_metrics.wait_ms, age)
