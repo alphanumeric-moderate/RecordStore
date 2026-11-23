@@ -283,7 +283,7 @@ do
 			completed = {}, completed_order = {}, known = {}, active_owner = {}, active_renewals_by_owner = {}, active_critical_by_owner = {},
 			dependency_ref_counts = {}, pending_completed_prune = {}, pending_failed_prune = {},
 			drr_deficit = {}, drr_cursor_key = nil, high_streak = 0, urgent_streak = 0,
-			failed = {}, failed_order = {}, retry_cooldown_until = {}, retry_tokens_by_class = {},
+			failed = {}, failed_order = {}, retry_cooldown_until = {}, retry_heaps_by_owner = {}, retry_tokens_by_class = {},
 			due_sequence = 0,
 			retry_tokens = 32, last_token_time = now_ms(),
 			last_budget = nil, last_budget_by_kind = {}, last_budget_sampled_at_by_kind = {},
@@ -1512,6 +1512,7 @@ do
 			self.known[value.id] = value
 			retain_dependencies(self, value)
 			table.insert(self.queue, value)
+			index_retry_item(self, value)
 			heap_push(self.queued_due_heap, { id = value.id, due_at_ms = value.due_at_ms, item = value })
 			index_item_wake_events(self, value)
 			inherit_ready_prerequisites(self, value, now_ms())
@@ -1522,17 +1523,95 @@ do
 			end
 			return { code = "accepted", count = #self.queue }
 		end
-		local remember_terminal
-		local function refresh_owner_retry_cooldown(self: EmbeddedSchedulerDynamicRecord, owner_id: string)
-			local latest_due = nil
-			for _, queued in ipairs(self.queue) do
-				if queued.owner_id == owner_id and queued.is_retry == true then
-					local due = if finite(queued.due_at_ms) then queued.due_at_ms else now_ms()
-					latest_due = if latest_due == nil then due else math.max(latest_due, due)
+		local function retry_heap_precedes(left: EmbeddedSchedulerDynamicRecord, right: EmbeddedSchedulerDynamicRecord): boolean
+			if left.due_at_ms ~= right.due_at_ms then return left.due_at_ms > right.due_at_ms end
+			return left.id > right.id
+		end
+		local function retry_heap_swap(heap: EmbeddedSchedulerDynamicRecord, left_index: number, right_index: number)
+			local items = heap.items
+			local left, right = items[left_index], items[right_index]
+			items[left_index], items[right_index] = right, left
+			heap.positions[left.id] = right_index
+			heap.positions[right.id] = left_index
+		end
+		local function retry_heap_sift_up(heap: EmbeddedSchedulerDynamicRecord, index: number): number
+			while index > 1 do
+				local parent = math.floor(index / 2)
+				if not retry_heap_precedes(heap.items[index], heap.items[parent]) then break end
+				retry_heap_swap(heap, index, parent)
+				index = parent
+			end
+			return index
+		end
+		local function retry_heap_sift_down(heap: EmbeddedSchedulerDynamicRecord, index: number): number
+			local items = heap.items
+			local count = #items
+			while true do
+				local left, right, best = index * 2, index * 2 + 1, index
+				if left <= count and retry_heap_precedes(items[left], items[best]) then best = left end
+				if right <= count and retry_heap_precedes(items[right], items[best]) then best = right end
+				if best == index then break end
+				retry_heap_swap(heap, index, best)
+				index = best
+			end
+			return index
+		end
+		local function index_retry_item(self: EmbeddedSchedulerDynamicRecord, item: EmbeddedSchedulerDynamicRecord)
+			if item.is_retry ~= true or not valid_text(item.owner_id, 512) or not valid_text(item.id, 128) then return end
+			local owner_heap = self.retry_heaps_by_owner[item.owner_id]
+			if owner_heap == nil then
+				owner_heap = { items = {}, positions = {} }
+				self.retry_heaps_by_owner[item.owner_id] = owner_heap
+			end
+			local position = owner_heap.positions[item.id]
+			if position == nil then
+				local entry = { id = item.id, due_at_ms = item.due_at_ms }
+				local items = owner_heap.items
+				position = #items + 1
+				items[position] = entry
+				owner_heap.positions[item.id] = position
+				retry_heap_sift_up(owner_heap, position)
+			else
+				local entry = owner_heap.items[position]
+				local prior_due = entry.due_at_ms
+				entry.due_at_ms = item.due_at_ms
+				if item.due_at_ms > prior_due then
+					retry_heap_sift_up(owner_heap, position)
+				elseif item.due_at_ms < prior_due then
+					retry_heap_sift_down(owner_heap, position)
 				end
 			end
-			self.retry_cooldown_until[owner_id] = latest_due
+			self.retry_cooldown_until[item.owner_id] = owner_heap.items[1].due_at_ms
 		end
+		local function unindex_retry_item(self: EmbeddedSchedulerDynamicRecord, item: EmbeddedSchedulerDynamicRecord)
+			if item.is_retry ~= true then return end
+			local owner_heap = self.retry_heaps_by_owner[item.owner_id]
+			if owner_heap == nil then return end
+			local position = owner_heap.positions[item.id]
+			if position == nil then return end
+			local items = owner_heap.items
+			local last_index = #items
+			local last = items[last_index]
+			owner_heap.positions[item.id] = nil
+			items[last_index] = nil
+			if position < last_index then
+				items[position] = last
+				owner_heap.positions[last.id] = position
+				local parent = math.floor(position / 2)
+				if position > 1 and retry_heap_precedes(items[position], items[parent]) then
+					retry_heap_sift_up(owner_heap, position)
+				else
+					retry_heap_sift_down(owner_heap, position)
+				end
+			end
+			if #items == 0 then
+				self.retry_heaps_by_owner[item.owner_id] = nil
+				self.retry_cooldown_until[item.owner_id] = nil
+			else
+				self.retry_cooldown_until[item.owner_id] = items[1].due_at_ms
+			end
+		end
+		local remember_terminal
 		local function clear_admission_preflight(item: any)
 			item.admission_preflight_policy_revision = nil
 			item.admission_preflight_batch_count = nil
@@ -1552,7 +1631,7 @@ do
 			if queue_index == nil then return nil, "queued item was not present in the queue" end
 			table.remove(self.queue, queue_index)
 			item.queued = false
-			refresh_owner_retry_cooldown(self, item.owner_id)
+			unindex_retry_item(self, item)
 			item.terminal_result = {
 				code = "cancelled",
 				message = if type(message) == "string" and message ~= "" then string.sub(message :: string, 1, 200)
@@ -1575,6 +1654,7 @@ do
 				if failed_dependency ~= nil then
 					table.remove(self.queue, index)
 					item.queued = false
+					unindex_retry_item(self, item)
 					local dependency_code = self.failed[failed_dependency]
 					item.terminal_result = {
 						code = "dependency_failed", message = "prerequisite reached a non-success terminal outcome",
@@ -1582,18 +1662,17 @@ do
 					}
 					release_dependencies(self, item)
 					self.known[item.id] = nil
-					refresh_owner_retry_cooldown(self, item.owner_id)
 					remember_terminal(self, item.id, "dependency_failed")
 					clear_admission_preflight(item)
 					return item, "dependency_failed"
 				elseif item.expires_at_ms and item.expires_at_ms <= now then
 					table.remove(self.queue, index)
 					item.queued = false
+					unindex_retry_item(self, item)
 					self.stats.scheduled_expired += 1
 					item.terminal_result = { code = "expired", message = "scheduled work expired before it could start" }
 					release_dependencies(self, item)
 					self.known[item.id] = nil
-					refresh_owner_retry_cooldown(self, item.owner_id)
 					remember_terminal(self, item.id, "expired")
 					clear_admission_preflight(item)
 					return item, "expired"
@@ -1625,6 +1704,7 @@ do
 						self.stats.rejected += 1
 						table.remove(self.queue, index)
 						item.queued = false
+						unindex_retry_item(self, item)
 						item.terminal_result = admission_terminal_result
 						self.known[item.id] = item
 						clear_admission_preflight(item)
@@ -1739,6 +1819,7 @@ do
 				else self.active_critical_by_owner[item.owner_id] = critical_count end
 			end
 			table.insert(self.queue, item)
+			index_retry_item(self, item)
 			heap_push(self.queued_due_heap, { id = item.id, due_at_ms = item.due_at_ms, item = item })
 			index_item_wake_events(self, item)
 			if #self.queued_due_heap > self.policy.queue_capacity * 2 then
@@ -1746,7 +1827,6 @@ do
 				for _, queued in ipairs(self.queue) do heap_push(rebuilt, { id = queued.id, due_at_ms = queued.due_at_ms, item = queued }) end
 				self.queued_due_heap = rebuilt
 			end
-			self.retry_cooldown_until[item.owner_id] = next_due
 			return true, nil, next_due
 		end
 		local function terminal_dependency_referenced(self: EmbeddedSchedulerDynamicRecord, id: string): boolean
@@ -1794,6 +1874,8 @@ do
 				policy = copy(self.policy), in_flight = self.in_flight, by_class = copy(self.by_class),
 				active_tickets = copy(self.active_tickets),
 				wake_heap = copy(self.wake_heap), wake_sequence = self.wake_sequence,
+				retry_cooldown_until = copy(self.retry_cooldown_until),
+				retry_heaps_by_owner = copy(self.retry_heaps_by_owner),
 				selection_scratch = new_scheduler_selection_scratch(),
 				read_units_in_flight = self.read_units_in_flight, write_units_in_flight = self.write_units_in_flight,
 				estimated_bytes_in_flight = self.estimated_bytes_in_flight, handler_slots_in_flight = self.handler_slots_in_flight,
@@ -1835,7 +1917,7 @@ do
 			end
 			release_dependencies(self, item)
 			self.known[id] = nil
-			if item ~= nil then refresh_owner_retry_cooldown(self, item.owner_id) end
+			if item ~= nil then unindex_retry_item(self, item) end
 			for _, dependent_item in pairs(self.known) do
 				if dependent_item.inherited_from == id then
 					dependent_item.inherited_lane = nil
