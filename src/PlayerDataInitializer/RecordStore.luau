@@ -161,6 +161,7 @@ do
 			eligible_batch_counts = {},
 			service_time_estimates = {},
 			dimensions = {},
+			batch_dimensions = {},
 			admission_result = {},
 			lane_rows = {},
 			lane_keys = {},
@@ -461,6 +462,27 @@ do
 			end
 			return true
 		end
+		local function admission_response(
+			target: EmbeddedSchedulerDynamicRecord?,
+			code: string,
+			terminal: boolean?,
+			transient: boolean?,
+			message: string?,
+			retry_after_ms: number?,
+			budget_limited: boolean?,
+			reason: string?
+		): EmbeddedSchedulerDynamicRecord
+			local result: EmbeddedSchedulerDynamicRecord = if target ~= nil then target else {}
+			if target ~= nil then table.clear(result) end
+			result.code = code
+			if terminal ~= nil then result.terminal = terminal end
+			if transient ~= nil then result.transient = transient end
+			if message ~= nil then result.message = message end
+			if retry_after_ms ~= nil then result.retry_after_ms = retry_after_ms end
+			if budget_limited ~= nil then result.budget_limited = budget_limited end
+			if reason ~= nil then result.reason = reason end
+			return result
+		end
 		local function admission_decision(
 			self: EmbeddedSchedulerDynamicRecord,
 			work_class: any,
@@ -479,18 +501,18 @@ do
 			if mutating == nil then
 				mutating = true
 			elseif type(mutating) ~= "boolean" then
-				return { code = "invalid", terminal = true, message = "mutating must be boolean" }, false, false
+				return admission_response(reusable_result, "invalid", true, nil, "mutating must be boolean"), false, false
 			end
 			if critical_override == nil then
 				critical_override = false
 			elseif type(critical_override) ~= "boolean" then
-				return { code = "invalid", terminal = true, message = "critical_override must be boolean" }, false, false
+				return admission_response(reusable_result, "invalid", true, nil, "critical_override must be boolean"), false, false
 			end
 			if not valid_text(work_class, 64) then
-				return { code = "invalid", terminal = true, message = "work_class must be 1..64 bytes" }, false, false
+				return admission_response(reusable_result, "invalid", true, nil, "work_class must be 1..64 bytes"), false, false
 			end
 			if not valid_text(request_kind, 128) then
-				return { code = "invalid", terminal = true, message = "request_kind must be 1..128 bytes" }, false, false
+				return admission_response(reusable_result, "invalid", true, nil, "request_kind must be 1..128 bytes"), false, false
 			end
 			if register_operation_kind ~= false then
 				request_kind = operation_metric_key(self, request_kind)
@@ -503,27 +525,30 @@ do
 				or work_class == "profile_save" or work_class == "profile_release"
 			if skip_terminal_checks ~= true then
 				if not finite(cost) or math.floor(cost) ~= cost or cost < 1 or cost > self.policy.max_item_cost then
-					return { code = "invalid", terminal = true, message = "cost must be an integer within max_item_cost" }, false, false
+					return admission_response(reusable_result, "invalid", true, nil, "cost must be an integer within max_item_cost"), false, false
 				end
 				if dimensions == nil then
 					dimensions = estimate_dimensions({ operation_class = request_kind })
 				elseif type(dimensions) ~= "table" then
-					return { code = "invalid", terminal = true, message = "dimensions must be a table" }, false, false
+					return admission_response(reusable_result, "invalid", true, nil, "dimensions must be a table"), false, false
 				end
 				for field in pairs(dimensions) do
 					if field ~= "read_units" and field ~= "write_units"
 						and field ~= "estimated_bytes" and field ~= "handler_slots"
 					then
-						return { code = "invalid", terminal = true, message = "unsupported admission dimension: " .. tostring(field) }, false, false
+						return admission_response(reusable_result, "invalid", true, nil, "unsupported admission dimension: " .. tostring(field)), false, false
 					end
 				end
 				if dimensions.read_units == nil or dimensions.write_units == nil
 					or dimensions.estimated_bytes == nil or dimensions.handler_slots == nil
 				then
-					return {
-						code = "invalid", terminal = true,
-						message = "dimensions must explicitly provide read_units, write_units, estimated_bytes, and handler_slots",
-					}, false, false
+					return admission_response(
+						reusable_result,
+						"invalid",
+						true,
+						nil,
+						"dimensions must explicitly provide read_units, write_units, estimated_bytes, and handler_slots"
+					), false, false
 				end
 				read_units = dimensions.read_units
 				write_units = dimensions.write_units
@@ -534,32 +559,32 @@ do
 					or not finite(estimated_bytes) or estimated_bytes < 0 or math.floor(estimated_bytes) ~= estimated_bytes
 					or not finite(handler_slots) or handler_slots < 1 or math.floor(handler_slots) ~= handler_slots
 				then
-					return { code = "invalid", terminal = true, message = "invalid multi-dimensional admission estimate" }, false, false
+					return admission_response(reusable_result, "invalid", true, nil, "invalid multi-dimensional admission estimate"), false, false
 				end
 				if read_units > self.policy.max_read_units_in_flight then
-					return { code = "capacity", terminal = true, message = "work item exceeds the StandardRead admission cap" }, false, true
+					return admission_response(reusable_result, "capacity", true, nil, "work item exceeds the StandardRead admission cap"), false, true
 				end
 				if write_units > self.policy.max_write_units_in_flight then
-					return { code = "capacity", terminal = true, message = "work item exceeds the StandardWrite admission cap" }, false, true
+					return admission_response(reusable_result, "capacity", true, nil, "work item exceeds the StandardWrite admission cap"), false, true
 				end
 				if estimated_bytes > self.policy.max_estimated_bytes_in_flight then
-					return { code = "capacity", terminal = true, message = "work item exceeds the estimated byte admission cap" }, false, true
+					return admission_response(reusable_result, "capacity", true, nil, "work item exceeds the estimated byte admission cap"), false, true
 				end
 				if handler_slots > self.policy.max_handler_slots_in_flight then
-					return { code = "capacity", terminal = true, message = "work item exceeds the handler-slot admission cap" }, false, true
+					return admission_response(reusable_result, "capacity", true, nil, "work item exceeds the handler-slot admission cap"), false, true
 				end
 				local class_limit = math.min(limits[work_class] or limits.interactive, self.policy.max_in_flight)
 				if cost > self.policy.max_in_flight then
-					return { code = "capacity", terminal = true, message = "work item cost exceeds max_in_flight" }, false, true
+					return admission_response(reusable_result, "capacity", true, nil, "work item cost exceeds max_in_flight"), false, true
 				end
 				if cost > class_limit then
-					return { code = "capacity", terminal = true, message = "work item cost exceeds its work-class admission cap" }, false, true
+					return admission_response(reusable_result, "capacity", true, nil, "work item cost exceeds its work-class admission cap"), false, true
 				end
 				if self.policy.mode == "read_only" and mutating and not critical then
-					return { code = "read_only", terminal = true, message = "mutating noncritical work is disabled" }, false, true
+					return admission_response(reusable_result, "read_only", true, nil, "mutating noncritical work is disabled"), false, true
 				end
 				if self.policy.mode == "reject_noncritical" and not critical then
-					return { code = "backpressure", terminal = true, message = "scheduler policy rejects noncritical work" }, false, true
+					return admission_response(reusable_result, "backpressure", true, nil, "scheduler policy rejects noncritical work"), false, true
 				end
 			end
 			local circuit = self.circuits[request_kind]
@@ -567,12 +592,12 @@ do
 			if circuit and circuit.state == "open" then
 				local wait_ms = circuit.until_ms - now_ms()
 				if wait_ms > 0 then
-					return { code = "circuit_open", transient = true, retry_after_ms = wait_ms, reason = circuit.reason }, false, false
+					return admission_response(reusable_result, "circuit_open", nil, true, nil, wait_ms, nil, circuit.reason), false, false
 				end
 				probe_needed = true
 			elseif circuit and circuit.state == "half_open" then
 				if circuit.probe then
-					return { code = "circuit_open", transient = true, retry_after_ms = 100, reason = "half-open probe already reserved" }, false, false
+					return admission_response(reusable_result, "circuit_open", nil, true, nil, 100, nil, "half-open probe already reserved"), false, false
 				end
 				probe_needed = true
 			end
@@ -581,8 +606,10 @@ do
 			local observed_budget_age = if finite(observed_budget_at) then now_ms() - observed_budget_at else math.huge
 			local observed_budget_fresh = observed_budget_age >= 0 and observed_budget_age <= 1000
 			if finite(observed_budget) and observed_budget < self.policy.minimum_budget and observed_budget_fresh and not critical then
-				return { code = "backpressure", transient = true, budget_limited = true, retry_after_ms = 250,
-					message = "operation budget is below configured minimum" }, false, true
+				return admission_response(
+					reusable_result, "backpressure", nil, true,
+					"operation budget is below configured minimum", 250, true
+				), false, true
 			end
 			local budgets = self.request_budgets
 			local budget_fresh = finite(budgets.sampled_at_ms) and now_ms() - budgets.sampled_at_ms <= 1000
@@ -590,50 +617,54 @@ do
 				local read_threshold = if critical then read_units else math.max(self.policy.minimum_budget, read_units)
 				local write_threshold = if critical then write_units else math.max(self.policy.minimum_budget, write_units)
 				if read_units > 0 and finite(budgets.read) and budgets.read < read_threshold then
-					return { code = "backpressure", transient = true, budget_limited = true, retry_after_ms = 250,
-						message = "StandardRead budget is below the operation admission threshold" }, false, true
+					return admission_response(
+						reusable_result, "backpressure", nil, true,
+						"StandardRead budget is below the operation admission threshold", 250, true
+					), false, true
 				end
 				if write_units > 0 and finite(budgets.write) and budgets.write < write_threshold then
-					return { code = "backpressure", transient = true, budget_limited = true, retry_after_ms = 250,
-						message = "StandardWrite budget is below the operation admission threshold" }, false, true
+					return admission_response(
+						reusable_result, "backpressure", nil, true,
+						"StandardWrite budget is below the operation admission threshold", 250, true
+					), false, true
 				end
 			end
 			if self.in_flight + cost > self.policy.max_in_flight then
-				return { code = "capacity", transient = true, message = "global estimated-work capacity reached" }, false, true
+				return admission_response(reusable_result, "capacity", nil, true, "global estimated-work capacity reached"), false, true
 			end
 			if not critical and self.in_flight + cost > self.policy.max_in_flight - self.policy.critical_reserve then
-				return { code = "backpressure", transient = true, message = "critical persistence reserve protected" }, false, true
+				return admission_response(reusable_result, "backpressure", nil, true, "critical persistence reserve protected"), false, true
 			end
 			if self.read_units_in_flight + read_units > self.policy.max_read_units_in_flight then
-				return { code = "capacity", transient = true, message = "StandardRead admission capacity reached" }, false, true
+				return admission_response(reusable_result, "capacity", nil, true, "StandardRead admission capacity reached"), false, true
 			end
 			if not critical and self.read_units_in_flight + read_units > self.policy.max_read_units_in_flight - self.policy.read_critical_reserve then
-				return { code = "backpressure", transient = true, message = "critical StandardRead reserve protected" }, false, true
+				return admission_response(reusable_result, "backpressure", nil, true, "critical StandardRead reserve protected"), false, true
 			end
 			if self.write_units_in_flight + write_units > self.policy.max_write_units_in_flight then
-				return { code = "capacity", transient = true, message = "StandardWrite admission capacity reached" }, false, true
+				return admission_response(reusable_result, "capacity", nil, true, "StandardWrite admission capacity reached"), false, true
 			end
 			if not critical and self.write_units_in_flight + write_units > self.policy.max_write_units_in_flight - self.policy.write_critical_reserve then
-				return { code = "backpressure", transient = true, message = "critical StandardWrite reserve protected" }, false, true
+				return admission_response(reusable_result, "backpressure", nil, true, "critical StandardWrite reserve protected"), false, true
 			end
 			if self.estimated_bytes_in_flight + estimated_bytes > self.policy.max_estimated_bytes_in_flight then
-				return { code = "capacity", transient = true, message = "estimated in-flight byte capacity reached" }, false, true
+				return admission_response(reusable_result, "capacity", nil, true, "estimated in-flight byte capacity reached"), false, true
 			end
 			if not critical and self.estimated_bytes_in_flight + estimated_bytes
 				> self.policy.max_estimated_bytes_in_flight - self.policy.estimated_bytes_critical_reserve
 			then
-				return { code = "backpressure", transient = true, message = "critical estimated-byte reserve protected" }, false, true
+				return admission_response(reusable_result, "backpressure", nil, true, "critical estimated-byte reserve protected"), false, true
 			end
 			if self.handler_slots_in_flight + handler_slots > self.policy.max_handler_slots_in_flight then
-				return { code = "capacity", transient = true, message = "handler-slot admission capacity reached" }, false, true
+				return admission_response(reusable_result, "capacity", nil, true, "handler-slot admission capacity reached"), false, true
 			end
 			if not critical and self.handler_slots_in_flight + handler_slots
 				> self.policy.max_handler_slots_in_flight - self.policy.handler_slots_critical_reserve
 			then
-				return { code = "backpressure", transient = true, message = "critical handler-slot reserve protected" }, false, true
+				return admission_response(reusable_result, "backpressure", nil, true, "critical handler-slot reserve protected"), false, true
 			end
 			if (self.by_class[work_class] or 0) + cost > math.min(limits[work_class] or limits.interactive, self.policy.max_in_flight) then
-				return { code = "capacity", transient = true, message = "work-class cap reached" }, false, true
+				return admission_response(reusable_result, "capacity", nil, true, "work-class cap reached"), false, true
 			end
 			local result: EmbeddedSchedulerDynamicRecord = if reusable_result ~= nil then reusable_result else {}
 			if reusable_result ~= nil then table.clear(result) end
@@ -778,7 +809,11 @@ do
 		function governor:ChooseBatchSize(requested, latency_ms, backlog, oldest_age_ms, budget_headroom)
 			return calculate_batch_size(self.policy, requested, latency_ms, backlog, oldest_age_ms, budget_headroom)
 		end
-		local function selected_batch_size(self: EmbeddedSchedulerDynamicRecord, item: EmbeddedSchedulerDynamicRecord): number?
+		local function selected_batch_size(
+			self: EmbeddedSchedulerDynamicRecord,
+			item: EmbeddedSchedulerDynamicRecord,
+			reusable_dimensions: EmbeddedSchedulerDynamicRecord?
+		): number?
 			if item.batchable ~= true then return nil end
 			local now = now_ms()
 			local operation_kind = operation_metric_key(self, item.operation_class or "default")
@@ -796,7 +831,7 @@ do
 			local requested = item.batch_size or 1
 			local backlog = item.batch_backlog or requested
 			local count = calculate_batch_size(self.policy, requested, latency, backlog, oldest_age, budget_headroom)
-			local unit = estimate_dimensions(item, 1)
+			local unit = estimate_dimensions(item, 1, reusable_dimensions)
 			local critical = item.service_class == "critical" or item.lane == "lease_renewal"
 			local read_limit = self.policy.max_read_units_in_flight - self.read_units_in_flight
 			local write_limit = self.policy.max_write_units_in_flight - self.write_units_in_flight
@@ -1167,7 +1202,7 @@ do
 					if owner_can_renew and owner_can_use_reserve
 						and (uses_critical_reserve(item) or owner_active < self.policy.max_per_owner_in_flight)
 					then
-						local batch_count = selected_batch_size(self, item)
+						local batch_count = selected_batch_size(self, item, scratch.batch_dimensions)
 						local admission_preflight_current = item.admission_preflight_policy_revision == self.policy.revision
 							and item.admission_preflight_batch_count == batch_count
 							and item.admission_preflight_terminal_result == false
@@ -1682,22 +1717,28 @@ do
 					if item.batchable ~= true then
 						operation_metric_key(self, item.operation_class or "default")
 					end
-					local batch_count = selected_batch_size(self, item)
+					local batch_count = selected_batch_size(self, item, self.selection_scratch.batch_dimensions)
 					local admission_terminal_result = item.admission_preflight_terminal_result
 					if item.admission_preflight_policy_revision ~= self.policy.revision
 						or item.admission_preflight_batch_count ~= batch_count
 						or admission_terminal_result == nil
 					then
+						local scratch = self.selection_scratch
+						local dimensions = estimate_dimensions(item, batch_count, scratch.dimensions)
+						local candidate_cost = effective_cost(item, batch_count, dimensions)
 						local admission = admission_decision(
 							self,
 							item.work_class,
 							item.operation_class,
-							effective_cost(item, batch_count),
+							candidate_cost,
 							item.mutating ~= false,
 							item.service_class == "critical" or item.lane == "lease_renewal",
-							estimate_dimensions(item, batch_count)
+							dimensions,
+							nil,
+							false,
+							scratch.admission_result
 						)
-						admission_terminal_result = if admission.terminal then admission else false
+						admission_terminal_result = if admission.terminal then table.clone(admission) else false
 						item.admission_preflight_policy_revision = self.policy.revision
 						item.admission_preflight_batch_count = batch_count
 						item.admission_preflight_terminal_result = admission_terminal_result
