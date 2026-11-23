@@ -1145,10 +1145,17 @@ do
 	local latest_cancelled, latest_cancel_error = owner_retry_cooldown:CancelQueued(second_active.id)
 	assert(latest_cancelled ~= nil and latest_cancel_error == nil,
 		"latest queued retry could not be cancelled")
+	assert(owner_retry_cooldown.retry_cooldown_until[owner_id] == latest_retry_due,
+		"cancelling one of two latest-due retries erased the other retry's cooldown")
+	local other_latest_cancelled, other_latest_cancel_error =
+		owner_retry_cooldown:CancelQueued(after_completion.id)
+	assert(other_latest_cancelled ~= nil and other_latest_cancel_error == nil,
+		"second latest-due retry could not be cancelled")
 	assert(owner_retry_cooldown.retry_cooldown_until[owner_id] == earlier_retry_due,
-		"removing the latest retry did not reveal the remaining owner cooldown")
+		"removing all latest-due retries did not reveal the remaining owner cooldown")
 	assert(owner_retry_cooldown.retry_heaps_by_owner[owner_id] ~= nil
-		and owner_retry_cooldown.retry_heaps_by_owner[owner_id].positions[second_active.id] == nil,
+		and owner_retry_cooldown.retry_heaps_by_owner[owner_id].positions[second_active.id] == nil
+		and owner_retry_cooldown.retry_heaps_by_owner[owner_id].positions[after_completion.id] == nil,
 		"cancelled retry remained in the owner retry index")
 
 	local earlier_cancelled, earlier_cancel_error = owner_retry_cooldown:CancelQueued(first_active.id)
