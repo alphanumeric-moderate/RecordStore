@@ -4075,7 +4075,7 @@ function V2.new(record_store, mailbox_module, options)
 			local ok, material = pcall(canonical, value)
 			return if ok then digest(material) else nil
 		end,
-		MailboxV2 = {
+		Mailbox = {
 			new = function(store, owner, mailbox_options)
 				local merged_options = {}
 				if mailbox_options ~= nil then
