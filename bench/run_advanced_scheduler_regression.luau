@@ -574,7 +574,9 @@ enqueue(chained_dependencies, {
 	owner_id = "chain-owner",
 	dependencies = { "chain-middle" },
 })
-local chain_root = take(chained_dependencies, "chain-root")
+local chain_root, chain_root_status = chained_dependencies:TakeNext()
+assert(chain_root ~= nil and chain_root.id == "chain-root" and chain_root_status == "success",
+	"chain root prerequisite was not selected")
 assert(chained_dependencies:MarkCompleted(chain_root.id, "unknown"),
 	"chain root failure could not be recorded")
 local chain_middle, chain_middle_status = chained_dependencies:TakeNext()
@@ -585,6 +587,30 @@ assert(chained_dependencies.known["chain-leaf"].failed_dependency_id == "chain-m
 local chain_leaf, chain_leaf_status = chained_dependencies:TakeNext()
 assert(chain_leaf ~= nil and chain_leaf.id == "chain-leaf" and chain_leaf_status == "dependency_failed",
 	"downstream dependency did not terminalize after its prerequisite failed")
+
+-- Expiry terminalization must also notify dependents of the expired prerequisite.
+local expired_dependency_chain = new_scheduler()
+enqueue(expired_dependency_chain, {
+	id = "expired-chain-root",
+	owner_id = "expired-chain-owner",
+	expires_at_ms = now_ms + 1,
+})
+enqueue(expired_dependency_chain, {
+	id = "expired-chain-child",
+	owner_id = "expired-chain-owner",
+	dependencies = { "expired-chain-root" },
+})
+now_ms += 2
+local expired_chain_root, expired_chain_status = expired_dependency_chain:TakeNext()
+assert(expired_chain_root ~= nil and expired_chain_root.id == "expired-chain-root"
+	and expired_chain_status == "expired",
+	"expired prerequisite did not terminalize")
+assert(expired_dependency_chain.known["expired-chain-child"].failed_dependency_id == "expired-chain-root",
+	"expired prerequisite failure was not propagated to its dependent")
+local expired_chain_child, expired_child_status = expired_dependency_chain:TakeNext()
+assert(expired_chain_child ~= nil and expired_chain_child.id == "expired-chain-child"
+	and expired_child_status == "dependency_failed",
+	"dependent did not terminalize after its prerequisite expired")
 
 -- A completion must refer to known dispatched/terminal work; it cannot forge or orphan dependencies.
 local completion_guard = new_scheduler()
