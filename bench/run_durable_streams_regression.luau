@@ -376,10 +376,41 @@ now += 2
 local permanent_prune = idempotency_stream:PruneAsync(idempotency_partition, 4)
 assert(permanent_prune.code == "pruned" and permanent_prune.removed >= 1,
 	"producer idempotency fixture did not delete the original event segment")
+local updates_before_permanent_retry = fake.control:metrics().update_calls
 local permanent_retry = idempotency_stream:PublishBatchAsync("producer-route", {
 	{ event_id = "stable-event-1", producer_id = "stable-producer", producer_sequence = 1, payload = { value = 1 } },
 })
+local updates_after_permanent_retry = fake.control:metrics().update_calls
 assert(permanent_retry.code == "committed" and permanent_retry.duplicate == true,
 	"producer sequence retry appended again after its original segment was deleted")
+assert(updates_after_permanent_retry == updates_before_permanent_retry,
+	"historical producer retry must resolve from the rollover checkpoint without another write")
+
+local producer_state = idempotency_stream:GetProducerSequenceAsync("producer-route", "stable-producer")
+assert(producer_state.code == "ok" and producer_state.sequence == 2 and producer_state.next_sequence == 3,
+	"producer sequence checkpoint was not carried through segment rollover and pruning")
+
+local latest_sequence_conflict = idempotency_stream:PublishBatchAsync("producer-route", {
+	{ event_id = "stable-event-2", producer_id = "stable-producer", producer_sequence = 2, payload = { value = 999 } },
+})
+assert(latest_sequence_conflict.code == "conflict",
+	"reusing the latest producer sequence with changed content must be rejected")
+
+local producer_gap = idempotency_stream:PublishBatchAsync("producer-route", {
+	{ event_id = "stable-event-4", producer_id = "stable-producer", producer_sequence = 4, payload = { value = 4 } },
+})
+assert(producer_gap.code == "conflict",
+	"producer sequence gaps must not be accepted")
+
+local permanent_third = idempotency_stream:PublishBatchAsync("producer-route", {
+	{ event_id = "stable-event-3", producer_id = "stable-producer", producer_sequence = 3, payload = { value = 3 } },
+})
+assert(permanent_third.code == "committed", "producer did not resume at its next durable sequence")
+
+local stale_producer_retry = idempotency_stream:PublishBatchAsync("producer-route", {
+	{ event_id = "stable-event-2", producer_id = "stable-producer", producer_sequence = 2, payload = { value = 2 } },
+})
+assert(stale_producer_retry.code == "committed" and stale_producer_retry.duplicate == true,
+	"an older producer sequence was not deduplicated after a later sequence committed")
 
 print("[durable-streams] partition append, rollover, integrity, consumer fencing, batch checkpoint, replay and recovery passed")
