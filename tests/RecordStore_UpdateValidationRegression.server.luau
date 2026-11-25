@@ -117,6 +117,7 @@ assert(record.Data.NewDefaults.Nested.Value == 7
 	and record.Data.Inventory[1].ReconcileMarker == "inserted",
 	"Reconcile retained caller-owned template subtrees")
 
+local stale_noop_reconcile_data = record.Data
 mutate_validator_input = true
 status, message = record:Reconcile(reconcile_template)
 mutate_validator_input = false
@@ -125,6 +126,9 @@ assert(validator_calls == 5, "no-op Reconcile did not invoke the custom validato
 assert(record.Data.Inventory[1].Count == 3 and record.Data.NewDefaults.Nested.Value == 7
 	and record.Data.NewDefaults.List[1] == "one",
 	"no-op Reconcile published custom-validator mutations or caller-owned template changes")
+stale_noop_reconcile_data.NewDefaults.Nested.Value = 1234
+assert(record.Data.NewDefaults.Nested.Value == 7,
+	"no-op Reconcile retained a previously exposed public Data reference")
 
 local ignored_sparse_default = { [1] = "one", [3] = "three" }
 status, message = record:Reconcile({
