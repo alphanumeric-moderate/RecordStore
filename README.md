@@ -156,7 +156,55 @@ The retention floor is stored in the same durable consumer-group registry that s
 
 Use a unique per-process worker token for each consumer lease. Remove a group only with RemoveConsumerGroupAsync(group, true); a partially completed removal stays marked as removing and can be retried. GetRetentionStateAsync(partition) reports the retained floor, cleanup cursor, and configured limits.
 
-event_id identifies a producer event within the segment being appended or reconciled. Permanent deduplication across already-sealed or deleted segments is not yet provided, so producers should reuse stable event IDs when retrying uncertain writes and consumers must remain idempotent. Cross-partition global ordering, transient MessagingService publish/subscribe or wake-ups, and production Roblox multi-server acceptance tests remain separate roadmap work. MessagingService and MemoryStore are not used as durable authorities.
+event_id identifies a producer event within the segment being appended or reconciled. Permanent deduplication across already-sealed or deleted segments is not provided: the append log deliberately avoids a second per-event index write and unbounded historical identity index. Reuse stable event IDs when retrying uncertain writes, reconcile against the exact segment where possible, and make consumer effects idempotent. Cross-partition global ordering and production Roblox multi-server acceptance tests remain outside this module.
+
+### Optional transient server messaging
+
+`RecordStoreTransientMessaging` is a separate best-effort transport. It does not write to DataStore, own consumer progress, queue messages, retry delivery, or change the durable stream commit point.
+
+```luau
+local TransientMessaging = require(script.Parent.RecordStoreTransientMessaging)
+local transport = assert(TransientMessaging.new(
+    game:GetService("MessagingService"),
+    HttpService,
+    {
+        namespace = "game-events",
+        server_id = game.JobId,
+    }
+))
+
+local partition = stream:GetPartition("tenant-42")
+local wake_subscription = transport:SubscribeStreamWakeups(
+    "game.events",
+    partition,
+    function(_hint)
+        -- Wake the existing poller; read events from the durable stream.
+        pollDurablePartition(partition)
+    end
+)
+
+local publish = stream:PublishAsync("tenant-42", HttpService:GenerateGUID(false), {
+    kind = "round.completed",
+    round_id = "round-124",
+})
+if publish.code == "committed" then
+    -- A wake-up is sent only after the DataStore append is confirmed.
+    transport:PublishStreamWakeup("game.events", partition, publish.sequence)
+end
+
+-- Directed message to one live server:
+transport:SendToServerAsync(targetJobId, { kind = "refresh-cache" })
+local direct_subscription = transport:SubscribeServerAsync(function(payload, context)
+    handleServerCommand(payload, context.sender)
+end)
+
+-- Release subscriptions when the owning system shuts down.
+wake_subscription.subscription:Disconnect()
+direct_subscription.subscription:Disconnect()
+transport:Close()
+```
+
+The adapter also exposes generic `PublishAsync(topic, payload)` and `SubscribeAsync(topic, handler)`. It hashes logical topic names before calling MessagingService, bounds the complete encoded envelope to 1,024 bytes by default, validates JSON-safe payloads, and returns `unknown` when a publish call throws because the message may already have been delivered. Delivery may be lost, duplicated, delayed, or reordered; handler effects must tolerate duplicates. Use `message_id` from the callback context for application-level idempotency where needed. MessagingService is only a wake-up/notification path; consumers must recover by polling the durable cursor and stream. MemoryStore is not used.
 
 ## PlayerData modules
 

@@ -9,6 +9,8 @@ for _, path in {
 	"src/PlayerDataInitializer/RecordStore.luau",
 	"src/PlayerDataInitializer/RecordStoreServices.luau",
 	"src/PlayerDataInitializer/RecordStoreDurableStreams.luau",
+	"src/PlayerDataInitializer/RecordStoreTransientMessaging.luau",
+	"bench/run_transient_messaging_regression.luau",
 	"bench/run_durable_streams_regression.luau",
 	"src/PlayerDataInitializer/RecordStoreMaintenanceDataStoreAdapter.luau",
 	"bench/run_scheduler_bugfix_regression.luau",
@@ -101,6 +103,7 @@ assert(CodeNumFormatter.format(high_range) == "1.25e1000")
 
 Shim.run_script("bench/run_services_regression.luau")
 Shim.run_script("bench/run_durable_streams_regression.luau")
+Shim.run_script("bench/run_transient_messaging_regression.luau")
 Shim.run_script("bench/run_outbox_adapter_unit_regression.luau")
 Shim.run_script("tests/RecordStore_OpenCorrupt_CompatibilityRegression.server.luau")
 Shim.run_script("tests/RecordStore_EventQueueRegression.server.luau")
