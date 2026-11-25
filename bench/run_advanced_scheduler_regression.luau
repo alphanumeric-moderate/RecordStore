@@ -1538,6 +1538,69 @@ assert(delayed_prerequisite ~= nil and delayed_status == "success"
 assert(delayed_inheritance:MarkCompleted(delayed_prerequisite.id, "committed"))
 take(delayed_inheritance, "delayed-urgent-dependent")
 
+-- A terminal queue outcome is processed before any priority inheritance side effect.
+local terminal_before_inheritance = new_scheduler()
+enqueue(terminal_before_inheritance, {
+	id = "terminal-order-prerequisite",
+	owner_id = "terminal-order-owner",
+	lane = "background",
+})
+enqueue(terminal_before_inheritance, {
+	id = "terminal-order-dependent",
+	owner_id = "terminal-order-owner",
+	lane = "high",
+	service_class = "interactive",
+	dependencies = { "terminal-order-prerequisite" },
+})
+enqueue(terminal_before_inheritance, {
+	id = "terminal-order-expired",
+	owner_id = "terminal-order-expiry-owner",
+	lane = "normal",
+	expires_at_ms = now_ms,
+})
+local terminal_first, terminal_first_status = terminal_before_inheritance:TakeNext()
+assert(terminal_first ~= nil and terminal_first.id == "terminal-order-expired"
+	and terminal_first_status == "expired",
+	"terminal queue outcome did not retain reverse-queue processing order")
+assert(terminal_before_inheritance.known["terminal-order-prerequisite"].inherited_lane == nil,
+	"priority inheritance ran before a higher-priority terminal queue outcome was returned")
+local inheritance_after_terminal, inheritance_after_terminal_status = terminal_before_inheritance:TakeNext()
+assert(inheritance_after_terminal ~= nil and inheritance_after_terminal.id == "terminal-order-prerequisite"
+	and inheritance_after_terminal_status == "success"
+	and inheritance_after_terminal.inherited_lane == "normal",
+	"priority inheritance was not applied after terminal queue processing completed")
+
+-- When multiple high dependents become eligible together, the oldest dependent
+-- remains the inherited-priority owner as in the original ascending queue sweep.
+local ordered_inheritance = new_scheduler()
+local ordered_ready_at = now_ms + 25
+enqueue(ordered_inheritance, {
+	id = "ordered-inheritance-prerequisite",
+	owner_id = "ordered-inheritance-owner",
+	lane = "background",
+	available_at_ms = ordered_ready_at,
+})
+enqueue(ordered_inheritance, {
+	id = "ordered-inheritance-oldest",
+	owner_id = "ordered-inheritance-owner",
+	lane = "high",
+	service_class = "interactive",
+	dependencies = { "ordered-inheritance-prerequisite" },
+})
+enqueue(ordered_inheritance, {
+	id = "ordered-inheritance-newest",
+	owner_id = "ordered-inheritance-owner",
+	lane = "high",
+	service_class = "interactive",
+	dependencies = { "ordered-inheritance-prerequisite" },
+})
+now_ms = ordered_ready_at
+local ordered_prerequisite, ordered_status = ordered_inheritance:TakeNext()
+assert(ordered_prerequisite ~= nil and ordered_status == "success"
+	and ordered_prerequisite.id == "ordered-inheritance-prerequisite"
+	and ordered_prerequisite.inherited_from == "ordered-inheritance-oldest",
+	"scan fusion changed priority-inheritance ownership order")
+
 -- Urgent-deadline selection is bounded so deadlines do not starve older lane work.
 local urgent = new_scheduler()
 local urgent_policy = urgent:Stats().policy
