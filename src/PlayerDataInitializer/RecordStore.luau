@@ -14159,11 +14159,13 @@ local function reconcile(self: Record, template: JsonValue): (ResultCode, string
 	-- allowing no-op reconciliation to skip the profile clone entirely.
 	local function inspect_template(target_value: unknown, template_value: unknown): (boolean, boolean, boolean)
 		local active_tables: { [any]: boolean } = {}
+		local node_count = 0
 		local defaults_missing = false
 		local custom_iterator = false
 
 		local function visit(target: unknown, current: unknown, depth: number, track_defaults: boolean): boolean
-			if depth > 64 then
+			node_count += 1
+			if node_count > 100000 or depth > 64 then
 				return false
 			end
 			if current == nil then
@@ -14174,7 +14176,7 @@ local function reconcile(self: Record, template: JsonValue): (ResultCode, string
 			if current_type == "number" or current_type == "boolean" or current_type == "buffer" then
 				return true
 			elseif current_type == "string" then
-				return true
+				return #(current :: string) <= 4_000_000
 			elseif current_type ~= "table" then
 				return false
 			end
@@ -14261,10 +14263,21 @@ local function reconcile(self: Record, template: JsonValue): (ResultCode, string
 	end
 
 	if not custom_iterator and not defaults_missing then
-		local valid, validation_message = validate_value(state.data, state.options.validator)
+		local copied = copy_value(state.data)
+		if copied == nil then
+			return "validation", "record data is missing"
+		end
+		local valid, validation_message = validate_value(copied, state.options.validator)
 		if not valid then
 			return "validation", validation_message
 		end
+		local public_source = copy_value(copied)
+		if public_source == nil then
+			return "validation", "record data could not be isolated"
+		end
+		state.data = copied
+		state.public_data_source = public_source
+		self.Data = copied
 		local skip_sync_external_mutation_check = state.options.on_event == nil and next(state.change_observers) == nil
 		observe(state, "reconcile", "success", nil)
 		sync_public(self, skip_sync_external_mutation_check)
