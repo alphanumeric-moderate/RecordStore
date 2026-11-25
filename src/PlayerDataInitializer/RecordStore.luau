@@ -8630,10 +8630,12 @@ local function encode_backend_update_value(value: unknown): unknown
 	return value
 end
 
-local function validate_serialized_size(value: unknown): (boolean, string?)
-	local shape_ok, shape_message = validate_value_shape(value)
-	if not shape_ok then
-		return false, shape_message
+local function validate_serialized_size(value: unknown, shape_already_validated: boolean?): (boolean, string?)
+	if shape_already_validated ~= true then
+		local shape_ok, shape_message = validate_value_shape(value)
+		if not shape_ok then
+			return false, shape_message
+		end
 	end
 	local ok, encoded = pcall(function()
 		return HttpService:JSONEncode(value)
@@ -9355,14 +9357,18 @@ local function backend_update(backend: Backend, transform: UpdateTransform, dead
 			return nil, nil, "validation", metadata_error
 		end
 		local stored_new_value = encode_backend_update_value(new_value)
-		local value = copy_value(stored_new_value)
+		local value, copy_error, non_finite_numbers_absent =
+			prepared_envelope_cache._copy_with_shape(stored_new_value)
 		if value == nil then
-			return nil, nil, "validation", "updated value is invalid"
+			return nil, nil, "validation", copy_error or "updated value is invalid"
+		end
+		if not non_finite_numbers_absent then
+			return nil, nil, "validation", "value contains a non-finite number"
 		end
 		if request_state ~= nil and request_state.retired then
 			return nil, nil, "invalid", "record has been retired"
 		end
-		local data_ok, data_error = validate_serialized_size(value)
+		local data_ok, data_error = validate_serialized_size(value, true)
 		if not data_ok then
 			return nil, nil, "validation", data_error
 		end
