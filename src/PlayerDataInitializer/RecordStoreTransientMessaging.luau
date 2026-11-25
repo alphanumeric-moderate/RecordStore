@@ -238,7 +238,7 @@ local function publish(self: ClientType, kind: string, logical_name: string, pay
 	end
 	local envelope, message_id, envelope_error = encode_envelope(self, kind, payload, target)
 	if envelope == nil then
-		local code = if string.sub(envelope_error or "", 1, 16) == "message_too_large" then "capacity" else "invalid"
+		local code = if string.sub(envelope_error or "", 1, 17) == "message_too_large" then "capacity" else "invalid"
 		return { code = code, message = envelope_error }
 	end
 	local topic = physical_topic(self._namespace, kind, logical_name)
