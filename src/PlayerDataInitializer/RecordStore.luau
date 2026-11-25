@@ -281,10 +281,10 @@ do
 			read_units_in_flight = 0, write_units_in_flight = 0,
 			estimated_bytes_in_flight = 0, handler_slots_in_flight = 0,
 			request_budgets = { read = nil, write = nil, sampled_at_ms = nil },
-			completed = {}, completed_order = {}, known = {}, active_owner = {}, active_renewals_by_owner = {}, active_critical_by_owner = {},
+			completed = {}, completed_order = {}, completed_order_head = 1, completed_order_tail = 0, completed_order_count = 0, known = {}, active_owner = {}, active_renewals_by_owner = {}, active_critical_by_owner = {},
 			dependency_ref_counts = {}, pending_completed_prune = {}, pending_failed_prune = {},
 			drr_deficit = {}, drr_cursor_key = nil, high_streak = 0, urgent_streak = 0,
-			failed = {}, failed_order = {}, retry_cooldown_until = {}, retry_heaps_by_owner = {}, retry_tokens_by_class = {},
+			failed = {}, failed_order = {}, failed_order_head = 1, failed_order_tail = 0, failed_order_count = 0, retry_cooldown_until = {}, retry_heaps_by_owner = {}, retry_tokens_by_class = {},
 			due_sequence = 0,
 			retry_tokens = 32, last_token_time = now_ms(),
 			last_budget = nil, last_budget_by_kind = {}, last_budget_sampled_at_by_kind = {},
@@ -1943,11 +1943,22 @@ do
 		local function terminal_dependency_referenced(self: EmbeddedSchedulerDynamicRecord, id: string): boolean
 			return (self.dependency_ref_counts[id] or 0) > 0
 		end
-		local function prune_terminal_history(self: EmbeddedSchedulerDynamicRecord)
-			local limit = self.policy.queue_capacity * 2
-			local function prune(order: any, outcomes: any, pending: any)
-				while #order > limit do
-					local oldest = table.remove(order, 1) :: string
+		local function prune_history_order(
+			self: EmbeddedSchedulerDynamicRecord,
+			order: any,
+			outcomes: any,
+			pending: any,
+			head: number,
+			tail: number,
+			count: number,
+			limit: number
+		): (number, number, number)
+			while count > limit do
+				local oldest = order[head]
+				order[head] = nil
+				head += 1
+				count -= 1
+				if oldest ~= nil then
 					if terminal_dependency_referenced(self, oldest) then
 						pending[oldest] = true
 					else
@@ -1956,12 +1967,38 @@ do
 					end
 				end
 			end
-			prune(self.completed_order, self.completed, self.pending_completed_prune)
-			prune(self.failed_order, self.failed, self.pending_failed_prune)
+			if head > limit or tail > limit * 2 then
+				local write_index = 0
+				for read_index = head, tail do
+					local retained_id = order[read_index]
+					if retained_id ~= nil then
+						write_index += 1
+						order[write_index] = retained_id
+					end
+				end
+				for index = write_index + 1, tail do
+					order[index] = nil
+				end
+				head, tail, count = 1, write_index, write_index
+			end
+			return head, tail, count
+		end
+		local function prune_terminal_history(self: EmbeddedSchedulerDynamicRecord)
+			local limit = self.policy.queue_capacity * 2
+			self.completed_order_head, self.completed_order_tail, self.completed_order_count = prune_history_order(
+				self, self.completed_order, self.completed, self.pending_completed_prune,
+				self.completed_order_head, self.completed_order_tail, self.completed_order_count, limit
+			)
+			self.failed_order_head, self.failed_order_tail, self.failed_order_count = prune_history_order(
+				self, self.failed_order, self.failed, self.pending_failed_prune,
+				self.failed_order_head, self.failed_order_tail, self.failed_order_count, limit
+			)
 		end
 		remember_terminal = function(self, id, code)
 			self.failed[id] = code
-			self.failed_order[#self.failed_order + 1] = id
+			self.failed_order_tail += 1
+			self.failed_order[self.failed_order_tail] = id
+			self.failed_order_count += 1
 			prune_terminal_history(self)
 		end
 		local function make_shadow_state(self: EmbeddedSchedulerDynamicRecord): EmbeddedSchedulerDynamicRecord
@@ -2053,7 +2090,9 @@ do
 			then
 				self.completed[id] = true
 				self.failed[id] = nil
-				self.completed_order[#self.completed_order + 1] = id
+				self.completed_order_tail += 1
+				self.completed_order[self.completed_order_tail] = id
+				self.completed_order_count += 1
 			else
 				self.completed[id] = nil
 				remember_terminal(self, id, tostring(code or "unknown"))
@@ -7382,7 +7421,9 @@ type InternalState = {
 	change_dispatch_running: boolean,
 	change_events_dropped: number,
 	takeover_seen: { [string]: HandoffStatus },
-	takeover_seen_order: { string },
+	takeover_seen_order: { [number]: string? },
+	takeover_seen_order_head: number,
+	takeover_seen_order_count: number,
 	takeover_request_id: string?,
 	takeover_requester_job_id: string?,
 	handoff_request_id: string?,
@@ -11343,15 +11384,23 @@ end
 
 local function cache_takeover_status(state: InternalState, request_id: string, status: HandoffStatus)
 	if state.takeover_seen[request_id] == nil then
-		state.takeover_seen_order[#state.takeover_seen_order + 1] = request_id
+		local head = state.takeover_seen_order_head
+		local count = state.takeover_seen_order_count
+		local index
+		if count < TAKEOVER_SEEN_CAPACITY then
+			index = ((head + count - 1) % TAKEOVER_SEEN_CAPACITY) + 1
+			state.takeover_seen_order_count = count + 1
+		else
+			local oldest = state.takeover_seen_order[head]
+			if oldest ~= nil then
+				state.takeover_seen[oldest] = nil
+			end
+			index = head
+			state.takeover_seen_order_head = (head % TAKEOVER_SEEN_CAPACITY) + 1
+		end
+		state.takeover_seen_order[index] = request_id
 	end
 	state.takeover_seen[request_id] = status
-	while #state.takeover_seen_order > TAKEOVER_SEEN_CAPACITY do
-		local oldest = table.remove(state.takeover_seen_order, 1)
-		if oldest ~= nil then
-			state.takeover_seen[oldest] = nil
-		end
-	end
 end
 
 local function publish_handoff_ack(state: InternalState, request_id: string, requester_job_id: string, generation: number, target_token: string, status: HandoffStatus): boolean
@@ -17099,7 +17148,9 @@ local function make_record(name: string, scope: string, key: string, options: Op
 		change_dispatch_running = false,
 		change_events_dropped = 0,
 		takeover_seen = {},
-		takeover_seen_order = {},
+		takeover_seen_order = table.create(TAKEOVER_SEEN_CAPACITY),
+		takeover_seen_order_head = 1,
+		takeover_seen_order_count = 0,
 		takeover_request_id = nil,
 		takeover_requester_job_id = nil,
 		handoff_request_id = nil,
