@@ -9,17 +9,24 @@ local READY_SCENARIOS = {
 	{ name = "quarter-ready", stride = 4, ready_count = function(count) return math.floor(count / 4) end, expect_selection = true },
 	{ name = "none-ready", stride = math.huge, ready_count = function(_count) return 0 end, expect_selection = false },
 	{ name = "owner-saturated", stride = 1, ready_count = function(count) return count end, owner_saturated = true, expect_selection = false },
+	{ name = "dependency-heavy", stride = 2, ready_count = function(count) return math.floor(count / 2) end, dependency_pairs = true, expect_selection = true },
 }
 local ALGORITHMS = { "fifo", "weighted", "deadline", "drr" }
 local REPEATS = 2
 local NOW_MS = 1_800_000_000_000
 
-local function enqueue_profile_item(governor: any, id: string, owner_id: string, available_at_ms: number?)
+local function enqueue_profile_item(
+	governor: any,
+	id: string,
+	owner_id: string,
+	available_at_ms: number?,
+	lane: string?
+)
 	local accepted = governor:Enqueue({
 		id = id,
 		owner_id = owner_id,
-		lane = "normal",
-		service_class = "normal",
+		lane = lane or "normal",
+		service_class = if lane == "high" then "interactive" else "normal",
 		work_class = "profile",
 		operation_class = "read",
 		read_units = 1,
@@ -30,6 +37,24 @@ local function enqueue_profile_item(governor: any, id: string, owner_id: string,
 	})
 	assert(accepted.code == "accepted",
 		("enqueue failed for %s: %s"):format(id, tostring(accepted.message)))
+end
+
+local function enqueue_dependent(governor: any, id: string, owner_id: string, prerequisite_id: string)
+	local accepted = governor:Enqueue({
+		id = id,
+		owner_id = owner_id,
+		lane = "high",
+		service_class = "interactive",
+		work_class = "profile",
+		operation_class = "read",
+		read_units = 1,
+		write_units = 0,
+		estimated_bytes = 1024,
+		handler_slots = 1,
+		dependencies = { prerequisite_id },
+	})
+	assert(accepted.code == "accepted",
+		("dependent enqueue failed for %s: %s"):format(id, tostring(accepted.message)))
 end
 
 local function build_queue(algorithm: string, count: number, scenario: any)
@@ -68,18 +93,31 @@ local function build_queue(algorithm: string, count: number, scenario: any)
 
 	local expected_ready = 0
 	for index = 1, count do
-		local ready = scenario.stride == 1
-			or (scenario.stride ~= math.huge and index % scenario.stride == 0)
+		local ready = if scenario.dependency_pairs then index % 2 == 1
+			else scenario.stride == 1 or (scenario.stride ~= math.huge and index % scenario.stride == 0)
 		if ready then expected_ready += 1 end
 		local owner_id = if scenario.owner_saturated
 			then "held-owner-" .. tostring((index - 1) % blocker_count + 1)
+			elseif scenario.dependency_pairs
+				then "dependency-owner-" .. tostring(math.floor((index + 1) / 2))
 			else "owner-" .. tostring((index - 1) % 64 + 1)
-		enqueue_profile_item(
-			governor,
-			algorithm .. "-" .. tostring(count) .. "-" .. scenario.name .. "-" .. tostring(index),
-			owner_id,
-			if ready then nil else NOW_MS + 60_000
-		)
+		local item_id = algorithm .. "-" .. tostring(count) .. "-" .. scenario.name .. "-" .. tostring(index)
+		if scenario.dependency_pairs then
+			local prerequisite_index = if index % 2 == 1 then index else index - 1
+			local prerequisite_id = algorithm .. "-" .. tostring(count) .. "-" .. scenario.name .. "-prerequisite-" .. tostring(math.floor((prerequisite_index + 1) / 2))
+			if index % 2 == 1 then
+				enqueue_profile_item(governor, prerequisite_id, owner_id, nil, "background")
+			else
+				enqueue_dependent(governor, item_id, owner_id, prerequisite_id)
+			end
+		else
+			enqueue_profile_item(
+				governor,
+				item_id,
+				owner_id,
+				if ready then nil else NOW_MS + 60_000
+			)
+		end
 	end
 	assert(governor:Stats().queue_items == count, "scheduler queue size differs from the requested depth")
 	return governor, expected_ready
