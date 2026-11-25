@@ -513,6 +513,54 @@ local capacity_rejected = capacity:Enqueue({ id = "capacity-3", owner_id = "owne
 assert(capacity_rejected.code == "capacity", "full scheduler queue did not apply explicit backpressure")
 assert(capacity:Stats().queue_items == 2, "queue capacity overflow evicted or silently accepted work")
 
+-- Indexed sparse queue slots make cancellation and removal O(1) while preserving FIFO.
+local indexed_queue = new_scheduler()
+local indexed_policy = indexed_queue:Stats().policy
+assert(indexed_queue:SetPolicy({
+	revision = indexed_policy.revision + 1,
+	algorithm = "fifo",
+	queue_capacity = 8,
+	high_burst = 8,
+}), "indexed queue fixture policy was rejected")
+for index = 1, 8 do
+	enqueue(indexed_queue, {
+		id = "indexed-q" .. tostring(index),
+		owner_id = "indexed-owner-" .. tostring(index),
+	})
+end
+for index = 2, 8, 2 do
+	local id = "indexed-q" .. tostring(index)
+	local cancelled = indexed_queue:CancelQueued(id)
+	assert(cancelled ~= nil and cancelled.id == id, "indexed queue failed to cancel an existing slot")
+	assert(indexed_queue:MarkCompleted(id, "cancelled"), "cancelled indexed work did not reach terminal history")
+end
+assert(indexed_queue:Stats().queue_items == 4, "queue count diverged after sparse cancellations")
+for index = 9, 12 do
+	enqueue(indexed_queue, {
+		id = "indexed-q" .. tostring(index),
+		owner_id = "indexed-owner-" .. tostring(index),
+	})
+end
+for _, index in ipairs({ 1, 3, 5, 7 }) do
+	local id = "indexed-q" .. tostring(index)
+	local cancelled = indexed_queue:CancelQueued(id)
+	assert(cancelled ~= nil and cancelled.id == id, "indexed queue failed to remove a slot after tail growth")
+	assert(indexed_queue:MarkCompleted(id, "cancelled"), "sparse cancelled work did not complete")
+end
+for index = 13, 16 do
+	enqueue(indexed_queue, {
+		id = "indexed-q" .. tostring(index),
+		owner_id = "indexed-owner-" .. tostring(index),
+	})
+end
+assert(indexed_queue:Stats().queue_items == 8, "sparse queue capacity accounting diverged after compaction")
+local sparse_shadow = indexed_queue:ShadowDecision()
+assert(sparse_shadow.candidate_count == 8, "shadow selection did not see the sparse live queue")
+for index = 9, 16 do
+	take(indexed_queue, "indexed-q" .. tostring(index))
+end
+assert(indexed_queue:Stats().queue_items == 0, "indexed queue retained tombstones after complete drain")
+
 -- A completion must refer to known dispatched/terminal work; it cannot forge or orphan dependencies.
 local completion_guard = new_scheduler()
 assert(not completion_guard:MarkCompleted("ghost-completion", "committed"),
