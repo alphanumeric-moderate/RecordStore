@@ -720,6 +720,56 @@ do
 	invalid_dispatcher:Close()
 end
 
+-- Prerequisite completion updates only its indexed dependents; readiness is O(1) after the final dependency.
+local dependency_index = new_scheduler()
+enqueue(dependency_index, { id = "index-prereq-a", owner_id = "dependency-owner", lane = "background" })
+enqueue(dependency_index, { id = "index-prereq-b", owner_id = "dependency-owner", lane = "background" })
+enqueue(dependency_index, {
+	id = "index-dependent",
+	owner_id = "dependency-owner",
+	lane = "normal",
+	dependencies = { "index-prereq-a", "index-prereq-b" },
+})
+local indexed_dependent = dependency_index.known["index-dependent"]
+assert(indexed_dependent.pending_dependency_count == 2,
+	"enqueue did not index every unresolved prerequisite")
+assert(dependency_index.dependents_by_dependency["index-prereq-a"]["index-dependent"] == indexed_dependent,
+	"prerequisite waiter index did not point to the dependent")
+local prerequisite_a = take(dependency_index, "index-prereq-a")
+assert(prerequisite_a.id == "index-prereq-a", "first prerequisite was not selected")
+assert(dependency_index:MarkCompleted(prerequisite_a.id, "success"),
+	"first prerequisite could not be completed")
+assert(indexed_dependent.pending_dependency_count == 1 and indexed_dependent.failed_dependency_id == nil,
+	"first prerequisite completion did not decrement pending dependency count")
+local prerequisite_b = take(dependency_index, "index-prereq-b")
+assert(prerequisite_b.id == "index-prereq-b", "second prerequisite was selected out of order")
+assert(dependency_index:MarkCompleted(prerequisite_b.id, "success"),
+	"second prerequisite could not be completed")
+assert(indexed_dependent.pending_dependency_count == 0 and indexed_dependent.failed_dependency_id == nil,
+	"final prerequisite completion did not release dependent readiness")
+local released_dependent = take(dependency_index, "index-dependent")
+assert(released_dependent.id == "index-dependent", "fully released dependent was not selectable")
+
+-- Cancellation removes waiter links but retains dependency history until completion is acknowledged.
+local cancelled_dependency_index = new_scheduler()
+enqueue(cancelled_dependency_index, { id = "cancel-index-prerequisite", owner_id = "dependency-owner" })
+enqueue(cancelled_dependency_index, {
+	id = "cancel-index-dependent",
+	owner_id = "dependency-owner",
+	dependencies = { "cancel-index-prerequisite" },
+})
+local cancelled_dependency = cancelled_dependency_index:CancelQueued("cancel-index-dependent")
+assert(cancelled_dependency ~= nil, "dependent could not be cancelled")
+local remaining_waiters = cancelled_dependency_index.dependents_by_dependency["cancel-index-prerequisite"]
+assert(remaining_waiters == nil or remaining_waiters["cancel-index-dependent"] == nil,
+	"cancelled dependent remained in prerequisite waiter index")
+assert(cancelled_dependency_index.dependency_ref_counts["cancel-index-prerequisite"] == 1,
+	"cancellation prematurely released dependency-history retention")
+assert(cancelled_dependency_index:MarkCompleted("cancel-index-dependent", "cancelled"),
+	"cancelled dependent did not reconcile")
+assert(cancelled_dependency_index.dependency_ref_counts["cancel-index-prerequisite"] == nil,
+	"completion did not release dependency-history retention")
+
 -- Dependencies cannot bypass a missing, failed or unknown prerequisite.
 local dependencies = new_scheduler()
 assert(dependencies:Enqueue({ id = "missing-dependent", owner_id = "x", dependencies = { "missing" } }).code == "invalid",
@@ -736,6 +786,8 @@ enqueue(failed_flow, { id = "must-not-run", owner_id = "flow-owner", lane = "hig
 local failing = failed_flow:TakeNext()
 assert(failing ~= nil and failing.id == "failing-step", "workflow dependency was selected out of order")
 assert(failed_flow:MarkCompleted(failing.id, "unknown"), "unknown prerequisite outcome did not terminalize")
+	assert(failed_flow.known["blocked"].failed_dependency_id == "failing-step",
+		"failed prerequisite was not propagated through the reverse waiter index")
 local blocked, blocked_status = failed_flow:TakeNext()
 assert(blocked ~= nil and blocked_status == "dependency_failed", "dependent work did not return dependency_failed")
 assert(blocked.terminal_result.dependency_code == "unknown", "dependency failure lost the prerequisite outcome")
