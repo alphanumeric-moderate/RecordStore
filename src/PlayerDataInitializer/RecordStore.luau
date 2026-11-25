@@ -14159,13 +14159,11 @@ local function reconcile(self: Record, template: JsonValue): (ResultCode, string
 	-- allowing no-op reconciliation to skip the profile clone entirely.
 	local function inspect_template(target_value: unknown, template_value: unknown): (boolean, boolean, boolean)
 		local active_tables: { [any]: boolean } = {}
-		local node_count = 0
 		local defaults_missing = false
 		local custom_iterator = false
 
 		local function visit(target: unknown, current: unknown, depth: number, track_defaults: boolean): boolean
-			node_count += 1
-			if node_count > 100000 or depth > 64 then
+			if depth > 64 then
 				return false
 			end
 			if current == nil then
@@ -14176,7 +14174,7 @@ local function reconcile(self: Record, template: JsonValue): (ResultCode, string
 			if current_type == "number" or current_type == "boolean" or current_type == "buffer" then
 				return true
 			elseif current_type == "string" then
-				return #(current :: string) <= 4_000_000
+				return true
 			elseif current_type ~= "table" then
 				return false
 			end
