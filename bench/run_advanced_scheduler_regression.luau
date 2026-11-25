@@ -786,14 +786,16 @@ assert(indexed_dependent.pending_dependency_count == 2,
 	"enqueue did not index every unresolved prerequisite")
 assert(dependency_index.dependents_by_dependency["index-prereq-a"]["index-dependent"] == indexed_dependent,
 	"prerequisite waiter index did not point to the dependent")
-local prerequisite_a = take(dependency_index, "index-prereq-a")
-assert(prerequisite_a.id == "index-prereq-a", "first prerequisite was not selected")
+local prerequisite_a, prerequisite_a_status = dependency_index:TakeNext()
+assert(prerequisite_a ~= nil and prerequisite_a.id == "index-prereq-a" and prerequisite_a_status == "success",
+	"first prerequisite was not selected")
 assert(dependency_index:MarkCompleted(prerequisite_a.id, "success"),
 	"first prerequisite could not be completed")
 assert(indexed_dependent.pending_dependency_count == 1 and indexed_dependent.failed_dependency_id == nil,
 	"first prerequisite completion did not decrement pending dependency count")
-local prerequisite_b = take(dependency_index, "index-prereq-b")
-assert(prerequisite_b.id == "index-prereq-b", "second prerequisite was selected out of order")
+local prerequisite_b, prerequisite_b_status = dependency_index:TakeNext()
+assert(prerequisite_b ~= nil and prerequisite_b.id == "index-prereq-b" and prerequisite_b_status == "success",
+	"second prerequisite was selected out of order")
 assert(dependency_index:MarkCompleted(prerequisite_b.id, "success"),
 	"second prerequisite could not be completed")
 assert(indexed_dependent.pending_dependency_count == 0 and indexed_dependent.failed_dependency_id == nil,
