@@ -67,6 +67,8 @@ assert(math.isnan(record:Get().not_a_number))
 
 `Record:Patch(operations)` is an opt-in path-based alternative for table-backed record roots. It applies a non-empty, dense list of at most 128 operations in order. Each path contains 1 to 64 string dictionary keys or positive integer array indices.
 
+Configured validators receive an isolated copy of the candidate data. They are predicates, not transformation callbacks: mutations made to the validator argument are discarded, and validators must not yield.
+
 ```lua
 local status, message = record:Patch({
     { op = "set", path = { "Stats", "Coins" }, value = 125 },
