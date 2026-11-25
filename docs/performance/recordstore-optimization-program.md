@@ -37,6 +37,8 @@ This PR is a performance refactor. The existing V2 service surface on `main` is 
 - Retain DRR batch-size decisions in an index-keyed side table so the final cost check uses the batch size computed during admission.
 - Cache terminal-admission preflight results against both policy revision and selected batch count. Clear private cache metadata before returning terminal items; preserve it for queued or successfully dispatched work where it is still valid.
 - Use ID-indexed queue positions and tombstone removals for O(1) queued cancellation and selection removal. Preserve FIFO order during sparse scans, compact in place only when holes exceed a bounded threshold, and keep shadow selectors on dense isolated copies.
+- Keep terminal completed/failed history in head-indexed bounded arrays, compacting only after the head passes its bound or backing tail grows beyond twice the limit. Dependency-referenced terminal outcomes remain retained until their final dependency is released.
+- Keep the bounded handoff-status cache in a fixed-capacity circular buffer instead of shifting entries from the front.
 
 Readiness, dependencies, expiry, admission/backpressure, retries, owner caps, priority inheritance, deadlines, FIFO tie-breaking, urgent streaks, DRR cursor/deficits, and critical/lease-renewal reserves remain authoritative and unchanged.
 
