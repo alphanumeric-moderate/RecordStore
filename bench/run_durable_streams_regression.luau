@@ -2,6 +2,8 @@
 local FakeDataStore = require("./FakeDataStore")
 local initializer = game:GetService("ServerScriptService"):WaitForChild("PlayerDataInitializer")
 local DurableStreams = require(initializer:WaitForChild("RecordStoreDurableStreams"))
+local Publisher = require(initializer:WaitForChild("RecordStoreDurableStreamPublisher"))
+local Worker = require(initializer:WaitForChild("RecordStoreDurableStreamWorker"))
 
 local now = 1000
 local fake = FakeDataStore.new({ cache_seconds = 120 })
@@ -412,5 +414,123 @@ local stale_producer_retry = idempotency_stream:PublishBatchAsync("producer-rout
 })
 assert(stale_producer_retry.code == "committed" and stale_producer_retry.duplicate == true,
 	"an older producer sequence was not deduplicated after a later sequence committed")
-
 print("[durable-streams] partition append, rollover, integrity, consumer fencing, batch checkpoint, replay and recovery passed")
+
+local scheduled_callbacks = {}
+local published_batches = {}
+local fake_publisher_stream = {
+	GetProducerSequenceAsync = function(_self, route_key, producer_id)
+		assert(route_key == "publisher-route" and producer_id == "stable-publisher")
+		return { code = "ok", sequence = 0 }
+	end,
+	PublishBatchAsync = function(_self, route_key, events)
+		assert(route_key == "publisher-route")
+		local copied = table.create(#events)
+		for index, event in ipairs(events) do
+			copied[index] = { event_id = event.event_id, producer_id = event.producer_id, producer_sequence = event.producer_sequence, payload = event.payload }
+		end
+		table.insert(published_batches, copied)
+		if #published_batches == 1 then return { code = "unknown", message = "simulated lost acknowledgement" } end
+		return { code = "committed", count = #events }
+	end,
+}
+local publisher, publisher_error = Publisher.OpenAsync(fake_publisher_stream, "publisher-route", "stable-publisher", {
+	max_batch_messages = 2,
+	max_pending_messages = 3,
+	flush_delay_seconds = 0.5,
+	schedule = function(delay_seconds, callback)
+		table.insert(scheduled_callbacks, { delay = delay_seconds, callback = callback })
+	end,
+	defer = function(callback) callback() end,
+})
+assert(publisher ~= nil, publisher_error)
+local mutable_payload = { value = 11, nested = { enabled = true } }
+local queued_first = publisher:Enqueue("publisher-event-1", mutable_payload)
+assert(queued_first.code == "queued" and queued_first.durable == false and queued_first.producer_sequence == 1,
+	"publisher enqueue must not claim durability before DataStore confirmation")
+mutable_payload.value = 999
+mutable_payload.nested.enabled = false
+local queued_second = publisher:Enqueue("publisher-event-2", { value = 22 })
+assert(queued_second.code == "queued" and queued_second.producer_sequence == 2, "publisher sequence assignment failed")
+assert(#published_batches == 0 and publisher:GetPendingCount() == 2, "publisher should buffer until a bounded flush is scheduled")
+scheduled_callbacks[1].callback()
+assert(#published_batches == 0, "cancelled flush timer must not flush a newer batch")
+scheduled_callbacks[2].callback()
+assert(#published_batches == 1 and publisher:GetPendingCount() == 2, "uncertain append must retain pending ring-buffer entries")
+assert(published_batches[1][1].payload.value == 11 and published_batches[1][1].payload.nested.enabled == true,
+	"publisher must snapshot payloads before the caller can mutate them")
+local retried = publisher:FlushAsync()
+assert(retried.code == "committed" and publisher:GetPendingCount() == 0, "publisher did not drain an uncertain batch after retry")
+assert(published_batches[2][1].producer_sequence == 1 and published_batches[2][2].producer_sequence == 2, "publisher retry changed producer sequence identities")
+local queued_third = publisher:Enqueue("publisher-event-3", { value = 33 })
+assert(queued_third.code == "queued" and queued_third.producer_sequence == 3, "publisher did not continue after a confirmed batch")
+local publisher_closed = publisher:CloseAsync()
+assert(publisher_closed.code == "closed" and publisher:GetPendingCount() == 0, "CloseAsync must flush pending items before closing")
+local bounded_publisher, bounded_error = Publisher.OpenAsync(fake_publisher_stream, "publisher-route", "bounded-publisher", {
+	max_batch_messages = 2,
+	max_pending_messages = 2,
+	schedule = function() end,
+	defer = function(callback) callback() end,
+})
+assert(bounded_publisher ~= nil, bounded_error)
+assert(bounded_publisher:Enqueue("bounded-1", { value = 1 }).code == "queued")
+assert(bounded_publisher:Enqueue("bounded-2", { value = 2 }).code == "queued")
+local over_capacity = bounded_publisher:Enqueue("bounded-3", { value = 3 })
+assert(over_capacity.code == "capacity" and bounded_publisher:GetPendingCount() == 2, "publisher must backpressure instead of dropping events")
+assert(bounded_publisher:CloseAsync().code == "closed", "bounded publisher did not close cleanly")
+print("[durable-streams] bounded publisher ring buffer, coalesced timers, retry, snapshot isolation and backpressure passed")
+
+local worker_scheduled = {}
+local worker_calls = { claims = 0, consumes = 0, renewals = 0, releases = 0 }
+local fake_worker_stream = {
+	ClaimConsumerAsync = function(_self, group, worker_partition, owner_token, lease_seconds)
+		assert(group == "analytics" and worker_partition == 1 and owner_token == "worker-token" and lease_seconds == 30)
+		worker_calls.claims += 1
+		return { code = "claimed", claim = { owner = owner_token } }
+	end,
+	ConsumeBatchAsync = function(_self, claim, handler, batch_size)
+		assert(claim.owner == "worker-token" and batch_size == 2)
+		worker_calls.consumes += 1
+		if worker_calls.consumes == 1 then return { code = "idle" } end
+		assert(handler({}, {}) == true)
+		return { code = "committed", count = 1 }
+	end,
+	RenewConsumerAsync = function(_self, claim)
+		assert(claim.owner == "worker-token")
+		worker_calls.renewals += 1
+		return { code = "renewed" }
+	end,
+	ReleaseConsumerAsync = function(_self, claim)
+		assert(claim.owner == "worker-token")
+		worker_calls.releases += 1
+		return { code = "released" }
+	end,
+}
+local worker, worker_error = Worker.Open(fake_worker_stream, "analytics", 1, "worker-token", function() return true end, {
+	lease_seconds = 30,
+	batch_size = 2,
+	min_poll_delay = 0.1,
+	max_poll_delay = 0.5,
+	jitter_fraction = 0,
+	random = function() return 0.5 end,
+	schedule = function(delay_seconds, callback)
+		table.insert(worker_scheduled, { delay = delay_seconds, callback = callback })
+	end,
+	defer = function(callback) callback() end,
+})
+assert(worker ~= nil, worker_error)
+assert(worker:Start().code == "started", "consumer worker did not start")
+worker_scheduled[1].callback()
+assert(worker_calls.claims == 1 and worker_calls.consumes == 1, "worker did not acquire and poll its partition")
+assert(worker:GetStatus().backoff_seconds == 0.2, "idle polling did not apply exponential backoff")
+local wake_result = worker:Wake()
+assert(wake_result.code == "scheduled", "wakeup did not preempt the idle poll timer")
+worker_scheduled[4].callback()
+assert(worker_calls.claims == 1 and worker_calls.consumes == 2, "worker did not reuse its claim after wakeup")
+assert(worker:GetStatus().backoff_seconds == 0.1, "successful batch did not reset polling backoff")
+worker_scheduled[2].callback()
+assert(worker_calls.renewals == 1, "consumer worker heartbeat did not renew its lease")
+local worker_stopped = worker:StopAsync()
+assert(worker_stopped.code == "stopped" and worker_calls.releases == 1, "consumer worker did not release its lease on stop")
+assert(worker:GetStatus().running == false and worker:GetStatus().claimed == false, "stopped worker retained active state")
+print("[durable-streams] consumer worker single-flight polling, wake coalescing, backoff, heartbeat and shutdown passed")

@@ -114,6 +114,8 @@ local loaded_purchase_entitlement_coordinator: any = nil
 local loaded_purchase_entitlement_handler: any = nil
 local loaded_recordstore_sha256: any = nil
 local loaded_recordstore_durable_streams: any = nil
+local loaded_recordstore_durable_stream_publisher: any = nil
+local loaded_recordstore_durable_stream_worker: any = nil
 local loaded_recordstore_transient_messaging: any = nil
 local loaded_maintenance_roblox_adapter: any = nil
 local loaded_maintenance_atomic_tombstone: any = nil
@@ -145,6 +147,8 @@ local PurchaseEntitlementCoordinatorInstance = table.freeze({ Name = "PurchaseEn
 local PurchaseEntitlementHandlerInstance = table.freeze({ Name = "PurchaseEntitlementReceiptHandler", ClassName = "ModuleScript" })
 local RecordStoreSHA256Instance = table.freeze({ Name = "RecordStoreSHA256", ClassName = "ModuleScript" })
 local RecordStoreDurableStreamsInstance = table.freeze({ Name = "RecordStoreDurableStreams", ClassName = "ModuleScript" })
+local RecordStoreDurableStreamPublisherInstance = table.freeze({ Name = "RecordStoreDurableStreamPublisher", ClassName = "ModuleScript" })
+local RecordStoreDurableStreamWorkerInstance = table.freeze({ Name = "RecordStoreDurableStreamWorker", ClassName = "ModuleScript" })
 local RecordStoreTransientMessagingInstance = table.freeze({ Name = "RecordStoreTransientMessaging", ClassName = "ModuleScript" })
 local RecordStoreMaintenanceRobloxAdapterInstance = table.freeze({ Name = "RecordStoreMaintenanceRobloxAdapter", ClassName = "ModuleScript" })
 local RecordStoreMaintenanceAtomicTombstoneInstance = table.freeze({ Name = "RecordStoreMaintenanceAtomicTombstone", ClassName = "ModuleScript" })
@@ -172,6 +176,8 @@ local PlayerDataInitializer = {
 	PurchaseEntitlementReceiptHandler = PurchaseEntitlementHandlerInstance,
 	RecordStoreSHA256 = RecordStoreSHA256Instance,
 	RecordStoreDurableStreams = RecordStoreDurableStreamsInstance,
+	RecordStoreDurableStreamPublisher = RecordStoreDurableStreamPublisherInstance,
+	RecordStoreDurableStreamWorker = RecordStoreDurableStreamWorkerInstance,
 	RecordStoreTransientMessaging = RecordStoreTransientMessagingInstance,
 	RecordStoreMaintenanceRobloxAdapter = RecordStoreMaintenanceRobloxAdapterInstance,
 	RecordStoreMaintenanceAtomicTombstone = RecordStoreMaintenanceAtomicTombstoneInstance,
@@ -312,6 +318,28 @@ local function load_recordstore_durable_streams(): any
 	loaded_recordstore_durable_streams = chunk()
 	return loaded_recordstore_durable_streams
 end
+local function load_recordstore_durable_stream_publisher(): any
+	if loaded_recordstore_durable_stream_publisher ~= nil then return loaded_recordstore_durable_stream_publisher end
+	local module_environment = table.clone(Shim.environment)
+	module_environment.script = { Parent = PlayerDataInitializer }
+	local chunk = luau.load(fs.readFile("src/PlayerDataInitializer/RecordStoreDurableStreamPublisher.luau"), {
+		debugName = "RecordStoreDurableStreamPublisher", environment = module_environment,
+	})
+	loaded_recordstore_durable_stream_publisher = chunk()
+	return loaded_recordstore_durable_stream_publisher
+end
+
+local function load_recordstore_durable_stream_worker(): any
+	if loaded_recordstore_durable_stream_worker ~= nil then return loaded_recordstore_durable_stream_worker end
+	local module_environment = table.clone(Shim.environment)
+	module_environment.script = { Parent = PlayerDataInitializer }
+	local chunk = luau.load(fs.readFile("src/PlayerDataInitializer/RecordStoreDurableStreamWorker.luau"), {
+		debugName = "RecordStoreDurableStreamWorker", environment = module_environment,
+	})
+	loaded_recordstore_durable_stream_worker = chunk()
+	return loaded_recordstore_durable_stream_worker
+end
+
 local function load_recordstore_sha256(): any
 	if loaded_recordstore_sha256 ~= nil then return loaded_recordstore_sha256 end
 	local chunk = luau.load(fs.readFile("src/PlayerDataInitializer/RecordStoreSHA256.luau"), {
@@ -559,6 +587,8 @@ local function shim_require(target: any)
 	if target == RecordStoreMailboxV2MigrationAdapterInstance then return load_mailbox_v2_migration_adapter() end
 	if target == RecordStoreSHA256Instance then return load_recordstore_sha256() end
 	if target == RecordStoreDurableStreamsInstance then return load_recordstore_durable_streams() end
+	if target == RecordStoreDurableStreamPublisherInstance then return load_recordstore_durable_stream_publisher() end
+	if target == RecordStoreDurableStreamWorkerInstance then return load_recordstore_durable_stream_worker() end
 	if target == RecordStoreTransientMessagingInstance then return load_recordstore_transient_messaging() end
 	if target == PurchaseInventoryManifestInstance then return load_purchase_inventory_manifest() end
 	if target == PurchaseEntitlementAuthorityInstance then return load_purchase_entitlement_authority() end
@@ -598,6 +628,14 @@ end
 
 function Shim.load_durable_streams(): any
 	return load_recordstore_durable_streams()
+end
+
+function Shim.load_durable_stream_publisher(): any
+	return load_recordstore_durable_stream_publisher()
+end
+
+function Shim.load_durable_stream_worker(): any
+	return load_recordstore_durable_stream_worker()
 end
 
 function Shim.load_scheduler(): any

@@ -24,8 +24,6 @@ for first = 1, event_count, batch_size do
 		local index = first + offset
 		events[offset + 1] = {
 			event_id = "event-" .. tostring(index),
-			producer_id = "benchmark-publisher",
-			producer_sequence = index,
 			payload = {
 				kind = "bench.event",
 				value = index,
@@ -37,25 +35,13 @@ for first = 1, event_count, batch_size do
 	assert(result.code == "committed", "batch publish failed: " .. tostring(result.message))
 end
 local elapsed = os.clock() - started
-local before_retry = fake.control:metrics().update_calls
-local historical_retry = stream:PublishAsync(
-	"benchmark-route",
-	"event-1",
-	{ kind = "bench.event", value = 1, nested = { active = true, source = "batch" } },
-	"benchmark-publisher",
-	1
-)
-local after_retry = fake.control:metrics().update_calls
-assert(historical_retry.code == "committed" and historical_retry.duplicate == true, "historical producer retry failed")
-assert(after_retry == before_retry, "historical producer retry issued an extra DataStore write")
 local metrics = fake.control:metrics()
 print(string.format(
-	"[durable-stream-batch] events=%d batch=%d elapsed=%.6f updates=%d updates_per_event=%.4f historical_retry_writes=%d",
+	"[durable-stream-batch] events=%d batch=%d elapsed=%.6f updates=%d updates_per_event=%.4f",
 	event_count,
 	batch_size,
 	elapsed,
 	metrics.update_calls,
-	metrics.update_calls / event_count,
-	after_retry - before_retry
+	metrics.update_calls / event_count
 ))
 Shim.close()
