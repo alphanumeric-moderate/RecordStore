@@ -117,6 +117,31 @@ assert(record.Data.NewDefaults.Nested.Value == 7
 	and record.Data.Inventory[1].ReconcileMarker == "inserted",
 	"Reconcile retained caller-owned template subtrees")
 
+mutate_validator_input = true
+status, message = record:Reconcile(reconcile_template)
+mutate_validator_input = false
+assert(status == "success", message)
+assert(validator_calls == 5, "no-op Reconcile did not invoke the custom validator exactly once")
+assert(record.Data.Inventory[1].Count == 3 and record.Data.NewDefaults.Nested.Value == 7
+	and record.Data.NewDefaults.List[1] == "one",
+	"no-op Reconcile published custom-validator mutations or caller-owned template changes")
+
+local custom_iterator_template = setmetatable({}, {
+	__iter = function()
+		local emitted = false
+		return function()
+			if emitted then return nil end
+			emitted = true
+			return "IterableDefaults", { Value = 11 }
+		end
+	end,
+})
+status, message = record:Reconcile(custom_iterator_template)
+assert(status == "success", message)
+assert(validator_calls == 6, "custom-iterator Reconcile did not validate exactly once")
+assert(record.Data.IterableDefaults.Value == 11,
+	"Reconcile did not preserve custom generalized iteration semantics")
+
 local sparse = { [1] = "one", [3] = "three" }
 status, message = record:Update(function(current)
 	local next_data = table.clone(current)
@@ -125,7 +150,7 @@ status, message = record:Update(function(current)
 end)
 assert(status == "validation" and string.find(message or "", "dense arrays", 1, true) ~= nil,
 	"sparse arrays were not rejected with the established shape-validation error")
-assert(validator_calls == 4, "custom validator ran after a shape-validation failure")
+assert(validator_calls == 6, "custom validator ran after a shape-validation failure")
 assert(record.Data.Revision == 1, "invalid sparse update changed the live record")
 
 local overlong = string.rep("x", 4_000_001)
@@ -136,7 +161,7 @@ status, message = record:Update(function(current)
 end)
 assert(status == "validation" and string.find(message or "", "overlong string", 1, true) ~= nil,
 	"overlong strings were not rejected with the established validation error")
-assert(validator_calls == 4, "custom validator ran after an overlong-string failure")
+assert(validator_calls == 6, "custom validator ran after an overlong-string failure")
 
 local too_many_nodes = table.create(100_001)
 for index = 1, 100_001 do
@@ -149,7 +174,7 @@ status, message = record:Update(function(current)
 end)
 assert(status == "validation" and string.find(message or "", "maximum node count", 1, true) ~= nil,
 	"oversized values were not rejected by the node-count limit")
-assert(validator_calls == 4, "custom validator ran after a node-count failure")
+assert(validator_calls == 6, "custom validator ran after a node-count failure")
 
 local oversized_iteration_count = 0
 local virtual_oversized = setmetatable({}, {
@@ -174,7 +199,7 @@ assert(status == "validation" and string.find(message or "", "maximum node count
 	"virtual oversized values were not rejected by the node-count limit")
 assert(oversized_iteration_count < 100_000,
 	("node-limit validation continued traversing after rejection: %d entries"):format(oversized_iteration_count))
-assert(validator_calls == 4, "custom validator ran after early node-limit rejection")
+assert(validator_calls == 6, "custom validator ran after early node-limit rejection")
 
 local cyclic = {}
 cyclic.self = cyclic
@@ -183,7 +208,7 @@ status, message = record:Update(function()
 end)
 assert(status == "validation" and string.find(message or "", "invalid data", 1, true) ~= nil,
 	"cyclic callback results did not retain the existing invalid-data result")
-assert(validator_calls == 4, "custom validator ran after cyclic-data rejection")
+assert(validator_calls == 6, "custom validator ran after cyclic-data rejection")
 
 local too_deep = {}
 local cursor = too_deep
@@ -197,13 +222,13 @@ status, message = record:Update(function()
 end)
 assert(status == "validation" and string.find(message or "", "invalid data", 1, true) ~= nil,
 	"excessive nesting did not retain the existing invalid-data result")
-assert(validator_calls == 4, "custom validator ran after excessive-depth rejection")
+assert(validator_calls == 6, "custom validator ran after excessive-depth rejection")
 assert(record.Data.Revision == 1, "invalid updates changed canonical data")
 
 local retained_public_data = record.Data
 local closed, close_message = record:Close()
 assert(closed == "closed" or closed == "fenced", close_message)
-assert(validator_calls == 5, "Close did not validate its detached snapshot exactly once")
+assert(validator_calls == 7, "Close did not validate its detached snapshot exactly once")
 
 retained_public_data.Inventory[1].Count = 7777
 assert(record.Data.Inventory[1].Count == 3,
