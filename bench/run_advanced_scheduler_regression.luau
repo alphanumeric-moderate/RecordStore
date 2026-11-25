@@ -45,6 +45,120 @@ local good_policy, policy_error = policy:SetPolicy({
 })
 assert(good_policy, "valid policy was rejected: " .. tostring(policy_error))
 
+-- FIFO tracks the earliest eligible item without materializing a candidate row for each queue entry.
+-- The configured high-lane burst still yields to normal work, but only when lower-priority work exists.
+local fifo_burst = new_scheduler()
+local fifo_burst_policy = fifo_burst:Stats().policy
+assert(fifo_burst:SetPolicy({
+	revision = fifo_burst_policy.revision + 1,
+	algorithm = "fifo",
+	high_burst = 2,
+}), "FIFO burst policy was rejected")
+enqueue(fifo_burst, { id = "fifo-high-first", owner_id = "fifo-high-owner-1", lane = "high" })
+enqueue(fifo_burst, { id = "fifo-high-second", owner_id = "fifo-high-owner-2", lane = "high" })
+enqueue(fifo_burst, { id = "fifo-high-third", owner_id = "fifo-high-owner-3", lane = "high" })
+enqueue(fifo_burst, { id = "fifo-normal", owner_id = "fifo-normal-owner", lane = "normal" })
+take(fifo_burst, "fifo-high-first")
+take(fifo_burst, "fifo-high-second")
+take(fifo_burst, "fifo-normal")
+take(fifo_burst, "fifo-high-third")
+
+-- Without non-high work, the high-burst guard must not strand eligible high-lane items.
+local fifo_high_only = new_scheduler()
+local fifo_high_policy = fifo_high_only:Stats().policy
+assert(fifo_high_only:SetPolicy({
+	revision = fifo_high_policy.revision + 1,
+	algorithm = "fifo",
+	high_burst = 2,
+}), "FIFO high-only policy was rejected")
+for index = 1, 3 do
+	enqueue(fifo_high_only, {
+		id = "fifo-high-only-" .. tostring(index),
+		owner_id = "fifo-high-only-owner-" .. tostring(index),
+		lane = "high",
+	})
+end
+take(fifo_high_only, "fifo-high-only-1")
+take(fifo_high_only, "fifo-high-only-2")
+take(fifo_high_only, "fifo-high-only-3")
+
+-- Weighted and deadline candidate selection must preserve high-burst fallback.
+for _, algorithm in ipairs({ "weighted", "deadline" }) do
+	local burst = new_scheduler()
+	local burst_policy = burst:Stats().policy
+	assert(burst:SetPolicy({
+		revision = burst_policy.revision + 1,
+		algorithm = algorithm,
+		high_burst = 1,
+	}), algorithm .. " high-burst policy was rejected")
+	enqueue(burst, {
+		id = algorithm .. "-high-first",
+		owner_id = algorithm .. "-high-owner-1",
+		lane = "high",
+		service_class = "normal",
+	})
+	enqueue(burst, {
+		id = algorithm .. "-high-second",
+		owner_id = algorithm .. "-high-owner-2",
+		lane = "high",
+		service_class = "normal",
+	})
+	enqueue(burst, {
+		id = algorithm .. "-normal-after-burst",
+		owner_id = algorithm .. "-normal-owner",
+		lane = "normal",
+		service_class = "normal",
+	})
+	take(burst, algorithm .. "-high-first")
+	take(burst, algorithm .. "-normal-after-burst")
+	take(burst, algorithm .. "-high-second")
+end
+
+-- When a lane contains an urgent item, DRR still compares every item using the
+-- deadline/age ordering; an older non-urgent item may correctly precede it.
+local aged_drr = new_scheduler()
+enqueue(aged_drr, {
+	id = "aged-drr-item",
+	owner_id = "aged-drr-owner",
+	lane = "normal",
+	work_class = "aged-drr-work",
+	service_class = "normal",
+	deadline_ms = now_ms + 66_000,
+})
+now_ms += 60_000
+enqueue(aged_drr, {
+	id = "urgent-drr-item",
+	owner_id = "aged-drr-owner",
+	lane = "normal",
+	work_class = "aged-drr-work",
+	service_class = "normal",
+	deadline_ms = now_ms + 4_000,
+})
+take(aged_drr, "aged-drr-item")
+
+-- DRR uses the same high-burst exclusion while retaining deterministic lane rotation.
+local drr_high_burst = new_scheduler()
+local drr_high_burst_policy = drr_high_burst:Stats().policy
+assert(drr_high_burst:SetPolicy({
+	revision = drr_high_burst_policy.revision + 1,
+	algorithm = "drr",
+	high_burst = 1,
+}), "DRR high-burst policy was rejected")
+enqueue(drr_high_burst, {
+	id = "drr-high-first",
+	owner_id = "a-high-owner",
+	lane = "high",
+	service_class = "normal",
+})
+enqueue(drr_high_burst, {
+	id = "drr-normal-after-burst",
+	owner_id = "z-norm-owner",
+	lane = "normal",
+	service_class = "normal",
+})
+take(drr_high_burst, "drr-high-first")
+take(drr_high_burst, "drr-normal-after-burst")
+
 -- DRR shares service across equally weighted owner/work-class lanes.
 local fair = new_scheduler()
 for index = 1, 5 do
@@ -399,6 +513,105 @@ local capacity_rejected = capacity:Enqueue({ id = "capacity-3", owner_id = "owne
 assert(capacity_rejected.code == "capacity", "full scheduler queue did not apply explicit backpressure")
 assert(capacity:Stats().queue_items == 2, "queue capacity overflow evicted or silently accepted work")
 
+-- Indexed sparse queue slots make cancellation and removal O(1) while preserving FIFO.
+local indexed_queue = new_scheduler()
+local indexed_policy = indexed_queue:Stats().policy
+assert(indexed_queue:SetPolicy({
+	revision = indexed_policy.revision + 1,
+	algorithm = "fifo",
+	queue_capacity = 8,
+	high_burst = 8,
+}), "indexed queue fixture policy was rejected")
+for index = 1, 8 do
+	enqueue(indexed_queue, {
+		id = "indexed-q" .. tostring(index),
+		owner_id = "indexed-owner-" .. tostring(index),
+	})
+end
+for index = 2, 8, 2 do
+	local id = "indexed-q" .. tostring(index)
+	local cancelled = indexed_queue:CancelQueued(id)
+	assert(cancelled ~= nil and cancelled.id == id, "indexed queue failed to cancel an existing slot")
+	assert(indexed_queue:MarkCompleted(id, "cancelled"), "cancelled indexed work did not reach terminal history")
+end
+assert(indexed_queue:Stats().queue_items == 4, "queue count diverged after sparse cancellations")
+for index = 9, 12 do
+	enqueue(indexed_queue, {
+		id = "indexed-q" .. tostring(index),
+		owner_id = "indexed-owner-" .. tostring(index),
+	})
+end
+for _, index in ipairs({ 1, 3, 5, 7 }) do
+	local id = "indexed-q" .. tostring(index)
+	local cancelled = indexed_queue:CancelQueued(id)
+	assert(cancelled ~= nil and cancelled.id == id, "indexed queue failed to remove a slot after tail growth")
+	assert(indexed_queue:MarkCompleted(id, "cancelled"), "sparse cancelled work did not complete")
+end
+for index = 13, 16 do
+	enqueue(indexed_queue, {
+		id = "indexed-q" .. tostring(index),
+		owner_id = "indexed-owner-" .. tostring(index),
+	})
+end
+assert(indexed_queue:Stats().queue_items == 8, "sparse queue capacity accounting diverged after compaction")
+local sparse_shadow = indexed_queue:ShadowDecision()
+assert(sparse_shadow.candidate_count == 8, "shadow selection did not see the sparse live queue")
+for index = 9, 16 do
+	take(indexed_queue, "indexed-q" .. tostring(index))
+end
+assert(indexed_queue:Stats().queue_items == 0, "indexed queue retained tombstones after complete drain")
+
+-- Terminal dependency failures cascade through multiple dependency levels.
+local chained_dependencies = new_scheduler()
+enqueue(chained_dependencies, { id = "chain-root", owner_id = "chain-owner" })
+enqueue(chained_dependencies, {
+	id = "chain-middle",
+	owner_id = "chain-owner",
+	dependencies = { "chain-root" },
+})
+enqueue(chained_dependencies, {
+	id = "chain-leaf",
+	owner_id = "chain-owner",
+	dependencies = { "chain-middle" },
+})
+local chain_root, chain_root_status = chained_dependencies:TakeNext()
+assert(chain_root ~= nil and chain_root.id == "chain-root" and chain_root_status == "success",
+	"chain root prerequisite was not selected")
+assert(chained_dependencies:MarkCompleted(chain_root.id, "unknown"),
+	"chain root failure could not be recorded")
+local chain_middle, chain_middle_status = chained_dependencies:TakeNext()
+assert(chain_middle ~= nil and chain_middle.id == "chain-middle" and chain_middle_status == "dependency_failed",
+	"middle dependency did not terminalize after its root failed")
+assert(chained_dependencies.known["chain-leaf"].failed_dependency_id == "chain-middle",
+	"TakeNext-terminalized dependency failure was not propagated to its dependent")
+local chain_leaf, chain_leaf_status = chained_dependencies:TakeNext()
+assert(chain_leaf ~= nil and chain_leaf.id == "chain-leaf" and chain_leaf_status == "dependency_failed",
+	"downstream dependency did not terminalize after its prerequisite failed")
+
+-- Expiry terminalization must also notify dependents of the expired prerequisite.
+local expired_dependency_chain = new_scheduler()
+enqueue(expired_dependency_chain, {
+	id = "expired-chain-root",
+	owner_id = "expired-chain-owner",
+	expires_at_ms = now_ms + 1,
+})
+enqueue(expired_dependency_chain, {
+	id = "expired-chain-child",
+	owner_id = "expired-chain-owner",
+	dependencies = { "expired-chain-root" },
+})
+now_ms += 2
+local expired_chain_root, expired_chain_status = expired_dependency_chain:TakeNext()
+assert(expired_chain_root ~= nil and expired_chain_root.id == "expired-chain-root"
+	and expired_chain_status == "expired",
+	"expired prerequisite did not terminalize")
+assert(expired_dependency_chain.known["expired-chain-child"].failed_dependency_id == "expired-chain-root",
+	"expired prerequisite failure was not propagated to its dependent")
+local expired_chain_child, expired_child_status = expired_dependency_chain:TakeNext()
+assert(expired_chain_child ~= nil and expired_chain_child.id == "expired-chain-child"
+	and expired_child_status == "dependency_failed",
+	"dependent did not terminalize after its prerequisite expired")
+
 -- A completion must refer to known dispatched/terminal work; it cannot forge or orphan dependencies.
 local completion_guard = new_scheduler()
 assert(not completion_guard:MarkCompleted("ghost-completion", "committed"),
@@ -463,7 +676,7 @@ do
 	end
 	assert(queued_history.completed["queued-history-prerequisite"] == true,
 		"queued dependency lost its prerequisite outcome during history pruning")
-	assert(#queued_history.completed_order <= queued_history:Stats().policy.queue_capacity * 2,
+	assert(queued_history.completed_order_count <= queued_history:Stats().policy.queue_capacity * 2,
 		"completed-history order grew beyond its configured bound while outcomes were referenced")
 	now_ms += 60000
 	take(queued_history, "queued-history-dependent")
@@ -501,7 +714,7 @@ do
 	end
 	assert(inflight_history.completed["inflight-history-prerequisite"] == true,
 		"in-flight dependency lost its prerequisite result before a retry")
-	assert(#inflight_history.completed_order <= inflight_history:Stats().policy.queue_capacity * 2,
+	assert(inflight_history.completed_order_count <= inflight_history:Stats().policy.queue_capacity * 2,
 		"in-flight dependencies caused completed-history order to grow beyond its configured bound")
 	local rescheduled, reschedule_error = inflight_history:Reschedule(dependent_item.id, now_ms)
 	assert(rescheduled, "dependent work could not be rescheduled: " .. tostring(reschedule_error))
@@ -558,6 +771,52 @@ do
 	invalid_dispatcher:Close()
 end
 
+-- Prerequisite completion updates only its indexed dependents; readiness is O(1) after the final dependency.
+local dependency_index = new_scheduler()
+enqueue(dependency_index, { id = "index-prereq-a", owner_id = "dependency-owner", lane = "background" })
+enqueue(dependency_index, { id = "index-prereq-b", owner_id = "dependency-owner", lane = "background" })
+enqueue(dependency_index, {
+	id = "index-dependent",
+	owner_id = "dependency-owner",
+	lane = "normal",
+	dependencies = { "index-prereq-a", "index-prereq-b" },
+})
+local indexed_dependent = dependency_index.known["index-dependent"]
+assert(indexed_dependent.pending_dependency_count == 2,
+	"enqueue did not index every unresolved prerequisite")
+assert(dependency_index.dependents_by_dependency["index-prereq-a"]["index-dependent"] == indexed_dependent,
+	"prerequisite waiter index did not point to the dependent")
+local prerequisite_a = take(dependency_index, "index-prereq-a")
+assert(prerequisite_a.id == "index-prereq-a", "first prerequisite was not selected")
+assert(indexed_dependent.pending_dependency_count == 1 and indexed_dependent.failed_dependency_id == nil,
+	"first prerequisite completion did not decrement pending dependency count")
+local prerequisite_b = take(dependency_index, "index-prereq-b")
+assert(prerequisite_b.id == "index-prereq-b", "second prerequisite was selected out of order")
+assert(indexed_dependent.pending_dependency_count == 0 and indexed_dependent.failed_dependency_id == nil,
+	"final prerequisite completion did not release dependent readiness")
+local released_dependent = take(dependency_index, "index-dependent")
+assert(released_dependent.id == "index-dependent", "fully released dependent was not selectable")
+
+-- Cancellation removes waiter links but retains dependency history until completion is acknowledged.
+local cancelled_dependency_index = new_scheduler()
+enqueue(cancelled_dependency_index, { id = "cancel-index-prerequisite", owner_id = "dependency-owner" })
+enqueue(cancelled_dependency_index, {
+	id = "cancel-index-dependent",
+	owner_id = "dependency-owner",
+	dependencies = { "cancel-index-prerequisite" },
+})
+local cancelled_dependency = cancelled_dependency_index:CancelQueued("cancel-index-dependent")
+assert(cancelled_dependency ~= nil, "dependent could not be cancelled")
+local remaining_waiters = cancelled_dependency_index.dependents_by_dependency["cancel-index-prerequisite"]
+assert(remaining_waiters == nil or remaining_waiters["cancel-index-dependent"] == nil,
+	"cancelled dependent remained in prerequisite waiter index")
+assert(cancelled_dependency_index.dependency_ref_counts["cancel-index-prerequisite"] == 1,
+	"cancellation prematurely released dependency-history retention")
+assert(cancelled_dependency_index:MarkCompleted("cancel-index-dependent", "cancelled"),
+	"cancelled dependent did not reconcile")
+assert(cancelled_dependency_index.dependency_ref_counts["cancel-index-prerequisite"] == nil,
+	"completion did not release dependency-history retention")
+
 -- Dependencies cannot bypass a missing, failed or unknown prerequisite.
 local dependencies = new_scheduler()
 assert(dependencies:Enqueue({ id = "missing-dependent", owner_id = "x", dependencies = { "missing" } }).code == "invalid",
@@ -574,6 +833,8 @@ enqueue(failed_flow, { id = "must-not-run", owner_id = "flow-owner", lane = "hig
 local failing = failed_flow:TakeNext()
 assert(failing ~= nil and failing.id == "failing-step", "workflow dependency was selected out of order")
 assert(failed_flow:MarkCompleted(failing.id, "unknown"), "unknown prerequisite outcome did not terminalize")
+	assert(failed_flow.known["blocked"].failed_dependency_id == "failing-step",
+		"failed prerequisite was not propagated through the reverse waiter index")
 local blocked, blocked_status = failed_flow:TakeNext()
 assert(blocked ~= nil and blocked_status == "dependency_failed", "dependent work did not return dependency_failed")
 assert(blocked.terminal_result.dependency_code == "unknown", "dependency failure lost the prerequisite outcome")
@@ -1027,6 +1288,44 @@ do
 		owner_retry_cooldown:Reschedule(after_completion.id, now_ms + 10)
 	assert(third_rescheduled and third_retry_due == latest_retry_due,
 		"new same-owner retries bypassed an already queued cooldown")
+
+	local latest_cancelled, latest_cancel_error = owner_retry_cooldown:CancelQueued(second_active.id)
+	assert(latest_cancelled ~= nil and latest_cancel_error == nil,
+		"latest queued retry could not be cancelled")
+	assert(owner_retry_cooldown.retry_cooldown_until[owner_id] == latest_retry_due,
+		"cancelling one of two latest-due retries erased the other retry's cooldown")
+	local other_latest_cancelled, other_latest_cancel_error =
+		owner_retry_cooldown:CancelQueued(after_completion.id)
+	assert(other_latest_cancelled ~= nil and other_latest_cancel_error == nil,
+		"second latest-due retry could not be cancelled")
+	assert(owner_retry_cooldown.retry_cooldown_until[owner_id] == earlier_retry_due,
+		"removing all latest-due retries did not reveal the remaining owner cooldown")
+	assert(owner_retry_cooldown.retry_heaps_by_owner[owner_id] ~= nil
+		and owner_retry_cooldown.retry_heaps_by_owner[owner_id].positions[second_active.id] == nil
+		and owner_retry_cooldown.retry_heaps_by_owner[owner_id].positions[after_completion.id] == nil,
+		"cancelled retry remained in the owner retry index")
+
+	local earlier_cancelled, earlier_cancel_error = owner_retry_cooldown:CancelQueued(first_active.id)
+	assert(earlier_cancelled ~= nil and earlier_cancel_error == nil,
+		"remaining queued retry could not be cancelled")
+	assert(owner_retry_cooldown.retry_cooldown_until[owner_id] == nil
+		and owner_retry_cooldown.retry_heaps_by_owner[owner_id] == nil,
+		"empty owner retry index retained a stale cooldown")
+
+	local fresh_after_cancellation = {
+		id = "retry-cooldown-after-cancellation",
+		owner_id = owner_id,
+		lane = "normal",
+		work_class = "cooldown-test",
+	}
+	enqueue(owner_retry_cooldown, fresh_after_cancellation)
+	local fresh_active, fresh_status = owner_retry_cooldown:TakeNext()
+	assert(fresh_status == "success" and fresh_active.id == fresh_after_cancellation.id,
+		"fresh same-owner work could not be selected after cancelling all retries")
+	local fresh_rescheduled, _, fresh_retry_due =
+		owner_retry_cooldown:Reschedule(fresh_active.id, now_ms + 10)
+	assert(fresh_rescheduled and fresh_retry_due == now_ms + 10,
+		"cancelled retry cooldown continued to delay a fresh retry")
 end
 
 -- Explicit throttled retries respect retry_after_ms, use the class-specific backoff,
@@ -1819,6 +2118,121 @@ end
 assert(read_only_read_ran, "explicitly non-mutating work was blocked in read-only mode")
 assert(read_only_governor:Stats().stats.rejected >= 1, "read-only rejection was not measured")
 read_only_dispatcher:Close()
+
+-- Cached terminal-admission preflight must be invalidated by a policy revision.
+do
+	local revisioned_preflight = new_scheduler()
+	local available_at = now_ms + 10
+	enqueue(revisioned_preflight, {
+		id = "revisioned-admission-preflight",
+		owner_id = "revisioned-admission-owner",
+		lane = "normal",
+		work_class = "maintenance",
+		operation_class = "tracing",
+		mutating = true,
+		available_at_ms = available_at,
+	})
+	local early_item, early_status = revisioned_preflight:TakeNext()
+	assert(early_item == nil and early_status == "empty"
+		and revisioned_preflight:Stats().queue_items == 1,
+		"future-due work did not remain queued after its initial admission preflight")
+
+	local policy = revisioned_preflight:Stats().policy
+	assert(revisioned_preflight:SetPolicy({
+		revision = policy.revision + 1,
+		mode = "read_only",
+	}), "read-only policy change was rejected")
+	now_ms = available_at
+	local rejected_item, rejected_status = revisioned_preflight:TakeNext()
+	assert(rejected_item ~= nil and rejected_status == "admission_rejected"
+		and rejected_item.terminal_result.code == "read_only",
+		"cached preflight ignored a policy revision that made queued mutation terminal")
+	assert(rejected_item.admission_preflight_policy_revision == nil
+		and rejected_item.admission_preflight_batch_count == nil
+		and rejected_item.admission_preflight_terminal_result == nil,
+		"internal admission-cache metadata leaked into the returned work item")
+	assert(revisioned_preflight:Stats().queue_items == 0,
+		"policy-revision admission rejection left the terminal item queued")
+end
+
+-- Admission preflight caching preserves bounded operation-metric registration order.
+do
+	local metric_order = new_scheduler()
+	for index = 1, 21 do
+		enqueue(metric_order, {
+			id = "metric-order-" .. tostring(index),
+			owner_id = "metric-order-owner-" .. tostring(index),
+			lane = "normal",
+			work_class = "maintenance",
+			operation_class = "custom-operation-" .. tostring(index),
+			available_at_ms = now_ms + 10,
+		})
+	end
+	assert(next(metric_order.operation_kind_keys) == nil,
+		"Enqueue registered operation metric labels before queue preflight")
+	local selected, status = metric_order:TakeNext()
+	assert(selected == nil and status == "empty",
+		"future-due metric-order fixture unexpectedly selected work")
+	assert(metric_order.operation_kind_keys["custom-operation-21"] == "custom-operation-21"
+		and metric_order.operation_kind_keys["custom-operation-3"] == "custom-operation-3"
+		and metric_order.operation_kind_keys["custom-operation-2"] == nil
+		and metric_order.operation_kind_keys["custom-operation-1"] == nil,
+		"cached admission preflight changed bounded operation-metric registration order")
+end
+
+-- Batchable items defer metric registration until batch sizing during TakeNext.
+do
+	local batch_metric_order = new_scheduler()
+	enqueue(batch_metric_order, {
+		id = "batch-metric-order",
+		owner_id = "batch-metric-order-owner",
+		lane = "normal",
+		work_class = "maintenance",
+		operation_class = "custom-batch-operation",
+		batchable = true,
+		batch_size = 4,
+		batch_backlog = 4,
+		available_at_ms = now_ms + 10,
+	})
+	assert(next(batch_metric_order.operation_kind_keys) == nil,
+		"batchable Enqueue registered an operation metric before selected batch sizing")
+	local selected, status = batch_metric_order:TakeNext()
+	assert(selected == nil and status == "empty"
+		and batch_metric_order.operation_kind_keys["custom-batch-operation"] == "custom-batch-operation",
+		"batchable preflight did not register its operation metric during TakeNext")
+end
+
+-- A transient circuit opening is not a cached terminal admission result.
+do
+	local transient_preflight = new_scheduler()
+	for _ = 1, 5 do
+		transient_preflight:Observe("tracing", false, 1, "transient")
+	end
+	enqueue(transient_preflight, {
+		id = "transient-circuit-preflight",
+		owner_id = "transient-circuit-owner",
+		lane = "normal",
+		work_class = "maintenance",
+		operation_class = "tracing",
+	})
+	local circuit_blocked_item, circuit_blocked_status = transient_preflight:TakeNext()
+	assert(circuit_blocked_item == nil and circuit_blocked_status == "empty"
+		and transient_preflight:Stats().queue_items == 1,
+		"open circuit incorrectly turned transient admission backpressure into terminal rejection")
+	local circuit_cooldown_ms = transient_preflight:Stats().policy.circuit_cooldown_ms
+	now_ms += circuit_cooldown_ms + 1
+	local recovered_item, recovered_status = transient_preflight:TakeNext()
+	assert(recovered_item ~= nil and recovered_status == "success"
+		and recovered_item.id == "transient-circuit-preflight",
+		"transient circuit preflight remained terminal after its cooldown elapsed")
+	local probe = transient_preflight:Admit("maintenance", "tracing", 1, true, false)
+	assert(probe.code == "admitted" and probe.probe == true,
+		"recovered circuit did not reserve a half-open probe")
+	transient_preflight:Observe("tracing", true, 1)
+	assert(transient_preflight:Release(probe), "successful half-open probe did not release its admission ticket")
+	assert(transient_preflight:MarkCompleted(recovered_item.id, "committed"),
+		"recovered circuit work did not complete")
+end
 
 -- Budget backpressure retains work and resumes after a fresh budget observation.
 local budget_governor = new_scheduler()

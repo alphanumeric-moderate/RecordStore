@@ -1,0 +1,130 @@
+--!nocheck
+-- Profiles first-selection cost at increasing queue depths and readiness ratios.
+-- Queue construction is deliberately outside the timed TakeNext interval.
+local Scheduler = require("./RobloxShim").load_scheduler()
+
+local QUEUE_SIZES = { 128, 512, 2048, 8192 }
+local READY_SCENARIOS = {
+	{ name = "all-ready", stride = 1, ready_count = function(count) return count end, expect_selection = true },
+	{ name = "quarter-ready", stride = 4, ready_count = function(count) return math.floor(count / 4) end, expect_selection = true },
+	{ name = "none-ready", stride = math.huge, ready_count = function(_count) return 0 end, expect_selection = false },
+	{ name = "owner-saturated", stride = 1, ready_count = function(count) return count end, owner_saturated = true, expect_selection = false },
+}
+local ALGORITHMS = { "fifo", "weighted", "deadline", "drr" }
+local REPEATS = 2
+local NOW_MS = 1_800_000_000_000
+
+local function enqueue_profile_item(governor: any, id: string, owner_id: string, available_at_ms: number?)
+	local accepted = governor:Enqueue({
+		id = id,
+		owner_id = owner_id,
+		lane = "normal",
+		service_class = "normal",
+		work_class = "profile",
+		operation_class = "read",
+		read_units = 1,
+		write_units = 0,
+		estimated_bytes = 1024,
+		handler_slots = 1,
+		available_at_ms = available_at_ms,
+	})
+	assert(accepted.code == "accepted",
+		("enqueue failed for %s: %s"):format(id, tostring(accepted.message)))
+end
+
+local function build_queue(algorithm: string, count: number, scenario: any)
+	local governor = Scheduler.new({
+		now_ms = function() return NOW_MS end,
+	})
+	local policy = governor:Stats().policy
+	local blocker_count = if scenario.owner_saturated then 16 else 0
+	local configured, configure_message = governor:SetPolicy({
+		revision = policy.revision + 1,
+		algorithm = algorithm,
+		queue_capacity = math.max(count, blocker_count),
+		max_per_owner_in_flight = 1,
+	})
+	assert(configured, "scheduler policy rejected: " .. tostring(configure_message))
+
+	if scenario.owner_saturated then
+		for owner_index = 1, blocker_count do
+			enqueue_profile_item(governor,
+				("blocker-%s-%d"):format(algorithm, owner_index),
+				"held-owner-" .. tostring(owner_index),
+				nil
+			)
+		end
+		local blocked_owners = {}
+		for _ = 1, blocker_count do
+			local selected, status = governor:TakeNext(false)
+			assert(selected ~= nil and status == "success",
+				"could not occupy an owner in-flight slot for the saturated case")
+			assert(string.sub(selected.owner_id, 1, 11) == "held-owner-"
+				and blocked_owners[selected.owner_id] ~= true,
+				"blocker selection did not occupy a distinct configured owner")
+			blocked_owners[selected.owner_id] = true
+		end
+	end
+
+	local expected_ready = 0
+	for index = 1, count do
+		local ready = scenario.stride == 1
+			or (scenario.stride ~= math.huge and index % scenario.stride == 0)
+		if ready then expected_ready += 1 end
+		local owner_id = if scenario.owner_saturated
+			then "held-owner-" .. tostring((index - 1) % blocker_count + 1)
+			else "owner-" .. tostring((index - 1) % 64 + 1)
+		enqueue_profile_item(
+			governor,
+			algorithm .. "-" .. tostring(count) .. "-" .. scenario.name .. "-" .. tostring(index),
+			owner_id,
+			if ready then nil else NOW_MS + 60_000
+		)
+	end
+	assert(governor:Stats().queue_items == count, "scheduler queue size differs from the requested depth")
+	return governor, expected_ready
+end
+
+local result_count = 0
+for _, algorithm in ipairs(ALGORITHMS) do
+	for _, scenario in ipairs(READY_SCENARIOS) do
+		for _, queue_size in ipairs(QUEUE_SIZES) do
+			local total_seconds = 0
+			for repeat_index = 1, REPEATS do
+				local governor, expected_ready = build_queue(algorithm, queue_size, scenario)
+				local start = os.clock()
+				local selected, status = governor:TakeNext(false)
+				local elapsed = os.clock() - start
+				total_seconds += elapsed
+
+				if scenario.expect_selection then
+					assert(expected_ready > 0 and selected ~= nil and status == "success",
+						"ready workload failed to select an item")
+					assert((selected.available_at_ms or 0) <= NOW_MS,
+						"selector returned an item that was not ready")
+					assert(governor:Stats().queue_items == queue_size - 1,
+						"successful selection did not remove exactly one queue item")
+				else
+					assert(selected == nil and status == "empty",
+						"fully blocked workload unexpectedly selected an item")
+					assert(governor:Stats().queue_items == queue_size,
+						"blocked selection changed the queue")
+				end
+			end
+			result_count += 1
+			print(string.format(
+				"[scheduler-backlog] algorithm=%s scenario=%s queue=%d ready=%d repeats=%d mean_take_next_ms=%.4f",
+				algorithm,
+				scenario.name,
+				queue_size,
+				scenario.ready_count(queue_size),
+				REPEATS,
+				total_seconds / REPEATS * 1000
+			))
+		end
+	end
+end
+
+assert(result_count == #ALGORITHMS * #READY_SCENARIOS * #QUEUE_SIZES,
+	"scheduler backlog matrix did not complete every workload")
+print(string.format("[scheduler-backlog] completed=%d", result_count))

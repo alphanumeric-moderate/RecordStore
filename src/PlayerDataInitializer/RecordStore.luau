@@ -155,6 +155,22 @@ do
 
 	local MAX_SCHEDULER_COPY_NODES = 4096
 
+	local function new_scheduler_selection_scratch(): EmbeddedSchedulerDynamicRecord
+		return {
+			eligible = {},
+			eligible_batch_counts = {},
+			service_time_estimates = {},
+			dimensions = {},
+			batch_dimensions = {},
+			admission_result = {},
+			lane_rows = {},
+			lane_keys = {},
+			lane_row_pool = {},
+			lane_has_urgent = {},
+			lane_oldest_index = {},
+		}
+	end
+
 	local function copy_bounded(value: any, maximum_nodes: number): any
 		local seen = {}
 		local nodes = 0
@@ -191,18 +207,22 @@ do
 		batch = { read = 1, write = 1, bytes = 65536, handlers = 1 },
 	}
 
-	local function estimate_dimensions(item: EmbeddedSchedulerDynamicRecord, batch_count: number?): EmbeddedSchedulerDynamicRecord
+	local function estimate_dimensions(
+		item: EmbeddedSchedulerDynamicRecord,
+		batch_count: number?,
+		reusable_result: EmbeddedSchedulerDynamicRecord?
+	): EmbeddedSchedulerDynamicRecord
 		local request_kind = if type(item.operation_class) == "string" then item.operation_class
 			elseif type(item.work_class) == "string" then item.work_class else "default"
 		local defaults = operation_dimension_defaults[request_kind] or operation_dimension_defaults.default
 		local multiplier: number = if item.batchable == true and type(batch_count) == "number" and math.isfinite(batch_count)
 			then math.clamp(math.floor(batch_count), 1, 16) else 1
-		return {
-			read_units = math.max(defaults.read, if finite(item.read_units) then item.read_units else 0) * multiplier,
-			write_units = math.max(defaults.write, if finite(item.write_units) then item.write_units else 0) * multiplier,
-			estimated_bytes = math.max(defaults.bytes, if finite(item.estimated_bytes) then item.estimated_bytes else 0) * multiplier,
-			handler_slots = math.max(defaults.handlers, if finite(item.handler_slots) then item.handler_slots else 1),
-		}
+		local result: EmbeddedSchedulerDynamicRecord = if reusable_result ~= nil then reusable_result else {}
+		result.read_units = math.max(defaults.read, if finite(item.read_units) then item.read_units else 0) * multiplier
+		result.write_units = math.max(defaults.write, if finite(item.write_units) then item.write_units else 0) * multiplier
+		result.estimated_bytes = math.max(defaults.bytes, if finite(item.estimated_bytes) then item.estimated_bytes else 0) * multiplier
+		result.handler_slots = math.max(defaults.handlers, if finite(item.handler_slots) then item.handler_slots else 1)
+		return result
 	end
 
 	local MAX_CUSTOM_OPERATION_KIND_KEYS = 19
@@ -256,15 +276,15 @@ do
 				priority_inheritance_max_ms = 1000, retry_jitter_percent = 20,
 				algorithm = "drr", shadow_algorithm = "weighted", shadow_enabled = false, shadow_sample_rate = 0,
 			},
-			in_flight = 0, by_class = {}, active_tickets = {}, queue = {}, due = {}, due_heap = {}, queued_due_heap = {},
+			in_flight = 0, by_class = {}, active_tickets = {}, queue = {}, queue_count = 0, queue_tail = 0, queue_positions = {}, due = {}, due_heap = {}, queued_due_heap = {},
 			wake_heap = {}, wake_sequence = 0,
 			read_units_in_flight = 0, write_units_in_flight = 0,
 			estimated_bytes_in_flight = 0, handler_slots_in_flight = 0,
 			request_budgets = { read = nil, write = nil, sampled_at_ms = nil },
-			completed = {}, completed_order = {}, known = {}, active_owner = {}, active_renewals_by_owner = {}, active_critical_by_owner = {},
-			dependency_ref_counts = {}, pending_completed_prune = {}, pending_failed_prune = {},
+			completed = {}, completed_order = {}, completed_order_head = 1, completed_order_tail = 0, completed_order_count = 0, known = {}, active_owner = {}, active_renewals_by_owner = {}, active_critical_by_owner = {},
+			dependency_ref_counts = {}, dependents_by_dependency = {}, pending_completed_prune = {}, pending_failed_prune = {},
 			drr_deficit = {}, drr_cursor_key = nil, high_streak = 0, urgent_streak = 0,
-			failed = {}, failed_order = {}, retry_cooldown_until = {}, retry_tokens_by_class = {},
+			failed = {}, failed_order = {}, failed_order_head = 1, failed_order_tail = 0, failed_order_count = 0, retry_cooldown_until = {}, retry_heaps_by_owner = {}, retry_tokens_by_class = {},
 			due_sequence = 0,
 			retry_tokens = 32, last_token_time = now_ms(),
 			last_budget = nil, last_budget_by_kind = {}, last_budget_sampled_at_by_kind = {},
@@ -273,6 +293,7 @@ do
 			stats = { admitted = 0, rejected = 0, completed = 0, released = 0, throttled = 0, errors = 0,
 				scheduled_selected = 0, scheduled_expired = 0, scheduled_overdue = 0, shadow_samples = 0 },
 			scheduler_metrics = { by_lane = {}, wait_ms = new_sample_window(), wait_by_lane_class = {}, last_shadow = nil },
+			selection_scratch = new_scheduler_selection_scratch(),
 		}
 		local limits = { critical = 32, profile_save = 32, profile_release = 32, interactive = 24, messaging = 20, migration = 4, maintenance = 8, tracing = 1 }
 		local function policy_valid(policy: EmbeddedSchedulerDynamicRecord): (boolean, string?)
@@ -441,99 +462,142 @@ do
 			end
 			return true
 		end
-		local function admission_decision(self: EmbeddedSchedulerDynamicRecord, work_class: any, request_kind: any, cost: any, mutating: any, critical_override: any, dimensions: any): (EmbeddedSchedulerDynamicRecord, boolean, boolean)
+		local function admission_response(
+			target: EmbeddedSchedulerDynamicRecord?,
+			code: string,
+			terminal: boolean?,
+			transient: boolean?,
+			message: string?,
+			retry_after_ms: number?,
+			budget_limited: boolean?,
+			reason: string?
+		): EmbeddedSchedulerDynamicRecord
+			local result: EmbeddedSchedulerDynamicRecord = if target ~= nil then target else {}
+			if target ~= nil then table.clear(result) end
+			result.code = code
+			if terminal ~= nil then result.terminal = terminal end
+			if transient ~= nil then result.transient = transient end
+			if message ~= nil then result.message = message end
+			if retry_after_ms ~= nil then result.retry_after_ms = retry_after_ms end
+			if budget_limited ~= nil then result.budget_limited = budget_limited end
+			if reason ~= nil then result.reason = reason end
+			return result
+		end
+		local function admission_decision(
+			self: EmbeddedSchedulerDynamicRecord,
+			work_class: any,
+			request_kind: any,
+			cost: any,
+			mutating: any,
+			critical_override: any,
+			dimensions: any,
+			register_operation_kind: boolean?,
+			skip_terminal_checks: boolean?,
+			reusable_result: EmbeddedSchedulerDynamicRecord?
+		): (EmbeddedSchedulerDynamicRecord, boolean, boolean)
 			if work_class == nil then work_class = "interactive" end
 			if request_kind == nil then request_kind = "default" end
 			if cost == nil then cost = 1 end
 			if mutating == nil then
 				mutating = true
 			elseif type(mutating) ~= "boolean" then
-				return { code = "invalid", terminal = true, message = "mutating must be boolean" }, false, false
+				return admission_response(reusable_result, "invalid", true, nil, "mutating must be boolean"), false, false
 			end
 			if critical_override == nil then
 				critical_override = false
 			elseif type(critical_override) ~= "boolean" then
-				return { code = "invalid", terminal = true, message = "critical_override must be boolean" }, false, false
+				return admission_response(reusable_result, "invalid", true, nil, "critical_override must be boolean"), false, false
 			end
 			if not valid_text(work_class, 64) then
-				return { code = "invalid", terminal = true, message = "work_class must be 1..64 bytes" }, false, false
+				return admission_response(reusable_result, "invalid", true, nil, "work_class must be 1..64 bytes"), false, false
 			end
 			if not valid_text(request_kind, 128) then
-				return { code = "invalid", terminal = true, message = "request_kind must be 1..128 bytes" }, false, false
+				return admission_response(reusable_result, "invalid", true, nil, "request_kind must be 1..128 bytes"), false, false
 			end
-			request_kind = operation_metric_key(self, request_kind)
-			if not finite(cost) or math.floor(cost) ~= cost or cost < 1 or cost > self.policy.max_item_cost then
-				return { code = "invalid", terminal = true, message = "cost must be an integer within max_item_cost" }, false, false
+			if register_operation_kind ~= false then
+				request_kind = operation_metric_key(self, request_kind)
 			end
-			if dimensions == nil then
-				dimensions = estimate_dimensions({ operation_class = request_kind })
-			elseif type(dimensions) ~= "table" then
-				return { code = "invalid", terminal = true, message = "dimensions must be a table" }, false, false
-			end
-			for field in pairs(dimensions) do
-				if field ~= "read_units" and field ~= "write_units"
-					and field ~= "estimated_bytes" and field ~= "handler_slots"
-				then
-					return { code = "invalid", terminal = true, message = "unsupported admission dimension: " .. tostring(field) }, false, false
-				end
-			end
-			if dimensions.read_units == nil or dimensions.write_units == nil
-				or dimensions.estimated_bytes == nil or dimensions.handler_slots == nil
-			then
-				return {
-					code = "invalid", terminal = true,
-					message = "dimensions must explicitly provide read_units, write_units, estimated_bytes, and handler_slots",
-				}, false, false
-			end
-			local read_units = dimensions.read_units
-			local write_units = dimensions.write_units
-			local estimated_bytes = dimensions.estimated_bytes
-			local handler_slots = dimensions.handler_slots
-			if not finite(read_units) or read_units < 0 or math.floor(read_units) ~= read_units
-				or not finite(write_units) or write_units < 0 or math.floor(write_units) ~= write_units
-				or not finite(estimated_bytes) or estimated_bytes < 0 or math.floor(estimated_bytes) ~= estimated_bytes
-				or not finite(handler_slots) or handler_slots < 1 or math.floor(handler_slots) ~= handler_slots
-			then
-				return { code = "invalid", terminal = true, message = "invalid multi-dimensional admission estimate" }, false, false
-			end
-			if read_units > self.policy.max_read_units_in_flight then
-				return { code = "capacity", terminal = true, message = "work item exceeds the StandardRead admission cap" }, false, true
-			end
-			if write_units > self.policy.max_write_units_in_flight then
-				return { code = "capacity", terminal = true, message = "work item exceeds the StandardWrite admission cap" }, false, true
-			end
-			if estimated_bytes > self.policy.max_estimated_bytes_in_flight then
-				return { code = "capacity", terminal = true, message = "work item exceeds the estimated byte admission cap" }, false, true
-			end
-			if handler_slots > self.policy.max_handler_slots_in_flight then
-				return { code = "capacity", terminal = true, message = "work item exceeds the handler-slot admission cap" }, false, true
-			end
+			local read_units = if type(dimensions) == "table" then dimensions.read_units else nil
+			local write_units = if type(dimensions) == "table" then dimensions.write_units else nil
+			local estimated_bytes = if type(dimensions) == "table" then dimensions.estimated_bytes else nil
+			local handler_slots = if type(dimensions) == "table" then dimensions.handler_slots else nil
 			local critical = critical_override == true or work_class == "critical"
 				or work_class == "profile_save" or work_class == "profile_release"
-			local class_limit = math.min(limits[work_class] or limits.interactive, self.policy.max_in_flight)
-			if cost > self.policy.max_in_flight then
-				return { code = "capacity", terminal = true, message = "work item cost exceeds max_in_flight" }, false, true
-			end
-			if cost > class_limit then
-				return { code = "capacity", terminal = true, message = "work item cost exceeds its work-class admission cap" }, false, true
-			end
-			if self.policy.mode == "read_only" and mutating and not critical then
-				return { code = "read_only", terminal = true, message = "mutating noncritical work is disabled" }, false, true
-			end
-			if self.policy.mode == "reject_noncritical" and not critical then
-				return { code = "backpressure", terminal = true, message = "scheduler policy rejects noncritical work" }, false, true
+			if skip_terminal_checks ~= true then
+				if not finite(cost) or math.floor(cost) ~= cost or cost < 1 or cost > self.policy.max_item_cost then
+					return admission_response(reusable_result, "invalid", true, nil, "cost must be an integer within max_item_cost"), false, false
+				end
+				if dimensions == nil then
+					dimensions = estimate_dimensions({ operation_class = request_kind })
+				elseif type(dimensions) ~= "table" then
+					return admission_response(reusable_result, "invalid", true, nil, "dimensions must be a table"), false, false
+				end
+				for field in pairs(dimensions) do
+					if field ~= "read_units" and field ~= "write_units"
+						and field ~= "estimated_bytes" and field ~= "handler_slots"
+					then
+						return admission_response(reusable_result, "invalid", true, nil, "unsupported admission dimension: " .. tostring(field)), false, false
+					end
+				end
+				if dimensions.read_units == nil or dimensions.write_units == nil
+					or dimensions.estimated_bytes == nil or dimensions.handler_slots == nil
+				then
+					return admission_response(
+						reusable_result,
+						"invalid",
+						true,
+						nil,
+						"dimensions must explicitly provide read_units, write_units, estimated_bytes, and handler_slots"
+					), false, false
+				end
+				read_units = dimensions.read_units
+				write_units = dimensions.write_units
+				estimated_bytes = dimensions.estimated_bytes
+				handler_slots = dimensions.handler_slots
+				if not finite(read_units) or read_units < 0 or math.floor(read_units) ~= read_units
+					or not finite(write_units) or write_units < 0 or math.floor(write_units) ~= write_units
+					or not finite(estimated_bytes) or estimated_bytes < 0 or math.floor(estimated_bytes) ~= estimated_bytes
+					or not finite(handler_slots) or handler_slots < 1 or math.floor(handler_slots) ~= handler_slots
+				then
+					return admission_response(reusable_result, "invalid", true, nil, "invalid multi-dimensional admission estimate"), false, false
+				end
+				if read_units > self.policy.max_read_units_in_flight then
+					return admission_response(reusable_result, "capacity", true, nil, "work item exceeds the StandardRead admission cap"), false, true
+				end
+				if write_units > self.policy.max_write_units_in_flight then
+					return admission_response(reusable_result, "capacity", true, nil, "work item exceeds the StandardWrite admission cap"), false, true
+				end
+				if estimated_bytes > self.policy.max_estimated_bytes_in_flight then
+					return admission_response(reusable_result, "capacity", true, nil, "work item exceeds the estimated byte admission cap"), false, true
+				end
+				if handler_slots > self.policy.max_handler_slots_in_flight then
+					return admission_response(reusable_result, "capacity", true, nil, "work item exceeds the handler-slot admission cap"), false, true
+				end
+				local class_limit = math.min(limits[work_class] or limits.interactive, self.policy.max_in_flight)
+				if cost > self.policy.max_in_flight then
+					return admission_response(reusable_result, "capacity", true, nil, "work item cost exceeds max_in_flight"), false, true
+				end
+				if cost > class_limit then
+					return admission_response(reusable_result, "capacity", true, nil, "work item cost exceeds its work-class admission cap"), false, true
+				end
+				if self.policy.mode == "read_only" and mutating and not critical then
+					return admission_response(reusable_result, "read_only", true, nil, "mutating noncritical work is disabled"), false, true
+				end
+				if self.policy.mode == "reject_noncritical" and not critical then
+					return admission_response(reusable_result, "backpressure", true, nil, "scheduler policy rejects noncritical work"), false, true
+				end
 			end
 			local circuit = self.circuits[request_kind]
 			local probe_needed = false
 			if circuit and circuit.state == "open" then
 				local wait_ms = circuit.until_ms - now_ms()
 				if wait_ms > 0 then
-					return { code = "circuit_open", transient = true, retry_after_ms = wait_ms, reason = circuit.reason }, false, false
+					return admission_response(reusable_result, "circuit_open", nil, true, nil, wait_ms, nil, circuit.reason), false, false
 				end
 				probe_needed = true
 			elseif circuit and circuit.state == "half_open" then
 				if circuit.probe then
-					return { code = "circuit_open", transient = true, retry_after_ms = 100, reason = "half-open probe already reserved" }, false, false
+					return admission_response(reusable_result, "circuit_open", nil, true, nil, 100, nil, "half-open probe already reserved"), false, false
 				end
 				probe_needed = true
 			end
@@ -542,8 +606,10 @@ do
 			local observed_budget_age = if finite(observed_budget_at) then now_ms() - observed_budget_at else math.huge
 			local observed_budget_fresh = observed_budget_age >= 0 and observed_budget_age <= 1000
 			if finite(observed_budget) and observed_budget < self.policy.minimum_budget and observed_budget_fresh and not critical then
-				return { code = "backpressure", transient = true, budget_limited = true, retry_after_ms = 250,
-					message = "operation budget is below configured minimum" }, false, true
+				return admission_response(
+					reusable_result, "backpressure", nil, true,
+					"operation budget is below configured minimum", 250, true
+				), false, true
 			end
 			local budgets = self.request_budgets
 			local budget_fresh = finite(budgets.sampled_at_ms) and now_ms() - budgets.sampled_at_ms <= 1000
@@ -551,59 +617,67 @@ do
 				local read_threshold = if critical then read_units else math.max(self.policy.minimum_budget, read_units)
 				local write_threshold = if critical then write_units else math.max(self.policy.minimum_budget, write_units)
 				if read_units > 0 and finite(budgets.read) and budgets.read < read_threshold then
-					return { code = "backpressure", transient = true, budget_limited = true, retry_after_ms = 250,
-						message = "StandardRead budget is below the operation admission threshold" }, false, true
+					return admission_response(
+						reusable_result, "backpressure", nil, true,
+						"StandardRead budget is below the operation admission threshold", 250, true
+					), false, true
 				end
 				if write_units > 0 and finite(budgets.write) and budgets.write < write_threshold then
-					return { code = "backpressure", transient = true, budget_limited = true, retry_after_ms = 250,
-						message = "StandardWrite budget is below the operation admission threshold" }, false, true
+					return admission_response(
+						reusable_result, "backpressure", nil, true,
+						"StandardWrite budget is below the operation admission threshold", 250, true
+					), false, true
 				end
 			end
 			if self.in_flight + cost > self.policy.max_in_flight then
-				return { code = "capacity", transient = true, message = "global estimated-work capacity reached" }, false, true
+				return admission_response(reusable_result, "capacity", nil, true, "global estimated-work capacity reached"), false, true
 			end
 			if not critical and self.in_flight + cost > self.policy.max_in_flight - self.policy.critical_reserve then
-				return { code = "backpressure", transient = true, message = "critical persistence reserve protected" }, false, true
+				return admission_response(reusable_result, "backpressure", nil, true, "critical persistence reserve protected"), false, true
 			end
 			if self.read_units_in_flight + read_units > self.policy.max_read_units_in_flight then
-				return { code = "capacity", transient = true, message = "StandardRead admission capacity reached" }, false, true
+				return admission_response(reusable_result, "capacity", nil, true, "StandardRead admission capacity reached"), false, true
 			end
 			if not critical and self.read_units_in_flight + read_units > self.policy.max_read_units_in_flight - self.policy.read_critical_reserve then
-				return { code = "backpressure", transient = true, message = "critical StandardRead reserve protected" }, false, true
+				return admission_response(reusable_result, "backpressure", nil, true, "critical StandardRead reserve protected"), false, true
 			end
 			if self.write_units_in_flight + write_units > self.policy.max_write_units_in_flight then
-				return { code = "capacity", transient = true, message = "StandardWrite admission capacity reached" }, false, true
+				return admission_response(reusable_result, "capacity", nil, true, "StandardWrite admission capacity reached"), false, true
 			end
 			if not critical and self.write_units_in_flight + write_units > self.policy.max_write_units_in_flight - self.policy.write_critical_reserve then
-				return { code = "backpressure", transient = true, message = "critical StandardWrite reserve protected" }, false, true
+				return admission_response(reusable_result, "backpressure", nil, true, "critical StandardWrite reserve protected"), false, true
 			end
 			if self.estimated_bytes_in_flight + estimated_bytes > self.policy.max_estimated_bytes_in_flight then
-				return { code = "capacity", transient = true, message = "estimated in-flight byte capacity reached" }, false, true
+				return admission_response(reusable_result, "capacity", nil, true, "estimated in-flight byte capacity reached"), false, true
 			end
 			if not critical and self.estimated_bytes_in_flight + estimated_bytes
 				> self.policy.max_estimated_bytes_in_flight - self.policy.estimated_bytes_critical_reserve
 			then
-				return { code = "backpressure", transient = true, message = "critical estimated-byte reserve protected" }, false, true
+				return admission_response(reusable_result, "backpressure", nil, true, "critical estimated-byte reserve protected"), false, true
 			end
 			if self.handler_slots_in_flight + handler_slots > self.policy.max_handler_slots_in_flight then
-				return { code = "capacity", transient = true, message = "handler-slot admission capacity reached" }, false, true
+				return admission_response(reusable_result, "capacity", nil, true, "handler-slot admission capacity reached"), false, true
 			end
 			if not critical and self.handler_slots_in_flight + handler_slots
 				> self.policy.max_handler_slots_in_flight - self.policy.handler_slots_critical_reserve
 			then
-				return { code = "backpressure", transient = true, message = "critical handler-slot reserve protected" }, false, true
+				return admission_response(reusable_result, "backpressure", nil, true, "critical handler-slot reserve protected"), false, true
 			end
 			if (self.by_class[work_class] or 0) + cost > math.min(limits[work_class] or limits.interactive, self.policy.max_in_flight) then
-				return { code = "capacity", transient = true, message = "work-class cap reached" }, false, true
+				return admission_response(reusable_result, "capacity", nil, true, "work-class cap reached"), false, true
 			end
-			return {
-				code = "admitted", work_class = work_class, request_kind = request_kind,
-				cost = cost, critical = critical,
-				dimensions = {
-					read_units = read_units, write_units = write_units,
-					estimated_bytes = estimated_bytes, handler_slots = handler_slots,
-				},
-			}, probe_needed, false
+			local result: EmbeddedSchedulerDynamicRecord = if reusable_result ~= nil then reusable_result else {}
+			if reusable_result ~= nil then table.clear(result) end
+			result.code = "admitted"
+			result.work_class = work_class
+			result.request_kind = request_kind
+			result.cost = cost
+			result.critical = critical
+			result.dimensions = if reusable_result ~= nil then dimensions else {
+				read_units = read_units, write_units = write_units,
+				estimated_bytes = estimated_bytes, handler_slots = handler_slots,
+			}
+			return result, probe_needed, false
 		end
 		function governor:CanAdmit(work_class, request_kind, cost, mutating, critical_override, dimensions)
 			local decision = admission_decision(self, work_class, request_kind, cost, mutating, critical_override, dimensions)
@@ -735,7 +809,11 @@ do
 		function governor:ChooseBatchSize(requested, latency_ms, backlog, oldest_age_ms, budget_headroom)
 			return calculate_batch_size(self.policy, requested, latency_ms, backlog, oldest_age_ms, budget_headroom)
 		end
-		local function selected_batch_size(self: EmbeddedSchedulerDynamicRecord, item: EmbeddedSchedulerDynamicRecord): number?
+		local function selected_batch_size(
+			self: EmbeddedSchedulerDynamicRecord,
+			item: EmbeddedSchedulerDynamicRecord,
+			reusable_dimensions: EmbeddedSchedulerDynamicRecord?
+		): number?
 			if item.batchable ~= true then return nil end
 			local now = now_ms()
 			local operation_kind = operation_metric_key(self, item.operation_class or "default")
@@ -753,7 +831,7 @@ do
 			local requested = item.batch_size or 1
 			local backlog = item.batch_backlog or requested
 			local count = calculate_batch_size(self.policy, requested, latency, backlog, oldest_age, budget_headroom)
-			local unit = estimate_dimensions(item, 1)
+			local unit = estimate_dimensions(item, 1, reusable_dimensions)
 			local critical = item.service_class == "critical" or item.lane == "lease_renewal"
 			local read_limit = self.policy.max_read_units_in_flight - self.read_units_in_flight
 			local write_limit = self.policy.max_write_units_in_flight - self.write_units_in_flight
@@ -831,15 +909,18 @@ do
 		rebuild_queue_wake_heap = function(self)
 			self.wake_heap = {}
 			local now = now_ms()
-			for _, item in ipairs(self.queue) do
-				if finite(item.due_at_ms) and item.due_at_ms > now then
-					push_wake_event(self, item, "due", item.due_at_ms)
-				end
-				if finite(item.expires_at_ms) and item.expires_at_ms > now then
-					push_wake_event(self, item, "expiry", item.expires_at_ms)
-				end
-				if finite(item.admission_blocked_until_ms) and item.admission_blocked_until_ms > now then
-					push_wake_event(self, item, "admission", item.admission_blocked_until_ms)
+			for index = 1, self.queue_tail do
+				local item = self.queue[index]
+				if item ~= nil then
+					if finite(item.due_at_ms) and item.due_at_ms > now then
+						push_wake_event(self, item, "due", item.due_at_ms)
+					end
+					if finite(item.expires_at_ms) and item.expires_at_ms > now then
+						push_wake_event(self, item, "expiry", item.expires_at_ms)
+					end
+					if finite(item.admission_blocked_until_ms) and item.admission_blocked_until_ms > now then
+						push_wake_event(self, item, "admission", item.admission_blocked_until_ms)
+					end
 				end
 			end
 		end
@@ -900,11 +981,58 @@ do
 				else return item.due_at_ms end
 			end
 		end
-		local function dependencies_ready(self: EmbeddedSchedulerDynamicRecord, item: EmbeddedSchedulerDynamicRecord): boolean
+		local function index_dependency_waiters(self: EmbeddedSchedulerDynamicRecord, item: EmbeddedSchedulerDynamicRecord)
+			local pending_count = 0
+			item.failed_dependency_id = nil
 			for _, dependency in ipairs(item.dependencies or {}) do
-				if not self.completed[dependency] then return false end
+				if self.completed[dependency] ~= true then
+					local failure = self.failed[dependency]
+					if failure ~= nil then
+						item.failed_dependency_id = dependency
+					else
+						local waiters = self.dependents_by_dependency[dependency]
+						if waiters == nil then
+							waiters = {}
+							self.dependents_by_dependency[dependency] = waiters
+						end
+						waiters[item.id] = item
+						pending_count += 1
+					end
+				end
 			end
-			return true
+			item.pending_dependency_count = pending_count
+		end
+		local function unregister_dependency_waiters(self: EmbeddedSchedulerDynamicRecord, item: EmbeddedSchedulerDynamicRecord)
+			for _, dependency in ipairs(item.dependencies or {}) do
+				local waiters = self.dependents_by_dependency[dependency]
+				if waiters ~= nil then
+					waiters[item.id] = nil
+					if next(waiters) == nil then
+						self.dependents_by_dependency[dependency] = nil
+					end
+				end
+			end
+			item.pending_dependency_count = 0
+		end
+		local function notify_dependency_waiters(
+			self: EmbeddedSchedulerDynamicRecord,
+			dependency_id: string,
+			succeeded: boolean
+		)
+			local waiters = self.dependents_by_dependency[dependency_id]
+			if waiters == nil then return end
+			self.dependents_by_dependency[dependency_id] = nil
+			for dependent_id, dependent in pairs(waiters) do
+				if self.known[dependent_id] == dependent then
+					dependent.pending_dependency_count = math.max(0, (dependent.pending_dependency_count or 0) - 1)
+					if not succeeded and dependent.failed_dependency_id == nil then
+						dependent.failed_dependency_id = dependency_id
+					end
+				end
+			end
+		end
+		local function dependencies_ready(_self: EmbeddedSchedulerDynamicRecord, item: EmbeddedSchedulerDynamicRecord): boolean
+			return (item.pending_dependency_count or 0) == 0 and item.failed_dependency_id == nil
 		end
 		local function retain_dependencies(self: EmbeddedSchedulerDynamicRecord, item: EmbeddedSchedulerDynamicRecord)
 			for _, dependency in ipairs(item.dependencies or {}) do
@@ -912,6 +1040,7 @@ do
 			end
 		end
 		local function release_dependencies(self: EmbeddedSchedulerDynamicRecord, item: EmbeddedSchedulerDynamicRecord)
+			unregister_dependency_waiters(self, item)
 			for _, dependency in ipairs(item.dependencies or {}) do
 				local count = self.dependency_ref_counts[dependency]
 				if count ~= nil then
@@ -1026,10 +1155,18 @@ do
 			cache[metric_kind] = estimate
 			return estimate
 		end
-		local function effective_cost(item: EmbeddedSchedulerDynamicRecord, batch_count: number?): number
+		local function effective_cost(
+			item: EmbeddedSchedulerDynamicRecord,
+			batch_count: number?,
+			prepared_dimensions: EmbeddedSchedulerDynamicRecord?
+		): number
 			local default_batch_count = if item.batchable == true
 				then math.min(item.batch_size or 1, item.batch_backlog or item.batch_size or 1) else nil
-			local dimensions = estimate_dimensions(item, if batch_count ~= nil then batch_count else default_batch_count)
+			local dimensions = prepared_dimensions or estimate_dimensions(
+				item,
+				if batch_count ~= nil then batch_count else default_batch_count,
+				nil
+			)
 			local estimated = math.max(
 				1,
 				dimensions.read_units + dimensions.write_units,
@@ -1050,14 +1187,54 @@ do
 				.. component(item.service_class or "best_effort")
 		end
 		local function choose_index(self: EmbeddedSchedulerDynamicRecord, algorithm: any, renewal_mode: any): (number?, boolean)
-			local now, eligible = now_ms(), {}
+			local fifo_fast_path = algorithm == "fifo" and renewal_mode ~= true and renewal_mode ~= "critical"
+			local drr_candidate_mode = algorithm ~= "fifo" and algorithm ~= "weighted" and algorithm ~= "deadline"
+				and renewal_mode ~= true and renewal_mode ~= "critical"
+			local scratch = self.selection_scratch
+			local eligible_buffer = scratch.eligible
+			local eligible_batch_counts_buffer = scratch.eligible_batch_counts
+			local service_time_estimates = scratch.service_time_estimates
+			local lane_rows = scratch.lane_rows
+			local lane_keys = scratch.lane_keys
+			local lane_row_pool = scratch.lane_row_pool
+			local lane_has_urgent = scratch.lane_has_urgent
+			local lane_oldest_index = scratch.lane_oldest_index
+			table.clear(eligible_buffer)
+			table.clear(eligible_batch_counts_buffer)
+			table.clear(service_time_estimates)
+			for lane_position = 1, #lane_keys do
+				local previous_key = lane_keys[lane_position]
+				local previous_row = lane_rows[previous_key]
+				if previous_row ~= nil then
+					table.clear(previous_row)
+					lane_row_pool[#lane_row_pool + 1] = previous_row
+					lane_rows[previous_key] = nil
+				end
+				lane_has_urgent[previous_key] = nil
+				lane_oldest_index[previous_key] = nil
+			end
+			table.clear(lane_keys)
+			local now = now_ms()
 			local urgent_fallback = self.urgent_streak >= self.policy.urgent_deadline_burst
-			for _, dependent in ipairs(self.queue) do
-				if dependent.lane == "high" and #(dependent.dependencies or {}) > 0 then
+			local eligible: { number }? =
+				if fifo_fast_path or drr_candidate_mode then nil else eligible_buffer
+			local eligible_batch_counts: { [number]: number }? =
+				if drr_candidate_mode then eligible_batch_counts_buffer else nil
+			local eligible_has_non_high = false
+			local fifo_best_index: number? = nil
+			local fifo_best_enqueued_at = math.huge
+			local fifo_best_non_high_index: number? = nil
+			local fifo_best_non_high_enqueued_at = math.huge
+			local fifo_has_non_high = false
+			for index = 1, self.queue_tail do
+				local dependent = self.queue[index]
+				if dependent ~= nil and dependent.lane == "high" and #(dependent.dependencies or {}) > 0 then
 					inherit_ready_prerequisites(self, dependent, now)
 				end
 			end
-			for index, item in ipairs(self.queue) do
+			for index = 1, self.queue_tail do
+				local item = self.queue[index]
+				if item ~= nil then
 				local ready = (item.due_at_ms or 0) <= now
 					and (item.available_at_ms == nil or item.available_at_ms <= now)
 					and dependencies_ready(self, item)
@@ -1079,13 +1256,79 @@ do
 					if owner_can_renew and owner_can_use_reserve
 						and (uses_critical_reserve(item) or owner_active < self.policy.max_per_owner_in_flight)
 					then
-						local batch_count = selected_batch_size(self, item)
-						local admission = admission_decision(self,
-							item.work_class, item.operation_class, effective_cost(item, batch_count), item.mutating ~= false,
-							item.service_class == "critical" or item.lane == "lease_renewal", estimate_dimensions(item, batch_count)
+						local batch_count = selected_batch_size(self, item, scratch.batch_dimensions)
+						local admission_preflight_current = item.admission_preflight_policy_revision == self.policy.revision
+							and item.admission_preflight_batch_count == batch_count
+							and item.admission_preflight_terminal_result == false
+						local dimensions = estimate_dimensions(item, batch_count, scratch.dimensions)
+						local candidate_cost = effective_cost(item, batch_count, dimensions)
+						local admission = admission_decision(
+							self,
+							item.work_class,
+							item.operation_class,
+							candidate_cost,
+							item.mutating ~= false,
+							item.service_class == "critical" or item.lane == "lease_renewal",
+							dimensions,
+							nil,
+							admission_preflight_current,
+							scratch.admission_result
 						)
 						if admission.code == "admitted" then
-							eligible[#eligible + 1] = { index = index, item = item, effective_lane = effective_lane, batch_count = batch_count }
+							if fifo_fast_path then
+								local enqueued_at = item.enqueued_at_ms
+								if fifo_best_index == nil or enqueued_at < fifo_best_enqueued_at then
+									fifo_best_index = index
+									fifo_best_enqueued_at = enqueued_at
+								end
+								if effective_lane ~= "high" then
+									if fifo_best_non_high_index == nil or enqueued_at < fifo_best_non_high_enqueued_at then
+										fifo_best_non_high_index = index
+										fifo_best_non_high_enqueued_at = enqueued_at
+									end
+								end
+								if effective_lane ~= "high" and effective_lane ~= "lease_renewal" then
+									fifo_has_non_high = true
+								end
+							elseif drr_candidate_mode then
+								if effective_lane ~= "high" and effective_lane ~= "lease_renewal" then
+									eligible_has_non_high = true
+								end
+								local key = lane_key(item, now)
+								local row = lane_rows[key]
+								if row == nil then
+									local pool_count = #lane_row_pool
+									if pool_count > 0 then
+										row = lane_row_pool[pool_count]
+										lane_row_pool[pool_count] = nil
+									else
+										row = {}
+									end
+									lane_rows[key] = row
+									lane_keys[#lane_keys + 1] = key
+									lane_has_urgent[key] = false
+									lane_oldest_index[key] = index
+								else
+									local oldest_index = lane_oldest_index[key]
+									if item.enqueued_at_ms < self.queue[oldest_index].enqueued_at_ms then
+										lane_oldest_index[key] = index
+									end
+								end
+								if finite(item.deadline_ms) and item.deadline_ms - now <= 5000 then
+									lane_has_urgent[key] = true
+								end
+								row[#row + 1] = index
+								if batch_count ~= nil then
+									local batch_counts = eligible_batch_counts :: { [number]: number }
+									batch_counts[index] = batch_count
+								end
+							else
+								local candidate_indices = eligible :: { number }
+								candidate_indices[#candidate_indices + 1] = index
+								if effective_lane ~= "high" and effective_lane ~= "lease_renewal" then
+									eligible_has_non_high = true
+								end
+							end
 						elseif finite(admission.retry_after_ms) then
 							if admission.budget_limited then
 								self.stats.rejected += 1
@@ -1096,52 +1339,137 @@ do
 						end
 					end
 				end
+				end
 			end
-			if #eligible == 0 then return nil, false end
-			if self.high_streak >= self.policy.high_burst then
-				local has_non_high = false
-				for _, row in ipairs(eligible) do
-					if row.effective_lane ~= "high" and row.effective_lane ~= "lease_renewal" then
-						has_non_high = true
-						break
+			if fifo_fast_path then
+				if fifo_best_index == nil then return nil, false end
+				if self.high_streak >= self.policy.high_burst and fifo_has_non_high then
+					return fifo_best_non_high_index, urgent_fallback
+				end
+				return fifo_best_index, urgent_fallback
+			end
+			if drr_candidate_mode then
+				if #lane_keys == 0 then return nil, false end
+				if self.high_streak >= self.policy.high_burst and eligible_has_non_high then
+					local write_index = 1
+					local lane_key_count = #lane_keys
+					for read_index = 1, lane_key_count do
+						local key = lane_keys[read_index]
+						local rows = lane_rows[key]
+						local first_item = self.queue[rows[1]]
+						if scheduled_lane(first_item, now) ~= "high" then
+							lane_keys[write_index] = key
+							write_index += 1
+						else
+							table.clear(rows)
+							lane_row_pool[#lane_row_pool + 1] = rows
+							lane_rows[key] = nil
+							lane_has_urgent[key] = nil
+							lane_oldest_index[key] = nil
+						end
+					end
+					for clear_index = write_index, lane_key_count do
+						lane_keys[clear_index] = nil
 					end
 				end
-				if has_non_high then
-					local filtered = {}
-					for _, row in ipairs(eligible) do if row.effective_lane ~= "high" then filtered[#filtered + 1] = row end end
-					eligible = filtered
+				if #lane_keys == 0 then return nil, false end
+				table.sort(lane_keys)
+				local lane_count = #lane_keys
+				local start_index = 1
+				if self.drr_cursor_key ~= nil then
+					for i, key in ipairs(lane_keys) do
+						if key == self.drr_cursor_key then
+							start_index = (i % lane_count) + 1
+							break
+						end
+					end
+				end
+				local rounds = math.ceil(self.policy.max_item_cost / self.policy.drr_quantum) + 2
+				for _ = 1, rounds do
+					for offset = 0, lane_count - 1 do
+						local lane_index = ((start_index + offset - 1) % lane_count) + 1
+						local key = lane_keys[lane_index]
+						local rows = lane_rows[key]
+						local first_item = self.queue[rows[1]]
+						local lane = scheduled_lane(first_item, now)
+						local lane_weight = if lane == "lease_renewal" then 4 elseif lane == "high" then 4 elseif lane == "normal" then 2 else 1
+						local service_class = first_item.service_class or "best_effort"
+						local service_weight = if service_class == "critical" then 4 elseif service_class == "interactive" then 3
+							elseif service_class == "normal" then 2 else 1
+						local weight = lane_weight * service_weight
+						self.drr_deficit[key] = math.min(self.policy.max_item_cost * 2, (self.drr_deficit[key] or 0) + self.policy.drr_quantum * weight)
+						local best_index = lane_oldest_index[key]
+						if lane_has_urgent[key] and self.urgent_streak < self.policy.urgent_deadline_burst then
+							best_index = rows[1]
+							local best_item = self.queue[best_index]
+							for row_index = 2, #rows do
+								local candidate_index = rows[row_index]
+								local item = self.queue[candidate_index]
+								if item_precedes(item, best_item, now) then
+									best_index = candidate_index
+									best_item = item
+								end
+							end
+						end
+						local best_item = self.queue[best_index]
+						local batch_count = eligible_batch_counts ~= nil and eligible_batch_counts[best_index] or nil
+						local cost = effective_cost(best_item, batch_count)
+						if cost <= self.drr_deficit[key] then
+							self.drr_deficit[key] -= cost
+							self.drr_cursor_key = key
+							return best_index, urgent_fallback
+						end
+					end
+				end
+				return nil, false
+			end
+			if eligible == nil or #eligible == 0 then return nil, false end
+			if self.high_streak >= self.policy.high_burst and eligible_has_non_high then
+				local write_index = 1
+				local eligible_count = #eligible
+				for read_index = 1, eligible_count do
+					local candidate_index = eligible[read_index]
+					if scheduled_lane(self.queue[candidate_index], now) ~= "high" then
+						eligible[write_index] = candidate_index
+						write_index += 1
+					end
+				end
+				for clear_index = write_index, eligible_count do
+					eligible[clear_index] = nil
 				end
 			end
-			if renewal_mode == true then
-				local best
-				for _, row in ipairs(eligible) do
-					if best == nil or item_precedes(row.item, best.item, now) then best = row end
+			if renewal_mode == true or renewal_mode == "critical" then
+				local best_index: number? = nil
+				for _, candidate_index in ipairs(eligible) do
+					local item = self.queue[candidate_index]
+					if best_index == nil or item_precedes(item, self.queue[best_index], now) then
+						best_index = candidate_index
+					end
 				end
-				return best and best.index or nil, urgent_fallback
-			elseif renewal_mode == "critical" then
-				local best
-				for _, row in ipairs(eligible) do
-					if best == nil or item_precedes(row.item, best.item, now) then best = row end
-				end
-				return best and best.index or nil, urgent_fallback
+				return best_index, urgent_fallback
 			end
 			if algorithm == "fifo" then
-				local best
-				for _, row in ipairs(eligible) do
-					if best == nil or row.item.enqueued_at_ms < best.item.enqueued_at_ms then best = row end
+				local best_index: number? = nil
+				local best_enqueued_at = math.huge
+				for _, candidate_index in ipairs(eligible) do
+					local item = self.queue[candidate_index]
+					if best_index == nil or item.enqueued_at_ms < best_enqueued_at then
+						best_index = candidate_index
+						best_enqueued_at = item.enqueued_at_ms
+					end
 				end
-				return best and best.index or nil, urgent_fallback
+				return best_index, urgent_fallback
 			elseif algorithm == "weighted" or algorithm == "deadline" then
-				local best, best_score
-				local service_time_estimates = {}
-				for _, row in ipairs(eligible) do
-					local item = row.item
+				local best_index: number? = nil
+				local best_score: number? = nil
+				for _, candidate_index in ipairs(eligible) do
+					local item = self.queue[candidate_index]
 					local age = math.min(60000, math.max(0, now - item.enqueued_at_ms))
 					local slack = if finite(item.deadline_ms)
 						then item.deadline_ms - now - estimated_service_time_ms(self, item, service_time_estimates)
 						else 60000
 					local urgency_score = if self.urgent_streak >= self.policy.urgent_deadline_burst then 0 else slack
-					local lane = row.effective_lane
+					local lane = scheduled_lane(item, now)
 					local lane_weight = if lane == "lease_renewal" then 8 elseif lane == "high" then 4 elseif lane == "normal" then 2 else 1
 					local service_rank = if item.service_class == "critical" then 4 elseif item.service_class == "interactive" then 3 elseif item.service_class == "normal" then 2 elseif item.service_class == "bulk" then 1 else 0
 					local deadline_bonus = math.clamp(urgency_score, -499, 499)
@@ -1149,64 +1477,68 @@ do
 					local score = if algorithm == "deadline"
 						then -service_rank * 1000 - lane_weight * 1000 + deadline_bonus - age * 0.25
 						else -lane_weight * 1000 - service_rank * 500 - age * 0.25 + weighted_deadline_bonus
-					if best_score == nil or score < best_score then best, best_score = row, score end
-				end
-				return best and best.index or nil, urgent_fallback
-			end
-			local lane_rows, lane_keys = {}, {}
-			for _, row in ipairs(eligible) do
-				local key = lane_key(row.item, now)
-				if lane_rows[key] == nil then
-					lane_rows[key] = {}
-					lane_keys[#lane_keys + 1] = key
-				end
-				lane_rows[key][#lane_rows[key] + 1] = row
-			end
-			table.sort(lane_keys)
-			local lane_count = #lane_keys
-			local start_index = 1
-			if self.drr_cursor_key ~= nil then
-				for i, key in ipairs(lane_keys) do
-					if key == self.drr_cursor_key then
-						start_index = (i % lane_count) + 1
-						break
+					if best_score == nil or score < best_score then
+						best_index = candidate_index
+						best_score = score
 					end
 				end
-			end
-			local rounds = math.ceil(self.policy.max_item_cost / self.policy.drr_quantum) + 2
-			for _ = 1, rounds do
-				for offset = 0, lane_count - 1 do
-					local lane_index = ((start_index + offset - 1) % lane_count) + 1
-					local key = lane_keys[lane_index]
-					local rows = lane_rows[key]
-					local lane = rows[1].effective_lane
-					local lane_weight = if lane == "lease_renewal" then 4 elseif lane == "high" then 4 elseif lane == "normal" then 2 else 1
-					local service_class = rows[1].item.service_class or "best_effort"
-					local service_weight = if service_class == "critical" then 4 elseif service_class == "interactive" then 3
-						elseif service_class == "normal" then 2 else 1
-					local weight = lane_weight * service_weight
-					self.drr_deficit[key] = math.min(self.policy.max_item_cost * 2, (self.drr_deficit[key] or 0) + self.policy.drr_quantum * weight)
-					local best = rows[1]
-					local has_urgent = false
-					for _, row in ipairs(rows) do
-						if finite(row.item.deadline_ms) and row.item.deadline_ms - now <= 5000 then has_urgent = true end
-					end
-					if has_urgent and self.urgent_streak < self.policy.urgent_deadline_burst then
-						for _, row in ipairs(rows) do if item_precedes(row.item, best.item, now) then best = row end end
-					else
-						for _, row in ipairs(rows) do
-							if row.item.enqueued_at_ms < best.item.enqueued_at_ms then best = row end
-						end
-					end
-					local cost = effective_cost(best.item, best.batch_count)
-					if cost <= self.drr_deficit[key] then
-						self.drr_deficit[key] -= cost
-						self.drr_cursor_key = key
-						return best.index, urgent_fallback
-					end
-				end
+				return best_index, urgent_fallback
 			end
 			return nil, false
+		end
+		local index_retry_item: (EmbeddedSchedulerDynamicRecord, EmbeddedSchedulerDynamicRecord) -> ()
+
+		local function compact_queue_storage(self: EmbeddedSchedulerDynamicRecord)
+			local queue = self.queue
+			local positions = self.queue_positions
+			table.clear(positions)
+			local write_index = 0
+			for read_index = 1, self.queue_tail do
+				local item = queue[read_index]
+				if item ~= nil then
+					write_index += 1
+					if write_index ~= read_index then
+						queue[write_index] = item
+					end
+					positions[item.id] = write_index
+				end
+			end
+			for index = write_index + 1, self.queue_tail do
+				queue[index] = nil
+			end
+			self.queue_tail = write_index
+		end
+		local function maybe_compact_queue_storage(self: EmbeddedSchedulerDynamicRecord)
+			if self.queue_count == 0 then
+				table.clear(self.queue)
+				table.clear(self.queue_positions)
+				self.queue_tail = 0
+				return
+			end
+			if self.queue_tail > math.max(self.policy.queue_capacity, self.queue_count * 2) then
+				compact_queue_storage(self)
+			end
+		end
+		local function append_queued_item(self: EmbeddedSchedulerDynamicRecord, item: EmbeddedSchedulerDynamicRecord)
+			self.queue_tail += 1
+			self.queue[self.queue_tail] = item
+			self.queue_count += 1
+			self.queue_positions[item.id] = self.queue_tail
+		end
+		local function remove_queued_item(
+			self: EmbeddedSchedulerDynamicRecord,
+			index: number,
+			expected_item: EmbeddedSchedulerDynamicRecord?
+		): EmbeddedSchedulerDynamicRecord?
+			local item = self.queue[index]
+			if item == nil or (expected_item ~= nil and item ~= expected_item) then
+				return nil
+			end
+			self.queue[index] = nil
+			self.queue_positions[item.id] = nil
+			self.queue_count -= 1
+			maybe_compact_queue_storage(self)
+			return item
 		end
 		function governor:Enqueue(item, protect_critical_queue)
 			if protect_critical_queue ~= nil and type(protect_critical_queue) ~= "boolean" then
@@ -1276,13 +1608,13 @@ do
 			then return { code = "invalid", message = "cost must be an integer within max_item_cost" } end
 			value.lane, value.original_lane = lane, lane
 			local queue_capacity = self.policy.queue_capacity
-			if #self.queue >= queue_capacity then
+			if self.queue_count >= queue_capacity then
 				self.stats.rejected += 1
 				return { code = "capacity", message = "local queue full; no accepted work is evicted" }
 			end
 			if protect_critical_queue == true and not uses_critical_reserve(value) then
 				local noncritical_capacity = noncritical_queue_capacity(queue_capacity)
-				if #self.queue >= noncritical_capacity then
+				if self.queue_count >= noncritical_capacity then
 					self.stats.rejected += 1
 					return {
 						code = "capacity",
@@ -1301,67 +1633,170 @@ do
 			value.requested_cost = if finite(value.cost) then value.cost else nil
 			value.cost = effective_cost(value)
 			if value.cost > self.policy.max_item_cost then return { code = "invalid", message = "estimated scheduler cost exceeds max_item_cost" } end
+			if value.batchable == true then
+				value.admission_preflight_policy_revision = nil
+				value.admission_preflight_batch_count = nil
+				value.admission_preflight_terminal_result = nil
+			else
+				local preflight_admission, _, _ = admission_decision(
+					self,
+					value.work_class,
+					value.operation_class,
+					effective_cost(value),
+					value.mutating ~= false,
+					value.service_class == "critical" or value.lane == "lease_renewal",
+					estimate_dimensions(value),
+					false
+				)
+				value.admission_preflight_policy_revision = self.policy.revision
+				value.admission_preflight_batch_count = nil
+				value.admission_preflight_terminal_result = if preflight_admission.terminal then preflight_admission else false
+			end
 			value.queued = true
 			self.known[value.id] = value
+			index_dependency_waiters(self, value)
 			retain_dependencies(self, value)
-			table.insert(self.queue, value)
+			append_queued_item(self, value)
+			index_retry_item(self, value)
 			heap_push(self.queued_due_heap, { id = value.id, due_at_ms = value.due_at_ms, item = value })
 			index_item_wake_events(self, value)
 			inherit_ready_prerequisites(self, value, now_ms())
 			if #self.queued_due_heap > self.policy.queue_capacity * 2 then
 				local rebuilt = {}
-				for _, queued in ipairs(self.queue) do heap_push(rebuilt, { id = queued.id, due_at_ms = queued.due_at_ms, item = queued }) end
+				for index = 1, self.queue_tail do
+					local queued = self.queue[index]
+					if queued ~= nil then
+						heap_push(rebuilt, { id = queued.id, due_at_ms = queued.due_at_ms, item = queued })
+					end
+				end
 				self.queued_due_heap = rebuilt
 			end
-			return { code = "accepted", count = #self.queue }
+			return { code = "accepted", count = self.queue_count }
 		end
-		local remember_terminal
-		local function refresh_owner_retry_cooldown(self: EmbeddedSchedulerDynamicRecord, owner_id: string)
-			local latest_due = nil
-			for _, queued in ipairs(self.queue) do
-				if queued.owner_id == owner_id and queued.is_retry == true then
-					local due = if finite(queued.due_at_ms) then queued.due_at_ms else now_ms()
-					latest_due = if latest_due == nil then due else math.max(latest_due, due)
+		local function retry_heap_precedes(left: EmbeddedSchedulerDynamicRecord, right: EmbeddedSchedulerDynamicRecord): boolean
+			if left.due_at_ms ~= right.due_at_ms then return left.due_at_ms > right.due_at_ms end
+			return left.id > right.id
+		end
+		local function retry_heap_swap(heap: EmbeddedSchedulerDynamicRecord, left_index: number, right_index: number)
+			local items = heap.items
+			local left, right = items[left_index], items[right_index]
+			items[left_index], items[right_index] = right, left
+			heap.positions[left.id] = right_index
+			heap.positions[right.id] = left_index
+		end
+		local function retry_heap_sift_up(heap: EmbeddedSchedulerDynamicRecord, index: number): number
+			while index > 1 do
+				local parent = math.floor(index / 2)
+				if not retry_heap_precedes(heap.items[index], heap.items[parent]) then break end
+				retry_heap_swap(heap, index, parent)
+				index = parent
+			end
+			return index
+		end
+		local function retry_heap_sift_down(heap: EmbeddedSchedulerDynamicRecord, index: number): number
+			local items = heap.items
+			local count = #items
+			while true do
+				local left, right, best = index * 2, index * 2 + 1, index
+				if left <= count and retry_heap_precedes(items[left], items[best]) then best = left end
+				if right <= count and retry_heap_precedes(items[right], items[best]) then best = right end
+				if best == index then break end
+				retry_heap_swap(heap, index, best)
+				index = best
+			end
+			return index
+		end
+		index_retry_item = function(self: EmbeddedSchedulerDynamicRecord, item: EmbeddedSchedulerDynamicRecord)
+			if item.is_retry ~= true or not valid_text(item.owner_id, 512) or not valid_text(item.id, 128) then return end
+			local owner_heap = self.retry_heaps_by_owner[item.owner_id]
+			if owner_heap == nil then
+				owner_heap = { items = {}, positions = {} }
+				self.retry_heaps_by_owner[item.owner_id] = owner_heap
+			end
+			local position = owner_heap.positions[item.id]
+			if position == nil then
+				local entry = { id = item.id, due_at_ms = item.due_at_ms }
+				local items = owner_heap.items
+				position = #items + 1
+				items[position] = entry
+				owner_heap.positions[item.id] = position
+				retry_heap_sift_up(owner_heap, position)
+			else
+				local entry = owner_heap.items[position]
+				local prior_due = entry.due_at_ms
+				entry.due_at_ms = item.due_at_ms
+				if item.due_at_ms > prior_due then
+					retry_heap_sift_up(owner_heap, position)
+				elseif item.due_at_ms < prior_due then
+					retry_heap_sift_down(owner_heap, position)
 				end
 			end
-			self.retry_cooldown_until[owner_id] = latest_due
+			self.retry_cooldown_until[item.owner_id] = owner_heap.items[1].due_at_ms
+		end
+		local function unindex_retry_item(self: EmbeddedSchedulerDynamicRecord, item: EmbeddedSchedulerDynamicRecord)
+			if item.is_retry ~= true then return end
+			local owner_heap = self.retry_heaps_by_owner[item.owner_id]
+			if owner_heap == nil then return end
+			local position = owner_heap.positions[item.id]
+			if position == nil then return end
+			local items = owner_heap.items
+			local last_index = #items
+			local last = items[last_index]
+			owner_heap.positions[item.id] = nil
+			items[last_index] = nil
+			if position < last_index then
+				items[position] = last
+				owner_heap.positions[last.id] = position
+				local parent = math.floor(position / 2)
+				if position > 1 and retry_heap_precedes(items[position], items[parent]) then
+					retry_heap_sift_up(owner_heap, position)
+				else
+					retry_heap_sift_down(owner_heap, position)
+				end
+			end
+			if #items == 0 then
+				self.retry_heaps_by_owner[item.owner_id] = nil
+				self.retry_cooldown_until[item.owner_id] = nil
+			else
+				self.retry_cooldown_until[item.owner_id] = items[1].due_at_ms
+			end
+		end
+		local remember_terminal
+		local function clear_admission_preflight(item: any)
+			item.admission_preflight_policy_revision = nil
+			item.admission_preflight_batch_count = nil
+			item.admission_preflight_terminal_result = nil
 		end
 		function governor:CancelQueued(id, message)
 			if not valid_text(id, 128) then return nil, "invalid id" end
 			local item = self.known[id]
 			if item == nil or item.queued ~= true then return nil, "scheduled item is not queued" end
-			local queue_index
-			for index, queued in ipairs(self.queue) do
-				if queued == item then
-					queue_index = index
-					break
-				end
+			local queue_index = self.queue_positions[id]
+			if queue_index == nil or self.queue[queue_index] ~= item then
+				return nil, "queued item was not present in the queue"
 			end
-			if queue_index == nil then return nil, "queued item was not present in the queue" end
-			table.remove(self.queue, queue_index)
+			remove_queued_item(self, queue_index, item)
 			item.queued = false
-			refresh_owner_retry_cooldown(self, item.owner_id)
+			unindex_retry_item(self, item)
+			unregister_dependency_waiters(self, item)
 			item.terminal_result = {
 				code = "cancelled",
 				message = if type(message) == "string" and message ~= "" then string.sub(message :: string, 1, 200)
 					else "scheduled work was cancelled before it started",
 			}
+			clear_admission_preflight(item)
 			return item, nil
 		end
 		function governor:TakeNext(renewal_mode)
 			local now = now_ms()
-			for index = #self.queue, 1, -1 do
+			for index = self.queue_tail, 1, -1 do
 				local item = self.queue[index]
-				local failed_dependency
-				for _, dependency in ipairs(item.dependencies or {}) do
-					if self.failed[dependency] ~= nil then
-						failed_dependency = dependency
-						break
-					end
-				end
+				if item ~= nil then
+				local failed_dependency = item.failed_dependency_id
 				if failed_dependency ~= nil then
-					table.remove(self.queue, index)
+					remove_queued_item(self, index, item)
 					item.queued = false
+					unindex_retry_item(self, item)
 					local dependency_code = self.failed[failed_dependency]
 					item.terminal_result = {
 						code = "dependency_failed", message = "prerequisite reached a non-success terminal outcome",
@@ -1369,35 +1804,64 @@ do
 					}
 					release_dependencies(self, item)
 					self.known[item.id] = nil
-					refresh_owner_retry_cooldown(self, item.owner_id)
 					remember_terminal(self, item.id, "dependency_failed")
+					clear_admission_preflight(item)
 					return item, "dependency_failed"
 				elseif item.expires_at_ms and item.expires_at_ms <= now then
-					table.remove(self.queue, index)
+					remove_queued_item(self, index, item)
 					item.queued = false
+					unindex_retry_item(self, item)
 					self.stats.scheduled_expired += 1
 					item.terminal_result = { code = "expired", message = "scheduled work expired before it could start" }
 					release_dependencies(self, item)
 					self.known[item.id] = nil
-					refresh_owner_retry_cooldown(self, item.owner_id)
 					remember_terminal(self, item.id, "expired")
+					clear_admission_preflight(item)
 					return item, "expired"
 				else
-					local batch_count = selected_batch_size(self, item)
-					local admission = admission_decision(self,
-						item.work_class, item.operation_class, effective_cost(item, batch_count), item.mutating ~= false,
-						item.service_class == "critical" or item.lane == "lease_renewal", estimate_dimensions(item, batch_count)
-					)
-					if admission.terminal then
+					if item.batchable ~= true then
+						operation_metric_key(self, item.operation_class or "default")
+					end
+					local batch_count = selected_batch_size(self, item, self.selection_scratch.batch_dimensions)
+					local admission_terminal_result = item.admission_preflight_terminal_result
+					if item.admission_preflight_policy_revision ~= self.policy.revision
+						or item.admission_preflight_batch_count ~= batch_count
+						or admission_terminal_result == nil
+					then
+						local scratch = self.selection_scratch
+						local dimensions = estimate_dimensions(item, batch_count, scratch.dimensions)
+						local candidate_cost = effective_cost(item, batch_count, dimensions)
+						local admission = admission_decision(
+							self,
+							item.work_class,
+							item.operation_class,
+							candidate_cost,
+							item.mutating ~= false,
+							item.service_class == "critical" or item.lane == "lease_renewal",
+							dimensions,
+							nil,
+							false,
+							scratch.admission_result
+						)
+						admission_terminal_result = if admission.terminal then table.clone(admission) else false
+						item.admission_preflight_policy_revision = self.policy.revision
+						item.admission_preflight_batch_count = batch_count
+						item.admission_preflight_terminal_result = admission_terminal_result
+					end
+					if type(admission_terminal_result) == "table" then
 						self.stats.rejected += 1
-						table.remove(self.queue, index)
+						remove_queued_item(self, index, item)
 						item.queued = false
-						item.terminal_result = admission
+						unindex_retry_item(self, item)
+						unregister_dependency_waiters(self, item)
+						item.terminal_result = admission_terminal_result
 						self.known[item.id] = item
+						clear_admission_preflight(item)
 						return item, "admission_rejected"
 					end
 				end
 			end
+				end
 			local index, urgent_fallback = choose_index(self, self.policy.algorithm or "drr", renewal_mode)
 			if not index then return nil, "empty" end
 			if self.policy.shadow_enabled and self.policy.shadow_sample_rate > 0 then
@@ -1406,11 +1870,12 @@ do
 			end
 			local selected_item = self.queue[index]
 			if selected_item == nil then return nil, "empty" end
-			local selected_count = selected_batch_size(self, selected_item)
-			local item = table.remove(self.queue, index)
+			local selected_count = selected_batch_size(self, selected_item, self.selection_scratch.batch_dimensions)
+			local item = remove_queued_item(self, index, selected_item)
 			if item == nil then return nil, "empty" end
 			item.admission_batch_size = selected_count
-			item.admission_cost = effective_cost(item, selected_count)
+			local selected_dimensions = estimate_dimensions(item, selected_count, self.selection_scratch.dimensions)
+			item.admission_cost = effective_cost(item, selected_count, selected_dimensions)
 			item.queued = false
 			local age = math.max(0, now - (item.enqueued_at_ms or now))
 			append_sample(self.scheduler_metrics.wait_ms, age)
@@ -1478,9 +1943,9 @@ do
 			if not valid_text(id, 128) or not finite(due_at_ms) then return false, "invalid retry schedule" end
 			local item = self.known[id]
 			if item == nil or item.dispatch_state ~= "in_flight" then return false, "scheduled item is not in flight" end
-			if #self.queue >= self.policy.queue_capacity then return false, "local queue full; retry was not accepted" end
+			if self.queue_count >= self.policy.queue_capacity then return false, "local queue full; retry was not accepted" end
 			if protect_critical_queue == true and not uses_critical_reserve(item)
-				and #self.queue >= noncritical_queue_capacity(self.policy.queue_capacity)
+				and self.queue_count >= noncritical_queue_capacity(self.policy.queue_capacity)
 			then
 				return false, "local queue full; capacity is reserved for internal critical work"
 			end
@@ -1504,25 +1969,41 @@ do
 				if critical_count == 0 then self.active_critical_by_owner[item.owner_id] = nil
 				else self.active_critical_by_owner[item.owner_id] = critical_count end
 			end
-			table.insert(self.queue, item)
+			append_queued_item(self, item)
+			index_retry_item(self, item)
 			heap_push(self.queued_due_heap, { id = item.id, due_at_ms = item.due_at_ms, item = item })
 			index_item_wake_events(self, item)
 			if #self.queued_due_heap > self.policy.queue_capacity * 2 then
 				local rebuilt = {}
-				for _, queued in ipairs(self.queue) do heap_push(rebuilt, { id = queued.id, due_at_ms = queued.due_at_ms, item = queued }) end
+				for index = 1, self.queue_tail do
+					local queued = self.queue[index]
+					if queued ~= nil then
+						heap_push(rebuilt, { id = queued.id, due_at_ms = queued.due_at_ms, item = queued })
+					end
+				end
 				self.queued_due_heap = rebuilt
 			end
-			self.retry_cooldown_until[item.owner_id] = next_due
 			return true, nil, next_due
 		end
 		local function terminal_dependency_referenced(self: EmbeddedSchedulerDynamicRecord, id: string): boolean
 			return (self.dependency_ref_counts[id] or 0) > 0
 		end
-		local function prune_terminal_history(self: EmbeddedSchedulerDynamicRecord)
-			local limit = self.policy.queue_capacity * 2
-			local function prune(order: any, outcomes: any, pending: any)
-				while #order > limit do
-					local oldest = table.remove(order, 1) :: string
+		local function prune_history_order(
+			self: EmbeddedSchedulerDynamicRecord,
+			order: any,
+			outcomes: any,
+			pending: any,
+			head: number,
+			tail: number,
+			count: number,
+			limit: number
+		): (number, number, number)
+			while count > limit do
+				local oldest = order[head]
+				order[head] = nil
+				head += 1
+				count -= 1
+				if oldest ~= nil then
 					if terminal_dependency_referenced(self, oldest) then
 						pending[oldest] = true
 					else
@@ -1531,16 +2012,52 @@ do
 					end
 				end
 			end
-			prune(self.completed_order, self.completed, self.pending_completed_prune)
-			prune(self.failed_order, self.failed, self.pending_failed_prune)
+			if head > limit or tail > limit * 2 then
+				local write_index = 0
+				for read_index = head, tail do
+					local retained_id = order[read_index]
+					if retained_id ~= nil then
+						write_index += 1
+						order[write_index] = retained_id
+					end
+				end
+				for index = write_index + 1, tail do
+					order[index] = nil
+				end
+				head, tail, count = 1, write_index, write_index
+			end
+			return head, tail, count
+		end
+		local function prune_terminal_history(self: EmbeddedSchedulerDynamicRecord)
+			local limit = self.policy.queue_capacity * 2
+			self.completed_order_head, self.completed_order_tail, self.completed_order_count = prune_history_order(
+				self, self.completed_order, self.completed, self.pending_completed_prune,
+				self.completed_order_head, self.completed_order_tail, self.completed_order_count, limit
+			)
+			self.failed_order_head, self.failed_order_tail, self.failed_order_count = prune_history_order(
+				self, self.failed_order, self.failed, self.pending_failed_prune,
+				self.failed_order_head, self.failed_order_tail, self.failed_order_count, limit
+			)
 		end
 		remember_terminal = function(self, id, code)
 			self.failed[id] = code
-			self.failed_order[#self.failed_order + 1] = id
+			notify_dependency_waiters(self, id, false)
+			self.failed_order_tail = (self.failed_order_tail :: number) + 1
+			self.failed_order[self.failed_order_tail] = id
+			self.failed_order_count = (self.failed_order_count :: number) + 1
 			prune_terminal_history(self)
 		end
 		local function make_shadow_state(self: EmbeddedSchedulerDynamicRecord): EmbeddedSchedulerDynamicRecord
-			local queue = copy(self.queue)
+			local queue = {}
+			local queue_positions = {}
+			for index = 1, self.queue_tail do
+				local item = self.queue[index]
+				if item ~= nil then
+					local copied_item = copy(item)
+					queue[#queue + 1] = copied_item
+					queue_positions[copied_item.id] = #queue
+				end
+			end
 			local queued_by_id = {}
 			for _, item in ipairs(queue) do
 				queued_by_id[item.id] = item
@@ -1550,7 +2067,8 @@ do
 				known[id] = queued_by_id[id] or copy(item)
 			end
 			return {
-				queue = queue, completed = copy(self.completed), known = known,
+				queue = queue, queue_count = #queue, queue_tail = #queue, queue_positions = queue_positions,
+				completed = copy(self.completed), known = known,
 				failed = copy(self.failed), active_owner = copy(self.active_owner),
 				operation_kind_keys = copy(self.operation_kind_keys),
 				active_renewals_by_owner = copy(self.active_renewals_by_owner),
@@ -1560,6 +2078,9 @@ do
 				policy = copy(self.policy), in_flight = self.in_flight, by_class = copy(self.by_class),
 				active_tickets = copy(self.active_tickets),
 				wake_heap = copy(self.wake_heap), wake_sequence = self.wake_sequence,
+				retry_cooldown_until = copy(self.retry_cooldown_until),
+				retry_heaps_by_owner = copy(self.retry_heaps_by_owner),
+				selection_scratch = new_scheduler_selection_scratch(),
 				read_units_in_flight = self.read_units_in_flight, write_units_in_flight = self.write_units_in_flight,
 				estimated_bytes_in_flight = self.estimated_bytes_in_flight, handler_slots_in_flight = self.handler_slots_in_flight,
 				request_budgets = copy(self.request_budgets),
@@ -1600,12 +2121,13 @@ do
 			end
 			release_dependencies(self, item)
 			self.known[id] = nil
-			if item ~= nil then refresh_owner_retry_cooldown(self, item.owner_id) end
-			for _, dependent_item in pairs(self.known) do
-				if dependent_item.inherited_from == id then
-					dependent_item.inherited_lane = nil
-					dependent_item.inherited_until_ms = nil
-					dependent_item.inherited_from = nil
+			if item ~= nil then unindex_retry_item(self, item) end
+			for _, prerequisite_id in ipairs(item.dependencies or {}) do
+				local prerequisite = self.known[prerequisite_id]
+				if prerequisite ~= nil and prerequisite.inherited_from == id then
+					prerequisite.inherited_lane = nil
+					prerequisite.inherited_until_ms = nil
+					prerequisite.inherited_from = nil
 				end
 			end
 			if code == nil or code == true or code == "success" or code == "committed"
@@ -1615,14 +2137,20 @@ do
 			then
 				self.completed[id] = true
 				self.failed[id] = nil
-				self.completed_order[#self.completed_order + 1] = id
+				notify_dependency_waiters(self, id, true)
+				self.completed_order_tail = (self.completed_order_tail :: number) + 1
+				self.completed_order[self.completed_order_tail] = id
+				self.completed_order_count = (self.completed_order_count :: number) + 1
 			else
 				self.completed[id] = nil
 				remember_terminal(self, id, tostring(code or "unknown"))
 			end
 			local active_lane_keys = {}
 			local instant = now_ms()
-			for _, queued in ipairs(self.queue) do active_lane_keys[lane_key(queued, instant)] = true end
+			for index = 1, self.queue_tail do
+				local queued = self.queue[index]
+				if queued ~= nil then active_lane_keys[lane_key(queued, instant)] = true end
+			end
 			for _, known_item in pairs(self.known) do
 				if known_item.dispatch_state == "in_flight" then active_lane_keys[lane_key(known_item, instant)] = true end
 			end
@@ -1651,7 +2179,7 @@ do
 				shadow_age_ms = if shadow then math.max(0, now - shadow.enqueued_at_ms) else nil,
 				real_slack_ms = if real and finite(real.deadline_ms) then real.deadline_ms - now else nil,
 				shadow_slack_ms = if shadow and finite(shadow.deadline_ms) then shadow.deadline_ms - now else nil,
-				candidate_count = #self.queue,
+				candidate_count = self.queue_count,
 				same_choice = real ~= nil and shadow ~= nil and real.id == shadow.id,
 				reason = if real == nil and shadow == nil then "no_eligible_candidates"
 					elseif real ~= nil and shadow ~= nil and real.id == shadow.id then "algorithms_agree"
@@ -1792,8 +2320,9 @@ do
 		end
 		function governor:OldestEligibleAgeMs()
 			local oldest_eligible_age_ms, instant = 0, now_ms()
-			for _, item in ipairs(self.queue) do
-				if (item.due_at_ms or 0) <= instant
+			for index = 1, self.queue_tail do
+				local item = self.queue[index]
+				if item ~= nil and (item.due_at_ms or 0) <= instant
 					and (item.available_at_ms == nil or item.available_at_ms <= instant)
 					and dependencies_ready(self, item)
 					and (item.expires_at_ms == nil or item.expires_at_ms > instant)
@@ -1825,13 +2354,16 @@ do
 		function governor:Stats()
 			local lanes = { high = 0, normal = 0, background = 0, lease_renewal = 0 }
 			local oldest_eligible_age_ms, now = 0, now_ms()
-			for _, item in ipairs(self.queue) do
-				lanes[item.lane] = (lanes[item.lane] or 0) + 1
-				if (item.due_at_ms or 0) <= now
-					and (item.available_at_ms == nil or item.available_at_ms <= now)
-					and dependencies_ready(self, item)
-					and (item.expires_at_ms == nil or item.expires_at_ms > now)
-				then oldest_eligible_age_ms = math.max(oldest_eligible_age_ms, now - item.enqueued_at_ms) end
+			for index = 1, self.queue_tail do
+				local item = self.queue[index]
+				if item ~= nil then
+					lanes[item.lane] = (lanes[item.lane] or 0) + 1
+					if (item.due_at_ms or 0) <= now
+						and (item.available_at_ms == nil or item.available_at_ms <= now)
+						and dependencies_ready(self, item)
+						and (item.expires_at_ms == nil or item.expires_at_ms > now)
+					then oldest_eligible_age_ms = math.max(oldest_eligible_age_ms, now - item.enqueued_at_ms) end
+				end
 			end
 			local waits = sample_window_values(self.scheduler_metrics.wait_ms)
 			table.sort(waits)
@@ -1859,7 +2391,7 @@ do
 				}
 			end
 			return {
-				policy = copy(self.policy), in_flight = self.in_flight, queue_items = #self.queue,
+				policy = copy(self.policy), in_flight = self.in_flight, queue_items = self.queue_count,
 				active_reservation_tickets = key_count(self.active_tickets),
 				read_units_in_flight = self.read_units_in_flight, write_units_in_flight = self.write_units_in_flight,
 				estimated_bytes_in_flight = self.estimated_bytes_in_flight,
@@ -6671,6 +7203,10 @@ export type TransactionReceiptStatus = {
 	expires_at: number?,
 }
 
+export type PatchOperation =
+	{ op: "set", path: { string | number }, value: JsonValue }
+	| { op: "remove", path: { string | number } }
+
 export type TransactionOptions = {
 	request: JsonValue?,
 	receipt_retention_seconds: number?,
@@ -6933,7 +7469,9 @@ type InternalState = {
 	change_dispatch_running: boolean,
 	change_events_dropped: number,
 	takeover_seen: { [string]: HandoffStatus },
-	takeover_seen_order: { string },
+	takeover_seen_order: { [number]: string? },
+	takeover_seen_order_head: number,
+	takeover_seen_order_count: number,
 	takeover_request_id: string?,
 	takeover_requester_job_id: string?,
 	handoff_request_id: string?,
@@ -6977,7 +7515,7 @@ type InternalState = {
 	busy: boolean,
 	queue_busy: boolean,
 	mailbox_v2_binding: boolean,
-	mailbox_v2: EmbeddedMailbox?,
+	mailbox_v2: EmbeddedMailbox?, 
 	save_requested: boolean,
 	shutdown: boolean,
 	retired: boolean,
@@ -7046,6 +7584,7 @@ export type Record = {
 	UpdateMetadata: (self: Record, callback: (Metadata) -> Metadata) -> (ResultCode, string?),
 	Touch: (self: Record) -> (ResultCode, string?),
 	Update: (self: Record, callback: (JsonValue?) -> JsonValue?) -> (ResultCode, string?),
+	Patch: (self: Record, operations: { PatchOperation }) -> (ResultCode, string?),
 	Reconcile: (self: Record, template: JsonValue) -> (ResultCode, string?),
 	Save: (self: Record, reason: string?) -> (ResultCode, string?),
 	TransactAsync: (self: Record, operation_id: string, reducer: TransactionReducer, options: TransactionOptions) -> (JsonValue?, TransactionStatus, string?),
@@ -7148,7 +7687,7 @@ local mock_get_failure_message: string? = nil
 local close_internal: (state: InternalState, shutdown: boolean) -> (ResultCode, string?)
 local complete_deferred_takeover: (state: InternalState) -> ()
 local process_queue_internal: (state: InternalState, max_messages: number) -> (ResultCode, string?)
-local copy_value: (value: unknown) -> JsonValue?
+local copy_value: (value: unknown, shape_validation: { nodes: number, message: string?, has_non_finite_numbers: boolean }?) -> JsonValue?
 local track_external_data_mutation: (state: InternalState) -> ()
 local messaging_enabled: (state: InternalState) -> boolean
 local publish_record_message: (state: InternalState, kind: string, message_type: string?, data: JsonValue?, generation: number?, target_job_id: string?, target_token: string?, request_id: string?, handoff_status: HandoffStatus?, requester_job_id: string?) -> (boolean, string?)
@@ -7186,11 +7725,15 @@ local function resolve_operation_deadline(operation_deadline: number?): (number?
 end
 
 local function run_validator(validator: Validator, value: JsonValue): (boolean, boolean, string?)
+	local copy_ok, validator_value = pcall(copy_value, value)
+	if not copy_ok or validator_value == nil then
+		return false, false, "validator input could not be isolated"
+	end
 	local accepted = false
 	local message: string? = nil
 	local callback_error: string? = nil
 	local thread = coroutine.create(function()
-		local ok, callback_accepted, callback_message = pcall(validator, value)
+		local ok, callback_accepted, callback_message = pcall(validator, validator_value)
 		if not ok then
 			callback_error = tostring(callback_accepted)
 			return
@@ -7399,25 +7942,25 @@ local function validate_value_shape(value: unknown, max_depth: number?, max_node
 		if current == nil then
 			return true, nil
 		end
-		if type(current) == "number" then
-			if not math.isfinite(current) and allow_non_finite_numbers ~= true then
+		local current_type = type(current)
+		if current_type == "number" then
+			local numeric_value = current :: number
+			if not math.isfinite(numeric_value) and allow_non_finite_numbers ~= true then
 				return false, "value contains a non-finite number"
 			end
 			return true, nil
-		end
-		if type(current) == "string" then
-			if #current > string_limit then
+		elseif current_type == "string" then
+			local string_value = current :: string
+			if #string_value > string_limit then
 				return false, "value contains an overlong string"
 			end
 			return true, nil
-		end
-		if type(current) == "boolean" or type(current) == "buffer" then
+		elseif current_type == "boolean" or current_type == "buffer" then
 			return true, nil
+		elseif current_type ~= "table" then
+			return false, "value contains an unsupported type: " .. current_type
 		end
-		if type(current) ~= "table" then
-			return false, "value contains an unsupported type: " .. type(current)
-		end
-		local table_value = current :: { [string | number]: unknown }
+		local table_value = current :: any
 		if active_tables[table_value] then
 			return false, "value contains a cyclic table"
 		end
@@ -7426,18 +7969,20 @@ local function validate_value_shape(value: unknown, max_depth: number?, max_node
 		local numeric_keys = 0
 		local max_numeric_key = 0
 		for key, child in table_value do
-			if type(key) ~= "string" and type(key) ~= "number" then
+			local key_type = type(key)
+			if key_type ~= "string" and key_type ~= "number" then
 				active_tables[table_value] = nil
 				return false, "value contains an unsupported table key type"
 			end
-			if type(key) == "number" then
-				if not math.isfinite(key) or math.floor(key) ~= key or key < 1 then
+			if key_type == "number" then
+				local numeric_key = key :: number
+				if not math.isfinite(numeric_key) or math.floor(numeric_key) ~= numeric_key or numeric_key < 1 then
 					active_tables[table_value] = nil
 					return false, "numeric table keys must be positive integers"
 				end
 				numeric_keys += 1
-				if key > max_numeric_key then
-					max_numeric_key = key
+				if numeric_key > max_numeric_key then
+					max_numeric_key = numeric_key
 				end
 			else
 				string_keys += 1
@@ -7506,7 +8051,10 @@ local function backend_metadata_matches(info: BackendInfo?, envelope: Envelope):
 	return true
 end
 
-copy_value = function(value: unknown): JsonValue?
+copy_value = function(
+	value: unknown,
+	shape_validation: { nodes: number, message: string?, has_non_finite_numbers: boolean }?
+): JsonValue?
 	if value == nil then
 		return nil
 	end
@@ -7517,22 +8065,38 @@ copy_value = function(value: unknown): JsonValue?
 		if current == nil then
 			return nil
 		end
+		if shape_validation ~= nil then
+			if shape_validation.message ~= nil then
+				return nil
+			end
+			shape_validation.nodes += 1
+			if shape_validation.nodes > 100000 then
+				shape_validation.message = "value exceeds the maximum node count"
+				return nil
+			end
+		end
 		if depth > 64 then
 			error("value exceeds the maximum nesting depth")
 		end
-		if type(current) == "boolean" then
-			return current
-		end
-		if type(current) == "number" then
-			return current
-		end
-		if type(current) == "string" then
-			return current
-		end
-		if typeof(current) == "buffer" then
-			return buffer.fromstring(buffer.tostring(current))
-		end
-		if type(current) ~= "table" then
+		local current_type = type(current)
+		if current_type == "boolean" then
+			return current :: boolean
+		elseif current_type == "number" then
+			local numeric_value = current :: number
+			if shape_validation ~= nil and not math.isfinite(numeric_value) then
+				shape_validation.has_non_finite_numbers = true
+			end
+			return numeric_value
+		elseif current_type == "string" then
+			local string_value = current :: string
+			if shape_validation ~= nil and #string_value > 4_000_000 then
+				shape_validation.message = "value contains an overlong string"
+				return nil
+			end
+			return string_value
+		elseif current_type == "buffer" then
+			return buffer.fromstring(buffer.tostring(current :: buffer))
+		elseif current_type ~= "table" then
 			error("value contains an unsupported type")
 		end
 
@@ -7543,6 +8107,8 @@ copy_value = function(value: unknown): JsonValue?
 		active_tables[table_value] = true
 		local has_string_key = false
 		local has_number_key = false
+		local numeric_key_count = 0
+		local max_numeric_key = 0
 		local result_dictionary: { [string]: JsonValue }? = nil
 		local result_array: { JsonValue }? = nil
 
@@ -7577,6 +8143,10 @@ copy_value = function(value: unknown): JsonValue?
 					active_tables[table_value] = nil
 					error("value contains an invalid array index")
 				end
+				numeric_key_count += 1
+				if numeric_key > max_numeric_key then
+					max_numeric_key = numeric_key
+				end
 				local copied = clone(child, depth + 1)
 				if copied == nil then
 					active_tables[table_value] = nil
@@ -7591,6 +8161,14 @@ copy_value = function(value: unknown): JsonValue?
 			end
 		end
 
+		if shape_validation ~= nil
+			and shape_validation.message == nil
+			and numeric_key_count > 0
+			and max_numeric_key ~= numeric_key_count
+		then
+			shape_validation.message = "numeric-keyed tables must be dense arrays"
+		end
+
 		active_tables[table_value] = nil
 		if has_string_key then
 			return result_dictionary
@@ -7603,11 +8181,13 @@ copy_value = function(value: unknown): JsonValue?
 	end
 	return clone(value, 1)
 end
+
+
 local function encode_non_finite_numbers(
 	value: JsonValue
 ): (JsonValue, { NonFiniteNumberMarker })
 	local markers: { NonFiniteNumberMarker } = {}
-	local path: { NonFinitePathSegment } = {}
+	local path: { string | number } = {}
 
 	local function encode(current: JsonValue, depth: number): (JsonValue, boolean)
 		if depth > 64 then
@@ -7628,14 +8208,25 @@ local function encode_non_finite_numbers(
 				kind = "negative_infinity"
 			end
 
+			local marker_path: { NonFinitePathSegment } = table.create(depth - 1)
+			for path_index = 1, depth - 1 do
+				local key = path[path_index]
+				local segment: NonFinitePathSegment
+				if type(key) == "string" then
+					segment = { kind = "string", key = key }
+				else
+					segment = { kind = "number", key = key :: number }
+				end
+				marker_path[path_index] = segment
+			end
 			markers[#markers + 1] = {
-				path = table.clone(path),
+				path = marker_path,
 				kind = kind,
 			}
 			return 0, true
 		end
 
-		if typeof(current) == "buffer" or type(current) ~= "table" then
+		if type(current) ~= "table" then
 			return current, false
 		end
 
@@ -7656,11 +8247,9 @@ local function encode_non_finite_numbers(
 				error("value contains mixed table keys")
 			end
 
-			path[#path + 1] = if is_dictionary_key
-				then { kind = "string", key = key :: string }
-				else { kind = "number", key = key :: number }
+			path[depth] = key
 			local encoded_child, child_changed = encode(child, depth + 1)
-			path[#path] = nil
+			path[depth] = nil
 
 			if child_changed then
 				if result == nil then
@@ -8093,10 +8682,12 @@ local function encode_backend_update_value(value: unknown): unknown
 	return value
 end
 
-local function validate_serialized_size(value: unknown): (boolean, string?)
-	local shape_ok, shape_message = validate_value_shape(value)
-	if not shape_ok then
-		return false, shape_message
+local function validate_serialized_size(value: unknown, shape_already_validated: boolean?): (boolean, string?)
+	if shape_already_validated ~= true then
+		local shape_ok, shape_message = validate_value_shape(value)
+		if not shape_ok then
+			return false, shape_message
+		end
 	end
 	local ok, encoded = pcall(function()
 		return HttpService:JSONEncode(value)
@@ -8110,15 +8701,25 @@ local function validate_serialized_size(value: unknown): (boolean, string?)
 	return true, nil
 end
 
-local function validate_value(value: JsonValue?, validator: Validator?): (boolean, string?)
+local function validate_value(
+	value: JsonValue?,
+	validator: Validator?,
+	shape_already_validated: boolean?,
+	non_finite_numbers_absent: boolean?
+): (boolean, string?)
 	if value == nil then
 		return false, "record data cannot be nil"
 	end
-	local shape_ok, shape_message = validate_value_shape(value, nil, nil, nil, true)
-	if not shape_ok then
-		return false, shape_message
+	if shape_already_validated ~= true then
+		local shape_ok, shape_message = validate_value_shape(value, nil, nil, nil, true)
+		if not shape_ok then
+			return false, shape_message
+		end
 	end
 	local safe_value_ok, safe_value = pcall(function()
+		if non_finite_numbers_absent == true then
+			return value
+		end
 		local encoded_value = encode_non_finite_numbers(value)
 		return encoded_value
 	end)
@@ -8144,6 +8745,38 @@ local function validate_value(value: JsonValue?, validator: Validator?): (boolea
 		end
 	end
 	return true, nil
+end
+
+prepared_envelope_cache._copy_with_shape = function(value: unknown): (JsonValue?, string?, boolean)
+	if value == nil then
+		return nil, "record data cannot be nil", false
+	end
+
+	local shape_validation = {
+		nodes = 0,
+		message = nil,
+		has_non_finite_numbers = false,
+	}
+	local copy_ok, copied_or_error = pcall(copy_value, value, shape_validation)
+	if shape_validation.message ~= nil then
+		return nil, shape_validation.message, false
+	end
+	if not copy_ok or copied_or_error == nil then
+		local shape_call_ok, shape_ok, shape_message = pcall(
+			validate_value_shape,
+			value,
+			nil,
+			nil,
+			nil,
+			true
+		)
+		if shape_call_ok and not shape_ok then
+			return nil, shape_message, false
+		end
+		return nil, "value could not be copied", false
+	end
+
+	return copied_or_error, nil, not shape_validation.has_non_finite_numbers
 end
 
 local function validate_store_identity(name: string, scope: string, key: string): (boolean, string?)
@@ -8776,14 +9409,18 @@ local function backend_update(backend: Backend, transform: UpdateTransform, dead
 			return nil, nil, "validation", metadata_error
 		end
 		local stored_new_value = encode_backend_update_value(new_value)
-		local value = copy_value(stored_new_value)
+		local value, copy_error, non_finite_numbers_absent =
+			prepared_envelope_cache._copy_with_shape(stored_new_value)
 		if value == nil then
-			return nil, nil, "validation", "updated value is invalid"
+			return nil, nil, "validation", copy_error or "updated value is invalid"
+		end
+		if not non_finite_numbers_absent then
+			return nil, nil, "validation", "value contains a non-finite number"
 		end
 		if request_state ~= nil and request_state.retired then
 			return nil, nil, "invalid", "record has been retired"
 		end
-		local data_ok, data_error = validate_serialized_size(value)
+		local data_ok, data_error = validate_serialized_size(value, true)
 		if not data_ok then
 			return nil, nil, "validation", data_error
 		end
@@ -8954,14 +9591,14 @@ local function parse_envelope(raw: unknown): (Envelope?, string?, boolean)
 	if implementation_version == nil then
 		local legacy_marker = get_string_field(raw, "__recordStore")
 		if legacy_marker == "RecordStore" then
-			local legacy_format = get_string_field(raw, "format")
+			local legacy_v1_format = get_string_field(raw, "format")
 			local legacy_revision = get_string_field(raw, "revision")
 			local legacy_fence = get_string_field(raw, "fence")
 			local legacy_commit_id = get_string_field(raw, "commitId")
-			local legacy_deleted = get_string_field(raw, "deleted")
+			local legacy_v1_deleted = get_string_field(raw, "deleted")
 			local legacy_schema_version = get_string_field(raw, "version")
 
-			if legacy_format ~= 1
+			if legacy_v1_format ~= 1
 				or type(legacy_revision) ~= "number"
 				or not math.isfinite(legacy_revision)
 				or math.floor(legacy_revision) ~= legacy_revision
@@ -8970,7 +9607,7 @@ local function parse_envelope(raw: unknown): (Envelope?, string?, boolean)
 				or legacy_fence == ""
 				or type(legacy_commit_id) ~= "string"
 				or legacy_commit_id == ""
-				or type(legacy_deleted) ~= "boolean"
+				or type(legacy_v1_deleted) ~= "boolean"
 				or type(legacy_schema_version) ~= "number"
 				or not math.isfinite(legacy_schema_version)
 				or math.floor(legacy_schema_version) ~= legacy_schema_version
@@ -8979,7 +9616,7 @@ local function parse_envelope(raw: unknown): (Envelope?, string?, boolean)
 				return nil, "malformed legacy RecordStore envelope", false
 			end
 
-			if legacy_deleted then
+			if legacy_v1_deleted then
 				if raw_data ~= nil then
 					return nil, "deleted legacy RecordStore envelope unexpectedly contains data", false
 				end
@@ -9241,7 +9878,7 @@ end
 
 local function update_local_from_envelope(state: InternalState, envelope: Envelope, info: BackendInfo?)
 	state.data = copy_value(envelope.data)
-	state.public_data_source = copy_value(state.data)
+	state.public_data_source = envelope.data
 	if state.public_record ~= nil then
 		local public_record: any = state.public_record
 		public_record.Data = state.data
@@ -9266,7 +9903,7 @@ end
 
 local function make_durable_snapshot(envelope: Envelope, info: BackendInfo?, reason: string): DurableSnapshot
 	return {
-		Data = copy_value(envelope.data),
+		Data = envelope.data,
 		Revision = envelope.revision,
 		Generation = envelope.fencing_generation,
 		UpdatedAt = envelope.updated_at,
@@ -9307,7 +9944,7 @@ local function snapshot_from_envelope(key: string, envelope: Envelope, info: Bac
 	local session = envelope.session
 	local session_active = session ~= nil and session.lease_until > now_unix()
 	return {
-		Data = copy_value(envelope.data),
+		Data = envelope.data,
 		State = if envelope.tombstone ~= nil then "tombstoned" elseif session_active then "active" else "closed",
 		Key = key,
 		SchemaVersion = envelope.schema_version,
@@ -10805,15 +11442,23 @@ end
 
 local function cache_takeover_status(state: InternalState, request_id: string, status: HandoffStatus)
 	if state.takeover_seen[request_id] == nil then
-		state.takeover_seen_order[#state.takeover_seen_order + 1] = request_id
+		local head = state.takeover_seen_order_head
+		local count = state.takeover_seen_order_count
+		local index
+		if count < TAKEOVER_SEEN_CAPACITY then
+			index = ((head + count - 1) % TAKEOVER_SEEN_CAPACITY) + 1
+			state.takeover_seen_order_count = count + 1
+		else
+			local oldest = state.takeover_seen_order[head]
+			if oldest ~= nil then
+				state.takeover_seen[oldest] = nil
+			end
+			index = head
+			state.takeover_seen_order_head = (head % TAKEOVER_SEEN_CAPACITY) + 1
+		end
+		state.takeover_seen_order[index] = request_id
 	end
 	state.takeover_seen[request_id] = status
-	while #state.takeover_seen_order > TAKEOVER_SEEN_CAPACITY do
-		local oldest = table.remove(state.takeover_seen_order, 1)
-		if oldest ~= nil then
-			state.takeover_seen[oldest] = nil
-		end
-	end
 end
 
 local function publish_handoff_ack(state: InternalState, request_id: string, requester_job_id: string, generation: number, target_token: string, status: HandoffStatus): boolean
@@ -11066,10 +11711,19 @@ local function save_internal(state: InternalState, reason: string?, operation_de
 		return "fenced", "session token is missing"
 	end
 	local session_token: string = token
-	local snapshot = copy_value(state.data)
+	local snapshot, copy_error, non_finite_numbers_absent = prepared_envelope_cache._copy_with_shape(state.data)
+	if snapshot == nil then
+		observe(state, "save", "validation", copy_error)
+		return "validation", copy_error
+	end
 	local captured_change_sequence = state.change_sequence
-	local valid, validation_error = validate_value(snapshot, state.options.validator)
-	if not valid then
+	local snapshot_valid, validation_error = validate_value(
+		snapshot,
+		state.options.validator,
+		true,
+		non_finite_numbers_absent
+	)
+	if not snapshot_valid then
 		observe(state, "save", "validation", validation_error)
 		return "validation", validation_error
 	end
@@ -12766,12 +13420,14 @@ track_external_data_mutation = function(state: InternalState)
 		state.data = candidate
 		return
 	end
+	local shape_validation = { nodes = 0, message = nil, has_non_finite_numbers = false }
 	local copied_ok, copied_or_error = pcall(function()
-		return copy_value(candidate)
+		return copy_value(candidate, shape_validation)
 	end)
-	if not copied_ok or copied_or_error == nil then
-		local rejection_reason = if not copied_ok
-			then string.gsub(tostring(copied_or_error), "%c", " ")
+	if shape_validation.message ~= nil or not copied_ok or copied_or_error == nil then
+		local rejection_reason = if shape_validation.message ~= nil
+			then shape_validation.message
+			elseif not copied_ok then string.gsub(tostring(copied_or_error), "%c", " ")
 			else "Data was set to nil"
 		rejection_reason = string.sub(rejection_reason, 1, 180)
 		state.data = copy_value(state.public_data_source)
@@ -12788,11 +13444,12 @@ track_external_data_mutation = function(state: InternalState)
 		return
 	end
 	local candidate_copy = copied_or_error
-	local validation_value: JsonValue? = candidate_copy
-	if state.options.validator ~= nil then
-		validation_value = copy_value(candidate_copy)
-	end
-	local valid, validation_message = validate_value(validation_value, state.options.validator)
+	local valid, validation_message = validate_value(
+		candidate_copy,
+		state.options.validator,
+		true,
+		not shape_validation.has_non_finite_numbers
+	)
 	if not valid then
 		state.data = copy_value(state.public_data_source)
 		if public_record_table ~= nil then
@@ -12803,17 +13460,8 @@ track_external_data_mutation = function(state: InternalState)
 		return
 	end
 	local old_data = state.public_data_source
+	local current_data = candidate_copy
 	state.data = candidate
-	local current_data = copy_value(state.data)
-	if current_data == nil then
-		state.data = copy_value(state.public_data_source)
-		if public_record_table ~= nil then
-			public_record_table.Data = state.data
-		end
-		state.public_data_source = copy_value(state.data)
-		observe(state, "external_data_mutation", "validation", "direct Data mutation could not be snapshotted")
-		return
-	end
 	if public_record_table ~= nil then
 		public_record_table.Data = state.data
 	end
@@ -13445,14 +14093,23 @@ local function update(self: Record, callback: (JsonValue?) -> JsonValue?): (Resu
 	if next_value == nil then
 		return "validation", "update callback returned nil"
 	end
+	local shape_validation = { nodes = 0, message = nil, has_non_finite_numbers = false }
 	local copy_ok, copied_or_error = pcall(function()
-		return copy_value(next_value)
+		return copy_value(next_value, shape_validation)
 	end)
+	if shape_validation.message ~= nil then
+		return "validation", shape_validation.message
+	end
 	if not copy_ok or copied_or_error == nil then
 		return "validation", "update callback returned invalid data"
 	end
 	local copied = copied_or_error
-	local valid, message = validate_value(copied, state.options.validator)
+	local valid, message = validate_value(
+		copied,
+		state.options.validator,
+		true,
+		not shape_validation.has_non_finite_numbers
+	)
 	if not valid then
 		return "validation", message
 	end
@@ -13473,6 +14130,7 @@ local function update(self: Record, callback: (JsonValue?) -> JsonValue?): (Resu
 	return "success", nil
 end
 
+
 local function reconcile(self: Record, template: JsonValue): (ResultCode, string?)
 	local state = private[self]
 	if state ~= nil then
@@ -13492,78 +14150,216 @@ local function reconcile(self: Record, template: JsonValue): (ResultCode, string
 		state.save_requested = true
 		return "busy", "record is already saving"
 	end
-	local old_data = state.data
+	if template == nil then
+		return "validation", "template is invalid"
+	end
+
+	-- Inspect plain templates without allocating a detached template tree. The
+	-- traversal also determines whether any default can actually be inserted,
+	-- allowing no-op reconciliation to skip the profile clone entirely.
+	local function inspect_template(target_value: unknown, template_value: unknown): (boolean, boolean, boolean)
+		local active_tables: { [any]: boolean } = {}
+		local defaults_missing = false
+		local custom_iterator = false
+
+		local function visit(target: unknown, current: unknown, depth: number, track_defaults: boolean): boolean
+			if depth > 64 then
+				return false
+			end
+			if current == nil then
+				return true
+			end
+
+			local current_type = type(current)
+			if current_type == "number" or current_type == "boolean" or current_type == "buffer" then
+				return true
+			elseif current_type == "string" then
+				return true
+			elseif current_type ~= "table" then
+				return false
+			end
+
+			local table_value = current :: any
+			if getmetatable(table_value) ~= nil then
+				custom_iterator = true
+				return true
+			end
+			if active_tables[table_value] then
+				return false
+			end
+			active_tables[table_value] = true
+
+			local target_table: any = if track_defaults and type(target) == "table" then target else nil
+			local first_target_key = if target_table ~= nil then next(target_table) else nil
+			local string_keys = 0
+			local numeric_keys = 0
+			local max_numeric_key = 0
+			local key, child = next(table_value)
+			while key ~= nil do
+				local key_type = type(key)
+				if key_type == "string" then
+					string_keys += 1
+				elseif key_type == "number" then
+					local numeric_key = key :: number
+					if not math.isfinite(numeric_key) or math.floor(numeric_key) ~= numeric_key or numeric_key < 1 then
+						active_tables[table_value] = nil
+						return false
+					end
+					numeric_keys += 1
+					if numeric_key > max_numeric_key then
+						max_numeric_key = numeric_key
+					end
+				else
+					active_tables[table_value] = nil
+					return false
+				end
+
+				local target_child: unknown = nil
+				local inspect_child = false
+				if target_table ~= nil then
+					local existing = target_table[key]
+					if existing == nil then
+						if first_target_key == nil or type(first_target_key) == key_type then
+							defaults_missing = true
+							inspect_child = true
+						end
+					elseif type(existing) == "table" and type(child) == "table" then
+						target_child = existing
+						inspect_child = true
+					end
+				end
+
+				if not visit(target_child, child, depth + 1, inspect_child) then
+					active_tables[table_value] = nil
+					return false
+				end
+				if custom_iterator then
+					active_tables[table_value] = nil
+					return true
+				end
+				key, child = next(table_value, key)
+			end
+
+			if string_keys > 0 and numeric_keys > 0 then
+				active_tables[table_value] = nil
+				return false
+			end
+			if numeric_keys > 0 and max_numeric_key ~= numeric_keys then
+				active_tables[table_value] = nil
+				return false
+			end
+			active_tables[table_value] = nil
+			return true
+		end
+
+		return visit(target_value, template_value, 1, true), defaults_missing, custom_iterator
+	end
+
+	local template_valid, defaults_missing, custom_iterator = inspect_template(state.data, template)
+	if not custom_iterator and not template_valid then
+		return "validation", "template is invalid"
+	end
+
+	if not custom_iterator and not defaults_missing then
+		local copied = copy_value(state.data)
+		if copied == nil then
+			return "validation", "record data is missing"
+		end
+		local valid, validation_message = validate_value(copied, state.options.validator)
+		if not valid then
+			return "validation", validation_message
+		end
+		local public_source = copy_value(copied)
+		if public_source == nil then
+			return "validation", "record data could not be isolated"
+		end
+		state.data = copied
+		state.public_data_source = public_source
+		self.Data = copied
+		local skip_sync_external_mutation_check = state.options.on_event == nil and next(state.change_observers) == nil
+		observe(state, "reconcile", "success", nil)
+		sync_public(self, skip_sync_external_mutation_check)
+		return "success", nil
+	end
+
 	local copied = copy_value(state.data)
 	if copied == nil then
 		return "validation", "record data is missing"
 	end
-	local template_ok, template_or_error = pcall(function()
-		return copy_value(template)
-	end)
-	if not template_ok or template_or_error == nil then
-		return "validation", "template is invalid"
-	end
-	local template_copy = template_or_error
-	local function set_table_child(
-		target: JsonValue,
-		key: string | number,
-		value: JsonValue
-	): (JsonValue, boolean)
-		if type(target) ~= "table" then return target, false end
-		local target_table: any = target
-		if type(key) == "string" then
-			for child_key in target_table do
-				if type(child_key) ~= "string" then return target, false end
-			end
-			target_table[key] = value
-			return target, true
+
+	local template_source = template
+	local copy_inserted_defaults = true
+	if custom_iterator then
+		local template_ok, template_or_error = pcall(function()
+			return copy_value(template)
+		end)
+		if not template_ok or template_or_error == nil then
+			return "validation", "template is invalid"
 		end
-		for child_key in target_table do
-			if type(child_key) ~= "number" or not math.isfinite(child_key)
-				or math.floor(child_key) ~= child_key or child_key < 1 then
-				return target, false
-			end
-		end
-		target_table[key] = value
-		return target, true
+		template_source = template_or_error
+		copy_inserted_defaults = false
 	end
 
-	local function reconcile_value(target: JsonValue, target_template: JsonValue): (JsonValue, boolean)
-		if type(target) ~= "table" or type(target_template) ~= "table" then return target, false end
+	local function reconcile_value(target: JsonValue, target_template: JsonValue): (boolean, boolean)
+		if type(target) ~= "table" or type(target_template) ~= "table" then
+			return false, true
+		end
 		local result: any = target
 		local template_table: any = target_template
 		local changed = false
 		for key, template_child in template_table do
-			if type(key) ~= "string" and type(key) ~= "number" then return target, false end
+			if type(key) ~= "string" and type(key) ~= "number" then
+				return false, false
+			end
 			local current = result[key]
 			if current == nil then
-				local updated, updated_ok = set_table_child(result, key, template_child)
-				if updated_ok then result = updated; changed = true end
+				local existing_key = next(result)
+				if existing_key == nil or type(existing_key) == type(key) then
+					local inserted_value: JsonValue? = template_child
+					if copy_inserted_defaults then
+						local inserted_ok, inserted_or_error = pcall(function()
+							return copy_value(template_child)
+						end)
+						if not inserted_ok or inserted_or_error == nil then
+							return false, false
+						end
+						inserted_value = inserted_or_error
+					end
+					result[key] = inserted_value :: JsonValue
+					changed = true
+				end
 			elseif type(current) == "table" and type(template_child) == "table" then
-				local _, nested_changed = reconcile_value(current, template_child)
-				if nested_changed then changed = true end
+				local nested_changed, nested_valid = reconcile_value(current, template_child)
+				if not nested_valid then
+					return false, false
+				end
+				if nested_changed then
+					changed = true
+				end
 			end
 		end
-		return result :: JsonValue, changed
+		return changed, true
 	end
-	local next_value, changed = reconcile_value(copied, template_copy)
-	if next_value == nil then
-		return "validation", "reconciliation returned nil"
+
+	local changed, merge_valid = reconcile_value(copied, template_source)
+	if not merge_valid then
+		return "validation", "template is invalid"
 	end
-	local valid, message = validate_value(next_value, state.options.validator)
+	local valid, validation_message = validate_value(copied, state.options.validator)
 	if not valid then
-		return "validation", message
+		return "validation", validation_message
 	end
+	local old_data = state.data
 	local skip_sync_external_mutation_check = state.options.on_event == nil and next(state.change_observers) == nil
-	state.data = next_value
+	state.data = copied
 	state.public_data_source = copy_value(state.data)
 	self.Data = state.data
 	if changed == true then
 		state.change_sequence += 1
-	mark_dirty(state)
+		mark_dirty(state)
 		local operation_id = HttpService:GenerateGUID(false)
 		state.current_operation_id = operation_id
-		enqueue_change_observation(state, old_data, next_value, operation_id, "reconcile")
+		enqueue_change_observation(state, old_data, copied, operation_id, "reconcile")
 		state.save_requested = true
 		state.next_autosave = now_local()
 	end
@@ -13961,19 +14757,19 @@ process_queue_v2 = function(self: Record, state: InternalState, max_messages: nu
 				end
 				if state.options.on_queue_message_async ~= nil then
 					local accepted, message = state.options.on_queue_message_async(
-					message_value.Type, payload :: JsonValue?, message_value.Attempts, message_value.Id,
-					if type(message_value.SenderJobId) == "string" then message_value.SenderJobId else "",
-					message_value.CreatedAt, context
-				)
+						message_value.Type, payload :: JsonValue?, message_value.Attempts, message_value.Id,
+						if type(message_value.SenderJobId) == "string" then message_value.SenderJobId else "",
+						message_value.CreatedAt, context
+					)
 				return accepted, message or (if accepted then "" else "queue handler rejected the message")
 				end
 				local handler = state.options.on_queue_message
 				if handler == nil then return false, "on_queue_message is not configured" end
 				local accepted, message = handler(
-					message_value.Type, payload :: JsonValue?, message_value.Attempts, message_value.Id,
-					if type(message_value.SenderJobId) == "string" then message_value.SenderJobId else "",
-					message_value.CreatedAt
-				)
+						message_value.Type, payload :: JsonValue?, message_value.Attempts, message_value.Id,
+						if type(message_value.SenderJobId) == "string" then message_value.SenderJobId else "",
+						message_value.CreatedAt
+					)
 				return accepted, message or (if accepted then "" else "queue handler rejected the message")
 			end)
 			if type(result) ~= "table" or type(result.code) ~= "string" then
@@ -16195,7 +16991,7 @@ local function detach_public_data_for_release(state: InternalState): (boolean, s
 		detached_data = copy_or_error
 	end
 	state.data = detached_data
-	state.public_data_source = copy_value(detached_data)
+	state.public_data_source = nil
 	state.public_data_detached = true
 	if type(state.public_record) == "table" then
 		local public_record = state.public_record :: { Data: unknown }
@@ -16243,9 +17039,18 @@ close_internal = function(state: InternalState, shutdown: boolean): (ResultCode,
 	local expected_revision = state.revision
 	local target_revision = expected_revision + 1
 	track_external_data_mutation(state)
-	local snapshot = copy_value(state.data)
-	local valid, validation_error = validate_value(snapshot, state.options.validator)
-	if not valid then
+	local snapshot, copy_error, non_finite_numbers_absent = prepared_envelope_cache._copy_with_shape(state.data)
+	if snapshot == nil then
+		observe(state, "close", "validation", copy_error)
+		return "validation", copy_error
+	end
+	local snapshot_valid, validation_error = validate_value(
+		snapshot,
+		state.options.validator,
+		true,
+		non_finite_numbers_absent
+	)
+	if not snapshot_valid then
 		observe(state, "close", "validation", validation_error)
 		return "validation", validation_error
 	end
@@ -16493,7 +17298,7 @@ local function open(self: Record, default_data: JsonValue?, recreate: boolean?):
 	return normalize_result_code(result) or "unknown", message
 end
 
-local function make_record(name: string, scope: string, key: string, options: Options, mock: boolean, transact_engine: (Record, string, string, TransactionReducer, TransactionOptions?, string?, JsonValue?, { OutboxEventSpec }?) -> (JsonValue?, TransactionStatus, string?), transaction_status_engine: (Record, string, JsonValue) -> TransactionReceiptStatus, instance_id: string?): Record
+local function make_record(name: string, scope: string, key: string, options: Options, mock: boolean, transact_engine: (Record, string, string, TransactionReducer, TransactionOptions?, string?, JsonValue?, { OutboxEventSpec }?) -> (JsonValue?, TransactionStatus, string?), transaction_status_engine: (Record, string, JsonValue) -> TransactionReceiptStatus, instance_id: string?, patch_method: (self: Record, operations: { PatchOperation }) -> (ResultCode, string?)): Record
 	local mode = if mock then "mock" else "live"
 	local id = if instance_id == nil
 		then HttpService:JSONEncode({ mode, name, scope, key })
@@ -16535,7 +17340,9 @@ local function make_record(name: string, scope: string, key: string, options: Op
 		change_dispatch_running = false,
 		change_events_dropped = 0,
 		takeover_seen = {},
-		takeover_seen_order = {},
+		takeover_seen_order = table.create(TAKEOVER_SEEN_CAPACITY),
+		takeover_seen_order_head = 1,
+		takeover_seen_order_count = 0,
 		takeover_request_id = nil,
 		takeover_requester_job_id = nil,
 		handoff_request_id = nil,
@@ -16632,6 +17439,7 @@ local function make_record(name: string, scope: string, key: string, options: Op
 		UpdateMetadata = update_metadata,
 		Touch = touch,
 		Update = update,
+		Patch = patch_method,
 		Reconcile = reconcile,
 		Save = save,
 		TransactAsync = function(self: Record, operation_id: string, reducer: TransactionReducer, options: TransactionOptions)
@@ -17374,6 +18182,443 @@ end
 end)())
 
 RecordStore._internals = {}
+RecordStore._internals.patch = (function()
+	local MAX_PATCH_OPERATIONS = 128
+	local MAX_PATCH_NODES = 100000
+	local MAX_PATCH_DEPTH = 64
+	local PATCH_SUMMARY_SIZE_RADIX = MAX_DATASTORE_BYTES + 1
+	local subtree_summaries: { [any]: number } = setmetatable({}, { __mode = "k" }) :: any
+
+	-- Shape summaries occupy the high digits; the low digits are a reject-only encoded-size lower bound.
+	local function pack_subtree_summary(
+		node_count: number,
+		max_depth: number,
+		has_non_finite_numbers: boolean,
+		minimum_encoded_bytes: number
+	): number
+		local shape_summary = node_count * 256 + max_depth * 2 + (if has_non_finite_numbers then 1 else 0)
+		return shape_summary * PATCH_SUMMARY_SIZE_RADIX + minimum_encoded_bytes
+	end
+
+	local function subtree_shape_summary(summary: number): number
+		return math.floor(summary / PATCH_SUMMARY_SIZE_RADIX)
+	end
+
+	local function subtree_minimum_encoded_bytes(summary: number): number
+		local shape_summary = subtree_shape_summary(summary)
+		return summary - shape_summary * PATCH_SUMMARY_SIZE_RADIX
+	end
+
+	local function datastore_size_limit_message(): string
+		return ("serialized value exceeds the %d byte DataStore limit"):format(MAX_DATASTORE_BYTES)
+	end
+
+	local function minimum_encoded_string_bytes(value: string): number
+		local ascii_bytes = 0
+		for index = 1, #value do
+			if string.byte(value, index) < 128 then
+				ascii_bytes += 1
+				if ascii_bytes > MAX_DATASTORE_BYTES then
+					return MAX_DATASTORE_BYTES + 1
+				end
+			end
+		end
+		return ascii_bytes
+	end
+
+	local function summarize_patch_value(
+		value: unknown,
+		active_tables: { [any]: boolean }
+	): (number?, string?)
+		local value_type = type(value)
+		if value_type == "number" then
+			return pack_subtree_summary(1, 1, not math.isfinite(value :: number), 1), nil
+		elseif value_type == "string" then
+			local string_value = value :: string
+			if #string_value > 4_000_000 then
+				return nil, "value contains an overlong string"
+			end
+			return pack_subtree_summary(1, 1, false, minimum_encoded_string_bytes(string_value)), nil
+		elseif value_type == "boolean" or value_type == "buffer" then
+			return pack_subtree_summary(1, 1, false, 1), nil
+		elseif value_type ~= "table" then
+			return nil, "value contains an unsupported type"
+		end
+
+		local table_value = value :: any
+		local cached_summary = subtree_summaries[table_value]
+		if cached_summary ~= nil then
+			return cached_summary, nil
+		end
+		if active_tables[table_value] then
+			return nil, "value contains a cyclic table"
+		end
+
+		active_tables[table_value] = true
+		local node_count = 1
+		local max_depth = 1
+		local has_non_finite_numbers = false
+		local minimum_encoded_bytes = 2
+		local has_string_key = false
+		local has_number_key = false
+		local numeric_key_count = 0
+		local max_numeric_key = 0
+
+		for key, child in table_value do
+			local key_type = type(key)
+			if key_type == "string" then
+				has_string_key = true
+				minimum_encoded_bytes += minimum_encoded_string_bytes(key :: string)
+				if minimum_encoded_bytes > MAX_DATASTORE_BYTES then
+					active_tables[table_value] = nil
+					return nil, datastore_size_limit_message()
+				end
+			elseif key_type == "number" then
+				local numeric_key = key :: number
+				if not math.isfinite(numeric_key)
+					or math.floor(numeric_key) ~= numeric_key
+					or numeric_key < 1
+				then
+					active_tables[table_value] = nil
+					return nil, "numeric table keys must be positive integers"
+				end
+				has_number_key = true
+				numeric_key_count += 1
+				if numeric_key > max_numeric_key then
+					max_numeric_key = numeric_key
+				end
+			else
+				active_tables[table_value] = nil
+				return nil, "value contains an unsupported table key type"
+			end
+
+			local child_summary, child_message = summarize_patch_value(child, active_tables)
+			if child_summary == nil then
+				active_tables[table_value] = nil
+				return nil, child_message
+			end
+			local child_shape_summary = subtree_shape_summary(child_summary)
+			node_count += math.floor(child_shape_summary / 256)
+			if node_count > MAX_PATCH_NODES then
+				active_tables[table_value] = nil
+				return nil, "value exceeds the maximum node count"
+			end
+
+			local child_depth = math.floor((child_shape_summary % 256) / 2)
+			if child_depth + 1 > max_depth then
+				max_depth = child_depth + 1
+				if max_depth > MAX_PATCH_DEPTH then
+					active_tables[table_value] = nil
+					return nil, "value exceeds the maximum nesting depth"
+				end
+			end
+			if child_shape_summary % 2 == 1 then
+				has_non_finite_numbers = true
+			end
+
+			minimum_encoded_bytes += subtree_minimum_encoded_bytes(child_summary)
+			if minimum_encoded_bytes > MAX_DATASTORE_BYTES then
+				active_tables[table_value] = nil
+				return nil, datastore_size_limit_message()
+			end
+		end
+
+		if has_string_key and has_number_key then
+			active_tables[table_value] = nil
+			return nil, "tables cannot mix string and numeric keys"
+		end
+		if numeric_key_count > 0 and max_numeric_key ~= numeric_key_count then
+			active_tables[table_value] = nil
+			return nil, "numeric-keyed tables must be dense arrays"
+		end
+
+		active_tables[table_value] = nil
+		local summary = pack_subtree_summary(node_count, max_depth, has_non_finite_numbers, minimum_encoded_bytes)
+		subtree_summaries[table_value] = summary
+		return summary, nil
+	end
+
+	local function clone_trusted_patch_value(value: any): any
+		local value_type = type(value)
+		if value_type == "table" then
+			local copied = table.clone(value)
+			for key, child in value do
+				local child_type = type(child)
+				if child_type == "table" then
+					copied[key] = clone_trusted_patch_value(child)
+				elseif child_type == "buffer" then
+					copied[key] = buffer.fromstring(buffer.tostring(child :: buffer))
+				end
+			end
+			return copied
+		elseif value_type == "buffer" then
+			return buffer.fromstring(buffer.tostring(value :: buffer))
+		end
+		return value
+	end
+
+	local function apply_patch_operations(
+		base: JsonValue?,
+		operations: unknown
+	): (JsonValue?, ResultCode, string?)
+		if type(base) ~= "table" then
+			return nil, "invalid", "patch requires table-backed record data"
+		end
+		if type(operations) ~= "table" then
+			return nil, "invalid", "patch operations must be an array"
+		end
+	
+		local operation_array = operations :: any
+		local operation_count = 0
+		local maximum_operation_index = 0
+		for key in next, operation_array do
+			if type(key) ~= "number" or not math.isfinite(key)
+				or math.floor(key) ~= key or key < 1 or key > MAX_PATCH_OPERATIONS
+			then
+				return nil, "invalid", "patch operations must be a dense array of at most 128 entries"
+			end
+			operation_count += 1
+			if key > maximum_operation_index then maximum_operation_index = key end
+		end
+		if operation_count == 0 or operation_count ~= maximum_operation_index then
+			return nil, "invalid", "patch operations must be a non-empty dense array"
+		end
+	
+		local current_root: any = table.clone(base)
+		local owned_tables: { [any]: boolean } = { [current_root] = true }
+		for operation_index = 1, operation_count do
+			local raw_operation = rawget(operation_array, operation_index)
+			if type(raw_operation) ~= "table" then
+				return nil, "invalid", "patch operation must be a table"
+			end
+			local operation = raw_operation :: any
+			local operation_name = rawget(operation, "op")
+			if operation_name ~= "set" and operation_name ~= "remove" then
+				return nil, "invalid", "patch operation must use op 'set' or 'remove'"
+			end
+			for key in next, operation do
+				if key ~= "op" and key ~= "path" and not (operation_name == "set" and key == "value") then
+					return nil, "invalid", "patch operation contains an unsupported field"
+				end
+			end
+	
+			local raw_path = rawget(operation, "path")
+			if type(raw_path) ~= "table" then
+				return nil, "invalid", "patch path must be a non-empty array"
+			end
+			local path_array = raw_path :: any
+			local path_count = 0
+			local maximum_path_index = 0
+			for key in next, path_array do
+				if type(key) ~= "number" or not math.isfinite(key)
+					or math.floor(key) ~= key or key < 1 or key > 64
+				then
+					return nil, "invalid", "patch path must be a dense array of at most 64 segments"
+				end
+				path_count += 1
+				if key > maximum_path_index then maximum_path_index = key end
+			end
+			if path_count == 0 or path_count ~= maximum_path_index then
+				return nil, "invalid", "patch path must be a non-empty dense array"
+			end
+	
+			local path: { string | number } = table.create(path_count) :: { string | number }
+			for path_index = 1, path_count do
+				local segment = rawget(path_array, path_index)
+				if type(segment) == "string" then
+					if #(segment :: string) > 4_000_000 then
+						return nil, "invalid", "patch path contains an overlong string segment"
+					end
+					path[path_index] = segment :: string
+				elseif type(segment) == "number" then
+					local numeric_segment = segment :: number
+					if not math.isfinite(numeric_segment) or math.floor(numeric_segment) ~= numeric_segment
+						or numeric_segment < 1 or numeric_segment > 100_001
+					then
+						return nil, "invalid", "numeric patch path segments must be positive array indices"
+					end
+					path[path_index] = numeric_segment
+				else
+					return nil, "invalid", "patch path segments must be strings or positive integers"
+				end
+			end
+	
+			local copied_payload: JsonValue? = nil
+			if operation_name == "set" then
+				local raw_payload = rawget(operation, "value")
+				if raw_payload == nil then
+					return nil, "invalid", "set patch operations require a non-nil value"
+				end
+				local payload_shape = { nodes = 0, message = nil, has_non_finite_numbers = false }
+				local copy_ok, payload_or_error = pcall(function()
+					return copy_value(raw_payload, payload_shape)
+				end)
+				if payload_shape.message ~= nil then
+					return nil, "validation", payload_shape.message
+				end
+				if not copy_ok or payload_or_error == nil then
+					return nil, "validation", "patch value is invalid"
+				end
+				copied_payload = payload_or_error
+			end
+	
+			local target_cursor: any = current_root
+			for path_index = 1, path_count - 1 do
+				local segment = path[path_index]
+				local first_key = next(target_cursor)
+				local parent_kind = if first_key == nil then "empty"
+					elseif type(first_key) == "string" then "dictionary"
+					elseif type(first_key) == "number" then "array"
+					else "invalid"
+				if parent_kind == "invalid" or parent_kind == "empty" then
+					return nil, "invalid", "patch path references a missing parent table"
+				end
+				if parent_kind == "dictionary" and type(segment) ~= "string" then
+					return nil, "invalid", "string path segments are required for dictionary tables"
+				end
+				if parent_kind == "array" and type(segment) ~= "number" then
+					return nil, "invalid", "numeric path segments are required for array tables"
+				end
+				if parent_kind == "array" and (segment :: number) > #target_cursor then
+					return nil, "invalid", "patch path references a missing array item"
+				end
+				local source_child = rawget(target_cursor, segment)
+				if type(source_child) ~= "table" then
+					return nil, "invalid", "patch path intermediate segments must reference existing tables"
+				end
+				local target_child: any = source_child
+				if owned_tables[target_child] ~= true then
+					target_child = table.clone(source_child)
+					target_cursor[segment] = target_child
+					owned_tables[target_child] = true
+				end
+				target_cursor = target_child
+			end
+	
+			local leaf = path[path_count]
+			local first_leaf_key = next(target_cursor)
+			local leaf_kind = if first_leaf_key == nil then "empty"
+				elseif type(first_leaf_key) == "string" then "dictionary"
+				elseif type(first_leaf_key) == "number" then "array"
+				else "invalid"
+			if leaf_kind == "invalid" then
+				return nil, "invalid", "patch path reached a table with unsupported keys"
+			end
+	
+			if leaf_kind == "dictionary" then
+				if type(leaf) ~= "string" then
+					return nil, "invalid", "string path segments are required for dictionary tables"
+				end
+				if operation_name == "set" then
+					target_cursor[leaf] = copied_payload
+				else
+					if rawget(target_cursor, leaf) == nil then
+						return nil, "invalid", "remove patch path does not exist"
+					end
+					target_cursor[leaf] = nil
+				end
+			elseif leaf_kind == "array" then
+				if type(leaf) ~= "number" then
+					return nil, "invalid", "numeric path segments are required for array tables"
+				end
+				local array_index = leaf :: number
+				local array_length = #target_cursor
+				if operation_name == "set" then
+					if array_index > array_length + 1 then
+						return nil, "invalid", "array set may replace an item or append at the next index"
+					end
+					target_cursor[array_index] = copied_payload
+				else
+					if array_index > array_length then
+						return nil, "invalid", "remove patch path does not exist"
+					end
+					table.remove(target_cursor, array_index)
+				end
+			else
+				if operation_name ~= "set" then
+					return nil, "invalid", "remove patch path does not exist"
+				end
+				if type(leaf) == "string" then
+					target_cursor[leaf] = copied_payload
+				elseif type(leaf) == "number" and (leaf :: number) == 1 then
+					target_cursor[1] = copied_payload
+				else
+					return nil, "invalid", "an empty table may only be initialized at a string key or array index 1"
+				end
+			end
+	
+		end
+	
+		return current_root :: JsonValue, "success", nil
+	end
+	
+	return function(self: Record, operations: { PatchOperation }): (ResultCode, string?)
+		local state = private[self]
+		local transaction_recovery = state ~= nil and state.state == "unknown" and state.pending_transaction ~= nil
+		if state ~= nil then
+			track_external_data_mutation(state)
+		end
+		if state == nil or (state.state ~= "active" and not transaction_recovery) then
+			return "fenced", "record is not actively owned"
+		end
+		local backpressure = scheduler_activation.mutation_backpressure_reason(state)
+		if backpressure ~= nil then
+			return "capacity", backpressure
+		end
+		if state.takeover_requested then
+			return "closing", "session takeover has been requested"
+		end
+		if state.busy then
+			state.save_requested = true
+			return "busy", "record has a durable operation in flight"
+		end
+	
+		local next_root, patch_result, patch_message = apply_patch_operations(state.public_data_source, operations)
+		if patch_result ~= "success" or next_root == nil then
+			return patch_result :: ResultCode, patch_message
+		end
+	
+		local root_summary, summary_message = summarize_patch_value(next_root, {})
+		if root_summary == nil then
+			return "validation", summary_message or "patch result contains invalid data"
+		end
+		local copy_ok, copied_or_error = pcall(function()
+			return clone_trusted_patch_value(next_root)
+		end)
+		if not copy_ok or copied_or_error == nil then
+			return "validation", "patch result contains invalid data"
+		end
+		local copied = copied_or_error :: JsonValue
+		local valid, message = validate_value(
+			copied,
+			state.options.validator,
+			true,
+			subtree_shape_summary(root_summary) % 2 == 0
+		)
+		if not valid then
+			return "validation", message
+		end
+	
+		local old_data = state.data
+		local skip_sync_external_mutation_check = state.options.on_event == nil and next(state.change_observers) == nil
+		state.data = copied
+		state.public_data_source = next_root
+		self.Data = state.data
+		state.change_sequence += 1
+		mark_dirty(state)
+		local operation_id = HttpService:GenerateGUID(false)
+		state.current_operation_id = operation_id
+		enqueue_change_observation(state, old_data, copied, operation_id, "patch")
+		state.save_requested = true
+		state.next_autosave = now_local()
+		state.last_observed = now_unix()
+		observe(state, "patch", "success", nil)
+		sync_public(self, skip_sync_external_mutation_check)
+		return "success", nil
+	end
+end)()
+
+
 RecordStore._internals.transact = (function()
 	local protocol = prepared_envelope_cache._sidecar_protocol
 	local DEFAULT_RECEIPT_RETENTION_SECONDS = 30 * 24 * 60 * 60
@@ -20012,6 +21257,7 @@ end)();
 end)(mailbox_v2_migration_api(false))
 
 RecordStore.new = (function()
+	local patch_method = (RecordStore._internals :: any).patch :: (self: Record, operations: { PatchOperation }) -> (ResultCode, string?)
 	local normalize_options = RecordStore._internals.normalize_options
 	local transact_engine = RecordStore._internals.transact :: (Record, string, string, TransactionReducer, TransactionOptions?, string?, JsonValue?, { OutboxEventSpec }?) -> (JsonValue?, TransactionStatus, string?)
 	local transaction_status_engine = (RecordStore._internals :: { [string]: any }).get_transaction_status :: (Record, string, JsonValue) -> TransactionReceiptStatus
@@ -20032,13 +21278,14 @@ RecordStore.new = (function()
 	if valid_options == nil then
 		error("normalized options are missing", 2)
 	end
-	local record = make_record(name, scope, key, valid_options, false, transact_engine, transaction_status_engine)
+	local record = make_record(name, scope, key, valid_options, false, transact_engine, transaction_status_engine, nil, patch_method)
 	start_scheduler()
 	return record
 	end
 end)()
 
 RecordStore.Mock = (function()
+	local patch_method = (RecordStore._internals :: any).patch :: (self: Record, operations: { PatchOperation }) -> (ResultCode, string?)
 	local normalize_options = RecordStore._internals.normalize_options
 	local transact_engine = RecordStore._internals.transact :: (Record, string, string, TransactionReducer, TransactionOptions?, string?, JsonValue?, { OutboxEventSpec }?) -> (JsonValue?, TransactionStatus, string?)
 	local transaction_status_engine = (RecordStore._internals :: { [string]: any }).get_transaction_status :: (Record, string, JsonValue) -> TransactionReceiptStatus
@@ -20064,7 +21311,7 @@ RecordStore.Mock = (function()
 		valid_options.messaging_enabled = false
 		valid_options.takeover_enabled = false
 		start_scheduler()
-		return make_record(name, scope, key, valid_options, true, transact_engine, transaction_status_engine)
+		return make_record(name, scope, key, valid_options, true, transact_engine, transaction_status_engine, nil, patch_method)
 	end
 
 	local function mock_new_client(name: string, scope: string, key: string, options: Options): Record
@@ -20089,7 +21336,7 @@ RecordStore.Mock = (function()
 		start_scheduler()
 		return make_record(
 			name, scope, key, valid_options, true, transact_engine, transaction_status_engine,
-			("mock-client-%d"):format(mock_client_sequence)
+			("mock-client-%d"):format(mock_client_sequence), patch_method
 		)
 	end
 

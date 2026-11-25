@@ -22,6 +22,11 @@ local initial = {
 	zero = 0,
 	nested = {
 		array = { math.huge, -math.huge, 0 / 0, 0 },
+		deep = {
+			branch = {
+				array = { math.huge },
+			},
+		},
 		ordinary = {
 			non_finite_numbers = "user-owned field; must not collide with RecordStore metadata",
 		},
@@ -42,6 +47,7 @@ assert(loaded.nested.array[1] == math.huge, "nested positive infinity was not pr
 assert(loaded.nested.array[2] == -math.huge, "nested negative infinity was not preserved")
 assert(math.isnan(loaded.nested.array[3]), "nested NaN was not preserved")
 assert(loaded.nested.array[4] == 0, "ordinary nested zero was changed")
+assert(loaded.nested.deep.branch.array[1] == math.huge, "deeply nested positive infinity was not preserved")
 assert(loaded.nested.ordinary.non_finite_numbers == initial.nested.ordinary.non_finite_numbers, "user data collided with RecordStore metadata")
 
 local update_result, update_message = record:Update(function(current)
@@ -63,6 +69,11 @@ assert_opened(close_result, close_message, "closed")
 local raw = RecordStore.Mock.get_record_raw(store_name, scope, key)
 assert(type(raw) == "table", "raw durable mock envelope is missing")
 assert(raw.implementation_version == 2, "new envelope implementation version was not written")
+local raw_json_ok, raw_json = pcall(function()
+	return game:GetService("HttpService"):JSONEncode(raw)
+end)
+assert(raw_json_ok and type(raw_json) == "string",
+	"durable UpdateAsync transform produced an envelope that is not JSON-encodable")
 assert(type(raw.data) == "table", "serialized data is missing")
 assert(type(raw.non_finite_numbers) == "table" and #raw.non_finite_numbers >= 6, "non-finite sidecar markers were not written")
 assert(raw.data.positive == 0 and raw.data.negative == 0 and raw.data.not_a_number == 0, "serialized placeholders must be JSON-safe")
@@ -70,7 +81,25 @@ assert(raw.data.zero == 0 and raw.data.nested.array[4] == 0, "ordinary zeros mus
 assert(raw.data.direct_positive_infinity == 0, "direct positive infinity placeholder is not JSON-safe")
 assert(raw.data.direct_negative_infinity == 0, "direct negative infinity placeholder is not JSON-safe")
 assert(raw.data.direct_nan == 0, "direct NaN placeholder is not JSON-safe")
+assert(raw.data.nested.deep.branch.array[1] == 0, "deeply nested non-finite placeholder is not JSON-safe")
 assert(raw.data.nested.ordinary.non_finite_numbers == initial.nested.ordinary.non_finite_numbers, "user data was modified by sidecar storage")
+
+local deep_marker_found = false
+for _, marker in ipairs(raw.non_finite_numbers) do
+	if marker.kind == "positive_infinity" and #marker.path == 5 then
+		local path = marker.path
+		if path[1].kind == "string" and path[1].key == "nested"
+			and path[2].kind == "string" and path[2].key == "deep"
+			and path[3].kind == "string" and path[3].key == "branch"
+			and path[4].kind == "string" and path[4].key == "array"
+			and path[5].kind == "number" and path[5].key == 1
+		then
+			deep_marker_found = true
+			break
+		end
+	end
+end
+assert(deep_marker_found, "deep non-finite marker path changed its persisted segment format")
 
 local reload_result, reload_message = record:Open(initial)
 assert_opened(reload_result, reload_message, "loaded")
@@ -85,6 +114,8 @@ assert(reloaded.direct_positive_infinity == math.huge, "direct positive infinity
 assert(reloaded.direct_negative_infinity == -math.huge, "direct negative infinity failed the persistence round trip")
 assert(math.isnan(reloaded.direct_nan), "direct NaN failed the persistence round trip")
 assert(math.isnan(reloaded.nested.array[3]), "nested NaN failed the persistence round trip")
+assert(reloaded.nested.deep.branch.array[1] == math.huge,
+	"deeply nested positive infinity failed the persistence round trip")
 local second_close_result, second_close_message = record:Close()
 assert_opened(second_close_result, second_close_message, "closed")
 

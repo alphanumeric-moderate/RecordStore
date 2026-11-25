@@ -52,6 +52,11 @@ jobs:
           rm lune.zip
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
+      - name: Run scheduler backlog scaling diagnostics
+        if: ${{ env.BENCHER_API_KEY != '' }}
+        timeout-minutes: 10
+        run: lune run bench/scheduler_backlog_scaling.bench.luau
+
       - name: Install Hyperfine
         if: ${{ env.BENCHER_API_KEY != '' }}
         timeout-minutes: 5
@@ -112,6 +117,9 @@ jobs:
             --command-name scheduler-enabled "lune run bench/scheduler_enabled_overhead.bench.luau" \
             --command-name session-lifecycle "lune run bench/session_lifecycle.bench.luau" \
             --command-name large-profile-update-save "lune run bench/large_profile.bench.luau" \
+            --command-name update-validation-pipeline "lune run bench/update_validation_pipeline.bench.luau" \
+            --command-name patch-validation-pipeline "lune run bench/patch_update_pipeline.bench.luau" \
+            --command-name reconcile-pipeline "lune run bench/reconcile_pipeline.bench.luau" \
             --command-name wide-profile-change-diff "lune run bench/change_diff.bench.luau" \
             --command-name legacy-migration-history "lune run bench/legacy_migration.bench.luau" \
             --command-name read-version-history "lune run bench/read_history.bench.luau" \

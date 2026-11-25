@@ -1364,8 +1364,8 @@ local function new(dependencies: Dependencies?): Controller
 				end
 			end
 
-			local batch = table.clone(pending)
-			table.clear(pending)
+			local batch = pending
+			pending_changes[record] = {}
 			local call_ok, result, message = pcall(function()
 				return record:Update(function(current)
 					if type(current) ~= "table" then
