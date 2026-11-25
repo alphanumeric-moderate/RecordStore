@@ -17,6 +17,8 @@ This PR is a performance refactor. The existing V2 service surface on `main` is 
 - Build persisted non-finite path segments only when a non-finite value is found; keep the persisted marker format unchanged.
 - Use the same prepared snapshot for custom validation and serialization so Save/Close do not repeat avoidable traversals.
 - Preserve caller-reference isolation, custom-validator isolation, snapshot boundaries, JSON size enforcement, and external mutation detection.
+- Fuse direct mutable `Record.Data` defensive copying with shape accounting, skip duplicate shape/non-finite traversals, and reuse the detached candidate for the private change-event baseline. The custom validator still receives its own isolated copy.
+- Transfer ownership of newly parsed detached envelopes into public read snapshots and private LastSaved/baseline storage. Public `Record.Data` and `GetLastSaved()` results remain independently owned.
 
 ### 2. Copy-on-write Patch path
 
@@ -34,6 +36,7 @@ This PR is a performance refactor. The existing V2 service surface on `main` is 
 - Compact the high-burst fallback candidate array in place rather than allocate a second filtered array.
 - Retain DRR batch-size decisions in an index-keyed side table so the final cost check uses the batch size computed during admission.
 - Cache terminal-admission preflight results against both policy revision and selected batch count. Clear private cache metadata before returning terminal items; preserve it for queued or successfully dispatched work where it is still valid.
+- Use ID-indexed queue positions and tombstone removals for O(1) queued cancellation and selection removal. Preserve FIFO order during sparse scans, compact in place only when holes exceed a bounded threshold, and keep shadow selectors on dense isolated copies.
 
 Readiness, dependencies, expiry, admission/backpressure, retries, owner caps, priority inheritance, deadlines, FIFO tie-breaking, urgent streaks, DRR cursor/deficits, and critical/lease-renewal reserves remain authoritative and unchanged.
 
@@ -66,7 +69,8 @@ These facilities remain process-local optimizations. They are not new durable me
 - `update_validation_pipeline.bench.luau` and `patch_update_pipeline.bench.luau`: matched large-profile mutation/validation workloads.
 - `v2_trace_ring.bench.luau` and `v2_read_coalescer.bench.luau`: bounded process-local structure throughput and cache churn.
 - PlayerData.Set regressions cover an interleaved newer same-field mutation during uncertain-write reconciliation.
-- RecordStore regressions cover Patch atomicity, copy isolation, shape limits, non-finite data, and save/reopen behavior.
+- RecordStore regressions cover Patch atomicity, copy isolation, shape limits, non-finite data, external mutable-Data validation isolation, LastSaved defensive copies, and save/reopen behavior.
+- Advanced scheduler regressions exercise sparse cancellation, tail growth, compaction, FIFO order, shadow selection, and drain accounting.
 
 Lune, Hyperfine, CodSpeed simulation, and mocked stores are diagnostic environments. They do not prove Roblox server-frame-time, garbage-collection, or live DataStoreService improvements. Use Roblox Script Profiler/MicroProfiler and multi-server tests before making those claims.
 
