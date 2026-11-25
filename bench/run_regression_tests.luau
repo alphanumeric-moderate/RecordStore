@@ -54,6 +54,7 @@ for _, path in {
 	"tests/IntegerInfinityValueRegression.server.luau",
 	"tests/RecordStore_EventQueueRegression.server.luau",
 	"tests/RecordStore_UpdateValidationRegression.server.luau",
+	"bench/reconcile_pipeline.bench.luau",
 	"tests/RecordStore_PatchRegression.server.luau",
 	"tests/RecordStore_TransactionMutationReconciliationRegression.server.luau",
 	"tests/PurchaseReceiptProcessorRegression.server.luau",
