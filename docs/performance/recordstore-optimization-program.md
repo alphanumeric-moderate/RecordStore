@@ -42,6 +42,7 @@ This PR is a performance refactor. The existing V2 service surface on `main` is 
 - Keep the bounded handoff-status cache in a fixed-capacity circular buffer instead of shifting entries from the front.
 
 Readiness, dependencies, expiry, admission/backpressure, retries, owner caps, priority inheritance, deadlines, FIFO tie-breaking, urgent streaks, DRR cursor/deficits, and critical/lease-renewal reserves remain authoritative and unchanged.
+- Cache each queued item's unresolved-dependency count and failed-prerequisite ID. A reverse dependency index updates only dependents when a prerequisite completes; selection, admission, and scheduler metrics use O(1) readiness checks rather than re-walking every dependency list. Removing or terminalizing a dependent unregisters its waiter entries; dependency-history reference counts remain separately enforced.
 
 ### 4. Process-local data structures
 
