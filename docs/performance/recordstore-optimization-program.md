@@ -41,6 +41,7 @@ This PR is a performance refactor. The existing V2 service surface on `main` is 
 - Use ID-indexed queue positions and tombstone removals for O(1) queued cancellation and selection removal. Preserve FIFO order during sparse scans, compact in place only when holes exceed a bounded threshold, and keep shadow selectors on dense isolated copies.
 - Keep terminal completed/failed history in head-indexed bounded arrays, compacting only after the head passes its bound or backing tail grows beyond twice the limit. Dependency-referenced terminal outcomes remain retained until their final dependency is released.
 - Keep the bounded handoff-status cache in a fixed-capacity circular buffer instead of shifting entries from the front.
+- Clear inherited-priority links by visiting the completed dependent's bounded dependency list instead of scanning every known work item.
 
 Readiness, dependencies, expiry, admission/backpressure, retries, owner caps, priority inheritance, deadlines, FIFO tie-breaking, urgent streaks, DRR cursor/deficits, and critical/lease-renewal reserves remain authoritative and unchanged.
 - Cache each queued item's unresolved-dependency count and failed-prerequisite ID. A reverse dependency index updates only dependents when a prerequisite completes; selection, admission, and scheduler metrics use O(1) readiness checks rather than re-walking every dependency list. Removing or terminalizing a dependent unregisters its waiter entries; dependency-history reference counts remain separately enforced.
