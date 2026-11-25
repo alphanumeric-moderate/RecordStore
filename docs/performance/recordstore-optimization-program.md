@@ -19,6 +19,7 @@ This PR is a performance refactor. The existing V2 service surface on `main` is 
 - Preserve caller-reference isolation, custom-validator isolation, snapshot boundaries, JSON size enforcement, and external mutation detection.
 - Fuse direct mutable `Record.Data` defensive copying with shape accounting, skip duplicate shape/non-finite traversals, and reuse the detached candidate for the private change-event baseline. The custom validator still receives its own isolated copy.
 - Transfer ownership of newly parsed detached envelopes into public read snapshots and private LastSaved/baseline storage. Public `Record.Data` and `GetLastSaved()` results remain independently owned.
+- In the durable UpdateAsync transform, fuse the detached stored-value copy with shape accounting, then run exact JSON serialization/byte-limit validation without a second shape traversal. Non-finite raw storage values remain rejected.
 
 ### 2. Copy-on-write Patch path
 
