@@ -9,6 +9,9 @@ local MAX_STREAM_NAME_BYTES = 96
 local MAX_GROUP_NAME_BYTES = 96
 local MAX_ROUTE_KEY_BYTES = 128
 local MAX_EVENT_ID_BYTES = 128
+local MAX_PRODUCER_ID_BYTES = 64
+local MAX_PRODUCERS_PER_PARTITION = 128
+local MAX_PRODUCER_STATE_BYTES = 65536
 local MAX_PARTITIONS = 32
 local MAX_SEGMENT_MESSAGES = 64
 local MAX_SEGMENT_BYTES = 262144
@@ -29,6 +32,19 @@ type Message = {
 	payload_digest: string,
 	payload_bytes: number,
 	created_at: number,
+	producer_id: string?,
+	producer_sequence: number?,
+}
+
+type ProducerState = {
+	sequence: number,
+	stream_sequence: number,
+	event_id: string,
+	payload_digest: string,
+}
+
+type ProducerStates = {
+	[string]: ProducerState,
 }
 
 type Segment = {
@@ -44,6 +60,7 @@ type Segment = {
 	chain_integrity: string,
 	integrity: string,
 	messages: { Message },
+	producer_states: ProducerStates,
 }
 
 type Head = {
@@ -56,6 +73,8 @@ type Head = {
 	retained_sequence: number,
 	cleanup_segment: number,
 	retention_generation: number,
+	producer_states: ProducerStates,
+	producer_integrity: string,
 }
 
 	type CursorRecord = {
@@ -151,8 +170,9 @@ type StreamType = {
 	_FenceRetentionGeneration: (self: StreamType, lease: MaintenanceLease) -> (boolean, string?),
 	_DeleteBelowRetentionFloor: (self: StreamType, partition: number, lease: MaintenanceLease, limit: number) -> (number, string?),
 	_AdvanceHead: (self: StreamType, partition: number, segment: Segment) -> (boolean, string?),
-	PublishAsync: (self: StreamType, route_key: string, event_id: string, payload: any) -> any,
+	PublishAsync: (self: StreamType, route_key: string, event_id: string, payload: any, producer_id: string?, producer_sequence: number?) -> any,
 	PublishBatchAsync: (self: StreamType, route_key: string, events: { any }) -> any,
+	GetProducerSequenceAsync: (self: StreamType, route_key: string, producer_id: string) -> any,
 	RegisterConsumerGroupAsync: (self: StreamType, group: string, start_position: any, retention_protected: boolean?) -> any,
 	RemoveConsumerGroupAsync: (self: StreamType, group: string, confirm: boolean) -> any,
 	PruneAsync: (self: StreamType, partition: number, max_segments: number?) -> any,
@@ -294,6 +314,10 @@ local function initial_integrity(stream_name: string, partition: number, segment
 end
 
 local function next_integrity(previous: string, message: Message): string
+	local producer_identity = ""
+	if message.producer_id ~= nil then
+		producer_identity = "\0producer\0" .. message.producer_id .. "\0" .. tostring(message.producer_sequence)
+	end
 	return SHA256.digest(
 		previous
 			.. "\0"
@@ -304,17 +328,75 @@ local function next_integrity(previous: string, message: Message): string
 			.. message.payload_digest
 			.. "\0"
 			.. tostring(message.payload_bytes)
+			.. producer_identity
 	)
 end
 
-local function segment_integrity(chain: string, sealed: boolean): string
-	return SHA256.digest(chain .. "\0sealed\0" .. (if sealed then "1" else "0"))
+local function producer_state_digest(states: ProducerStates): string
+	local producer_ids = {}
+	for producer_id in pairs(states) do
+		producer_ids[#producer_ids + 1] = producer_id
+	end
+	table.sort(producer_ids)
+	local parts = table.create(#producer_ids)
+	for index, producer_id in ipairs(producer_ids) do
+		local state = states[producer_id]
+		parts[index] = tostring(#producer_id)
+			.. ":" .. producer_id
+			.. ":" .. tostring(state.sequence)
+			.. ":" .. tostring(state.stream_sequence)
+			.. ":" .. tostring(#state.event_id)
+			.. ":" .. state.event_id
+			.. ":" .. state.payload_digest
+	end
+	return SHA256.digest(table.concat(parts, "\0"))
 end
 
-local function new_segment(stream_name: string, partition: number, segment_id: number, first_sequence: number, created_at: number): Segment
+local function validate_producer_states(value: any): (ProducerStates?, string?)
+	if type(value) ~= "table" or getmetatable(value) ~= nil then
+		return nil, "producer checkpoint table is malformed"
+	end
+	local count = 0
+	local bytes = 0
+	for producer_id, state in pairs(value) do
+		count += 1
+		if not valid_text(producer_id, MAX_PRODUCER_ID_BYTES)
+			or type(state) ~= "table"
+			or getmetatable(state) ~= nil
+			or not safe_integer(state.sequence, 1)
+			or not safe_integer(state.stream_sequence, 1)
+			or not valid_text(state.event_id, MAX_EVENT_ID_BYTES)
+			or type(state.payload_digest) ~= "string"
+			or #state.payload_digest ~= 64
+		then
+			return nil, "producer checkpoint entry is malformed"
+		end
+		bytes += #producer_id + #state.event_id + #state.payload_digest
+			+ #tostring(state.sequence) + #tostring(state.stream_sequence) + 64
+		if count > MAX_PRODUCERS_PER_PARTITION or bytes > MAX_PRODUCER_STATE_BYTES then
+			return nil, "producer checkpoint exceeds its fixed storage bound"
+		end
+	end
+	return value :: ProducerStates, nil
+end
+
+local function segment_integrity(chain: string, sealed: boolean, producer_states: ProducerStates): string
+	local base = SHA256.digest(chain .. "\0sealed\0" .. (if sealed then "1" else "0"))
+	return SHA256.digest(base .. "\0producer-state\0" .. producer_state_digest(producer_states))
+end
+
+local function new_segment(
+	stream_name: string,
+	partition: number,
+	segment_id: number,
+	first_sequence: number,
+	created_at: number,
+	producer_states: ProducerStates
+): Segment
 	local chain = initial_integrity(stream_name, partition, segment_id, first_sequence, created_at)
+	local copied_producers = table.clone(producer_states)
 	return {
-		format = 2,
+		format = 3,
 		stream = stream_name,
 		partition = partition,
 		segment = segment_id,
@@ -324,8 +406,9 @@ local function new_segment(stream_name: string, partition: number, segment_id: n
 		bytes = 0,
 		sealed = false,
 		chain_integrity = chain,
-		integrity = segment_integrity(chain, false),
+		integrity = segment_integrity(chain, false, copied_producers),
 		messages = {},
+		producer_states = copied_producers,
 	}
 end
 
@@ -333,7 +416,7 @@ local function validate_head(value: any, stream_name: string, partition: number)
 	if type(value) ~= "table" then
 		return nil, "partition head is missing or malformed"
 	end
-	if value.format ~= 2 then
+	if value.format ~= 3 then
 		return nil, "unsupported partition-head format"
 	end
 	if value.stream ~= stream_name or value.partition ~= partition then
@@ -347,6 +430,12 @@ local function validate_head(value: any, stream_name: string, partition: number)
 	then
 		return nil, "partition head contains invalid sequence or retention metadata"
 	end
+	local producers, producer_error = validate_producer_states(value.producer_states)
+	if producers == nil or type(value.producer_integrity) ~= "string"
+		or value.producer_integrity ~= producer_state_digest(producers)
+	then
+		return nil, "partition head producer checkpoint is corrupt: " .. tostring(producer_error or "integrity mismatch")
+	end
 	return value :: Head, nil
 end
 
@@ -357,7 +446,7 @@ local function validate_segment(
 	segment_id: number,
 	options: StreamOptions
 ): (Segment?, string?)
-	if type(value) ~= "table" or value.format ~= 2 then
+	if type(value) ~= "table" or value.format ~= 3 then
 		return nil, "missing, malformed, or unsupported segment"
 	end
 	if value.stream ~= stream_name or value.partition ~= partition or value.segment ~= segment_id then
@@ -374,6 +463,10 @@ local function validate_segment(
 		or type(value.messages) ~= "table"
 	then
 		return nil, "segment metadata is malformed"
+	end
+	local producer_states, producer_error = validate_producer_states(value.producer_states)
+	if producer_states == nil then
+		return nil, "segment producer checkpoint is malformed: " .. tostring(producer_error)
 	end
 	local messages = value.messages
 	local count = #messages
@@ -404,6 +497,11 @@ local function validate_segment(
 			or type(message.payload_digest) ~= "string"
 			or not safe_integer(message.payload_bytes, 1)
 			or not safe_integer(message.created_at, 0)
+			or (message.producer_id ~= nil and (
+				not valid_text(message.producer_id, MAX_PRODUCER_ID_BYTES)
+				or not safe_integer(message.producer_sequence, 1)
+			))
+			or (message.producer_id == nil and message.producer_sequence ~= nil)
 		then
 			return nil, "segment message metadata is malformed"
 		end
@@ -412,7 +510,10 @@ local function validate_segment(
 			return nil, "segment payload is invalid: " .. tostring(payload_error)
 		end
 		local actual_digest = SHA256.digest(canonical)
-		local actual_bytes = #message.event_id + payload_bytes + 64
+		local producer_bytes = if message.producer_id ~= nil
+			then #message.producer_id + #tostring(message.producer_sequence) + 24
+			else 0
+		local actual_bytes = #message.event_id + payload_bytes + 64 + producer_bytes
 		if seen_event_ids[message.event_id] then
 			return nil, "segment contains a duplicate event identity"
 		end
@@ -420,12 +521,36 @@ local function validate_segment(
 		if actual_digest ~= message.payload_digest or actual_bytes ~= message.payload_bytes then
 			return nil, "segment payload digest or byte count mismatch"
 		end
+		if message.producer_id ~= nil then
+			local state = producer_states[message.producer_id]
+			if state == nil or state.sequence < (message.producer_sequence :: number) then
+				return nil, "producer checkpoint is behind a stored message"
+			end
+			if state.sequence == message.producer_sequence
+				and (state.stream_sequence ~= message.sequence or state.event_id ~= message.event_id or state.payload_digest ~= message.payload_digest)
+			then
+				return nil, "latest producer checkpoint disagrees with its message"
+			end
+		end
 		expected_bytes += actual_bytes
 		expected_integrity = next_integrity(expected_integrity, message :: Message)
 	end
+	for _, state in pairs(producer_states) do
+		if state.stream_sequence > value.last_sequence then
+			return nil, "producer checkpoint is ahead of the segment sequence range"
+		end
+		if state.stream_sequence >= value.first_sequence then
+			local latest = messages[state.stream_sequence - value.first_sequence + 1]
+			if latest == nil or latest.producer_id == nil or latest.producer_sequence ~= state.sequence
+				or latest.event_id ~= state.event_id or latest.payload_digest ~= state.payload_digest
+			then
+				return nil, "producer checkpoint does not identify its latest segment message"
+			end
+		end
+	end
 	if expected_bytes ~= value.bytes
 		or expected_integrity ~= value.chain_integrity
-		or segment_integrity(expected_integrity, value.sealed) ~= value.integrity
+		or segment_integrity(expected_integrity, value.sealed, producer_states) ~= value.integrity
 	then
 		return nil, "segment integrity verification failed"
 	end
@@ -433,7 +558,7 @@ local function validate_segment(
 end
 
 local function validate_cursor(value: any, stream_name: string, group: string, partition: number): (CursorRecord?, string?)
-	if type(value) ~= "table" or value.format ~= 2 then
+	if type(value) ~= "table" or value.format ~= 3 then
 		return nil, "consumer cursor is missing, malformed, or unsupported"
 	end
 	if value.stream ~= stream_name or value.group ~= group or value.partition ~= partition then
@@ -461,6 +586,8 @@ local function copy_head(head: Head): Head
 		retained_sequence = head.retained_sequence,
 		cleanup_segment = head.cleanup_segment,
 		retention_generation = head.retention_generation,
+		producer_states = table.clone(head.producer_states),
+		producer_integrity = head.producer_integrity,
 	}
 end
 
@@ -537,7 +664,7 @@ end
 
 
 local function validate_group_registry(value: any, stream_name: string, partitions: number): (GroupRegistry?, string?)
-	if type(value) ~= "table" or value.format ~= 2 or value.stream ~= stream_name
+	if type(value) ~= "table" or value.format ~= 3 or value.stream ~= stream_name
 		or type(value.groups) ~= "table" or type(value.floors) ~= "table"
 		or not safe_integer(value.lease_generation, 0)
 		or not safe_integer(value.lease_until, 0)
@@ -705,7 +832,7 @@ function DurableStreams.new(data_store: any, raw_options: any?): any
 			return nil, "manifest_read_failed: " .. read_error
 		end
 		local expected = {
-			format = 2,
+			format = 3,
 			stream = name,
 			partitions = partitions,
 			max_segment_messages = self._options.max_segment_messages,
@@ -737,7 +864,7 @@ function DurableStreams.new(data_store: any, raw_options: any?): any
 				end
 			end
 		end
-		if type(existing) ~= "table" or existing.format ~= 2 or existing.stream ~= name then
+		if type(existing) ~= "table" or existing.format ~= 3 or existing.stream ~= name then
 			return nil, "manifest_corrupt_or_unsupported"
 		end
 		for field, value in pairs(expected) do
@@ -781,7 +908,7 @@ function Stream._ReadHead(self: StreamType, partition: number): (Head?, string?)
 		local created, write_error = datastore_update(self._store, key, function(current)
 			if current == nil then
 				return {
-					format = 2,
+					format = 3,
 					stream = self._name,
 					partition = partition,
 					active_segment = 1,
@@ -790,6 +917,8 @@ function Stream._ReadHead(self: StreamType, partition: number): (Head?, string?)
 					retained_sequence = 1,
 					cleanup_segment = 1,
 					retention_generation = 0,
+					producer_states = {},
+					producer_integrity = producer_state_digest({}),
 				}
 			end
 			return nil
@@ -860,6 +989,8 @@ function Stream._AdvanceHead(self: StreamType, partition: number, segment: Segme
 		local next_head = copy_head(current)
 		next_head.active_segment = segment.segment + 1
 		next_head.next_sequence = segment.last_sequence + 1
+		next_head.producer_states = table.clone(segment.producer_states)
+		next_head.producer_integrity = producer_state_digest(next_head.producer_states)
 		return next_head
 	end)
 	if write_error ~= nil then
@@ -922,7 +1053,7 @@ function Stream._AcquireMaintenanceLease(self: StreamType): (MaintenanceLease?, 
 				floors[partition] = { segment = 1, sequence = 1 }
 			end
 			current = {
-				format = 2,
+				format = 3,
 				stream = self._name,
 				groups = {},
 				floors = floors,
@@ -1225,7 +1356,7 @@ function Stream.PublishBatchAsync(self: StreamType, route_key: string, events: {
 			local sealed = #messages >= self._options.max_segment_messages
 				or new_bytes >= self._options.max_segment_bytes
 			return {
-				format = 2,
+				format = 3,
 				stream = self._name,
 				partition = partition,
 				segment = head.active_segment,
@@ -2157,7 +2288,7 @@ function Stream.ClaimConsumerAsync(self: StreamType, group: string, partition: n
 		local current: CursorRecord
 		if raw == nil then
 			current = {
-				format = 2,
+				format = 3,
 				stream = self._name,
 				group = group,
 				partition = partition,
