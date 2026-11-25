@@ -2041,6 +2041,7 @@ do
 		end
 		remember_terminal = function(self, id, code)
 			self.failed[id] = code
+			notify_dependency_waiters(self, id, false)
 			self.failed_order_tail = (self.failed_order_tail :: number) + 1
 			self.failed_order[self.failed_order_tail] = id
 			self.failed_order_count = (self.failed_order_count :: number) + 1
@@ -2135,6 +2136,7 @@ do
 			then
 				self.completed[id] = true
 				self.failed[id] = nil
+				notify_dependency_waiters(self, id, true)
 				self.completed_order_tail = (self.completed_order_tail :: number) + 1
 				self.completed_order[self.completed_order_tail] = id
 				self.completed_order_count = (self.completed_order_count :: number) + 1
@@ -2142,7 +2144,6 @@ do
 				self.completed[id] = nil
 				remember_terminal(self, id, tostring(code or "unknown"))
 			end
-			notify_dependency_waiters(self, id, self.completed[id] == true)
 			local active_lane_keys = {}
 			local instant = now_ms()
 			for index = 1, self.queue_tail do
