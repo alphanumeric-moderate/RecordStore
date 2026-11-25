@@ -64,6 +64,13 @@ These facilities remain process-local optimizations. They are not new durable me
 - Preserve mutations that arrive while an earlier write is uncertain; reconciliation must not overwrite the newest same-field update.
 - Keep leave, shutdown, and unknown-write recovery behavior covered by regression tests.
 
+## Remaining scheduler and runtime gates
+
+- `TakeNext` still performs its reverse terminal preflight scan. It preserves newest-queued terminal-first behavior across dependency failures, expiries, and policy/batch admission rejections. The scan now also collects priority-inheritance candidates, removing the separate selector-wide inheritance pass; replacing terminal preflight with heaps or indexes still needs a proof that mixed terminal outcomes retain exactly the same ordering and update semantics.
+- Candidate selection remains a queue scan. FIFO, weighted, deadline, and DRR decisions depend on current readiness, owner capacity, budget/admission state, lane inheritance, age, deadlines, and fairness state. A heap keyed by stale priority values is not a safe drop-in replacement. The backlog benchmark includes dependency-heavy cases to measure this path before further restructuring.
+- Selective `@native` compilation remains gated on profiling pure kernels in the target Roblox runtime. Lune timing is not a substitute.
+- Roblox Script Profiler/MicroProfiler traces, GC observations, throttling/cache fault tests, and multi-server acceptance remain required before making production performance claims.
+
 ## Luau implementation guidance
 
 - Prefer stable table layouts and dense numeric arrays in hot paths.
@@ -75,7 +82,7 @@ These facilities remain process-local optimizations. They are not new durable me
 
 ## Benchmarks and verification
 
-- `scheduler_backlog_scaling.bench.luau`: first `TakeNext` at 128/512/2048/8192 queued entries across FIFO, weighted, deadline, and DRR, including ready, partially-ready, future-blocked, and owner-cap-saturated queues. Queue setup is outside the timed interval.
+- `scheduler_backlog_scaling.bench.luau`: first `TakeNext` at 128/512/2048/8192 queued entries across FIFO, weighted, deadline, and DRR, including ready, partially-ready, future-blocked, owner-cap-saturated, and dependency-heavy queues. Queue setup is outside the timed interval.
 - `update_validation_pipeline.bench.luau` and `patch_update_pipeline.bench.luau`: matched large-profile mutation/validation workloads.
 - `v2_trace_ring.bench.luau` and `v2_read_coalescer.bench.luau`: bounded process-local structure throughput and cache churn.
 - PlayerData.Set regressions cover an interleaved newer same-field mutation during uncertain-write reconciliation.
