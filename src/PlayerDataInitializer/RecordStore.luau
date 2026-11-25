@@ -282,7 +282,7 @@ do
 			estimated_bytes_in_flight = 0, handler_slots_in_flight = 0,
 			request_budgets = { read = nil, write = nil, sampled_at_ms = nil },
 			completed = {}, completed_order = {}, completed_order_head = 1, completed_order_tail = 0, completed_order_count = 0, known = {}, active_owner = {}, active_renewals_by_owner = {}, active_critical_by_owner = {},
-			dependency_ref_counts = {}, pending_completed_prune = {}, pending_failed_prune = {},
+			dependency_ref_counts = {}, dependents_by_dependency = {}, pending_completed_prune = {}, pending_failed_prune = {},
 			drr_deficit = {}, drr_cursor_key = nil, high_streak = 0, urgent_streak = 0,
 			failed = {}, failed_order = {}, failed_order_head = 1, failed_order_tail = 0, failed_order_count = 0, retry_cooldown_until = {}, retry_heaps_by_owner = {}, retry_tokens_by_class = {},
 			due_sequence = 0,
@@ -981,11 +981,58 @@ do
 				else return item.due_at_ms end
 			end
 		end
-		local function dependencies_ready(self: EmbeddedSchedulerDynamicRecord, item: EmbeddedSchedulerDynamicRecord): boolean
+		local function index_dependency_waiters(self: EmbeddedSchedulerDynamicRecord, item: EmbeddedSchedulerDynamicRecord)
+			local pending_count = 0
+			item.failed_dependency_id = nil
 			for _, dependency in ipairs(item.dependencies or {}) do
-				if not self.completed[dependency] then return false end
+				if self.completed[dependency] ~= true then
+					local failure = self.failed[dependency]
+					if failure ~= nil then
+						item.failed_dependency_id = dependency
+					else
+						local waiters = self.dependents_by_dependency[dependency]
+						if waiters == nil then
+							waiters = {}
+							self.dependents_by_dependency[dependency] = waiters
+						end
+						waiters[item.id] = item
+						pending_count += 1
+					end
+				end
 			end
-			return true
+			item.pending_dependency_count = pending_count
+		end
+		local function unregister_dependency_waiters(self: EmbeddedSchedulerDynamicRecord, item: EmbeddedSchedulerDynamicRecord)
+			for _, dependency in ipairs(item.dependencies or {}) do
+				local waiters = self.dependents_by_dependency[dependency]
+				if waiters ~= nil then
+					waiters[item.id] = nil
+					if next(waiters) == nil then
+						self.dependents_by_dependency[dependency] = nil
+					end
+				end
+			end
+			item.pending_dependency_count = 0
+		end
+		local function notify_dependency_waiters(
+			self: EmbeddedSchedulerDynamicRecord,
+			dependency_id: string,
+			succeeded: boolean
+		)
+			local waiters = self.dependents_by_dependency[dependency_id]
+			if waiters == nil then return end
+			self.dependents_by_dependency[dependency_id] = nil
+			for dependent_id, dependent in pairs(waiters) do
+				if self.known[dependent_id] == dependent then
+					dependent.pending_dependency_count = math.max(0, (dependent.pending_dependency_count or 0) - 1)
+					if not succeeded and dependent.failed_dependency_id == nil then
+						dependent.failed_dependency_id = dependency_id
+					end
+				end
+			end
+		end
+		local function dependencies_ready(_self: EmbeddedSchedulerDynamicRecord, item: EmbeddedSchedulerDynamicRecord): boolean
+			return (item.pending_dependency_count or 0) == 0 and item.failed_dependency_id == nil
 		end
 		local function retain_dependencies(self: EmbeddedSchedulerDynamicRecord, item: EmbeddedSchedulerDynamicRecord)
 			for _, dependency in ipairs(item.dependencies or {}) do
@@ -993,6 +1040,7 @@ do
 			end
 		end
 		local function release_dependencies(self: EmbeddedSchedulerDynamicRecord, item: EmbeddedSchedulerDynamicRecord)
+			unregister_dependency_waiters(self, item)
 			for _, dependency in ipairs(item.dependencies or {}) do
 				local count = self.dependency_ref_counts[dependency]
 				if count ~= nil then
@@ -1606,6 +1654,7 @@ do
 			end
 			value.queued = true
 			self.known[value.id] = value
+			index_dependency_waiters(self, value)
 			retain_dependencies(self, value)
 			append_queued_item(self, value)
 			index_retry_item(self, value)
@@ -1729,6 +1778,7 @@ do
 			remove_queued_item(self, queue_index, item)
 			item.queued = false
 			unindex_retry_item(self, item)
+			unregister_dependency_waiters(self, item)
 			item.terminal_result = {
 				code = "cancelled",
 				message = if type(message) == "string" and message ~= "" then string.sub(message :: string, 1, 200)
@@ -1742,13 +1792,7 @@ do
 			for index = self.queue_tail, 1, -1 do
 				local item = self.queue[index]
 				if item ~= nil then
-				local failed_dependency
-				for _, dependency in ipairs(item.dependencies or {}) do
-					if self.failed[dependency] ~= nil then
-						failed_dependency = dependency
-						break
-					end
-				end
+				local failed_dependency = item.failed_dependency_id
 				if failed_dependency ~= nil then
 					remove_queued_item(self, index, item)
 					item.queued = false
@@ -1809,6 +1853,7 @@ do
 						remove_queued_item(self, index, item)
 						item.queued = false
 						unindex_retry_item(self, item)
+						unregister_dependency_waiters(self, item)
 						item.terminal_result = admission_terminal_result
 						self.known[item.id] = item
 						clear_admission_preflight(item)
@@ -2097,6 +2142,7 @@ do
 				self.completed[id] = nil
 				remember_terminal(self, id, tostring(code or "unknown"))
 			end
+			notify_dependency_waiters(self, id, self.completed[id] == true)
 			local active_lane_keys = {}
 			local instant = now_ms()
 			for index = 1, self.queue_tail do
