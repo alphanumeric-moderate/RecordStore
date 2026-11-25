@@ -625,7 +625,7 @@ do
 	end
 	assert(queued_history.completed["queued-history-prerequisite"] == true,
 		"queued dependency lost its prerequisite outcome during history pruning")
-	assert(#queued_history.completed_order <= queued_history:Stats().policy.queue_capacity * 2,
+	assert(queued_history.completed_order_count <= queued_history:Stats().policy.queue_capacity * 2,
 		"completed-history order grew beyond its configured bound while outcomes were referenced")
 	now_ms += 60000
 	take(queued_history, "queued-history-dependent")
@@ -663,7 +663,7 @@ do
 	end
 	assert(inflight_history.completed["inflight-history-prerequisite"] == true,
 		"in-flight dependency lost its prerequisite result before a retry")
-	assert(#inflight_history.completed_order <= inflight_history:Stats().policy.queue_capacity * 2,
+	assert(inflight_history.completed_order_count <= inflight_history:Stats().policy.queue_capacity * 2,
 		"in-flight dependencies caused completed-history order to grow beyond its configured bound")
 	local rescheduled, reschedule_error = inflight_history:Reschedule(dependent_item.id, now_ms)
 	assert(rescheduled, "dependent work could not be rescheduled: " .. tostring(reschedule_error))
