@@ -1191,7 +1191,7 @@ do
 			self: EmbeddedSchedulerDynamicRecord,
 			algorithm: any,
 			renewal_mode: any,
-			priority_inheritance_prepared: boolean?
+			prepared_priority_indices: { number }?
 		): (number?, boolean)
 			local fifo_fast_path = algorithm == "fifo" and renewal_mode ~= true and renewal_mode ~= "critical"
 			local drr_candidate_mode = algorithm ~= "fifo" and algorithm ~= "weighted" and algorithm ~= "deadline"
@@ -1232,7 +1232,14 @@ do
 			local fifo_best_non_high_index: number? = nil
 			local fifo_best_non_high_enqueued_at = math.huge
 			local fifo_has_non_high = false
-			if priority_inheritance_prepared ~= true then
+			if prepared_priority_indices ~= nil then
+				for position = #prepared_priority_indices, 1, -1 do
+					local dependent = self.queue[prepared_priority_indices[position]]
+					if dependent ~= nil and dependent.lane == "high" and #(dependent.dependencies or {}) > 0 then
+						inherit_ready_prerequisites(self, dependent, now)
+					end
+				end
+			else
 				for index = 1, self.queue_tail do
 					local dependent = self.queue[index]
 					if dependent ~= nil and dependent.lane == "high" and #(dependent.dependencies or {}) > 0 then
@@ -1875,15 +1882,8 @@ do
 				end
 			end
 				end
-			local inheritance_now = now_ms()
-			for position = #priority_indices, 1, -1 do
-				local dependent = self.queue[priority_indices[position]]
-				if dependent ~= nil and dependent.lane == "high" and #(dependent.dependencies or {}) > 0 then
-					inherit_ready_prerequisites(self, dependent, inheritance_now)
-				end
-			end
 			local index, urgent_fallback = choose_index(
-				self, self.policy.algorithm or "drr", renewal_mode, true
+				self, self.policy.algorithm or "drr", renewal_mode, priority_indices
 			)
 			if not index then return nil, "empty" end
 			if self.policy.shadow_enabled and self.policy.shadow_sample_rate > 0 then
