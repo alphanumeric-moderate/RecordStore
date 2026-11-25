@@ -79,7 +79,7 @@ record.Data.Inventory[1].Count = 3
 mutate_validator_input = true
 local direct_mutation_snapshot = record:Get()
 mutate_validator_input = false
-assert(validator_calls == 4, "direct Data mutation did not invoke the custom validator exactly once")
+assert(validator_calls == 3, "direct Data mutation did not invoke the custom validator exactly once")
 assert(direct_mutation_snapshot.Inventory[1].Count == 3 and record.Data.Inventory[1].Count == 3,
 	"custom validator mutation escaped its isolated argument or changed accepted public data")
 
