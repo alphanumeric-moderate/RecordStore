@@ -561,6 +561,31 @@ for index = 9, 16 do
 end
 assert(indexed_queue:Stats().queue_items == 0, "indexed queue retained tombstones after complete drain")
 
+-- Terminal dependency failures cascade through multiple dependency levels.
+local chained_dependencies = new_scheduler()
+enqueue(chained_dependencies, { id = "chain-root", owner_id = "chain-owner" })
+enqueue(chained_dependencies, {
+	id = "chain-middle",
+	owner_id = "chain-owner",
+	dependencies = { "chain-root" },
+})
+enqueue(chained_dependencies, {
+	id = "chain-leaf",
+	owner_id = "chain-owner",
+	dependencies = { "chain-middle" },
+})
+local chain_root = take(chained_dependencies, "chain-root")
+assert(chained_dependencies:MarkCompleted(chain_root.id, "unknown"),
+	"chain root failure could not be recorded")
+local chain_middle, chain_middle_status = chained_dependencies:TakeNext()
+assert(chain_middle ~= nil and chain_middle.id == "chain-middle" and chain_middle_status == "dependency_failed",
+	"middle dependency did not terminalize after its root failed")
+assert(chained_dependencies.known["chain-leaf"].failed_dependency_id == "chain-middle",
+	"TakeNext-terminalized dependency failure was not propagated to its dependent")
+local chain_leaf, chain_leaf_status = chained_dependencies:TakeNext()
+assert(chain_leaf ~= nil and chain_leaf.id == "chain-leaf" and chain_leaf_status == "dependency_failed",
+	"downstream dependency did not terminalize after its prerequisite failed")
+
 -- A completion must refer to known dispatched/terminal work; it cannot forge or orphan dependencies.
 local completion_guard = new_scheduler()
 assert(not completion_guard:MarkCompleted("ghost-completion", "committed"),
