@@ -2122,11 +2122,12 @@ do
 			release_dependencies(self, item)
 			self.known[id] = nil
 			if item ~= nil then unindex_retry_item(self, item) end
-			for _, dependent_item in pairs(self.known) do
-				if dependent_item.inherited_from == id then
-					dependent_item.inherited_lane = nil
-					dependent_item.inherited_until_ms = nil
-					dependent_item.inherited_from = nil
+			for _, prerequisite_id in ipairs(item.dependencies or {}) do
+				local prerequisite = self.known[prerequisite_id]
+				if prerequisite ~= nil and prerequisite.inherited_from == id then
+					prerequisite.inherited_lane = nil
+					prerequisite.inherited_until_ms = nil
+					prerequisite.inherited_from = nil
 				end
 			end
 			if code == nil or code == true or code == "success" or code == "committed"
