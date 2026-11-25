@@ -1215,6 +1215,7 @@ local function prepare_events(events: any, options: StreamOptions): ({ any }?, s
 	end
 	local prepared = table.create(count)
 	local event_ids: { [string]: boolean } = {}
+	local producer_sequences: { [string]: number } = {}
 	local total_bytes = 0
 	for index = 1, count do
 		local item = events[index]
@@ -1225,11 +1226,29 @@ local function prepare_events(events: any, options: StreamOptions): ({ any }?, s
 			return nil, "event_id values must be unique within a batch"
 		end
 		event_ids[item.event_id] = true
+		local producer_id = item.producer_id
+		local producer_sequence = item.producer_sequence
+		if (producer_id == nil) ~= (producer_sequence == nil) then
+			return nil, "producer_id and producer_sequence must be supplied together"
+		end
+		if producer_id ~= nil then
+			if not valid_text(producer_id, MAX_PRODUCER_ID_BYTES) or not safe_integer(producer_sequence, 1) then
+				return nil, "producer_id must be 1..64 bytes and producer_sequence a positive safe integer"
+			end
+			local previous_sequence = producer_sequences[producer_id]
+			if previous_sequence ~= nil and producer_sequence ~= previous_sequence + 1 then
+				return nil, "producer sequences must be unique, contiguous, and ordered within a batch"
+			end
+			producer_sequences[producer_id] = producer_sequence
+		end
 		local payload, canonical, payload_bytes, payload_error = normalize_payload(item.payload, options.max_payload_bytes, true)
 		if payload_error ~= nil or payload == nil or canonical == nil or payload_bytes == nil then
 			return nil, payload_error or "event payload is invalid"
 		end
-		local entry_bytes = #item.event_id + payload_bytes + 64
+		local producer_bytes = if producer_id ~= nil
+			then #producer_id + #tostring(producer_sequence) + 24
+			else 0
+		local entry_bytes = #item.event_id + payload_bytes + 64 + producer_bytes
 		total_bytes += entry_bytes
 		prepared[index] = {
 			event_id = item.event_id,
@@ -1237,6 +1256,8 @@ local function prepare_events(events: any, options: StreamOptions): ({ any }?, s
 			payload_digest = SHA256.digest(canonical),
 			payload_bytes = entry_bytes,
 			created_at = 0,
+			producer_id = producer_id,
+			producer_sequence = producer_sequence,
 		}
 	end
 	if total_bytes > options.max_segment_bytes then
@@ -1245,29 +1266,96 @@ local function prepare_events(events: any, options: StreamOptions): ({ any }?, s
 	return prepared, nil
 end
 
+local function find_producer_event(segment: Segment, producer_id: string, producer_sequence: number): Message?
+	for _, message in ipairs(segment.messages) do
+		if message.producer_id == producer_id and message.producer_sequence == producer_sequence then
+			return message
+		end
+	end
+	return nil
+end
+
 local function resolve_batch(segment: Segment, prepared: { any }): (boolean, number, { any }?, string?)
 	local results = table.create(#prepared)
 	local found_count = 0
+	local producer_states = segment.producer_states
 	for index, event in ipairs(prepared) do
 		local existing = find_event(segment, event.event_id)
-		if existing == nil then
-			results[index] = nil
-		else
-			if existing.payload_digest ~= event.payload_digest then
-				return false, 0, nil, "event_id already exists with different content"
+		if existing == nil and event.producer_id ~= nil then
+			existing = find_producer_event(segment, event.producer_id, event.producer_sequence)
+		end
+		if existing ~= nil then
+			if existing.payload_digest ~= event.payload_digest
+				or (event.producer_id ~= nil and (
+					existing.producer_id ~= event.producer_id
+					or existing.producer_sequence ~= event.producer_sequence
+				))
+			then
+				return false, 0, nil, "event or producer sequence already exists with different content"
 			end
 			found_count += 1
 			results[index] = {
 				event_id = existing.event_id,
 				sequence = existing.sequence,
 				segment = segment.segment,
+				duplicate = true,
 			}
+		elseif event.producer_id ~= nil then
+			local state = producer_states[event.producer_id]
+			if state ~= nil and event.producer_sequence <= state.sequence then
+				if event.producer_sequence == state.sequence
+					and (state.event_id ~= event.event_id or state.payload_digest ~= event.payload_digest)
+				then
+					return false, 0, nil, "latest producer sequence already exists with different content"
+				end
+				found_count += 1
+				results[index] = {
+					event_id = event.event_id,
+					producer_id = event.producer_id,
+					producer_sequence = event.producer_sequence,
+					sequence = if event.producer_sequence == state.sequence then state.stream_sequence else nil,
+					duplicate = true,
+					historical = event.producer_sequence < state.sequence,
+				}
+			else
+				results[index] = nil
+			end
+		else
+			results[index] = nil
 		end
 	end
 	if found_count == #prepared then
 		return true, found_count, results, nil
 	end
 	return false, found_count, results, nil
+end
+
+local function resolve_head_producer_retry(head: Head, prepared: { any }): ({ any }?, string?)
+	local states = head.producer_states
+	local results = table.create(#prepared)
+	for index, event in ipairs(prepared) do
+		if event.producer_id == nil then
+			return nil, nil
+		end
+		local state = states[event.producer_id]
+		if state == nil or event.producer_sequence > state.sequence then
+			return nil, nil
+		end
+		if event.producer_sequence == state.sequence
+			and (state.event_id ~= event.event_id or state.payload_digest ~= event.payload_digest)
+		then
+			return nil, "latest producer sequence already exists with different content"
+		end
+		results[index] = {
+			event_id = event.event_id,
+			producer_id = event.producer_id,
+			producer_sequence = event.producer_sequence,
+			sequence = if event.producer_sequence == state.sequence then state.stream_sequence else nil,
+			duplicate = true,
+			historical = event.producer_sequence < state.sequence,
+		}
+	end
+	return results, nil
 end
 
 function Stream.PublishBatchAsync(self: StreamType, route_key: string, events: { any }): any
@@ -1291,6 +1379,20 @@ function Stream.PublishBatchAsync(self: StreamType, route_key: string, events: {
 		if head == nil then
 			return { code = "unknown", message = head_error, partition = partition }
 		end
+		local historical_results, historical_error = resolve_head_producer_retry(head, prepared)
+		if historical_error ~= nil then
+			return { code = "conflict", message = historical_error, partition = partition }
+		end
+		if historical_results ~= nil then
+			return {
+				code = "committed",
+				duplicate = true,
+				historical = true,
+				count = #prepared,
+				items = historical_results,
+				partition = partition,
+			}
+		end
 		if head.active_segment >= MAX_SAFE_INTEGER or head.next_sequence >= MAX_SAFE_INTEGER then
 			return { code = "capacity", message = "partition sequence space is exhausted", partition = partition }
 		end
@@ -1298,7 +1400,7 @@ function Stream.PublishBatchAsync(self: StreamType, route_key: string, events: {
 		local updated, update_error = datastore_update(self._store, key, function(raw)
 			local current: Segment
 			if raw == nil then
-				current = new_segment(self._name, partition, head.active_segment, head.next_sequence, now)
+				current = new_segment(self._name, partition, head.active_segment, head.next_sequence, now, head.producer_states)
 			else
 				local valid, validation_error = validate_segment(raw, self._name, partition, head.active_segment, self._options)
 				if valid == nil then
@@ -1309,14 +1411,50 @@ function Stream.PublishBatchAsync(self: StreamType, route_key: string, events: {
 			if current.sealed then
 				return nil
 			end
+			local current_producers = current.producer_states
 			local missing = table.create(#prepared)
 			local missing_count = 0
 			local missing_bytes = 0
+			local planned_sequences: { [string]: number } = {}
 			for _, event in ipairs(prepared) do
 				local existing = find_event(current, event.event_id)
 				if existing ~= nil then
-					if existing.payload_digest ~= event.payload_digest then
+					if existing.payload_digest ~= event.payload_digest
+						or (event.producer_id ~= nil and (
+							existing.producer_id ~= event.producer_id
+							or existing.producer_sequence ~= event.producer_sequence
+						))
+					then
 						error("EVENT_ID_CONFLICT", 0)
+					end
+				elseif event.producer_id ~= nil then
+					local producer_existing = find_producer_event(current, event.producer_id, event.producer_sequence)
+					if producer_existing ~= nil then
+						if producer_existing.event_id ~= event.event_id or producer_existing.payload_digest ~= event.payload_digest then
+							error("PRODUCER_SEQUENCE_CONFLICT", 0)
+						end
+					else
+						local last_sequence = planned_sequences[event.producer_id]
+						if last_sequence == nil then
+							local state = current_producers[event.producer_id]
+							last_sequence = if state == nil then 0 else state.sequence
+						end
+						if event.producer_sequence <= last_sequence then
+							local state = current_producers[event.producer_id]
+							if event.producer_sequence == last_sequence
+								and state ~= nil
+								and (state.event_id ~= event.event_id or state.payload_digest ~= event.payload_digest)
+							then
+								error("PRODUCER_SEQUENCE_CONFLICT", 0)
+							end
+						elseif event.producer_sequence ~= last_sequence + 1 then
+							error("PRODUCER_SEQUENCE_GAP", 0)
+						else
+							planned_sequences[event.producer_id] = event.producer_sequence
+							missing_count += 1
+							missing_bytes += event.payload_bytes
+							missing[missing_count] = event
+						end
 					end
 				else
 					missing_count += 1
@@ -1327,15 +1465,29 @@ function Stream.PublishBatchAsync(self: StreamType, route_key: string, events: {
 			if missing_count == 0 then
 				return nil
 			end
+			local producer_count = 0
+			for _ in pairs(current_producers) do
+				producer_count += 1
+			end
+			for producer_id in pairs(planned_sequences) do
+				if current_producers[producer_id] == nil then
+					producer_count += 1
+				end
+			end
+			if producer_count > MAX_PRODUCERS_PER_PARTITION then
+				error("PRODUCER_CAPACITY", 0)
+			end
 			if #current.messages + missing_count > self._options.max_segment_messages
 				or current.bytes + missing_bytes > self._options.max_segment_bytes
 			then
 				local sealed = table.clone(current)
+				sealed.producer_states = table.clone(current_producers)
 				sealed.sealed = true
-				sealed.integrity = segment_integrity(sealed.chain_integrity, true)
+				sealed.integrity = segment_integrity(sealed.chain_integrity, true, sealed.producer_states)
 				return sealed
 			end
 			local messages = table.clone(current.messages)
+			local producer_states = table.clone(current_producers)
 			local chain = current.chain_integrity
 			local sequence = current.last_sequence
 			for index = 1, missing_count do
@@ -1348,9 +1500,23 @@ function Stream.PublishBatchAsync(self: StreamType, route_key: string, events: {
 					payload_digest = event.payload_digest,
 					payload_bytes = event.payload_bytes,
 					created_at = event.created_at,
+					producer_id = event.producer_id,
+					producer_sequence = event.producer_sequence,
 				}
 				messages[#messages + 1] = message
 				chain = next_integrity(chain, message)
+				if event.producer_id ~= nil then
+					producer_states[event.producer_id] = {
+						sequence = event.producer_sequence,
+						stream_sequence = sequence,
+						event_id = event.event_id,
+						payload_digest = event.payload_digest,
+					}
+				end
+			end
+			local validated_producers, producer_error = validate_producer_states(producer_states)
+			if validated_producers == nil then
+				error("PRODUCER_CAPACITY: " .. tostring(producer_error), 0)
 			end
 			local new_bytes = current.bytes + missing_bytes
 			local sealed = #messages >= self._options.max_segment_messages
@@ -1366,11 +1532,22 @@ function Stream.PublishBatchAsync(self: StreamType, route_key: string, events: {
 				bytes = new_bytes,
 				sealed = sealed,
 				chain_integrity = chain,
-				integrity = segment_integrity(chain, sealed),
+				integrity = segment_integrity(chain, sealed, producer_states),
 				messages = messages,
+				producer_states = producer_states,
 			}
 		end)
 		if update_error ~= nil then
+			local transform_error = tostring(update_error)
+			if string.find(transform_error, "PRODUCER_CAPACITY", 1, true) ~= nil then
+				return { code = "capacity", message = "partition has reached its fixed producer identity limit", partition = partition }
+			elseif string.find(transform_error, "PRODUCER_SEQUENCE_GAP", 1, true) ~= nil then
+				return { code = "conflict", message = "producer_sequence must be exactly the next sequence for this producer", partition = partition }
+			elseif string.find(transform_error, "PRODUCER_SEQUENCE_CONFLICT", 1, true) ~= nil
+				or string.find(transform_error, "EVENT_ID_CONFLICT", 1, true) ~= nil
+			then
+				return { code = "conflict", message = "event or producer sequence already exists with different content", partition = partition }
+			end
 			local segment, read_error = self:_ReadSegment(partition, head.active_segment)
 			if segment ~= nil then
 				local all_found, _, results, conflict_error = resolve_batch(segment, prepared)
@@ -1489,8 +1666,47 @@ function Stream.PublishBatchAsync(self: StreamType, route_key: string, events: {
 	return { code = "retryable", message = "partition rollover retry limit reached", partition = partition }
 end
 
-function Stream.PublishAsync(self: StreamType, route_key: string, event_id: string, payload: any): any
-	local result = self:PublishBatchAsync(route_key, { { event_id = event_id, payload = payload } })
+function Stream.GetProducerSequenceAsync(self: StreamType, route_key: string, producer_id: string): any
+	if not valid_text(route_key, MAX_ROUTE_KEY_BYTES) or not valid_text(producer_id, MAX_PRODUCER_ID_BYTES) then
+		return { code = "invalid", message = "route_key must be 1..128 bytes and producer_id 1..64 bytes" }
+	end
+	local partition = self:GetPartition(route_key)
+	local head, head_error = self:_RefreshHead(partition)
+	if head == nil then
+		return { code = "unknown", message = head_error, partition = partition }
+	end
+	local segment, segment_error = self:_ReadSegment(partition, head.active_segment)
+	if segment_error ~= nil then
+		return { code = "unknown", message = segment_error, partition = partition }
+	end
+	local states = if segment ~= nil then segment.producer_states else head.producer_states
+	local state = states[producer_id]
+	local sequence = if state == nil then 0 else state.sequence
+	return {
+		code = "ok",
+		partition = partition,
+		sequence = sequence,
+		next_sequence = sequence + 1,
+		observed_stream_sequence = if state == nil then nil else state.stream_sequence,
+	}
+end
+
+function Stream.PublishAsync(
+	self: StreamType,
+	route_key: string,
+	event_id: string,
+	payload: any,
+	producer_id: string?,
+	producer_sequence: number?
+): any
+	local result = self:PublishBatchAsync(route_key, {
+		{
+			event_id = event_id,
+			payload = payload,
+			producer_id = producer_id,
+			producer_sequence = producer_sequence,
+		},
+	})
 	if result.code ~= "committed" then
 		return result
 	end
@@ -1498,6 +1714,7 @@ function Stream.PublishAsync(self: StreamType, route_key: string, event_id: stri
 	return {
 		code = "committed",
 		duplicate = result.duplicate,
+		historical = result.historical,
 		reconciled = result.reconciled,
 		partition = result.partition,
 		segment = first and first.segment or result.segment,
@@ -2586,6 +2803,8 @@ function Stream.ConsumeBatchAsync(self: StreamType, claim: any, handler: (any, a
 			event_id = row.event_id,
 			payload = row.payload,
 			created_at = row.created_at,
+			producer_id = row.producer_id,
+			producer_sequence = row.producer_sequence,
 		})
 	end
 	local next_segment = expected_segment
