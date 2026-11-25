@@ -57,6 +57,8 @@ function FakeDataStore.new(options)
 		active_requests = 0,
 		max_active_requests = 0,
 		read_failures = 0,
+		remove_failures = 0,
+		remove_calls = 0,
 		update_faults = {},
 		next_replay_count = 0,
 		cache_updates_enabled = true,
@@ -213,6 +215,31 @@ function FakeDataStore.new(options)
 			return result, info
 		end
 
+		function Store:RemoveAsync(key)
+			assert(not state.inside_transform, "DataStore removal must not run inside UpdateAsync transforms")
+			state.remove_calls += 1
+			enter_request()
+			local call_ok, result = pcall(function()
+				if state.delay_seconds > 0 then
+					task.wait(state.delay_seconds)
+				end
+				if state.remove_failures > 0 then
+					state.remove_failures -= 1
+					error("injected fake DataStore removal failure", 0)
+				end
+				local identity = get_record_key(name, scope, key)
+				local previous = state.records[identity]
+				state.records[identity] = nil
+				cache[key] = nil
+				return if previous == nil then nil else clone(previous.Value)
+			end)
+			leave_request()
+			if not call_ok then
+				error(result, 0)
+			end
+			return result
+		end
+
 		function Store:GetVersionAsync(key, version)
 			assert(not state.inside_transform, "version reads must not run inside UpdateAsync transforms")
 			local history = state.versions[get_record_key(name, scope, key)] or {}
@@ -304,6 +331,11 @@ function FakeDataStore.new(options)
 		table.insert(history, clone(entry))
 	end
 
+	function control:fail_next_remove(count)
+		assert(type(count) == "number" and count >= 0 and math.floor(count) == count)
+		state.remove_failures = count
+	end
+
 	function control:fail_next_get(count)
 		assert(type(count) == "number" and count >= 0 and math.floor(count) == count)
 		state.read_failures = count
@@ -332,6 +364,7 @@ function FakeDataStore.new(options)
 		return {
 			get_calls = state.get_calls,
 			update_calls = state.update_calls,
+			remove_calls = state.remove_calls,
 			fresh_get_calls = state.fresh_get_calls,
 			cache_get_calls = state.cache_get_calls,
 			transform_calls = state.transform_calls,

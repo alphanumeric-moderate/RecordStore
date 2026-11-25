@@ -111,6 +111,8 @@ jobs:
             --command-name scheduler-weighted-128 "lune run bench/advanced_scheduler_weighted.bench.luau" \
             --command-name scheduler-deadline-128 "lune run bench/advanced_scheduler_deadline.bench.luau" \
             --command-name scheduler-drr-128 "lune run bench/advanced_scheduler_drr.bench.luau" \
+            --command-name durable-stream-single-publish "lune run bench/durable_stream_publish_single.bench.luau" \
+            --command-name durable-stream-batch-publish "lune run bench/durable_stream_publish_batch.bench.luau" \
             --command-name lease-renewal-snapshot "lune run bench/lease_renewal_stats.bench.luau" \
             --command-name lease-renewal-advice "lune run bench/lease_renewal_advice.bench.luau" \
             --command-name scheduler-disabled "lune run bench/scheduler_disabled_overhead.bench.luau" \
