@@ -131,10 +131,11 @@ status, message = record:Reconcile({
 	Settings = { Music = ignored_sparse_default },
 	Inventory = { IgnoredDictionaryEntry = ignored_sparse_default },
 })
-assert(status == "success", message)
-assert(validator_calls == 6, "ignored Reconcile defaults did not retain one validation pass")
+assert(status == "validation" and string.find(message or "", "dense arrays", 1, true) ~= nil,
+	"Reconcile stopped validating ignored template subtrees")
+assert(validator_calls == 5, "custom validator ran for an invalid ignored template subtree")
 assert(record.Data.Settings.Music == true and record.Data.Inventory[1].Count == 3,
-	"Reconcile changed existing scalar values or mixed table key kinds")
+	"invalid ignored template defaults changed canonical data")
 
 local custom_iterator_template = setmetatable({}, {
 	__iter = function()
