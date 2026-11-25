@@ -347,4 +347,39 @@ local conflicting_batch = batch_stream:PublishBatchAsync("tenant-b", {
 })
 assert(conflicting_batch.code == "conflict", "batch event identity conflict was not rejected")
 
+
+local idempotency_client, idempotency_client_error = DurableStreams.new(store, {
+	max_segment_messages = 1,
+	max_segment_bytes = 4096,
+	max_payload_bytes = 1024,
+	max_batch_messages = 1,
+	max_retained_segments = 8,
+	min_segment_age_seconds = 0,
+	max_segment_age_seconds = 1,
+	now = function()
+		return now
+	end,
+})
+assert(idempotency_client ~= nil, idempotency_client_error)
+local idempotency_stream, idempotency_stream_error = idempotency_client:OpenStreamAsync("application.permanent-idempotency", 1)
+assert(idempotency_stream ~= nil, idempotency_stream_error)
+local idempotency_partition = idempotency_stream:GetPartition("producer-route")
+local permanent_first = idempotency_stream:PublishBatchAsync("producer-route", {
+	{ event_id = "stable-event-1", producer_id = "stable-producer", producer_sequence = 1, payload = { value = 1 } },
+})
+assert(permanent_first.code == "committed", "first producer sequence failed")
+local permanent_second = idempotency_stream:PublishBatchAsync("producer-route", {
+	{ event_id = "stable-event-2", producer_id = "stable-producer", producer_sequence = 2, payload = { value = 2 } },
+})
+assert(permanent_second.code == "committed", "second producer sequence failed")
+now += 2
+local permanent_prune = idempotency_stream:PruneAsync(idempotency_partition, 4)
+assert(permanent_prune.code == "pruned" and permanent_prune.removed >= 1,
+	"producer idempotency fixture did not delete the original event segment")
+local permanent_retry = idempotency_stream:PublishBatchAsync("producer-route", {
+	{ event_id = "stable-event-1", producer_id = "stable-producer", producer_sequence = 1, payload = { value = 1 } },
+})
+assert(permanent_retry.code == "committed" and permanent_retry.duplicate == true,
+	"producer sequence retry appended again after its original segment was deleted")
+
 print("[durable-streams] partition append, rollover, integrity, consumer fencing, batch checkpoint, replay and recovery passed")
