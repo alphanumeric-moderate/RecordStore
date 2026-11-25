@@ -9,10 +9,13 @@ local validator_calls = 0
 local mutate_validator_input = false
 local function validator(value)
 	validator_calls += 1
-	if mutate_validator_input and type(value) == "table"
-		and type(value.Inventory) == "table" and type(value.Inventory[1]) == "table"
-	then
-		value.Inventory[1].Count = 777777
+	if mutate_validator_input and type(value) == "table" then
+		if type(value.Inventory) == "table" and type(value.Inventory[1]) == "table" then
+			value.Inventory[1].Count = 777777
+		end
+		if type(value.NewDefaults) == "table" and type(value.NewDefaults.Nested) == "table" then
+			value.NewDefaults.Nested.Value = 999
+		end
 	end
 	return true, nil
 end
@@ -104,6 +107,8 @@ assert(record.Data.NewDefaults.Nested.Value == 7
 	"Reconcile did not add missing defaults recursively")
 assert(record.Data.Inventory[1].Count == 3,
 	"Reconcile custom-validator mutation escaped into canonical profile data")
+assert(record.Data.NewDefaults.Nested.Value == 7,
+	"Reconcile custom-validator mutation escaped into canonical template defaults")
 reconcile_template.NewDefaults.Nested.Value = 999
 reconcile_template.NewDefaults.List[1] = "mutated"
 reconcile_template.Inventory[1].ReconcileMarker = "mutated"
@@ -215,6 +220,8 @@ local reopened, reopen_message = record:Open({
 assert(reopened == "loaded", reopen_message)
 assert(record.Data.Inventory[1].Count == 3,
 	"mutating a retained pre-close reference changed the persisted profile after reopen")
+assert(record.Data.NewDefaults.Nested.Value == 7,
+	"Reconcile validator mutation changed the persisted defaults after reopen")
 
 local closed_again, close_again_message = record:Close()
 assert(closed_again == "closed" or closed_again == "fenced", close_again_message)
