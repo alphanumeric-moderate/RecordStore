@@ -14168,18 +14168,9 @@ local function reconcile(self: Record, template: JsonValue): (ResultCode, string
 	): (JsonValue, boolean)
 		if type(target) ~= "table" then return target, false end
 		local target_table: any = target
-		if type(key) == "string" then
-			for child_key in target_table do
-				if type(child_key) ~= "string" then return target, false end
-			end
-			target_table[key] = value
-			return target, true
-		end
-		for child_key in target_table do
-			if type(child_key) ~= "number" or not math.isfinite(child_key)
-				or math.floor(child_key) ~= child_key or child_key < 1 then
-				return target, false
-			end
+		local existing_key = next(target_table)
+		if existing_key ~= nil and type(existing_key) ~= type(key) then
+			return target, false
 		end
 		target_table[key] = value
 		return target, true
