@@ -7724,11 +7724,15 @@ local function resolve_operation_deadline(operation_deadline: number?): (number?
 end
 
 local function run_validator(validator: Validator, value: JsonValue): (boolean, boolean, string?)
+	local copy_ok, validator_value = pcall(copy_value, value)
+	if not copy_ok or validator_value == nil then
+		return false, false, "validator input could not be isolated"
+	end
 	local accepted = false
 	local message: string? = nil
 	local callback_error: string? = nil
 	local thread = coroutine.create(function()
-		local ok, callback_accepted, callback_message = pcall(validator, value)
+		local ok, callback_accepted, callback_message = pcall(validator, validator_value)
 		if not ok then
 			callback_error = tostring(callback_accepted)
 			return
