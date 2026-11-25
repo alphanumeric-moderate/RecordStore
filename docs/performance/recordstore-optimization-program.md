@@ -20,7 +20,8 @@ This PR is a performance refactor. The existing V2 service surface on `main` is 
 - Fuse direct mutable `Record.Data` defensive copying with shape accounting, skip duplicate shape/non-finite traversals, and reuse the detached candidate for the private change-event baseline. The custom validator still receives its own isolated copy.
 - Transfer ownership of newly parsed detached envelopes into public read snapshots and private LastSaved/baseline storage. Public `Record.Data` and `GetLastSaved()` results remain independently owned.
 - In the durable UpdateAsync transform, fuse the detached stored-value copy with shape accounting, then run exact JSON serialization/byte-limit validation without a second shape traversal. Non-finite raw storage values remain rejected.
-- During reconciliation, rely on the already-validated detached target's table-shape invariant and inspect one existing key to reject map/array key-kind mixing, instead of rescanning every target key for each inserted default. Existing full profile/template snapshots and configured validation remain intact.
+- During reconciliation, rely on the already-validated detached target's table-shape invariant and inspect one existing key to reject map/array key-kind mixing, instead of rescanning every target key for each inserted default.
+- For plain-table templates, inspect only subtrees the merge can insert or recurse into; avoid a detached template snapshot and clone only inserted default subtrees. A no-op reconciliation validates the canonical profile without cloning or republishing it. Templates with custom iteration metamethods retain the defensive snapshot path. Configured validation and exact serialized-size checks remain authoritative.
 
 ### 2. Copy-on-write Patch path
 
