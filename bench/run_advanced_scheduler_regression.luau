@@ -1544,6 +1544,7 @@ enqueue(terminal_before_inheritance, {
 	id = "terminal-order-prerequisite",
 	owner_id = "terminal-order-owner",
 	lane = "background",
+	available_at_ms = now_ms + 100,
 })
 enqueue(terminal_before_inheritance, {
 	id = "terminal-order-dependent",
@@ -1564,6 +1565,7 @@ assert(terminal_first ~= nil and terminal_first.id == "terminal-order-expired"
 	"terminal queue outcome did not retain reverse-queue processing order")
 assert(terminal_before_inheritance.known["terminal-order-prerequisite"].inherited_lane == nil,
 	"priority inheritance ran before a higher-priority terminal queue outcome was returned")
+now_ms += 100
 local inheritance_after_terminal, inheritance_after_terminal_status = terminal_before_inheritance:TakeNext()
 assert(inheritance_after_terminal ~= nil and inheritance_after_terminal.id == "terminal-order-prerequisite"
 	and inheritance_after_terminal_status == "success"
