@@ -159,6 +159,7 @@ do
 		return {
 			eligible = {},
 			eligible_batch_counts = {},
+			priority_inheritance_indices = {},
 			service_time_estimates = {},
 			dimensions = {},
 			batch_dimensions = {},
@@ -1186,7 +1187,12 @@ do
 				.. component(scheduled_lane(item, instant))
 				.. component(item.service_class or "best_effort")
 		end
-		local function choose_index(self: EmbeddedSchedulerDynamicRecord, algorithm: any, renewal_mode: any): (number?, boolean)
+		local function choose_index(
+			self: EmbeddedSchedulerDynamicRecord,
+			algorithm: any,
+			renewal_mode: any,
+			priority_inheritance_prepared: boolean?
+		): (number?, boolean)
 			local fifo_fast_path = algorithm == "fifo" and renewal_mode ~= true and renewal_mode ~= "critical"
 			local drr_candidate_mode = algorithm ~= "fifo" and algorithm ~= "weighted" and algorithm ~= "deadline"
 				and renewal_mode ~= true and renewal_mode ~= "critical"
@@ -1226,10 +1232,12 @@ do
 			local fifo_best_non_high_index: number? = nil
 			local fifo_best_non_high_enqueued_at = math.huge
 			local fifo_has_non_high = false
-			for index = 1, self.queue_tail do
-				local dependent = self.queue[index]
-				if dependent ~= nil and dependent.lane == "high" and #(dependent.dependencies or {}) > 0 then
-					inherit_ready_prerequisites(self, dependent, now)
+			if priority_inheritance_prepared ~= true then
+				for index = 1, self.queue_tail do
+					local dependent = self.queue[index]
+					if dependent ~= nil and dependent.lane == "high" and #(dependent.dependencies or {}) > 0 then
+						inherit_ready_prerequisites(self, dependent, now)
+					end
 				end
 			end
 			for index = 1, self.queue_tail do
@@ -1789,6 +1797,8 @@ do
 		end
 		function governor:TakeNext(renewal_mode)
 			local now = now_ms()
+			local priority_indices = self.selection_scratch.priority_inheritance_indices
+			table.clear(priority_indices)
 			for index = self.queue_tail, 1, -1 do
 				local item = self.queue[index]
 				if item ~= nil then
@@ -1859,10 +1869,22 @@ do
 						clear_admission_preflight(item)
 						return item, "admission_rejected"
 					end
+					if item.lane == "high" and #(item.dependencies or {}) > 0 then
+						priority_indices[#priority_indices + 1] = index
+					end
 				end
 			end
 				end
-			local index, urgent_fallback = choose_index(self, self.policy.algorithm or "drr", renewal_mode)
+			local inheritance_now = now_ms()
+			for position = #priority_indices, 1, -1 do
+				local dependent = self.queue[priority_indices[position]]
+				if dependent ~= nil and dependent.lane == "high" and #(dependent.dependencies or {}) > 0 then
+					inherit_ready_prerequisites(self, dependent, inheritance_now)
+				end
+			end
+			local index, urgent_fallback = choose_index(
+				self, self.policy.algorithm or "drr", renewal_mode, true
+			)
 			if not index then return nil, "empty" end
 			if self.policy.shadow_enabled and self.policy.shadow_sample_rate > 0 then
 				local interval = math.max(1, math.floor(1 / self.policy.shadow_sample_rate))
