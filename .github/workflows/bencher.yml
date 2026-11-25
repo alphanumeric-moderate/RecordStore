@@ -119,6 +119,7 @@ jobs:
             --command-name large-profile-update-save "lune run bench/large_profile.bench.luau" \
             --command-name update-validation-pipeline "lune run bench/update_validation_pipeline.bench.luau" \
             --command-name patch-validation-pipeline "lune run bench/patch_update_pipeline.bench.luau" \
+            --command-name reconcile-pipeline "lune run bench/reconcile_pipeline.bench.luau" \
             --command-name wide-profile-change-diff "lune run bench/change_diff.bench.luau" \
             --command-name legacy-migration-history "lune run bench/legacy_migration.bench.luau" \
             --command-name read-version-history "lune run bench/read_history.bench.luau" \
