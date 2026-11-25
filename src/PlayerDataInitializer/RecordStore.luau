@@ -14162,7 +14162,7 @@ local function reconcile(self: Record, template: JsonValue): (ResultCode, string
 		local defaults_missing = false
 		local custom_iterator = false
 
-		local function visit(target: unknown, current: unknown, depth: number): boolean
+		local function visit(target: unknown, current: unknown, depth: number, track_defaults: boolean): boolean
 			if depth > 64 then
 				return false
 			end
@@ -14189,7 +14189,7 @@ local function reconcile(self: Record, template: JsonValue): (ResultCode, string
 			end
 			active_tables[table_value] = true
 
-			local target_table: any = if type(target) == "table" then target else nil
+			local target_table: any = if track_defaults and type(target) == "table" then target else nil
 			local first_target_key = if target_table ~= nil then next(target_table) else nil
 			local string_keys = 0
 			local numeric_keys = 0
@@ -14229,7 +14229,7 @@ local function reconcile(self: Record, template: JsonValue): (ResultCode, string
 					end
 				end
 
-				if inspect_child and not visit(target_child, child, depth + 1) then
+				if not visit(target_child, child, depth + 1, inspect_child) then
 					active_tables[table_value] = nil
 					return false
 				end
@@ -14252,7 +14252,7 @@ local function reconcile(self: Record, template: JsonValue): (ResultCode, string
 			return true
 		end
 
-		return visit(target_value, template_value, 1), defaults_missing, custom_iterator
+		return visit(target_value, template_value, 1, true), defaults_missing, custom_iterator
 	end
 
 	local template_valid, defaults_missing, custom_iterator = inspect_template(state.data, template)
