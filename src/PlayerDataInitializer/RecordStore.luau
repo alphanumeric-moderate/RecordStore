@@ -14215,18 +14215,21 @@ local function reconcile(self: Record, template: JsonValue): (ResultCode, string
 				end
 
 				local target_child: unknown = nil
+				local inspect_child = false
 				if target_table ~= nil then
 					local existing = target_table[key]
 					if existing == nil then
 						if first_target_key == nil or type(first_target_key) == key_type then
 							defaults_missing = true
+							inspect_child = true
 						end
 					elseif type(existing) == "table" and type(child) == "table" then
 						target_child = existing
+						inspect_child = true
 					end
 				end
 
-				if not visit(target_child, child, depth + 1) then
+				if inspect_child and not visit(target_child, child, depth + 1) then
 					active_tables[table_value] = nil
 					return false
 				end
