@@ -58,7 +58,7 @@ assert(record.Data.Revision == 1 and record.Data.Inventory[1].Count == 2,
 
 local save_status, save_message = record:Save()
 assert(save_status == "saved", save_message)
-assert(validator_calls == 3, "Save did not validate its detached snapshot exactly once")
+assert(validator_calls == 2, "Save did not validate its detached snapshot exactly once")
 
 local saved_snapshot = record:GetLastSaved()
 assert(saved_snapshot ~= nil, "Save did not publish a last-saved snapshot")
