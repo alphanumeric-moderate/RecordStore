@@ -1996,9 +1996,9 @@ do
 		end
 		remember_terminal = function(self, id, code)
 			self.failed[id] = code
-			self.failed_order_tail += 1
+			self.failed_order_tail = (self.failed_order_tail :: number) + 1
 			self.failed_order[self.failed_order_tail] = id
-			self.failed_order_count += 1
+			self.failed_order_count = (self.failed_order_count :: number) + 1
 			prune_terminal_history(self)
 		end
 		local function make_shadow_state(self: EmbeddedSchedulerDynamicRecord): EmbeddedSchedulerDynamicRecord
@@ -2090,9 +2090,9 @@ do
 			then
 				self.completed[id] = true
 				self.failed[id] = nil
-				self.completed_order_tail += 1
+				self.completed_order_tail = (self.completed_order_tail :: number) + 1
 				self.completed_order[self.completed_order_tail] = id
-				self.completed_order_count += 1
+				self.completed_order_count = (self.completed_order_count :: number) + 1
 			else
 				self.completed[id] = nil
 				remember_terminal(self, id, tostring(code or "unknown"))
@@ -9533,14 +9533,14 @@ local function parse_envelope(raw: unknown): (Envelope?, string?, boolean)
 	if implementation_version == nil then
 		local legacy_marker = get_string_field(raw, "__recordStore")
 		if legacy_marker == "RecordStore" then
-			local legacy_format = get_string_field(raw, "format")
+			local legacy_v1_format = get_string_field(raw, "format")
 			local legacy_revision = get_string_field(raw, "revision")
 			local legacy_fence = get_string_field(raw, "fence")
 			local legacy_commit_id = get_string_field(raw, "commitId")
-			local legacy_deleted = get_string_field(raw, "deleted")
+			local legacy_v1_deleted = get_string_field(raw, "deleted")
 			local legacy_schema_version = get_string_field(raw, "version")
 
-			if legacy_format ~= 1
+			if legacy_v1_format ~= 1
 				or type(legacy_revision) ~= "number"
 				or not math.isfinite(legacy_revision)
 				or math.floor(legacy_revision) ~= legacy_revision
@@ -9549,7 +9549,7 @@ local function parse_envelope(raw: unknown): (Envelope?, string?, boolean)
 				or legacy_fence == ""
 				or type(legacy_commit_id) ~= "string"
 				or legacy_commit_id == ""
-				or type(legacy_deleted) ~= "boolean"
+				or type(legacy_v1_deleted) ~= "boolean"
 				or type(legacy_schema_version) ~= "number"
 				or not math.isfinite(legacy_schema_version)
 				or math.floor(legacy_schema_version) ~= legacy_schema_version
@@ -9558,7 +9558,7 @@ local function parse_envelope(raw: unknown): (Envelope?, string?, boolean)
 				return nil, "malformed legacy RecordStore envelope", false
 			end
 
-			if legacy_deleted then
+			if legacy_v1_deleted then
 				if raw_data ~= nil then
 					return nil, "deleted legacy RecordStore envelope unexpectedly contains data", false
 				end
@@ -14565,19 +14565,19 @@ process_queue_v2 = function(self: Record, state: InternalState, max_messages: nu
 				end
 				if state.options.on_queue_message_async ~= nil then
 					local accepted, message = state.options.on_queue_message_async(
-					message_value.Type, payload :: JsonValue?, message_value.Attempts, message_value.Id,
-					if type(message_value.SenderJobId) == "string" then message_value.SenderJobId else "",
-					message_value.CreatedAt, context
-				)
+						message_value.Type, payload :: JsonValue?, message_value.Attempts, message_value.Id,
+						if type(message_value.SenderJobId) == "string" then message_value.SenderJobId else "",
+						message_value.CreatedAt, context
+					)
 				return accepted, message or (if accepted then "" else "queue handler rejected the message")
 				end
 				local handler = state.options.on_queue_message
 				if handler == nil then return false, "on_queue_message is not configured" end
 				local accepted, message = handler(
-					message_value.Type, payload :: JsonValue?, message_value.Attempts, message_value.Id,
-					if type(message_value.SenderJobId) == "string" then message_value.SenderJobId else "",
-					message_value.CreatedAt
-				)
+						message_value.Type, payload :: JsonValue?, message_value.Attempts, message_value.Id,
+						if type(message_value.SenderJobId) == "string" then message_value.SenderJobId else "",
+						message_value.CreatedAt
+					)
 				return accepted, message or (if accepted then "" else "queue handler rejected the message")
 			end)
 			if type(result) ~= "table" or type(result.code) ~= "string" then
