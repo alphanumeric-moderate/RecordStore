@@ -276,7 +276,7 @@ do
 				priority_inheritance_max_ms = 1000, retry_jitter_percent = 20,
 				algorithm = "drr", shadow_algorithm = "weighted", shadow_enabled = false, shadow_sample_rate = 0,
 			},
-			in_flight = 0, by_class = {}, active_tickets = {}, queue = {}, due = {}, due_heap = {}, queued_due_heap = {},
+			in_flight = 0, by_class = {}, active_tickets = {}, queue = {}, queue_count = 0, queue_tail = 0, queue_positions = {}, due = {}, due_heap = {}, queued_due_heap = {},
 			wake_heap = {}, wake_sequence = 0,
 			read_units_in_flight = 0, write_units_in_flight = 0,
 			estimated_bytes_in_flight = 0, handler_slots_in_flight = 0,
@@ -909,15 +909,18 @@ do
 		rebuild_queue_wake_heap = function(self)
 			self.wake_heap = {}
 			local now = now_ms()
-			for _, item in ipairs(self.queue) do
-				if finite(item.due_at_ms) and item.due_at_ms > now then
-					push_wake_event(self, item, "due", item.due_at_ms)
-				end
-				if finite(item.expires_at_ms) and item.expires_at_ms > now then
-					push_wake_event(self, item, "expiry", item.expires_at_ms)
-				end
-				if finite(item.admission_blocked_until_ms) and item.admission_blocked_until_ms > now then
-					push_wake_event(self, item, "admission", item.admission_blocked_until_ms)
+			for index = 1, self.queue_tail do
+				local item = self.queue[index]
+				if item ~= nil then
+					if finite(item.due_at_ms) and item.due_at_ms > now then
+						push_wake_event(self, item, "due", item.due_at_ms)
+					end
+					if finite(item.expires_at_ms) and item.expires_at_ms > now then
+						push_wake_event(self, item, "expiry", item.expires_at_ms)
+					end
+					if finite(item.admission_blocked_until_ms) and item.admission_blocked_until_ms > now then
+						push_wake_event(self, item, "admission", item.admission_blocked_until_ms)
+					end
 				end
 			end
 		end
@@ -1175,12 +1178,15 @@ do
 			local fifo_best_non_high_index: number? = nil
 			local fifo_best_non_high_enqueued_at = math.huge
 			local fifo_has_non_high = false
-			for _, dependent in ipairs(self.queue) do
-				if dependent.lane == "high" and #(dependent.dependencies or {}) > 0 then
+			for index = 1, self.queue_tail do
+				local dependent = self.queue[index]
+				if dependent ~= nil and dependent.lane == "high" and #(dependent.dependencies or {}) > 0 then
 					inherit_ready_prerequisites(self, dependent, now)
 				end
 			end
-			for index, item in ipairs(self.queue) do
+			for index = 1, self.queue_tail do
+				local item = self.queue[index]
+				if item ~= nil then
 				local ready = (item.due_at_ms or 0) <= now
 					and (item.available_at_ms == nil or item.available_at_ms <= now)
 					and dependencies_ready(self, item)
@@ -1284,6 +1290,7 @@ do
 							push_wake_event(self, item, "admission", item.admission_blocked_until_ms)
 						end
 					end
+				end
 				end
 			end
 			if fifo_fast_path then
@@ -1433,6 +1440,58 @@ do
 		end
 		local index_retry_item: (EmbeddedSchedulerDynamicRecord, EmbeddedSchedulerDynamicRecord) -> ()
 
+		local function compact_queue_storage(self: EmbeddedSchedulerDynamicRecord)
+			local queue = self.queue
+			local positions = self.queue_positions
+			table.clear(positions)
+			local write_index = 0
+			for read_index = 1, self.queue_tail do
+				local item = queue[read_index]
+				if item ~= nil then
+					write_index += 1
+					if write_index ~= read_index then
+						queue[write_index] = item
+					end
+					positions[item.id] = write_index
+				end
+			end
+			for index = write_index + 1, self.queue_tail do
+				queue[index] = nil
+			end
+			self.queue_tail = write_index
+		end
+		local function maybe_compact_queue_storage(self: EmbeddedSchedulerDynamicRecord)
+			if self.queue_count == 0 then
+				table.clear(self.queue)
+				table.clear(self.queue_positions)
+				self.queue_tail = 0
+				return
+			end
+			if self.queue_tail > math.max(self.policy.queue_capacity, self.queue_count * 2) then
+				compact_queue_storage(self)
+			end
+		end
+		local function append_queued_item(self: EmbeddedSchedulerDynamicRecord, item: EmbeddedSchedulerDynamicRecord)
+			self.queue_tail += 1
+			self.queue[self.queue_tail] = item
+			self.queue_count += 1
+			self.queue_positions[item.id] = self.queue_tail
+		end
+		local function remove_queued_item(
+			self: EmbeddedSchedulerDynamicRecord,
+			index: number,
+			expected_item: EmbeddedSchedulerDynamicRecord?
+		): EmbeddedSchedulerDynamicRecord?
+			local item = self.queue[index]
+			if item == nil or (expected_item ~= nil and item ~= expected_item) then
+				return nil
+			end
+			self.queue[index] = nil
+			self.queue_positions[item.id] = nil
+			self.queue_count -= 1
+			maybe_compact_queue_storage(self)
+			return item
+		end
 		function governor:Enqueue(item, protect_critical_queue)
 			if protect_critical_queue ~= nil and type(protect_critical_queue) ~= "boolean" then
 				return { code = "invalid", message = "protect_critical_queue must be boolean" }
@@ -1501,13 +1560,13 @@ do
 			then return { code = "invalid", message = "cost must be an integer within max_item_cost" } end
 			value.lane, value.original_lane = lane, lane
 			local queue_capacity = self.policy.queue_capacity
-			if #self.queue >= queue_capacity then
+			if self.queue_count >= queue_capacity then
 				self.stats.rejected += 1
 				return { code = "capacity", message = "local queue full; no accepted work is evicted" }
 			end
 			if protect_critical_queue == true and not uses_critical_reserve(value) then
 				local noncritical_capacity = noncritical_queue_capacity(queue_capacity)
-				if #self.queue >= noncritical_capacity then
+				if self.queue_count >= noncritical_capacity then
 					self.stats.rejected += 1
 					return {
 						code = "capacity",
@@ -1548,17 +1607,22 @@ do
 			value.queued = true
 			self.known[value.id] = value
 			retain_dependencies(self, value)
-			table.insert(self.queue, value)
+			append_queued_item(self, value)
 			index_retry_item(self, value)
 			heap_push(self.queued_due_heap, { id = value.id, due_at_ms = value.due_at_ms, item = value })
 			index_item_wake_events(self, value)
 			inherit_ready_prerequisites(self, value, now_ms())
 			if #self.queued_due_heap > self.policy.queue_capacity * 2 then
 				local rebuilt = {}
-				for _, queued in ipairs(self.queue) do heap_push(rebuilt, { id = queued.id, due_at_ms = queued.due_at_ms, item = queued }) end
+				for index = 1, self.queue_tail do
+					local queued = self.queue[index]
+					if queued ~= nil then
+						heap_push(rebuilt, { id = queued.id, due_at_ms = queued.due_at_ms, item = queued })
+					end
+				end
 				self.queued_due_heap = rebuilt
 			end
-			return { code = "accepted", count = #self.queue }
+			return { code = "accepted", count = self.queue_count }
 		end
 		local function retry_heap_precedes(left: EmbeddedSchedulerDynamicRecord, right: EmbeddedSchedulerDynamicRecord): boolean
 			if left.due_at_ms ~= right.due_at_ms then return left.due_at_ms > right.due_at_ms end
@@ -1658,15 +1722,11 @@ do
 			if not valid_text(id, 128) then return nil, "invalid id" end
 			local item = self.known[id]
 			if item == nil or item.queued ~= true then return nil, "scheduled item is not queued" end
-			local queue_index
-			for index, queued in ipairs(self.queue) do
-				if queued == item then
-					queue_index = index
-					break
-				end
+			local queue_index = self.queue_positions[id]
+			if queue_index == nil or self.queue[queue_index] ~= item then
+				return nil, "queued item was not present in the queue"
 			end
-			if queue_index == nil then return nil, "queued item was not present in the queue" end
-			table.remove(self.queue, queue_index)
+			remove_queued_item(self, queue_index, item)
 			item.queued = false
 			unindex_retry_item(self, item)
 			item.terminal_result = {
@@ -1679,8 +1739,9 @@ do
 		end
 		function governor:TakeNext(renewal_mode)
 			local now = now_ms()
-			for index = #self.queue, 1, -1 do
+			for index = self.queue_tail, 1, -1 do
 				local item = self.queue[index]
+				if item ~= nil then
 				local failed_dependency
 				for _, dependency in ipairs(item.dependencies or {}) do
 					if self.failed[dependency] ~= nil then
@@ -1689,7 +1750,7 @@ do
 					end
 				end
 				if failed_dependency ~= nil then
-					table.remove(self.queue, index)
+					remove_queued_item(self, index, item)
 					item.queued = false
 					unindex_retry_item(self, item)
 					local dependency_code = self.failed[failed_dependency]
@@ -1703,7 +1764,7 @@ do
 					clear_admission_preflight(item)
 					return item, "dependency_failed"
 				elseif item.expires_at_ms and item.expires_at_ms <= now then
-					table.remove(self.queue, index)
+					remove_queued_item(self, index, item)
 					item.queued = false
 					unindex_retry_item(self, item)
 					self.stats.scheduled_expired += 1
@@ -1745,7 +1806,7 @@ do
 					end
 					if type(admission_terminal_result) == "table" then
 						self.stats.rejected += 1
-						table.remove(self.queue, index)
+						remove_queued_item(self, index, item)
 						item.queued = false
 						unindex_retry_item(self, item)
 						item.terminal_result = admission_terminal_result
@@ -1755,6 +1816,7 @@ do
 					end
 				end
 			end
+				end
 			local index, urgent_fallback = choose_index(self, self.policy.algorithm or "drr", renewal_mode)
 			if not index then return nil, "empty" end
 			if self.policy.shadow_enabled and self.policy.shadow_sample_rate > 0 then
@@ -1764,7 +1826,7 @@ do
 			local selected_item = self.queue[index]
 			if selected_item == nil then return nil, "empty" end
 			local selected_count = selected_batch_size(self, selected_item, self.selection_scratch.batch_dimensions)
-			local item = table.remove(self.queue, index)
+			local item = remove_queued_item(self, index, selected_item)
 			if item == nil then return nil, "empty" end
 			item.admission_batch_size = selected_count
 			local selected_dimensions = estimate_dimensions(item, selected_count, self.selection_scratch.dimensions)
@@ -1836,9 +1898,9 @@ do
 			if not valid_text(id, 128) or not finite(due_at_ms) then return false, "invalid retry schedule" end
 			local item = self.known[id]
 			if item == nil or item.dispatch_state ~= "in_flight" then return false, "scheduled item is not in flight" end
-			if #self.queue >= self.policy.queue_capacity then return false, "local queue full; retry was not accepted" end
+			if self.queue_count >= self.policy.queue_capacity then return false, "local queue full; retry was not accepted" end
 			if protect_critical_queue == true and not uses_critical_reserve(item)
-				and #self.queue >= noncritical_queue_capacity(self.policy.queue_capacity)
+				and self.queue_count >= noncritical_queue_capacity(self.policy.queue_capacity)
 			then
 				return false, "local queue full; capacity is reserved for internal critical work"
 			end
@@ -1862,13 +1924,18 @@ do
 				if critical_count == 0 then self.active_critical_by_owner[item.owner_id] = nil
 				else self.active_critical_by_owner[item.owner_id] = critical_count end
 			end
-			table.insert(self.queue, item)
+			append_queued_item(self, item)
 			index_retry_item(self, item)
 			heap_push(self.queued_due_heap, { id = item.id, due_at_ms = item.due_at_ms, item = item })
 			index_item_wake_events(self, item)
 			if #self.queued_due_heap > self.policy.queue_capacity * 2 then
 				local rebuilt = {}
-				for _, queued in ipairs(self.queue) do heap_push(rebuilt, { id = queued.id, due_at_ms = queued.due_at_ms, item = queued }) end
+				for index = 1, self.queue_tail do
+					local queued = self.queue[index]
+					if queued ~= nil then
+						heap_push(rebuilt, { id = queued.id, due_at_ms = queued.due_at_ms, item = queued })
+					end
+				end
 				self.queued_due_heap = rebuilt
 			end
 			return true, nil, next_due
@@ -1898,7 +1965,16 @@ do
 			prune_terminal_history(self)
 		end
 		local function make_shadow_state(self: EmbeddedSchedulerDynamicRecord): EmbeddedSchedulerDynamicRecord
-			local queue = copy(self.queue)
+			local queue = {}
+			local queue_positions = {}
+			for index = 1, self.queue_tail do
+				local item = self.queue[index]
+				if item ~= nil then
+					local copied_item = copy(item)
+					queue[#queue + 1] = copied_item
+					queue_positions[copied_item.id] = #queue
+				end
+			end
 			local queued_by_id = {}
 			for _, item in ipairs(queue) do
 				queued_by_id[item.id] = item
@@ -1908,7 +1984,8 @@ do
 				known[id] = queued_by_id[id] or copy(item)
 			end
 			return {
-				queue = queue, completed = copy(self.completed), known = known,
+				queue = queue, queue_count = #queue, queue_tail = #queue, queue_positions = queue_positions,
+				completed = copy(self.completed), known = known,
 				failed = copy(self.failed), active_owner = copy(self.active_owner),
 				operation_kind_keys = copy(self.operation_kind_keys),
 				active_renewals_by_owner = copy(self.active_renewals_by_owner),
@@ -1983,7 +2060,10 @@ do
 			end
 			local active_lane_keys = {}
 			local instant = now_ms()
-			for _, queued in ipairs(self.queue) do active_lane_keys[lane_key(queued, instant)] = true end
+			for index = 1, self.queue_tail do
+				local queued = self.queue[index]
+				if queued ~= nil then active_lane_keys[lane_key(queued, instant)] = true end
+			end
 			for _, known_item in pairs(self.known) do
 				if known_item.dispatch_state == "in_flight" then active_lane_keys[lane_key(known_item, instant)] = true end
 			end
@@ -2012,7 +2092,7 @@ do
 				shadow_age_ms = if shadow then math.max(0, now - shadow.enqueued_at_ms) else nil,
 				real_slack_ms = if real and finite(real.deadline_ms) then real.deadline_ms - now else nil,
 				shadow_slack_ms = if shadow and finite(shadow.deadline_ms) then shadow.deadline_ms - now else nil,
-				candidate_count = #self.queue,
+				candidate_count = self.queue_count,
 				same_choice = real ~= nil and shadow ~= nil and real.id == shadow.id,
 				reason = if real == nil and shadow == nil then "no_eligible_candidates"
 					elseif real ~= nil and shadow ~= nil and real.id == shadow.id then "algorithms_agree"
@@ -2153,8 +2233,9 @@ do
 		end
 		function governor:OldestEligibleAgeMs()
 			local oldest_eligible_age_ms, instant = 0, now_ms()
-			for _, item in ipairs(self.queue) do
-				if (item.due_at_ms or 0) <= instant
+			for index = 1, self.queue_tail do
+				local item = self.queue[index]
+				if item ~= nil and (item.due_at_ms or 0) <= instant
 					and (item.available_at_ms == nil or item.available_at_ms <= instant)
 					and dependencies_ready(self, item)
 					and (item.expires_at_ms == nil or item.expires_at_ms > instant)
@@ -2186,13 +2267,16 @@ do
 		function governor:Stats()
 			local lanes = { high = 0, normal = 0, background = 0, lease_renewal = 0 }
 			local oldest_eligible_age_ms, now = 0, now_ms()
-			for _, item in ipairs(self.queue) do
-				lanes[item.lane] = (lanes[item.lane] or 0) + 1
-				if (item.due_at_ms or 0) <= now
-					and (item.available_at_ms == nil or item.available_at_ms <= now)
-					and dependencies_ready(self, item)
-					and (item.expires_at_ms == nil or item.expires_at_ms > now)
-				then oldest_eligible_age_ms = math.max(oldest_eligible_age_ms, now - item.enqueued_at_ms) end
+			for index = 1, self.queue_tail do
+				local item = self.queue[index]
+				if item ~= nil then
+					lanes[item.lane] = (lanes[item.lane] or 0) + 1
+					if (item.due_at_ms or 0) <= now
+						and (item.available_at_ms == nil or item.available_at_ms <= now)
+						and dependencies_ready(self, item)
+						and (item.expires_at_ms == nil or item.expires_at_ms > now)
+					then oldest_eligible_age_ms = math.max(oldest_eligible_age_ms, now - item.enqueued_at_ms) end
+				end
 			end
 			local waits = sample_window_values(self.scheduler_metrics.wait_ms)
 			table.sort(waits)
@@ -2220,7 +2304,7 @@ do
 				}
 			end
 			return {
-				policy = copy(self.policy), in_flight = self.in_flight, queue_items = #self.queue,
+				policy = copy(self.policy), in_flight = self.in_flight, queue_items = self.queue_count,
 				active_reservation_tickets = key_count(self.active_tickets),
 				read_units_in_flight = self.read_units_in_flight, write_units_in_flight = self.write_units_in_flight,
 				estimated_bytes_in_flight = self.estimated_bytes_in_flight,
@@ -9695,7 +9779,7 @@ end
 
 local function update_local_from_envelope(state: InternalState, envelope: Envelope, info: BackendInfo?)
 	state.data = copy_value(envelope.data)
-	state.public_data_source = copy_value(state.data)
+	state.public_data_source = envelope.data
 	if state.public_record ~= nil then
 		local public_record: any = state.public_record
 		public_record.Data = state.data
@@ -9720,7 +9804,7 @@ end
 
 local function make_durable_snapshot(envelope: Envelope, info: BackendInfo?, reason: string): DurableSnapshot
 	return {
-		Data = copy_value(envelope.data),
+		Data = envelope.data,
 		Revision = envelope.revision,
 		Generation = envelope.fencing_generation,
 		UpdatedAt = envelope.updated_at,
@@ -9761,7 +9845,7 @@ local function snapshot_from_envelope(key: string, envelope: Envelope, info: Bac
 	local session = envelope.session
 	local session_active = session ~= nil and session.lease_until > now_unix()
 	return {
-		Data = copy_value(envelope.data),
+		Data = envelope.data,
 		State = if envelope.tombstone ~= nil then "tombstoned" elseif session_active then "active" else "closed",
 		Key = key,
 		SchemaVersion = envelope.schema_version,
@@ -13229,12 +13313,14 @@ track_external_data_mutation = function(state: InternalState)
 		state.data = candidate
 		return
 	end
+	local shape_validation = { nodes = 0, message = nil, has_non_finite_numbers = false }
 	local copied_ok, copied_or_error = pcall(function()
-		return copy_value(candidate)
+		return copy_value(candidate, shape_validation)
 	end)
-	if not copied_ok or copied_or_error == nil then
-		local rejection_reason = if not copied_ok
-			then string.gsub(tostring(copied_or_error), "%c", " ")
+	if shape_validation.message ~= nil or not copied_ok or copied_or_error == nil then
+		local rejection_reason = if shape_validation.message ~= nil
+			then shape_validation.message
+			elseif not copied_ok then string.gsub(tostring(copied_or_error), "%c", " ")
 			else "Data was set to nil"
 		rejection_reason = string.sub(rejection_reason, 1, 180)
 		state.data = copy_value(state.public_data_source)
@@ -13255,7 +13341,12 @@ track_external_data_mutation = function(state: InternalState)
 	if state.options.validator ~= nil then
 		validation_value = copy_value(candidate_copy)
 	end
-	local valid, validation_message = validate_value(validation_value, state.options.validator)
+	local valid, validation_message = validate_value(
+		validation_value,
+		state.options.validator,
+		true,
+		not shape_validation.has_non_finite_numbers
+	)
 	if not valid then
 		state.data = copy_value(state.public_data_source)
 		if public_record_table ~= nil then
@@ -13266,17 +13357,8 @@ track_external_data_mutation = function(state: InternalState)
 		return
 	end
 	local old_data = state.public_data_source
+	local current_data = candidate_copy
 	state.data = candidate
-	local current_data = copy_value(state.data)
-	if current_data == nil then
-		state.data = copy_value(state.public_data_source)
-		if public_record_table ~= nil then
-			public_record_table.Data = state.data
-		end
-		state.public_data_source = copy_value(state.data)
-		observe(state, "external_data_mutation", "validation", "direct Data mutation could not be snapshotted")
-		return
-	end
 	if public_record_table ~= nil then
 		public_record_table.Data = state.data
 	end
