@@ -14150,69 +14150,204 @@ local function reconcile(self: Record, template: JsonValue): (ResultCode, string
 		state.save_requested = true
 		return "busy", "record is already saving"
 	end
-	local old_data = state.data
+	if template == nil then
+		return "validation", "template is invalid"
+	end
+
+	-- Inspect plain templates without allocating a detached template tree. The
+	-- traversal also determines whether any default can actually be inserted,
+	-- allowing no-op reconciliation to skip the profile clone entirely.
+	local function inspect_template(target_value: unknown, template_value: unknown): (boolean, boolean, boolean)
+		local active_tables: { [any]: boolean } = {}
+		local node_count = 0
+		local defaults_missing = false
+		local custom_iterator = false
+
+		local function visit(target: unknown, current: unknown, depth: number): boolean
+			node_count += 1
+			if node_count > 100000 or depth > 64 then
+				return false
+			end
+			if current == nil then
+				return true
+			end
+
+			local current_type = type(current)
+			if current_type == "number" or current_type == "boolean" or current_type == "buffer" then
+				return true
+			elseif current_type == "string" then
+				return #(current :: string) <= 4_000_000
+			elseif current_type ~= "table" then
+				return false
+			end
+
+			local table_value = current :: any
+			if getmetatable(table_value) ~= nil then
+				custom_iterator = true
+				return true
+			end
+			if active_tables[table_value] then
+				return false
+			end
+			active_tables[table_value] = true
+
+			local target_table: any = if type(target) == "table" then target else nil
+			local first_target_key = if target_table ~= nil then next(target_table) else nil
+			local string_keys = 0
+			local numeric_keys = 0
+			local max_numeric_key = 0
+			local key, child = next(table_value)
+			while key ~= nil do
+				local key_type = type(key)
+				if key_type == "string" then
+					string_keys += 1
+				elseif key_type == "number" then
+					local numeric_key = key :: number
+					if not math.isfinite(numeric_key) or math.floor(numeric_key) ~= numeric_key or numeric_key < 1 then
+						active_tables[table_value] = nil
+						return false
+					end
+					numeric_keys += 1
+					if numeric_key > max_numeric_key then
+						max_numeric_key = numeric_key
+					end
+				else
+					active_tables[table_value] = nil
+					return false
+				end
+
+				local target_child: unknown = nil
+				if target_table ~= nil then
+					local existing = target_table[key]
+					if existing == nil then
+						if first_target_key == nil or type(first_target_key) == key_type then
+							defaults_missing = true
+						end
+					elseif type(existing) == "table" and type(child) == "table" then
+						target_child = existing
+					end
+				end
+
+				if not visit(target_child, child, depth + 1) then
+					active_tables[table_value] = nil
+					return false
+				end
+				if custom_iterator then
+					active_tables[table_value] = nil
+					return true
+				end
+				key, child = next(table_value, key)
+			end
+
+			if string_keys > 0 and numeric_keys > 0 then
+				active_tables[table_value] = nil
+				return false
+			end
+			if numeric_keys > 0 and max_numeric_key ~= numeric_keys then
+				active_tables[table_value] = nil
+				return false
+			end
+			active_tables[table_value] = nil
+			return true
+		end
+
+		return visit(target_value, template_value, 1), defaults_missing, custom_iterator
+	end
+
+	local template_valid, defaults_missing, custom_iterator = inspect_template(state.data, template)
+	if not custom_iterator and not template_valid then
+		return "validation", "template is invalid"
+	end
+
+	if not custom_iterator and not defaults_missing then
+		local valid, validation_message = validate_value(state.data, state.options.validator)
+		if not valid then
+			return "validation", validation_message
+		end
+		local skip_sync_external_mutation_check = state.options.on_event == nil and next(state.change_observers) == nil
+		observe(state, "reconcile", "success", nil)
+		sync_public(self, skip_sync_external_mutation_check)
+		return "success", nil
+	end
+
 	local copied = copy_value(state.data)
 	if copied == nil then
 		return "validation", "record data is missing"
 	end
-	local template_ok, template_or_error = pcall(function()
-		return copy_value(template)
-	end)
-	if not template_ok or template_or_error == nil then
-		return "validation", "template is invalid"
-	end
-	local template_copy = template_or_error
-	local function set_table_child(
-		target: JsonValue,
-		key: string | number,
-		value: JsonValue
-	): (JsonValue, boolean)
-		if type(target) ~= "table" then return target, false end
-		local target_table: any = target
-		local existing_key = next(target_table)
-		if existing_key ~= nil and type(existing_key) ~= type(key) then
-			return target, false
+
+	local template_source = template
+	local copy_inserted_defaults = true
+	if custom_iterator then
+		local template_ok, template_or_error = pcall(function()
+			return copy_value(template)
+		end)
+		if not template_ok or template_or_error == nil then
+			return "validation", "template is invalid"
 		end
-		target_table[key] = value
-		return target, true
+		template_source = template_or_error
+		copy_inserted_defaults = false
 	end
 
-	local function reconcile_value(target: JsonValue, target_template: JsonValue): (JsonValue, boolean)
-		if type(target) ~= "table" or type(target_template) ~= "table" then return target, false end
+	local function reconcile_value(target: JsonValue, target_template: JsonValue): (boolean, boolean)
+		if type(target) ~= "table" or type(target_template) ~= "table" then
+			return false, true
+		end
 		local result: any = target
 		local template_table: any = target_template
 		local changed = false
 		for key, template_child in template_table do
-			if type(key) ~= "string" and type(key) ~= "number" then return target, false end
+			if type(key) ~= "string" and type(key) ~= "number" then
+				return false, false
+			end
 			local current = result[key]
 			if current == nil then
-				local updated, updated_ok = set_table_child(result, key, template_child)
-				if updated_ok then result = updated; changed = true end
+				local existing_key = next(result)
+				if existing_key == nil or type(existing_key) == type(key) then
+					local inserted_value: JsonValue? = template_child
+					if copy_inserted_defaults then
+						local inserted_ok, inserted_or_error = pcall(function()
+							return copy_value(template_child)
+						end)
+						if not inserted_ok or inserted_or_error == nil then
+							return false, false
+						end
+						inserted_value = inserted_or_error
+					end
+					result[key] = inserted_value :: JsonValue
+					changed = true
+				end
 			elseif type(current) == "table" and type(template_child) == "table" then
-				local _, nested_changed = reconcile_value(current, template_child)
-				if nested_changed then changed = true end
+				local nested_changed, nested_valid = reconcile_value(current, template_child)
+				if not nested_valid then
+					return false, false
+				end
+				if nested_changed then
+					changed = true
+				end
 			end
 		end
-		return result :: JsonValue, changed
+		return changed, true
 	end
-	local next_value, changed = reconcile_value(copied, template_copy)
-	if next_value == nil then
-		return "validation", "reconciliation returned nil"
+
+	local changed, merge_valid = reconcile_value(copied, template_source)
+	if not merge_valid then
+		return "validation", "template is invalid"
 	end
-	local valid, message = validate_value(next_value, state.options.validator)
+	local valid, validation_message = validate_value(copied, state.options.validator)
 	if not valid then
-		return "validation", message
+		return "validation", validation_message
 	end
+	local old_data = state.data
 	local skip_sync_external_mutation_check = state.options.on_event == nil and next(state.change_observers) == nil
-	state.data = next_value
+	state.data = copied
 	state.public_data_source = copy_value(state.data)
 	self.Data = state.data
 	if changed == true then
 		state.change_sequence += 1
-	mark_dirty(state)
+		mark_dirty(state)
 		local operation_id = HttpService:GenerateGUID(false)
 		state.current_operation_id = operation_id
-		enqueue_change_observation(state, old_data, next_value, operation_id, "reconcile")
+		enqueue_change_observation(state, old_data, copied, operation_id, "reconcile")
 		state.save_requested = true
 		state.next_autosave = now_local()
 	end
