@@ -478,6 +478,40 @@ do
 		"expired item did not release its terminal-preflight candidate count")
 end
 
+do
+	local governor = new_governor()
+	local prerequisite = governor:Enqueue({
+		id = "terminal-scan-pending-prerequisite",
+		owner_id = "terminal-scan-pending-owner",
+		lane = "normal",
+		work_class = "maintenance",
+	})
+	assert(prerequisite.code == "accepted", "pending prerequisite fixture was not accepted")
+	local dependent = governor:Enqueue({
+		id = "terminal-scan-resolved-dependent",
+		owner_id = "terminal-scan-dependent-owner",
+		lane = "normal",
+		work_class = "maintenance",
+		dependencies = { "terminal-scan-pending-prerequisite" },
+	})
+	assert(dependent.code == "accepted", "dependent fixture was not accepted")
+	assert(governor.terminal_preflight_count == 1,
+		"unresolved dependency was omitted from terminal preflight")
+
+	local selected, status = governor:TakeNext()
+	assert(selected ~= nil and selected.id == "terminal-scan-pending-prerequisite" and status == "success",
+		"ready prerequisite was not dispatched ahead of its dependent")
+	assert(governor:MarkCompleted(selected.id, "success"),
+		"pending prerequisite fixture did not complete")
+	local resolved, resolved_status = governor:TakeNext()
+	assert(resolved ~= nil and resolved.id == "terminal-scan-resolved-dependent" and resolved_status == "success",
+		"dependent did not become ready after prerequisite success")
+	assert(governor.terminal_preflight_count == 0,
+		"successfully resolved dependency continued forcing terminal-preflight scans")
+	assert(governor:MarkCompleted(resolved.id, "success"),
+		"resolved dependent fixture did not complete")
+end
+
 print("[scheduler-acceptance] bounded fairness, low-budget reserve, throttle recovery, and lease-margin isolation passed.")
 
 print("[scheduler-bugfix] policy atomicity, incomplete admission estimates, and false-lane rejection passed.")
