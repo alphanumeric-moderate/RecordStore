@@ -1,7 +1,7 @@
 --!nocheck
 local FakeDataStore = require("./FakeDataStore")
 local Shim = require("./RobloxShim")
-local DurableStreams = Shim.load_durable_streams()
+local DurableStreams = Shim.load().DurableStreams
 
 local fake = FakeDataStore.new()
 local store = fake.service:GetDataStore("DurableStreamPublishSingleBench", "global")

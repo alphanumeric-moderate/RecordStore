@@ -91,14 +91,15 @@ Patch operations have these rules:
 
 Use `Patch` when a mutation can be expressed as a small set of explicit path operations, especially when a large profile changes only a few paths. Use `Update` when a callback or arbitrary structural edits are more natural. Both APIs share persistence, change-observation, dirty tracking, and save scheduling semantics; `Update` retains its existing contract.
 
-## Independent durable event streams
+## Durable event streams
 
-`RecordStoreDurableStreams` is a separate DataStore-backed event-stream module. It is not tied to player profiles, Record sessions, or session ownership. Each named stream has a fixed partition count and bounded append-only segments. Ordering is guaranteed within one partition, not globally.
+Durable event streams are exposed by the main `RecordStore` ModuleScript. They are independent of player profiles, Record sessions, and session ownership. Each named stream has a fixed partition count and bounded append-only segments. Ordering is guaranteed within one partition, not globally. No additional stream-related runtime ModuleScripts are required.
 
 ```luau
 local DataStoreService = game:GetService("DataStoreService")
 local HttpService = game:GetService("HttpService")
-local DurableStreams = require(script.Parent.RecordStoreDurableStreams)
+local RecordStore = require(script.Parent.RecordStore)
+local DurableStreams = RecordStore.DurableStreams
 
 local store = DataStoreService:GetDataStore("ApplicationEventStreams", "global")
 local client = assert(DurableStreams.new(store, {
@@ -142,9 +143,9 @@ local consumed = stream:ConsumeBatchAsync(claim_result.claim, function(messages,
         processEvent(message.payload, message.event_id)
     end
     return true
-}, 16)
+end, 16)
 
--- Run from a maintenance loop appropriate to the application.
+-- Run bounded retention maintenance from an application maintenance loop.
 local pruned = stream:PruneAsync(partition, 4)
 ```
 
@@ -156,57 +157,69 @@ Consumer groups must be registered before claiming a partition. The start positi
 
 The retention floor is stored in the same durable consumer-group registry that serializes group lifecycle and maintenance ownership. The floor is advanced before any segment deletion. Segment cleanup uses an independent monotonic cleanup cursor and idempotent RemoveAsync calls, so an interruption after deleting a segment but before advancing cleanup can safely resume. Partition heads mirror the committed floor for append-capacity checks. PruneAsync(partition, max_segments) performs bounded maintenance and can return blocked, idle, pruned, capacity, or unknown. Until old segments become eligible and are reclaimed, a full retained-segment limit applies backpressure instead of overwriting unread data.
 
-Use a unique per-process worker token for each consumer lease. Remove a group only with RemoveConsumerGroupAsync(group, true); a partially completed removal stays marked as removing and can be retried. GetRetentionStateAsync(partition) reports the retained floor, cleanup cursor, and configured limits.
-
-event_id identifies a producer event within the segment being appended or reconciled. Permanent deduplication across already-sealed or deleted segments is not provided: the append log deliberately avoids a second per-event index write and unbounded historical identity index. Reuse stable event IDs when retrying uncertain writes, reconcile against the exact segment where possible, and make consumer effects idempotent. Cross-partition global ordering and production Roblox multi-server acceptance tests remain outside this module.
-
-### Optional transient server messaging
-
-`RecordStoreTransientMessaging` is a separate best-effort transport. It does not write to DataStore, own consumer progress, queue messages, retry delivery, or change the durable stream commit point.
+The bounded producer helper amortizes writes across multiple pending events. Its in-memory queue is not durable until FlushAsync returns a confirmed `committed` result; uncertain or failed batches remain queued for retry. The managed consumer worker adds single-flight polling, bounded exponential backoff, lease heartbeat, wake coalescing, and release on shutdown. Both are part of the main RecordStore module:
 
 ```luau
-local TransientMessaging = require(script.Parent.RecordStoreTransientMessaging)
-local transport = assert(TransientMessaging.new(
+local Publisher = RecordStore.DurableStreamPublisher
+local publisher = assert(Publisher.OpenAsync(
+    stream,
+    "tenant-42",
+    "stable-producer-id",
+    { max_batch_messages = 16, max_pending_messages = 256 }
+))
+publisher:Enqueue(HttpService:GenerateGUID(false), { kind = "round.scored" })
+local flush_result = publisher:FlushAsync()
+assert(flush_result.code == "committed", flush_result.message)
+
+local Worker = RecordStore.DurableStreamWorker
+local worker = assert(Worker.Open(
+    stream,
+    "analytics",
+    partition,
+    HttpService:GenerateGUID(false),
+    function(messages, context)
+        for _, message in ipairs(messages) do
+            processEvent(message.payload, message.event_id)
+        end
+        return true
+    end
+))
+worker:Start()
+```
+
+Use a unique per-process worker token for each consumer lease. Remove a group only with RemoveConsumerGroupAsync(group, true); a partially completed removal stays marked as removing and can be retried. GetRetentionStateAsync(partition) reports the retained floor, cleanup cursor, and configured limits.
+
+Producer sequence checkpoints provide durable per-producer idempotency across segment rollover and retention, within the bounded producer-state capacity. Stable event IDs remain useful when reconciling an uncertain append against its original segment. Consumer side effects still need idempotency. Cross-partition global ordering and production Roblox multi-server acceptance tests remain outside this module.
+
+### Optional transient stream wake-ups
+
+`RecordStore.TransientMessaging` exposes only a best-effort, partition-scoped wake-up hint. It does not write to DataStore, own consumer progress, queue messages, retry delivery, or change the durable stream commit point. Generic topic broadcasts and directed server commands are intentionally excluded. A lost hint is harmless because consumers must continue polling their durable cursor.
+
+```luau
+local transport = assert(RecordStore.TransientMessaging.new(
     game:GetService("MessagingService"),
     HttpService,
-    {
-        namespace = "game-events",
-        server_id = game.JobId,
-    }
+    { namespace = "game-events", server_id = game.JobId }
 ))
 
-local partition = stream:GetPartition("tenant-42")
-local wake_subscription = transport:SubscribeStreamWakeups(
-    "game.events",
-    partition,
-    function(_hint)
-        -- Wake the existing poller; read events from the durable stream.
-        pollDurablePartition(partition)
-    end
-)
+local wake_subscription = transport:SubscribeStreamWakeups("game.events", partition, function(_hint)
+    worker:Wake()
+end)
 
 local publish = stream:PublishAsync("tenant-42", HttpService:GenerateGUID(false), {
     kind = "round.completed",
     round_id = "round-124",
 })
 if publish.code == "committed" then
-    -- A wake-up is sent only after the DataStore append is confirmed.
+    -- A wake-up is published only after the durable append is confirmed.
     transport:PublishStreamWakeup("game.events", partition, publish.sequence)
 end
 
--- Directed message to one live server:
-transport:SendToServerAsync(targetJobId, { kind = "refresh-cache" })
-local direct_subscription = transport:SubscribeServerAsync(function(payload, context)
-    handleServerCommand(payload, context.sender)
-end)
-
--- Release subscriptions when the owning system shuts down.
 wake_subscription.subscription:Disconnect()
-direct_subscription.subscription:Disconnect()
 transport:Close()
 ```
 
-The adapter also exposes generic `PublishAsync(topic, payload)` and `SubscribeAsync(topic, handler)`. It hashes logical topic names before calling MessagingService, bounds the complete encoded envelope to 1,024 bytes by default, validates JSON-safe payloads, and returns `unknown` when a publish call throws because the message may already have been delivered. Delivery may be lost, duplicated, delayed, or reordered; handler effects must tolerate duplicates. Use `message_id` from the callback context for application-level idempotency where needed. MessagingService is only a wake-up/notification path; consumers must recover by polling the durable cursor and stream. MemoryStore is not used.
+The transport hashes stream/partition identities before calling MessagingService, validates the complete encoded envelope against a 1,024-byte default limit, and returns `unknown` when a publish call throws because the hint may already have been delivered. Hints may be lost, duplicated, delayed, or reordered. They are never a durability or ordering mechanism. The stream is the source of truth; MemoryStore is not used.
 
 ## PlayerData modules
 

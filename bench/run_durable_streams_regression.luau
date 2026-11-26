@@ -1,9 +1,10 @@
 --!nocheck
 local FakeDataStore = require("./FakeDataStore")
 local initializer = game:GetService("ServerScriptService"):WaitForChild("PlayerDataInitializer")
-local DurableStreams = require(initializer:WaitForChild("RecordStoreDurableStreams"))
-local Publisher = require(initializer:WaitForChild("RecordStoreDurableStreamPublisher"))
-local Worker = require(initializer:WaitForChild("RecordStoreDurableStreamWorker"))
+local RecordStore = require(initializer:WaitForChild("RecordStore"))
+local DurableStreams = RecordStore.DurableStreams
+local Publisher = RecordStore.DurableStreamPublisher
+local Worker = RecordStore.DurableStreamWorker
 
 local now = 1000
 local fake = FakeDataStore.new({ cache_seconds = 120 })

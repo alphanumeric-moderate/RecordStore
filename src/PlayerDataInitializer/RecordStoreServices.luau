@@ -23,7 +23,6 @@ local PlayerDataErasure = require(script.Parent.PlayerDataErasure)
 local ErasureManifestBinding = require(script.Parent.PlayerDataErasureManifestBinding)
 local OutboxConsumerAdapter = require(script.Parent.RecordStoreOutboxConsumerAdapter)
 local OutboxMailboxAdapter = require(script.Parent.RecordStoreOutboxMailboxAdapter)
-local SHA256 = require(script.Parent.RecordStoreSHA256)
 
 function Services.new(record_store: any, raw_options: any?): any
 	if raw_options ~= nil and type(raw_options) ~= "table" then
@@ -33,6 +32,10 @@ function Services.new(record_store: any, raw_options: any?): any
 	local core = record_store
 	if type(core) ~= "table" or type(core.new) ~= "function" or type(core.MailboxV2) ~= "table" then
 		error("RecordStore service bundle requires the core RecordStore and embedded Mailbox V2", 2)
+	end
+	local SHA256 = core.SHA256
+	if type(SHA256) ~= "table" or type(SHA256.digest) ~= "function" then
+		error("RecordStore service bundle requires the embedded SHA-256 implementation", 2)
 	end
 
 	local options = raw_options or {}
