@@ -430,14 +430,20 @@ assert(capacity_client ~= nil, capacity_client_error)
 local capacity_stream, capacity_stream_error = capacity_client:OpenStreamAsync("application.producer-capacity", 1)
 assert(capacity_stream ~= nil, capacity_stream_error)
 
-for index = 1, 128 do
-	local producer_id = string.format("capacity-producer-%03d", index)
-	local event_id = string.format("capacity-event-%03d", index)
-	local accepted = capacity_stream:PublishBatchAsync("capacity-route", {
-		{ event_id = event_id, producer_id = producer_id, producer_sequence = 1, payload = { value = index } },
-	})
-	assert(accepted.code == "committed",
-		"producer checkpoint capacity rejected an allowed producer: " .. tostring(index) .. " / " .. tostring(accepted.message))
+for batch_index = 0, 3 do
+	local events = table.create(32)
+	for offset = 1, 32 do
+		local index = batch_index * 32 + offset
+		events[offset] = {
+			event_id = string.format("capacity-event-%03d", index),
+			producer_id = string.format("capacity-producer-%03d", index),
+			producer_sequence = 1,
+			payload = { value = index },
+		}
+	end
+	local accepted = capacity_stream:PublishBatchAsync("capacity-route", events)
+	assert(accepted.code == "committed" and accepted.count == 32,
+		"producer checkpoint capacity rejected an allowed batch: " .. tostring(batch_index) .. " / " .. tostring(accepted.message))
 end
 
 local capacity_rejected = capacity_stream:PublishBatchAsync("capacity-route", {
