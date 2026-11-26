@@ -21971,7 +21971,7 @@ local RecordStoreEmbeddedRequestAdmission = (function()
 
 	local function enqueue(
 		callback: () -> (),
-		critical: boolean,
+		deadline_sensitive: boolean,
 		lease_remaining_seconds: number?,
 		on_rejected: ((any) -> ())?
 	): (boolean, string?)
@@ -21988,7 +21988,7 @@ local RecordStoreEmbeddedRequestAdmission = (function()
 
 		sequence += 1
 		local now_ms = now_local() * 1000
-		local remaining_ms = if critical then math.max(100, (lease_remaining_seconds or 1) * 1000) else nil
+		local remaining_ms = if deadline_sensitive then math.max(100, (lease_remaining_seconds or 1) * 1000) else nil
 		local callback_started = false
 		local rejection_delivered = false
 		local function deliver_rejection(result: any)
@@ -22001,14 +22001,15 @@ local RecordStoreEmbeddedRequestAdmission = (function()
 			end
 		end
 		local options: EmbeddedSchedulerScheduleOptions = {
-			lane = "background",
+			lane = if deadline_sensitive then "high" else "background",
+			service_class = if deadline_sensitive then "interactive" else "bulk",
 			work_class = "background",
 			operation_class = "update_async",
 			due_at_ms = now_ms,
-			deadline_ms = if critical then now_ms + math.max(10, (remaining_ms :: number) * 0.75) else nil,
-			expires_at_ms = if critical then now_ms + (remaining_ms :: number) else nil,
-			read_units = if critical then 1 else 2,
-			write_units = if critical then 1 else 2,
+			deadline_ms = if deadline_sensitive then now_ms + math.max(10, (remaining_ms :: number) * 0.75) else nil,
+			expires_at_ms = if deadline_sensitive then now_ms + (remaining_ms :: number) else nil,
+			read_units = if deadline_sensitive then 1 else 2,
+			write_units = if deadline_sensitive then 1 else 2,
 			estimated_bytes = 32768,
 			handler_slots = 1,
 			cost = 1,
