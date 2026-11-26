@@ -169,8 +169,18 @@ do
 			lane_row_pool = {},
 			lane_has_urgent = {},
 			lane_oldest_index = {},
+			active_lane_keys = {},
 		}
 	end
+
+	local SCHEDULER_SERVICE_CLASSES: { [string]: boolean } = {
+		critical = true,
+		interactive = true,
+		normal = true,
+		bulk = true,
+		best_effort = true,
+	}
+	local SCHEDULER_DIMENSION_FIELDS: { string } = { "read_units", "write_units", "handler_slots" }
 
 	local function copy_bounded(value: any, maximum_nodes: number): any
 		local seen = {}
@@ -1575,8 +1585,7 @@ do
 			if value.due_at_ms ~= nil and not finite(value.due_at_ms) then return { code = "invalid", message = "due_at_ms must be finite" } end
 			if value.deadline_ms ~= nil and not finite(value.deadline_ms) then return { code = "invalid", message = "deadline_ms must be finite" } end
 			if value.expires_at_ms ~= nil and not finite(value.expires_at_ms) then return { code = "invalid", message = "expires_at_ms must be finite" } end
-			local valid_service_classes = { critical = true, interactive = true, normal = true, bulk = true, best_effort = true }
-			if value.service_class ~= nil and not valid_service_classes[value.service_class] then return { code = "invalid", message = "unsupported service_class" } end
+			if value.service_class ~= nil and not SCHEDULER_SERVICE_CLASSES[value.service_class] then return { code = "invalid", message = "unsupported service_class" } end
 			if value.mutating ~= nil and type(value.mutating) ~= "boolean" then return { code = "invalid", message = "mutating must be boolean" } end
 			if value.batchable ~= nil and type(value.batchable) ~= "boolean" then return { code = "invalid", message = "batchable must be boolean" } end
 			if value.batchable == true then
@@ -1609,8 +1618,7 @@ do
 					return { code = "invalid", message = "dependency is missing; enqueue its prerequisite before the dependent item" }
 				end
 			end
-			local dimensions = { "read_units", "write_units", "handler_slots" }
-			for _, field in ipairs(dimensions) do
+			for _, field in ipairs(SCHEDULER_DIMENSION_FIELDS) do
 				if value[field] ~= nil and (not finite(value[field]) or value[field] < 0 or value[field] > 64 or math.floor(value[field]) ~= value[field]) then
 					return { code = "invalid", message = field .. " must be an integer in 0..64" }
 				end
@@ -2170,16 +2178,26 @@ do
 				self.completed[id] = nil
 				remember_terminal(self, id, tostring(code or "unknown"))
 			end
-			local active_lane_keys = {}
-			local instant = now_ms()
-			for index = 1, self.queue_tail do
-				local queued = self.queue[index]
-				if queued ~= nil then active_lane_keys[lane_key(queued, instant)] = true end
+			local drr_deficit = self.drr_deficit
+			if next(drr_deficit) ~= nil then
+				if self.queue_count == 0 and next(self.active_owner) == nil then
+					table.clear(drr_deficit)
+				else
+					local active_lane_keys = self.selection_scratch.active_lane_keys
+					table.clear(active_lane_keys)
+					local instant = now_ms()
+					for index = 1, self.queue_tail do
+						local queued = self.queue[index]
+						if queued ~= nil then active_lane_keys[lane_key(queued, instant)] = true end
+					end
+					for _, known_item in pairs(self.known) do
+						if known_item.dispatch_state == "in_flight" then active_lane_keys[lane_key(known_item, instant)] = true end
+					end
+					for key in pairs(drr_deficit) do
+						if not active_lane_keys[key] then drr_deficit[key] = nil end
+					end
+				end
 			end
-			for _, known_item in pairs(self.known) do
-				if known_item.dispatch_state == "in_flight" then active_lane_keys[lane_key(known_item, instant)] = true end
-			end
-			for key in pairs(self.drr_deficit) do if not active_lane_keys[key] then self.drr_deficit[key] = nil end end
 			self.stats.completed += 1
 			prune_terminal_history(self)
 			return true
