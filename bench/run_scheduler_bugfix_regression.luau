@@ -343,6 +343,84 @@ do
 	assert(governor:MarkCompleted(next_renewal.id, "success"), "late renewal fixture completion failed")
 end
 
+do
+	local governor = new_governor()
+	local prerequisite_id = "terminal-failed-prerequisite"
+	local accepted = governor:Enqueue({
+		id = prerequisite_id,
+		owner_id = "terminal-failed-prerequisite-owner",
+		lane = "normal",
+		work_class = "maintenance",
+	})
+	assert(accepted.code == "accepted", "failed prerequisite fixture was not accepted")
+	local selected, status = governor:TakeNext()
+	assert(selected ~= nil and selected.id == prerequisite_id and status == "success",
+		"failed prerequisite fixture was not dispatched")
+	local marked, message = governor:MarkCompleted(prerequisite_id, "permanent_failure")
+	assert(marked, "failed prerequisite fixture could not be terminalized: " .. tostring(message))
+	assert(governor.failed[prerequisite_id] == "permanent_failure",
+		"failed prerequisite was not retained in terminal history")
+
+	local dependent = governor:Enqueue({
+		id = "dependent-of-terminal-failure",
+		owner_id = "dependent-of-terminal-failure-owner",
+		lane = "normal",
+		work_class = "maintenance",
+		dependencies = { prerequisite_id },
+	})
+	assert(dependent.code == "accepted",
+		"dependent enqueue rejected a retained terminal failure: " .. tostring(dependent.message))
+	local terminal, terminal_status = governor:TakeNext()
+	assert(terminal ~= nil and terminal.id == "dependent-of-terminal-failure"
+		and terminal_status == "dependency_failed",
+		"dependent of an already-failed prerequisite did not terminate as dependency_failed")
+	assert(terminal.terminal_result.dependency_id == prerequisite_id
+		and terminal.terminal_result.dependency_code == "permanent_failure",
+		"dependent terminal result did not preserve the failed prerequisite identity and reason")
+
+	local missing = governor:Enqueue({
+		id = "dependent-of-missing-prerequisite",
+		owner_id = "dependent-of-missing-prerequisite-owner",
+		lane = "normal",
+		work_class = "maintenance",
+		dependencies = { "never-enqueued-prerequisite" },
+	})
+	assert(missing.code == "invalid",
+		"dependency validation accepted a prerequisite with no retained or active history")
+end
+
+do
+	local governor = new_governor()
+	local scratch = governor.selection_scratch.active_lane_keys
+	assert(type(scratch) == "table", "DRR cleanup scratch table was not initialized")
+	for index = 1, 2 do
+		local accepted = governor:Enqueue({
+			id = "drr-scratch-reuse-" .. tostring(index),
+			owner_id = "drr-scratch-reuse-owner",
+			lane = "normal",
+			work_class = "drr-scratch-reuse",
+		})
+		assert(accepted.code == "accepted", "DRR scratch reuse fixture enqueue failed")
+	end
+
+	local first, first_status = governor:TakeNext()
+	assert(first ~= nil and first_status == "success", "first DRR scratch fixture was not selected")
+	assert(next(governor.drr_deficit) ~= nil, "DRR fixture did not populate a lane deficit")
+	assert(governor:MarkCompleted(first.id, "success"), "first DRR scratch fixture did not complete")
+	assert(governor.selection_scratch.active_lane_keys == scratch,
+		"MarkCompleted replaced its reusable active-lane scratch table")
+	assert(next(governor.drr_deficit) ~= nil,
+		"DRR deficit was cleared while another queued item still owned the lane")
+
+	local second, second_status = governor:TakeNext()
+	assert(second ~= nil and second_status == "success", "second DRR scratch fixture was not selected")
+	assert(governor:MarkCompleted(second.id, "success"), "second DRR scratch fixture did not complete")
+	assert(governor.selection_scratch.active_lane_keys == scratch,
+		"MarkCompleted replaced its reusable active-lane scratch table")
+	assert(next(governor.drr_deficit) == nil,
+		"DRR deficit remained after its final queued and in-flight lane item completed")
+end
+
 print("[scheduler-acceptance] bounded fairness, low-budget reserve, throttle recovery, and lease-margin isolation passed.")
 
 print("[scheduler-bugfix] policy atomicity, incomplete admission estimates, and false-lane rejection passed.")
