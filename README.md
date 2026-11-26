@@ -91,6 +91,140 @@ Patch operations have these rules:
 
 Use `Patch` when a mutation can be expressed as a small set of explicit path operations, especially when a large profile changes only a few paths. Use `Update` when a callback or arbitrary structural edits are more natural. Both APIs share persistence, change-observation, dirty tracking, and save scheduling semantics; `Update` retains its existing contract.
 
+## Durable event streams
+
+Durable event streams are exposed by the main `RecordStore` ModuleScript. They are independent of player profiles, Record sessions, and session ownership. Each named stream has a fixed partition count and bounded append-only segments. Ordering is guaranteed within one partition, not globally. No additional stream-related runtime ModuleScripts are required.
+
+```luau
+local DataStoreService = game:GetService("DataStoreService")
+local HttpService = game:GetService("HttpService")
+local ServerScriptService = game:GetService("ServerScriptService")
+local initializer = ServerScriptService:WaitForChild("PlayerDataInitializer")
+local RecordStore = require(initializer:WaitForChild("RecordStore"))
+local DurableStreams = RecordStore.DurableStreams
+
+local store = DataStoreService:GetDataStore("ApplicationEventStreams", "global")
+local client = assert(DurableStreams.new(store, {
+    max_segment_messages = 24,
+    max_segment_bytes = 131072,
+    max_payload_bytes = 8192,
+    max_batch_messages = 16,
+    max_retained_segments = 32,
+    min_segment_age_seconds = 60,
+    max_segment_age_seconds = 86400,
+}))
+
+local stream = assert(client:OpenStreamAsync("game.events", 8))
+local published = stream:PublishAsync("tenant-42", HttpService:GenerateGUID(false), {
+    kind = "round.completed",
+    round_id = "round-123",
+})
+assert(published.code == "committed", published.message)
+
+local batch = stream:PublishBatchAsync("tenant-42", {
+    { event_id = HttpService:GenerateGUID(false), payload = { kind = "round.started" } },
+    { event_id = HttpService:GenerateGUID(false), payload = { kind = "round.scored" } },
+})
+assert(batch.code == "committed", batch.message)
+
+local registration = stream:RegisterConsumerGroupAsync("analytics", "earliest", true)
+assert(registration.code == "registered" or registration.code == "exists")
+
+local partition = stream:GetPartition("tenant-42")
+local claim_result = stream:ClaimConsumerAsync(
+    "analytics",
+    partition,
+    HttpService:GenerateGUID(false),
+    30
+)
+assert(claim_result.code == "claimed", claim_result.message)
+
+local consumed = stream:ConsumeBatchAsync(claim_result.claim, function(messages, context)
+    for _, message in ipairs(messages) do
+        -- Make application effects idempotent using message.event_id.
+        processEvent(message.payload, message.event_id)
+    end
+    return true
+end, 16)
+
+-- Run bounded retention maintenance from an application maintenance loop.
+local pruned = stream:PruneAsync(partition, 4)
+```
+
+Stream partition count and storage limits are persisted in an immutable format-v2 manifest; reopening with different settings fails closed. Payloads are detached and validated before UpdateAsync. PublishBatchAsync(route_key, events) appends a bounded batch to one segment with one UpdateAsync; a full segment may require a separate head rollover update. PublishAsync is the one-event convenience path. Outcomes distinguish committed, duplicate, conflict, unknown, retryable, and capacity cases. A committed append remains committed even when the head rollover needs repair.
+
+Segments carry per-partition sequence ranges, creation timestamps, and chained SHA-256 integrity metadata. Consumers use durable (segment, offset) checkpoints and monotonically increasing fencing generations. ConsumeBatchAsync invokes the application handler outside DataStore transforms and advances the cursor only when the handler returns true. The handler can run again if its side effect succeeds but its checkpoint is not confirmed. Application effects therefore need idempotency; exactly-once external effects are not provided.
+
+Consumer groups must be registered before claiming a partition. The start position can be earliest, latest, or an explicit { segment, offset } position. Retention protection defaults to true. Protected groups pin a segment until their durable cursor has passed it and the configured minimum segment age has elapsed. A configured max_segment_age_seconds is a hard upper bound and can expire lagging protected consumers; subsequent claims or consumes receive an explicit expired result with the new retained floor rather than silently skipping data. Consumers that are not retention-protected do not pin storage.
+
+The retention floor is stored in the same durable consumer-group registry that serializes group lifecycle and maintenance ownership. The floor is advanced before any segment deletion. Segment cleanup uses an independent monotonic cleanup cursor and idempotent RemoveAsync calls, so an interruption after deleting a segment but before advancing cleanup can safely resume. Partition heads mirror the committed floor for append-capacity checks. PruneAsync(partition, max_segments) performs bounded maintenance and can return blocked, idle, pruned, capacity, or unknown. Until old segments become eligible and are reclaimed, a full retained-segment limit applies backpressure instead of overwriting unread data.
+
+The bounded producer helper amortizes writes across multiple pending events. Its in-memory queue is not durable until FlushAsync returns a confirmed `committed` result; uncertain or failed batches remain queued for retry. The managed consumer worker adds single-flight polling, bounded exponential backoff, lease heartbeat, wake coalescing, and release on shutdown. Both are part of the main RecordStore module:
+
+Background publisher flushes and consumer polling pass through RecordStore's shared request-admission scheduler as background-lane bulk work when advanced scheduling is enabled. Consumer lease heartbeats use the high lane with the interactive service class plus explicit deadline and expiry, but do not consume the critical capacity or lease-renewal lane reserved for profile-session ownership. If advanced scheduling is disabled, these callbacks use the existing deferred-work fallback. Direct stream API calls retain their synchronous result contracts.
+
+```luau
+local Publisher = RecordStore.DurableStreamPublisher
+local publisher = assert(Publisher.OpenAsync(
+    stream,
+    "tenant-42",
+    "stable-producer-id",
+    { max_batch_messages = 16, max_pending_messages = 256 }
+))
+publisher:Enqueue(HttpService:GenerateGUID(false), { kind = "round.scored" })
+local flush_result = publisher:FlushAsync()
+assert(flush_result.code == "committed", flush_result.message)
+
+local Worker = RecordStore.DurableStreamWorker
+local worker = assert(Worker.Open(
+    stream,
+    "analytics",
+    partition,
+    HttpService:GenerateGUID(false),
+    function(messages, context)
+        for _, message in ipairs(messages) do
+            processEvent(message.payload, message.event_id)
+        end
+        return true
+    end
+))
+worker:Start()
+```
+
+Use a unique per-process worker token for each consumer lease. Remove a group only with RemoveConsumerGroupAsync(group, true); a partially completed removal stays marked as removing and can be retried. GetRetentionStateAsync(partition) reports the retained floor, cleanup cursor, and configured limits.
+
+Producer sequence checkpoints provide durable per-producer idempotency across segment rollover and retention, within the bounded producer-state capacity. Stable event IDs remain useful when reconciling an uncertain append against its original segment. Consumer side effects still need idempotency. Cross-partition global ordering and production Roblox multi-server acceptance tests remain outside this module.
+
+### Optional transient stream wake-ups
+
+`RecordStore.TransientMessaging` exposes only a best-effort, partition-scoped wake-up hint. It does not write to DataStore, own consumer progress, queue messages, retry delivery, or change the durable stream commit point. Generic topic broadcasts and directed server commands are intentionally excluded. A lost hint is harmless because consumers must continue polling their durable cursor.
+
+```luau
+local transport = assert(RecordStore.TransientMessaging.new(
+    game:GetService("MessagingService"),
+    HttpService,
+    { namespace = "game-events", server_id = game.JobId }
+))
+
+local wake_subscription = transport:SubscribeStreamWakeups("game.events", partition, function(_hint)
+    worker:Wake()
+end)
+
+local publish = stream:PublishAsync("tenant-42", HttpService:GenerateGUID(false), {
+    kind = "round.completed",
+    round_id = "round-124",
+})
+if publish.code == "committed" then
+    -- A wake-up is published only after the durable append is confirmed.
+    transport:PublishStreamWakeup("game.events", partition, publish.sequence)
+end
+
+wake_subscription.subscription:Disconnect()
+transport:Close()
+```
+
+The transport hashes stream/partition identities before calling MessagingService, validates the complete encoded envelope against a 1,024-byte default limit, and returns `unknown` when a publish call throws because the hint may already have been delivered. Hints may be lost, duplicated, delayed, or reordered. They are never a durability or ordering mechanism. The stream is the source of truth; MemoryStore is not used.
+
 ## PlayerData modules
 
 The repository also includes:

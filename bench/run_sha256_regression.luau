@@ -1,7 +1,7 @@
 --!nocheck
 local Shim = require("./RobloxShim")
-local initializer = Shim.environment.game:GetService("ServerScriptService"):WaitForChild("PlayerDataInitializer")
-local SHA256 = Shim.environment.require(initializer:WaitForChild("RecordStoreSHA256"))
+local RecordStore = Shim.load()
+local SHA256 = RecordStore.SHA256
 
 local function expect(value, message)
 	if not value then error(message, 2) end

@@ -4,7 +4,7 @@
 -- UpdateAsync transforms are pure and all ambiguous outcomes are reconciled by
 -- uncached reads before this adapter reports a successful claim or commit.
 local DataStoreService = game:GetService("DataStoreService")
-local SHA256 = require(script.Parent:WaitForChild("RecordStoreSHA256"))
+local SHA256 = require(script.Parent:WaitForChild("RecordStore")).SHA256
 
 local PurchaseDataStoreAuthority = {}
 

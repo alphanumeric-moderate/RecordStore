@@ -18203,7 +18203,23 @@ RecordStore.shutdown = function()
 		task.wait(0.05)
 	end
 end
-	return { start = start_scheduler }
+	return {
+		start = start_scheduler,
+		schedule = function(
+			owner_id: string,
+			work_id: string,
+			callback: (...any) -> any,
+			options: EmbeddedSchedulerScheduleOptions?
+		): EmbeddedSchedulerScheduleResult
+			return RecordStore.schedule_work(owner_id, work_id, callback, options)
+		end,
+		is_enabled = function(): boolean
+			return scheduler_enabled
+		end,
+		is_shutting_down = function(): boolean
+			return closing
+		end,
+	}
 end)())
 
 RecordStore._internals = {}
@@ -21827,6 +21843,4123 @@ RecordStore.Mock = (function()
 
 	return Mock
 end)()
+
+local RecordStoreEmbeddedSHA256 = (function()
+local SHA256 = {}
+
+local MODULUS = 4294967296
+local MAX_INPUT_BYTES = 16777216
+
+local INITIAL = {
+	0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+	0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+}
+
+local ROUND = {
+	0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5,
+	0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+	0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
+	0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+	0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc,
+	0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+	0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+	0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+	0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
+	0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+	0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3,
+	0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+	0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5,
+	0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+	0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+	0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+}
+
+local function add32(...: number): number
+	local result = 0
+	for index = 1, select("#", ...) do
+		result = (result + (select(index, ...) :: number)) % MODULUS
+	end
+	return result
+end
+
+local function word_at(data: string, offset: number): number
+	local a, b, c, d = string.byte(data, offset, offset + 3)
+	return (a :: number) * 16777216 + (b :: number) * 65536 + (c :: number) * 256 + (d :: number)
+end
+
+local function append_u64(length_bits: number): string
+	local high = math.floor(length_bits / MODULUS)
+	local low = length_bits % MODULUS
+	return string.char(
+		math.floor(high / 16777216) % 256,
+		math.floor(high / 65536) % 256,
+		math.floor(high / 256) % 256,
+		high % 256,
+		math.floor(low / 16777216) % 256,
+		math.floor(low / 65536) % 256,
+		math.floor(low / 256) % 256,
+		low % 256
+	)
+end
+
+function SHA256.digest(input: string): string
+	if type(input) ~= "string" then error("SHA-256 input must be a string", 2) end
+	local length = #input
+	if length > MAX_INPUT_BYTES then error("SHA-256 input exceeds the 16 MiB limit", 2) end
+	local padding_count = (56 - ((length + 1) % 64)) % 64
+	local data = input .. string.char(0x80) .. string.rep("\0", padding_count) .. append_u64(length * 8)
+	local state = table.clone(INITIAL)
+	local schedule: { [number]: number } = table.create(64, 0)
+
+	for block_offset = 1, #data, 64 do
+		for index = 0, 15 do
+			schedule[index] = word_at(data, block_offset + index * 4)
+		end
+		for index = 16, 63 do
+			local x = schedule[index - 15]
+			local y = schedule[index - 2]
+			local sigma0 = bit32.bxor(bit32.rrotate(x, 7), bit32.rrotate(x, 18), bit32.rshift(x, 3))
+			local sigma1 = bit32.bxor(bit32.rrotate(y, 17), bit32.rrotate(y, 19), bit32.rshift(y, 10))
+			schedule[index] = add32(schedule[index - 16], sigma0, schedule[index - 7], sigma1)
+		end
+
+		local a, b, c, d = state[1], state[2], state[3], state[4]
+		local e, f, g, h = state[5], state[6], state[7], state[8]
+		for index = 0, 63 do
+			local upper_e = bit32.bxor(bit32.rrotate(e, 6), bit32.rrotate(e, 11), bit32.rrotate(e, 25))
+			local choose = bit32.bxor(bit32.band(e, f), bit32.band(bit32.bnot(e), g))
+			local temp1 = add32(h, upper_e, choose, ROUND[index + 1], schedule[index])
+			local upper_a = bit32.bxor(bit32.rrotate(a, 2), bit32.rrotate(a, 13), bit32.rrotate(a, 22))
+			local majority = bit32.bxor(bit32.band(a, b), bit32.band(a, c), bit32.band(b, c))
+			local temp2 = add32(upper_a, majority)
+			h = g
+			g = f
+			f = e
+			e = add32(d, temp1)
+			d = c
+			c = b
+			b = a
+			a = add32(temp1, temp2)
+		end
+		state[1] = add32(state[1], a)
+		state[2] = add32(state[2], b)
+		state[3] = add32(state[3], c)
+		state[4] = add32(state[4], d)
+		state[5] = add32(state[5], e)
+		state[6] = add32(state[6], f)
+		state[7] = add32(state[7], g)
+		state[8] = add32(state[8], h)
+	end
+
+	local hex = table.create(8)
+	for index, value in ipairs(state) do
+		hex[index] = string.format("%08x", value)
+	end
+	return table.concat(hex)
+end
+
+return table.freeze(SHA256)
+
+end)()
+
+local RecordStoreEmbeddedRequestAdmission = (function()
+	local runtime = rawget(RecordStore, "_scheduler_runtime") :: any
+	if type(runtime) ~= "table" or type(runtime.schedule) ~= "function" then
+		error("RecordStore background request admission is unavailable", 2)
+	end
+	local sequence = 0
+
+	local function enqueue(
+		callback: () -> (),
+		deadline_sensitive: boolean,
+		lease_remaining_seconds: number?,
+		on_rejected: ((any) -> ())?
+	): (boolean, string?)
+		if type(callback) ~= "function" then
+			return false, "background callback must be a function"
+		end
+		if runtime.is_shutting_down() then
+			return false, "RecordStore is shutting down"
+		end
+		if not runtime.is_enabled() then
+			task.defer(callback)
+			return true, nil
+		end
+
+		sequence += 1
+		local now_ms = now_local() * 1000
+		local remaining_ms = if deadline_sensitive then math.max(100, (lease_remaining_seconds or 1) * 1000) else nil
+		local callback_started = false
+		local rejection_delivered = false
+		local function deliver_rejection(result: any)
+			if callback_started or rejection_delivered or runtime.is_shutting_down() then return end
+			rejection_delivered = true
+			if not runtime.is_enabled() then
+				task.defer(callback)
+			elseif on_rejected ~= nil then
+				pcall(on_rejected, result)
+			end
+		end
+		local options: EmbeddedSchedulerScheduleOptions = {
+			lane = if deadline_sensitive then "high" else "background",
+			service_class = if deadline_sensitive then "interactive" else "bulk",
+			work_class = "background",
+			operation_class = "update_async",
+			due_at_ms = now_ms,
+			deadline_ms = if deadline_sensitive then now_ms + math.max(10, (remaining_ms :: number) * 0.75) else nil,
+			expires_at_ms = if deadline_sensitive then now_ms + (remaining_ms :: number) else nil,
+			read_units = if deadline_sensitive then 1 else 2,
+			write_units = if deadline_sensitive then 1 else 2,
+			estimated_bytes = 32768,
+			handler_slots = 1,
+			cost = 1,
+			max_retries = 0,
+			mutating = true,
+			on_complete = deliver_rejection,
+		}
+		local result = runtime.schedule(
+			"recordstore:durable-streams",
+			"stream:" .. tostring(sequence),
+			function()
+				callback_started = true
+				callback()
+				return { code = "completed" }
+			end,
+			options
+		)
+		if type(result) == "table" and result.code == "accepted" then
+			return true, nil
+		end
+		if runtime.is_shutting_down() then
+			return false, "RecordStore is shutting down"
+		end
+		if not runtime.is_enabled() then
+			task.defer(callback)
+			return true, nil
+		end
+		deliver_rejection(result)
+		return false, tostring(if type(result) == "table" then result.message or result.code else "scheduler admission failed")
+	end
+
+	return table.freeze({
+		defer_background = function(callback: () -> (), on_rejected: ((any) -> ())?): (boolean, string?)
+			return enqueue(callback, false, nil, on_rejected)
+		end,
+		defer_lease_renewal = function(
+			lease_remaining_seconds: number,
+			callback: () -> (),
+			on_rejected: ((any) -> ())?
+		): (boolean, string?)
+			if type(lease_remaining_seconds) ~= "number" or lease_remaining_seconds ~= lease_remaining_seconds
+				or lease_remaining_seconds <= 0 or lease_remaining_seconds == math.huge
+				or lease_remaining_seconds == -math.huge
+			then
+				return false, "lease_remaining_seconds must be positive and finite"
+			end
+			return enqueue(callback, true, lease_remaining_seconds, on_rejected)
+		end,
+	})
+end)()
+
+local RecordStoreEmbeddedDurableStreams = (function()
+	local SHA256 = RecordStoreEmbeddedSHA256
+
+local DurableStreams = {}
+local Stream = {}
+Stream.__index = Stream
+
+local MAX_STREAM_NAME_BYTES = 96
+local MAX_GROUP_NAME_BYTES = 96
+local MAX_ROUTE_KEY_BYTES = 128
+local MAX_EVENT_ID_BYTES = 128
+local MAX_PRODUCER_ID_BYTES = 64
+local MAX_PRODUCERS_PER_PARTITION = 128
+local MAX_PRODUCER_STATE_BYTES = 65536
+local MAX_PARTITIONS = 32
+local MAX_SEGMENT_MESSAGES = 64
+local MAX_SEGMENT_BYTES = 262144
+local MAX_PAYLOAD_BYTES = 32768
+local MAX_BATCH_MESSAGES = 32
+local MIN_LEASE_SECONDS = 5
+local MAX_LEASE_SECONDS = 120
+local MAX_PAYLOAD_DEPTH = 32
+local MAX_PAYLOAD_NODES = 4096
+local MAX_SAFE_INTEGER = 9007199254740991
+local MAX_CONSUMER_GROUPS = 16
+local MAX_MAINTENANCE_LEASE_SECONDS = 600
+
+type Message = {
+	sequence: number,
+	event_id: string,
+	payload: any,
+	payload_digest: string,
+	payload_bytes: number,
+	created_at: number,
+	producer_id: string?,
+	producer_sequence: number?,
+}
+
+type ProducerState = {
+	sequence: number,
+	stream_sequence: number,
+	event_id: string,
+	payload_digest: string,
+}
+
+type ProducerStates = {
+	[string]: ProducerState,
+}
+
+type Segment = {
+	format: number,
+	stream: string,
+	partition: number,
+	segment: number,
+	created_at: number,
+	first_sequence: number,
+	last_sequence: number,
+	bytes: number,
+	sealed: boolean,
+	chain_integrity: string,
+	integrity: string,
+	messages: { Message },
+	producer_states: ProducerStates,
+}
+
+type Head = {
+	format: number,
+	stream: string,
+	partition: number,
+	active_segment: number,
+	next_sequence: number,
+	retained_segment: number,
+	retained_sequence: number,
+	cleanup_segment: number,
+	retention_generation: number,
+	producer_states: ProducerStates,
+	producer_integrity: string,
+}
+
+	type CursorRecord = {
+	format: number,
+	stream: string,
+	group: string,
+	partition: number,
+	segment: number,
+	offset: number,
+	generation: number,
+	owner_token: string?,
+	lease_until: number,
+}
+
+type ClaimState = {
+	group: string,
+	partition: number,
+	owner_token: string,
+	generation: number,
+	segment: number,
+	offset: number,
+	lease_until: number,
+	lease_seconds: number,
+	cursor_key: string,
+	claim_key: string,
+	released: boolean,
+}
+
+type GroupPosition = {
+	segment: number,
+	offset: number,
+}
+
+type RetentionFloor = {
+	segment: number,
+	sequence: number,
+}
+
+type ConsumerGroup = {
+	name: string,
+	retention_protected: boolean,
+	removing: boolean,
+	start_mode: string,
+	explicit_segment: number?,
+	explicit_offset: number?,
+	positions: { GroupPosition },
+}
+
+type GroupRegistry = {
+	format: number,
+	stream: string,
+	groups: { ConsumerGroup },
+	floors: { RetentionFloor },
+	lease_owner: string?,
+	lease_generation: number,
+	lease_until: number,
+}
+
+type MaintenanceLease = {
+	owner: string,
+	generation: number,
+	lease_until: number,
+}
+
+type StreamOptions = {
+	max_segment_messages: number,
+	max_segment_bytes: number,
+	max_payload_bytes: number,
+	max_batch_messages: number,
+	max_retained_segments: number,
+	min_segment_age_seconds: number,
+	max_segment_age_seconds: number?,
+	now: () -> number,
+}
+
+type StreamType = {
+	_store: any,
+	_name: string,
+	_hash: string,
+	_partitions: number,
+	_options: StreamOptions,
+	_get_options: any,
+	_heads: { [number]: Head },
+	_claims: { [any]: ClaimState },
+	_busy: { [string]: boolean },
+	GetPartition: (self: StreamType, route_key: string) -> number,
+	_ReadHead: (self: StreamType, partition: number) -> (Head?, string?),
+	_RefreshHead: (self: StreamType, partition: number) -> (Head?, string?),
+	_ReadSegment: (self: StreamType, partition: number, segment_id: number) -> (Segment?, string?),
+	_ReadGroupRegistry: (self: StreamType) -> (GroupRegistry?, string?),
+	_AcquireMaintenanceLease: (self: StreamType) -> (MaintenanceLease?, string?),
+	_ReleaseMaintenanceLease: (self: StreamType, lease: MaintenanceLease) -> boolean,
+	_FenceRetentionGeneration: (self: StreamType, lease: MaintenanceLease) -> (boolean, string?),
+	_DeleteBelowRetentionFloor: (self: StreamType, partition: number, lease: MaintenanceLease, limit: number) -> (number, string?),
+	_AdvanceHead: (self: StreamType, partition: number, segment: Segment) -> (boolean, string?),
+	PublishAsync: (self: StreamType, route_key: string, event_id: string, payload: any, producer_id: string?, producer_sequence: number?) -> any,
+	PublishBatchAsync: (self: StreamType, route_key: string, events: { any }) -> any,
+	GetProducerSequenceAsync: (self: StreamType, route_key: string, producer_id: string) -> any,
+	RegisterConsumerGroupAsync: (self: StreamType, group: string, start_position: any, retention_protected: boolean?) -> any,
+	RemoveConsumerGroupAsync: (self: StreamType, group: string, confirm: boolean) -> any,
+	PruneAsync: (self: StreamType, partition: number, max_segments: number?) -> any,
+	GetRetentionStateAsync: (self: StreamType, partition: number) -> any,
+	ClaimConsumerAsync: (self: StreamType, group: string, partition: number, owner_token: string, lease_seconds: number?) -> any,
+	RenewConsumerAsync: (self: StreamType, claim: any) -> any,
+	ConsumeBatchAsync: (self: StreamType, claim: any, handler: (any, any) -> (boolean, string?), batch_size: number?) -> any,
+	ReleaseConsumerAsync: (self: StreamType, claim: any) -> any,
+}
+
+type ClientType = {
+	_store: any,
+	_options: StreamOptions,
+	_get_options: DataStoreGetOptions,
+	OpenStreamAsync: (self: ClientType, name: string, partitions: number) -> any,
+}
+
+local function finite(value: any): boolean
+	return type(value) == "number" and value == value and value ~= math.huge and value ~= -math.huge
+end
+
+local function integer_at_least(value: any, minimum: number): boolean
+	return finite(value) and math.floor(value) == value and value >= minimum
+end
+
+local function safe_integer(value: any, minimum: number): boolean
+	return integer_at_least(value, minimum) and value <= MAX_SAFE_INTEGER
+end
+
+local function valid_text(value: any, maximum: number): boolean
+	return type(value) == "string" and #value > 0 and #value <= maximum
+end
+
+local function base36(value: number): string
+	local digits = "0123456789abcdefghijklmnopqrstuvwxyz"
+	local result = ""
+	repeat
+		local remainder = value % 36
+		result = string.sub(digits, remainder + 1, remainder + 1) .. result
+		value = math.floor(value / 36)
+	until value == 0
+	return result
+end
+
+local function clone_payload(value: any, seen: { [any]: boolean }, depth: number, nodes: { number }, copy_value: boolean): (any, string)
+	if depth > MAX_PAYLOAD_DEPTH then
+		error("payload exceeds the maximum nesting depth", 0)
+	end
+	local kind = type(value)
+	if kind == "nil" then
+		error("payload cannot be nil", 0)
+	elseif kind == "boolean" then
+		return if copy_value then value else nil, if value then "b1" else "b0"
+	elseif kind == "number" then
+		if not finite(value) then
+			error("payload numbers must be finite", 0)
+		end
+		return if copy_value then value else nil, if value == 0 then "d0" else "d" .. string.format("%.17g", value)
+	elseif kind == "string" then
+		return if copy_value then value else nil, "s" .. tostring(#value) .. ":" .. value
+	elseif kind ~= "table" then
+		error("unsupported payload type " .. kind, 0)
+	end
+	if getmetatable(value) ~= nil then
+		error("payload tables must not have metatables", 0)
+	end
+	if seen[value] then
+		error("cyclic payload tables are unsupported", 0)
+	end
+	nodes[1] += 1
+	if nodes[1] > MAX_PAYLOAD_NODES then
+		error("payload exceeds the maximum node count", 0)
+	end
+	seen[value] = true
+	local count = 0
+	local numeric_keys = true
+	local string_keys = true
+	local max_index = 0
+	for key in pairs(value) do
+		count += 1
+		if type(key) == "number" and integer_at_least(key, 1) then
+			max_index = math.max(max_index, key)
+		else
+			numeric_keys = false
+		end
+		if type(key) ~= "string" then
+			string_keys = false
+		end
+	end
+	local copied: any = if copy_value then {} else nil
+	local canonical: string
+	if count > 0 and numeric_keys and max_index == count then
+		local parts = table.create(count)
+		for index = 1, count do
+			local child, encoded = clone_payload(value[index], seen, depth + 1, nodes, copy_value)
+			if copy_value then copied[index] = child end
+			parts[index] = encoded
+		end
+		canonical = "a" .. tostring(count) .. "[" .. table.concat(parts, "") .. "]"
+	elseif count == 0 or string_keys then
+		local keys = {}
+		for key in pairs(value) do
+			table.insert(keys, key)
+		end
+		table.sort(keys)
+		local parts = table.create(count * 2)
+		for index, key in ipairs(keys) do
+			local child, encoded = clone_payload(value[key], seen, depth + 1, nodes, copy_value)
+			if copy_value then copied[key] = child end
+			parts[index * 2 - 1] = "s" .. tostring(#key) .. ":" .. key
+			parts[index * 2] = encoded
+		end
+		canonical = "o" .. tostring(count) .. "{" .. table.concat(parts, "") .. "}"
+	else
+		seen[value] = nil
+		error("payload tables must be dense arrays or string-keyed objects", 0)
+	end
+	seen[value] = nil
+	return if copy_value then table.freeze(copied) else nil, canonical
+end
+
+local function normalize_payload(value: any, maximum_bytes: number, copy_value: boolean): (any?, string?, number?, string?)
+	local ok, copied, canonical = pcall(function()
+		local result, encoded = clone_payload(value, {}, 0, { 0 }, copy_value)
+		return result, encoded
+	end)
+	if not ok then
+		return nil, nil, nil, tostring(copied)
+	end
+	local bytes = #canonical
+	if bytes > maximum_bytes then
+		return nil, nil, nil, "payload exceeds the configured byte limit"
+	end
+	return copied, canonical, bytes, nil
+end
+
+local function initial_integrity(stream_name: string, partition: number, segment: number, first_sequence: number, created_at: number): string
+	return SHA256.digest(stream_name .. "\0" .. tostring(partition) .. "\0" .. tostring(segment) .. "\0" .. tostring(first_sequence) .. "\0" .. tostring(created_at))
+end
+
+local function next_integrity(previous: string, message: Message): string
+	local producer_identity = ""
+	if message.producer_id ~= nil then
+		producer_identity = "\0producer\0" .. message.producer_id .. "\0" .. tostring(message.producer_sequence)
+	end
+	return SHA256.digest(
+		previous
+			.. "\0"
+			.. tostring(message.sequence)
+			.. "\0"
+			.. message.event_id
+			.. "\0"
+			.. message.payload_digest
+			.. "\0"
+			.. tostring(message.payload_bytes)
+			.. producer_identity
+	)
+end
+
+local function producer_state_digest(states: ProducerStates): string
+	local producer_ids = {}
+	for producer_id in pairs(states) do
+		producer_ids[#producer_ids + 1] = producer_id
+	end
+	table.sort(producer_ids)
+	local parts = table.create(#producer_ids)
+	for index, producer_id in ipairs(producer_ids) do
+		local state = states[producer_id]
+		parts[index] = tostring(#producer_id)
+			.. ":" .. producer_id
+			.. ":" .. tostring(state.sequence)
+			.. ":" .. tostring(state.stream_sequence)
+			.. ":" .. tostring(#state.event_id)
+			.. ":" .. state.event_id
+			.. ":" .. state.payload_digest
+	end
+	return SHA256.digest(table.concat(parts, "\0"))
+end
+
+local function validate_producer_states(value: any): (ProducerStates?, string?)
+	if type(value) ~= "table" or getmetatable(value) ~= nil then
+		return nil, "producer checkpoint table is malformed"
+	end
+	local count = 0
+	local bytes = 0
+	for producer_id, state in pairs(value) do
+		count += 1
+		if not valid_text(producer_id, MAX_PRODUCER_ID_BYTES)
+			or type(state) ~= "table"
+			or getmetatable(state) ~= nil
+			or not safe_integer(state.sequence, 1)
+			or not safe_integer(state.stream_sequence, 1)
+			or not valid_text(state.event_id, MAX_EVENT_ID_BYTES)
+			or type(state.payload_digest) ~= "string"
+			or #state.payload_digest ~= 64
+		then
+			return nil, "producer checkpoint entry is malformed"
+		end
+		bytes += #producer_id + #state.event_id + #state.payload_digest
+			+ #tostring(state.sequence) + #tostring(state.stream_sequence) + 64
+		if count > MAX_PRODUCERS_PER_PARTITION or bytes > MAX_PRODUCER_STATE_BYTES then
+			return nil, "producer checkpoint exceeds its fixed storage bound"
+		end
+	end
+	return value :: ProducerStates, nil
+end
+
+local function segment_integrity(chain: string, sealed: boolean, producer_states: ProducerStates): string
+	local base = SHA256.digest(chain .. "\0sealed\0" .. (if sealed then "1" else "0"))
+	return SHA256.digest(base .. "\0producer-state\0" .. producer_state_digest(producer_states))
+end
+
+local function new_segment(
+	stream_name: string,
+	partition: number,
+	segment_id: number,
+	first_sequence: number,
+	created_at: number,
+	producer_states: ProducerStates
+): Segment
+	local chain = initial_integrity(stream_name, partition, segment_id, first_sequence, created_at)
+	local copied_producers = table.clone(producer_states)
+	return {
+		format = 3,
+		stream = stream_name,
+		partition = partition,
+		segment = segment_id,
+		created_at = created_at,
+		first_sequence = first_sequence,
+		last_sequence = first_sequence - 1,
+		bytes = 0,
+		sealed = false,
+		chain_integrity = chain,
+		integrity = segment_integrity(chain, false, copied_producers),
+		messages = {},
+		producer_states = copied_producers,
+	}
+end
+
+local function validate_head(value: any, stream_name: string, partition: number): (Head?, string?)
+	if type(value) ~= "table" then
+		return nil, "partition head is missing or malformed"
+	end
+	if value.format ~= 3 then
+		return nil, "unsupported partition-head format"
+	end
+	if value.stream ~= stream_name or value.partition ~= partition then
+		return nil, "partition-head identity mismatch"
+	end
+	if not safe_integer(value.active_segment, 1) or not safe_integer(value.next_sequence, 1)
+		or not safe_integer(value.retained_segment, 1) or value.retained_segment > value.active_segment
+		or not safe_integer(value.retained_sequence, 1) or value.retained_sequence > value.next_sequence
+		or not safe_integer(value.cleanup_segment, 1) or value.cleanup_segment > value.retained_segment
+		or not safe_integer(value.retention_generation, 0)
+	then
+		return nil, "partition head contains invalid sequence or retention metadata"
+	end
+	local producers, producer_error = validate_producer_states(value.producer_states)
+	if producers == nil or type(value.producer_integrity) ~= "string"
+		or value.producer_integrity ~= producer_state_digest(producers)
+	then
+		return nil, "partition head producer checkpoint is corrupt: " .. tostring(producer_error or "integrity mismatch")
+	end
+	return value :: Head, nil
+end
+
+local function validate_segment(
+	value: any,
+	stream_name: string,
+	partition: number,
+	segment_id: number,
+	options: StreamOptions
+): (Segment?, string?)
+	if type(value) ~= "table" or value.format ~= 3 then
+		return nil, "missing, malformed, or unsupported segment"
+	end
+	if value.stream ~= stream_name or value.partition ~= partition or value.segment ~= segment_id then
+		return nil, "segment identity mismatch"
+	end
+	if not safe_integer(value.created_at, 0)
+		or not safe_integer(value.first_sequence, 1)
+		or not safe_integer(value.last_sequence, 0)
+		or not integer_at_least(value.bytes, 0)
+		or not safe_integer(value.segment, 1)
+		or type(value.sealed) ~= "boolean"
+		or type(value.chain_integrity) ~= "string"
+		or type(value.integrity) ~= "string"
+		or type(value.messages) ~= "table"
+	then
+		return nil, "segment metadata is malformed"
+	end
+	local producer_states, producer_error = validate_producer_states(value.producer_states)
+	if producer_states == nil then
+		return nil, "segment producer checkpoint is malformed: " .. tostring(producer_error)
+	end
+	local messages = value.messages
+	local count = #messages
+	local message_keys = 0
+	for key in pairs(messages) do
+		if not integer_at_least(key, 1) or key > count then
+			return nil, "segment message array is not dense"
+		end
+		message_keys += 1
+	end
+	if message_keys ~= count then
+		return nil, "segment message array is not dense"
+	end
+	if count > options.max_segment_messages or value.bytes > options.max_segment_bytes then
+		return nil, "segment exceeds its configured bounds"
+	end
+	if value.last_sequence ~= value.first_sequence + count - 1 then
+		return nil, "segment sequence range is discontinuous"
+	end
+	local expected_integrity = initial_integrity(stream_name, partition, segment_id, value.first_sequence, value.created_at)
+	local expected_bytes = 0
+	local seen_event_ids: { [string]: boolean } = {}
+	for index = 1, count do
+		local message = messages[index]
+		if type(message) ~= "table"
+			or message.sequence ~= value.first_sequence + index - 1
+			or not valid_text(message.event_id, MAX_EVENT_ID_BYTES)
+			or type(message.payload_digest) ~= "string"
+			or not safe_integer(message.payload_bytes, 1)
+			or not safe_integer(message.created_at, 0)
+			or (message.producer_id ~= nil and (
+				not valid_text(message.producer_id, MAX_PRODUCER_ID_BYTES)
+				or not safe_integer(message.producer_sequence, 1)
+			))
+			or (message.producer_id == nil and message.producer_sequence ~= nil)
+		then
+			return nil, "segment message metadata is malformed"
+		end
+		local _, canonical, payload_bytes, payload_error = normalize_payload(message.payload, options.max_payload_bytes, false)
+		if payload_error ~= nil or canonical == nil or payload_bytes == nil then
+			return nil, "segment payload is invalid: " .. tostring(payload_error)
+		end
+		local actual_digest = SHA256.digest(canonical)
+		local producer_bytes = if message.producer_id ~= nil
+			then #message.producer_id + #tostring(message.producer_sequence) + 24
+			else 0
+		local actual_bytes = #message.event_id + payload_bytes + 64 + producer_bytes
+		if seen_event_ids[message.event_id] then
+			return nil, "segment contains a duplicate event identity"
+		end
+		seen_event_ids[message.event_id] = true
+		if actual_digest ~= message.payload_digest or actual_bytes ~= message.payload_bytes then
+			return nil, "segment payload digest or byte count mismatch"
+		end
+		if message.producer_id ~= nil then
+			local state = producer_states[message.producer_id]
+			if state == nil or state.sequence < (message.producer_sequence :: number) then
+				return nil, "producer checkpoint is behind a stored message"
+			end
+			if state.sequence == message.producer_sequence
+				and (state.stream_sequence ~= message.sequence or state.event_id ~= message.event_id or state.payload_digest ~= message.payload_digest)
+			then
+				return nil, "latest producer checkpoint disagrees with its message"
+			end
+		end
+		expected_bytes += actual_bytes
+		expected_integrity = next_integrity(expected_integrity, message :: Message)
+	end
+	for _, state in pairs(producer_states) do
+		if state.stream_sequence > value.last_sequence then
+			return nil, "producer checkpoint is ahead of the segment sequence range"
+		end
+		if state.stream_sequence >= value.first_sequence then
+			local latest = messages[state.stream_sequence - value.first_sequence + 1]
+			if latest == nil or latest.producer_id == nil or latest.producer_sequence ~= state.sequence
+				or latest.event_id ~= state.event_id or latest.payload_digest ~= state.payload_digest
+			then
+				return nil, "producer checkpoint does not identify its latest segment message"
+			end
+		end
+	end
+	if expected_bytes ~= value.bytes
+		or expected_integrity ~= value.chain_integrity
+		or segment_integrity(expected_integrity, value.sealed, producer_states) ~= value.integrity
+	then
+		return nil, "segment integrity verification failed"
+	end
+	return value :: Segment, nil
+end
+
+local function validate_cursor(value: any, stream_name: string, group: string, partition: number): (CursorRecord?, string?)
+	if type(value) ~= "table" or value.format ~= 3 then
+		return nil, "consumer cursor is missing, malformed, or unsupported"
+	end
+	if value.stream ~= stream_name or value.group ~= group or value.partition ~= partition then
+		return nil, "consumer cursor identity mismatch"
+	end
+	if not safe_integer(value.segment, 1)
+		or not safe_integer(value.offset, 1)
+		or not safe_integer(value.generation, 0)
+		or not safe_integer(value.lease_until, 0)
+		or (value.owner_token ~= nil and not valid_text(value.owner_token, 128))
+	then
+		return nil, "consumer cursor metadata is malformed"
+	end
+	return value :: CursorRecord, nil
+end
+
+local function copy_head(head: Head): Head
+	return {
+		format = head.format,
+		stream = head.stream,
+		partition = head.partition,
+		active_segment = head.active_segment,
+		next_sequence = head.next_sequence,
+		retained_segment = head.retained_segment,
+		retained_sequence = head.retained_sequence,
+		cleanup_segment = head.cleanup_segment,
+		retention_generation = head.retention_generation,
+		producer_states = table.clone(head.producer_states),
+		producer_integrity = head.producer_integrity,
+	}
+end
+
+local function copy_cursor(cursor: CursorRecord): CursorRecord
+	return {
+		format = cursor.format,
+		stream = cursor.stream,
+		group = cursor.group,
+		partition = cursor.partition,
+		segment = cursor.segment,
+		offset = cursor.offset,
+		generation = cursor.generation,
+		owner_token = cursor.owner_token,
+		lease_until = cursor.lease_until,
+	}
+end
+
+local function datastore_get(store: any, key: string, get_options: DataStoreGetOptions): (any, string?)
+	local ok, value = pcall(function()
+		return store:GetAsync(key, get_options)
+	end)
+	if not ok then
+		return nil, tostring(value)
+	end
+	return value, nil
+end
+
+local function datastore_update(store: any, key: string, transform: (any) -> any): (any, string?)
+	local ok, value = pcall(function()
+		return store:UpdateAsync(key, transform)
+	end)
+	if not ok then
+		return nil, tostring(value)
+	end
+	return value, nil
+end
+
+local function datastore_remove(store: any, key: string): (boolean, string?)
+	local ok, result = pcall(function()
+		return store:RemoveAsync(key)
+	end)
+	if not ok then
+		return false, tostring(result)
+	end
+	return true, nil
+end
+
+local function manifest_key(stream_hash: string): string
+	return "rs2m" .. stream_hash
+end
+
+local function head_key(stream_hash: string, partition: number): string
+	return "rs2h" .. stream_hash .. base36(partition)
+end
+
+local function group_registry_key(stream_hash: string): string
+	return "rs2g" .. stream_hash
+end
+
+local function segment_key(stream_hash: string, partition: number, segment_id: number): string
+	local partition_code = base36(partition)
+	local segment_code = base36(segment_id)
+	return "rs2s"
+		.. stream_hash
+		.. string.rep("0", 2 - #partition_code)
+		.. partition_code
+		.. string.rep("0", 11 - #segment_code)
+		.. segment_code
+end
+
+local function cursor_key(stream_hash: string, group: string, partition: number): string
+	return "rs2c" .. SHA256.digest(stream_hash .. "\0" .. group .. "\0" .. tostring(partition)):sub(1, 36)
+end
+
+
+local function validate_group_registry(value: any, stream_name: string, partitions: number): (GroupRegistry?, string?)
+	if type(value) ~= "table" or value.format ~= 3 or value.stream ~= stream_name
+		or type(value.groups) ~= "table" or type(value.floors) ~= "table"
+		or not safe_integer(value.lease_generation, 0)
+		or not safe_integer(value.lease_until, 0)
+		or (value.lease_owner ~= nil and not valid_text(value.lease_owner, 128))
+	then
+		return nil, "consumer-group registry is missing, malformed, or unsupported"
+	end
+	local floor_keys = 0
+	for key in pairs(value.floors) do
+		if not integer_at_least(key, 1) or key > partitions then
+			return nil, "retention floor array is not dense"
+		end
+		floor_keys += 1
+	end
+	if floor_keys ~= partitions then
+		return nil, "retention floor array is not dense"
+	end
+	for partition = 1, partitions do
+		local floor = value.floors[partition]
+		if type(floor) ~= "table" or not safe_integer(floor.segment, 1) or not safe_integer(floor.sequence, 1) then
+			return nil, "retention floor metadata is malformed"
+		end
+	end
+	local count = #value.groups
+	local keys = 0
+	local names: { [string]: boolean } = {}
+	for key in pairs(value.groups) do
+		if not integer_at_least(key, 1) or key > count then
+			return nil, "consumer-group registry array is not dense"
+		end
+		keys += 1
+	end
+	if keys ~= count or count > MAX_CONSUMER_GROUPS then
+		return nil, "consumer-group registry exceeds its bounds"
+	end
+	for index = 1, count do
+		local group = value.groups[index]
+		if type(group) ~= "table" or not valid_text(group.name, MAX_GROUP_NAME_BYTES)
+			or names[group.name] or type(group.retention_protected) ~= "boolean"
+			or type(group.removing) ~= "boolean"
+			or (group.start_mode ~= "earliest" and group.start_mode ~= "latest" and group.start_mode ~= "position")
+			or (group.start_mode == "position" and (not safe_integer(group.explicit_segment, 1) or not safe_integer(group.explicit_offset, 1)))
+			or type(group.positions) ~= "table" or #group.positions ~= partitions
+		then
+			return nil, "consumer-group registry entry is malformed"
+		end
+		names[group.name] = true
+		local position_keys = 0
+		for key in pairs(group.positions) do
+			if not integer_at_least(key, 1) or key > partitions then
+				return nil, "consumer-group positions array is not dense"
+			end
+			position_keys += 1
+		end
+		if position_keys ~= partitions then
+			return nil, "consumer-group positions array is not dense"
+		end
+		for partition = 1, partitions do
+			local position = group.positions[partition]
+			if type(position) ~= "table" or not safe_integer(position.segment, 1)
+				or not safe_integer(position.offset, 1)
+			then
+				return nil, "consumer-group start position is malformed"
+			end
+		end
+	end
+	return value :: GroupRegistry, nil
+end
+
+local function copy_group_registry(registry: GroupRegistry): GroupRegistry
+	return {
+		format = registry.format,
+		stream = registry.stream,
+		groups = table.clone(registry.groups),
+		floors = table.clone(registry.floors),
+		lease_owner = registry.lease_owner,
+		lease_generation = registry.lease_generation,
+		lease_until = registry.lease_until,
+	}
+end
+
+local function find_consumer_group(registry: GroupRegistry, name: string): ConsumerGroup?
+	for _, group in ipairs(registry.groups) do
+		if group.name == name then
+			return group
+		end
+	end
+	return nil
+end
+
+function DurableStreams.new(data_store: any, raw_options: any?): any
+	if data_store == nil or type(data_store.GetAsync) ~= "function" or type(data_store.UpdateAsync) ~= "function"
+		or type(data_store.RemoveAsync) ~= "function"
+	then
+		return nil, "a DataStore with GetAsync, UpdateAsync, and RemoveAsync is required"
+	end
+	if raw_options ~= nil and type(raw_options) ~= "table" then
+		return nil, "options must be a table"
+	end
+	local options = raw_options or {}
+	local max_payload_bytes = options.max_payload_bytes or 8192
+	local max_segment_messages = options.max_segment_messages or 24
+	local max_segment_bytes = options.max_segment_bytes or 131072
+	local max_batch_messages = options.max_batch_messages or 16
+	local max_retained_segments = options.max_retained_segments or 32
+	local min_segment_age_seconds = options.min_segment_age_seconds or 0
+	local max_segment_age_seconds = options.max_segment_age_seconds
+	local now = options.now or os.time
+	if not integer_at_least(max_payload_bytes, 128) or max_payload_bytes > MAX_PAYLOAD_BYTES then
+		return nil, "max_payload_bytes must be 128..32768"
+	end
+	if not integer_at_least(max_segment_messages, 1) or max_segment_messages > MAX_SEGMENT_MESSAGES then
+		return nil, "max_segment_messages must be 1..64"
+	end
+	if not integer_at_least(max_segment_bytes, max_payload_bytes + MAX_EVENT_ID_BYTES + 64)
+		or max_segment_bytes > MAX_SEGMENT_BYTES
+	then
+		return nil, "max_segment_bytes is outside the supported bounds"
+	end
+	if not integer_at_least(max_batch_messages, 1) or max_batch_messages > MAX_BATCH_MESSAGES
+		or max_batch_messages > max_segment_messages
+	then
+		return nil, "max_batch_messages must be 1..min(32, max_segment_messages)"
+	end
+	if not integer_at_least(max_retained_segments, 2) or max_retained_segments > 128 then
+		return nil, "max_retained_segments must be 2..128"
+	end
+	if not safe_integer(min_segment_age_seconds, 0) then
+		return nil, "min_segment_age_seconds must be a non-negative safe integer"
+	end
+	if max_segment_age_seconds ~= nil and (not safe_integer(max_segment_age_seconds, min_segment_age_seconds) or max_segment_age_seconds == 0) then
+		return nil, "max_segment_age_seconds must be nil or a positive safe integer not smaller than the minimum age"
+	end
+	if type(now) ~= "function" then
+		return nil, "now must be a function"
+	end
+	local get_options = Instance.new("DataStoreGetOptions") :: DataStoreGetOptions
+	get_options.UseCache = false
+	local config: StreamOptions = {
+		max_segment_messages = max_segment_messages,
+		max_segment_bytes = max_segment_bytes,
+		max_payload_bytes = max_payload_bytes,
+		max_batch_messages = max_batch_messages,
+		max_retained_segments = max_retained_segments,
+		min_segment_age_seconds = min_segment_age_seconds,
+		max_segment_age_seconds = max_segment_age_seconds,
+		now = now,
+	}
+	local client: any = {
+		_store = data_store,
+		_options = config,
+		_get_options = get_options,
+	}
+	function client:OpenStreamAsync(name: string, partitions: number): any
+		if not valid_text(name, MAX_STREAM_NAME_BYTES) then
+			return nil, "stream name must be 1..96 bytes"
+		end
+		if not integer_at_least(partitions, 1) or partitions > MAX_PARTITIONS then
+			return nil, "partitions must be 1..32"
+		end
+		local hash = SHA256.digest(name):sub(1, 28)
+		local key = manifest_key(hash)
+		local existing, read_error = datastore_get(self._store, key, self._get_options)
+		if read_error ~= nil then
+			return nil, "manifest_read_failed: " .. read_error
+		end
+		local expected = {
+			format = 3,
+			stream = name,
+			partitions = partitions,
+			max_segment_messages = self._options.max_segment_messages,
+			max_segment_bytes = self._options.max_segment_bytes,
+			max_payload_bytes = self._options.max_payload_bytes,
+			max_batch_messages = self._options.max_batch_messages,
+			max_retained_segments = self._options.max_retained_segments,
+			min_segment_age_seconds = self._options.min_segment_age_seconds,
+			max_segment_age_seconds = self._options.max_segment_age_seconds,
+		}
+		if existing == nil then
+			local created, write_error = datastore_update(self._store, key, function(current)
+				if current == nil then
+					return expected
+				end
+				return nil
+			end)
+			if write_error ~= nil then
+				existing, read_error = datastore_get(self._store, key, self._get_options)
+				if read_error ~= nil then
+					return nil, "manifest_outcome_unknown: " .. write_error
+				end
+			elseif created ~= nil then
+				existing = created
+			else
+				existing, read_error = datastore_get(self._store, key, self._get_options)
+				if read_error ~= nil then
+					return nil, "manifest_read_failed: " .. read_error
+				end
+			end
+		end
+		if type(existing) ~= "table" or existing.format ~= 3 or existing.stream ~= name then
+			return nil, "manifest_corrupt_or_unsupported"
+		end
+		for field, value in pairs(expected) do
+			if existing[field] ~= value then
+				return nil, "stream_configuration_conflict: " .. tostring(field)
+			end
+		end
+		local stream: any = setmetatable({
+			_store = self._store,
+			_name = name,
+			_hash = hash,
+			_partitions = partitions,
+			_options = self._options,
+			_get_options = self._get_options,
+			_heads = {},
+			_claims = setmetatable({}, { __mode = "k" }),
+			_busy = {},
+		}, Stream)
+		return stream, nil
+	end
+	return client, nil
+end
+
+function Stream.GetPartition(self: StreamType, route_key: string): number
+	if not valid_text(route_key, MAX_ROUTE_KEY_BYTES) then
+		error("route_key must be 1..128 bytes", 2)
+	end
+	local hash = SHA256.digest(self._name .. "\0" .. route_key):sub(1, 8)
+	local value = tonumber(hash, 16) :: number
+	return value % self._partitions + 1
+end
+
+function Stream._ReadHead(self: StreamType, partition: number): (Head?, string?)
+	self._heads[partition] = nil
+	local key = head_key(self._hash, partition)
+	local value, read_error = datastore_get(self._store, key, self._get_options)
+	if read_error ~= nil then
+		return nil, "head_read_failed: " .. read_error
+	end
+	if value == nil then
+		local created, write_error = datastore_update(self._store, key, function(current)
+			if current == nil then
+				return {
+					format = 3,
+					stream = self._name,
+					partition = partition,
+					active_segment = 1,
+					next_sequence = 1,
+					retained_segment = 1,
+					retained_sequence = 1,
+					cleanup_segment = 1,
+					retention_generation = 0,
+					producer_states = {},
+					producer_integrity = producer_state_digest({}),
+				}
+			end
+			return nil
+		end)
+		if write_error ~= nil then
+			value, read_error = datastore_get(self._store, key, self._get_options)
+			if read_error ~= nil then
+				return nil, "head_outcome_unknown: " .. write_error
+			end
+		elseif created ~= nil then
+			value = created
+		else
+			value, read_error = datastore_get(self._store, key, self._get_options)
+			if read_error ~= nil then
+				return nil, "head_read_failed: " .. read_error
+			end
+		end
+	end
+	local head, validation_error = validate_head(value, self._name, partition)
+	if head == nil then
+		return nil, "head_corrupt: " .. tostring(validation_error)
+	end
+	self._heads[partition] = head
+	return head, nil
+end
+
+function Stream._RefreshHead(self: StreamType, partition: number): (Head?, string?)
+	return self:_ReadHead(partition)
+end
+
+function Stream._ReadSegment(self: StreamType, partition: number, segment_id: number): (Segment?, string?)
+	local key = segment_key(self._hash, partition, segment_id)
+	local value, read_error = datastore_get(self._store, key, self._get_options)
+	if read_error ~= nil then
+		return nil, "segment_read_failed: " .. read_error
+	end
+	if value == nil then
+		return nil, nil
+	end
+	local segment, validation_error = validate_segment(value, self._name, partition, segment_id, self._options)
+	if segment == nil then
+		return nil, "segment_corrupt: " .. tostring(validation_error)
+	end
+	return segment, nil
+end
+
+function Stream._AdvanceHead(self: StreamType, partition: number, segment: Segment): (boolean, string?)
+	if segment.segment >= MAX_SAFE_INTEGER or segment.last_sequence >= MAX_SAFE_INTEGER then
+		return false, "capacity: partition sequence space is exhausted"
+	end
+	local key = head_key(self._hash, partition)
+	local updated, write_error = datastore_update(self._store, key, function(raw)
+		local current, validation_error = validate_head(raw, self._name, partition)
+		if current == nil then
+			error("head corrupt during rollover: " .. tostring(validation_error), 0)
+		end
+		if current.active_segment > segment.segment then
+			return nil
+		end
+		if current.active_segment ~= segment.segment or current.next_sequence ~= segment.first_sequence then
+			error("head and sealed segment disagree", 0)
+		end
+		if current.cleanup_segment < current.retained_segment
+			or current.active_segment - current.retained_segment + 1 >= self._options.max_retained_segments
+		then
+			return nil
+		end
+		local next_head = copy_head(current)
+		next_head.active_segment = segment.segment + 1
+		next_head.next_sequence = segment.last_sequence + 1
+		next_head.producer_states = table.clone(segment.producer_states)
+		next_head.producer_integrity = producer_state_digest(next_head.producer_states)
+		return next_head
+	end)
+	if write_error ~= nil then
+		local refreshed, refresh_error = self:_RefreshHead(partition)
+		if refreshed ~= nil and refreshed.active_segment > segment.segment then
+			return true, nil
+		end
+		return false, "rollover_outcome_unknown: " .. tostring(refresh_error or write_error)
+	end
+	if updated ~= nil then
+		local head, validation_error = validate_head(updated, self._name, partition)
+		if head == nil then
+			return false, "rollover_corrupt: " .. tostring(validation_error)
+		end
+		self._heads[partition] = head
+		return true, nil
+	end
+	local refreshed, refresh_error = self:_RefreshHead(partition)
+	if refreshed ~= nil and refreshed.active_segment > segment.segment then
+		return true, nil
+	end
+	if refreshed ~= nil and refreshed.active_segment == segment.segment then
+		if refreshed.cleanup_segment < refreshed.retained_segment then
+			return false, "capacity: sealed segment cleanup is still pending"
+		end
+		if refreshed.active_segment - refreshed.retained_segment + 1 >= self._options.max_retained_segments then
+			return false, "capacity: retained segment limit reached"
+		end
+	end
+	return false, "rollover_not_confirmed: " .. tostring(refresh_error)
+end
+
+function Stream._ReadGroupRegistry(self: StreamType): (GroupRegistry?, string?)
+	local value, read_error = datastore_get(self._store, group_registry_key(self._hash), self._get_options)
+	if read_error ~= nil then
+		return nil, "consumer_group_registry_read_failed: " .. read_error
+	end
+	if value == nil then
+		return nil, nil
+	end
+	local registry, validation_error = validate_group_registry(value, self._name, self._partitions)
+	if registry == nil then
+		return nil, "consumer_group_registry_corrupt: " .. tostring(validation_error)
+	end
+	return registry, nil
+end
+
+function Stream._AcquireMaintenanceLease(self: StreamType): (MaintenanceLease?, string?)
+	local now = self._options.now()
+	if not safe_integer(now, 0) or now > MAX_SAFE_INTEGER - MAX_MAINTENANCE_LEASE_SECONDS then
+		return nil, "clock is outside the safe maintenance-lease range"
+	end
+	local owner = SHA256.digest(self._name .. "\0" .. tostring(now) .. "\0" .. tostring({})):sub(1, 32)
+	local key = group_registry_key(self._hash)
+	local updated, update_error = datastore_update(self._store, key, function(raw)
+		local current: GroupRegistry
+		if raw == nil then
+			local floors = table.create(self._partitions)
+			for partition = 1, self._partitions do
+				floors[partition] = { segment = 1, sequence = 1 }
+			end
+			current = {
+				format = 3,
+				stream = self._name,
+				groups = {},
+				floors = floors,
+				lease_owner = nil,
+				lease_generation = 0,
+				lease_until = 0,
+			}
+		else
+			local valid, validation_error = validate_group_registry(raw, self._name, self._partitions)
+			if valid == nil then
+				error("consumer-group registry corrupt during maintenance lease: " .. tostring(validation_error), 0)
+			end
+			current = valid
+		end
+		if current.lease_owner ~= nil and current.lease_owner ~= owner and current.lease_until > now then
+			return nil
+		end
+		if current.lease_generation >= MAX_SAFE_INTEGER then
+			return nil
+		end
+		local next_registry = copy_group_registry(current)
+		next_registry.lease_owner = owner
+		next_registry.lease_generation += 1
+		next_registry.lease_until = now + MAX_MAINTENANCE_LEASE_SECONDS
+		return next_registry
+	end)
+	if updated == nil or update_error ~= nil then
+		local observed, read_error = datastore_get(self._store, key, self._get_options)
+		if read_error ~= nil then
+			return nil, "maintenance_lease_outcome_unknown: " .. tostring(update_error or "lease not returned") .. "; " .. read_error
+		end
+		local registry, validation_error = validate_group_registry(observed, self._name, self._partitions)
+		if registry == nil then
+			return nil, update_error or validation_error or "consumer-group registry is missing"
+		end
+		if registry.lease_owner == owner and registry.lease_until > now then
+			return {
+				owner = owner,
+				generation = registry.lease_generation,
+				lease_until = registry.lease_until,
+			}, nil
+		end
+		if registry.lease_owner ~= nil and registry.lease_until > now then
+			return nil, "maintenance_busy"
+		end
+		return nil, "maintenance_lease_outcome_unknown: " .. tostring(update_error or "lease was not acquired")
+	end
+	local registry, validation_error = validate_group_registry(updated, self._name, self._partitions)
+	if registry == nil then
+		return nil, "maintenance_lease_corrupt: " .. tostring(validation_error)
+	end
+	if registry.lease_owner ~= owner then
+		return nil, "maintenance_busy"
+	end
+	return {
+		owner = owner,
+		generation = registry.lease_generation,
+		lease_until = registry.lease_until,
+	}, nil
+end
+
+function Stream._ReleaseMaintenanceLease(self: StreamType, lease: MaintenanceLease): boolean
+	local key = group_registry_key(self._hash)
+	local updated = datastore_update(self._store, key, function(raw)
+		local current, validation_error = validate_group_registry(raw, self._name, self._partitions)
+		if current == nil then
+			error("consumer-group registry corrupt during lease release: " .. tostring(validation_error), 0)
+		end
+		if current.lease_owner ~= lease.owner or current.lease_generation ~= lease.generation then
+			return nil
+		end
+		local next_registry = copy_group_registry(current)
+		next_registry.lease_owner = nil
+		next_registry.lease_until = 0
+		return next_registry
+	end)
+	if updated ~= nil then
+		return true
+	end
+	local observed = self:_ReadGroupRegistry()
+	if observed ~= nil and observed.lease_owner == nil and observed.lease_generation == lease.generation then
+		return true
+	end
+	return false
+end
+
+function Stream._FenceRetentionGeneration(self: StreamType, lease: MaintenanceLease): (boolean, string?)
+	for partition = 1, self._partitions do
+		local head, head_error = self:_ReadHead(partition)
+		if head == nil then
+			return false, head_error
+		end
+		if head.retention_generation > lease.generation then
+			return false, "maintenance_fenced"
+		end
+		if head.retention_generation < lease.generation then
+			local key = head_key(self._hash, partition)
+			local updated, update_error = datastore_update(self._store, key, function(raw)
+				local current, validation_error = validate_head(raw, self._name, partition)
+				if current == nil then
+					error("head corrupt while fencing retention generation: " .. tostring(validation_error), 0)
+				end
+				if current.retention_generation >= lease.generation then
+					return nil
+				end
+				local next_head = copy_head(current)
+				next_head.retention_generation = lease.generation
+				return next_head
+			end)
+			if update_error ~= nil or updated == nil then
+				local refreshed, refresh_error = self:_RefreshHead(partition)
+				if refreshed == nil or refreshed.retention_generation ~= lease.generation then
+					return false, "retention_generation_fence_unknown: " .. tostring(refresh_error or update_error)
+				end
+				head = refreshed
+			else
+				local validated, validation_error = validate_head(updated, self._name, partition)
+				if validated == nil then
+					return false, "retention_generation_fence_corrupt: " .. tostring(validation_error)
+				end
+				head = validated
+			end
+		end
+		self._heads[partition] = head
+	end
+	return true, nil
+end
+
+local function find_event(segment: Segment, event_id: string): Message?
+	for _, message in ipairs(segment.messages) do
+		if message.event_id == event_id then
+			return message
+		end
+	end
+	return nil
+end
+
+local function is_capacity_error(message: any): boolean
+	return type(message) == "string" and string.sub(message, 1, 9) == "capacity:"
+end
+
+local function prepare_events(events: any, options: StreamOptions): ({ any }?, string?)
+	if type(events) ~= "table" then
+		return nil, "events must be a dense array"
+	end
+	local count = #events
+	if count < 1 or count > options.max_batch_messages then
+		return nil, "batch size is outside the configured bound"
+	end
+	local key_count = 0
+	for key in pairs(events) do
+		if not integer_at_least(key, 1) or key > count then
+			return nil, "events must be a dense array"
+		end
+		key_count += 1
+	end
+	if key_count ~= count then
+		return nil, "events must be a dense array"
+	end
+	local prepared = table.create(count)
+	local event_ids: { [string]: boolean } = {}
+	local producer_sequences: { [string]: number } = {}
+	local total_bytes = 0
+	for index = 1, count do
+		local item = events[index]
+		if type(item) ~= "table" or getmetatable(item) ~= nil or not valid_text(item.event_id, MAX_EVENT_ID_BYTES) then
+			return nil, "each event requires an event_id of 1..128 bytes"
+		end
+		if event_ids[item.event_id] then
+			return nil, "event_id values must be unique within a batch"
+		end
+		event_ids[item.event_id] = true
+		local producer_id = item.producer_id
+		local producer_sequence = item.producer_sequence
+		if (producer_id == nil) ~= (producer_sequence == nil) then
+			return nil, "producer_id and producer_sequence must be supplied together"
+		end
+		if producer_id ~= nil then
+			if not valid_text(producer_id, MAX_PRODUCER_ID_BYTES) or not safe_integer(producer_sequence, 1) then
+				return nil, "producer_id must be 1..64 bytes and producer_sequence a positive safe integer"
+			end
+			local previous_sequence = producer_sequences[producer_id]
+			if previous_sequence ~= nil and producer_sequence ~= previous_sequence + 1 then
+				return nil, "producer sequences must be unique, contiguous, and ordered within a batch"
+			end
+			producer_sequences[producer_id] = producer_sequence
+		end
+		local payload, canonical, payload_bytes, payload_error = normalize_payload(item.payload, options.max_payload_bytes, true)
+		if payload_error ~= nil or payload == nil or canonical == nil or payload_bytes == nil then
+			return nil, payload_error or "event payload is invalid"
+		end
+		local producer_bytes = if producer_id ~= nil
+			then #producer_id + #tostring(producer_sequence) + 24
+			else 0
+		local entry_bytes = #item.event_id + payload_bytes + 64 + producer_bytes
+		total_bytes += entry_bytes
+		prepared[index] = {
+			event_id = item.event_id,
+			payload = payload,
+			payload_digest = SHA256.digest(canonical),
+			payload_bytes = entry_bytes,
+			created_at = 0,
+			producer_id = producer_id,
+			producer_sequence = producer_sequence,
+		}
+	end
+	if total_bytes > options.max_segment_bytes then
+		return nil, "batch cannot fit in one segment"
+	end
+	return prepared, nil
+end
+
+local function find_producer_event(segment: Segment, producer_id: string, producer_sequence: number): Message?
+	for _, message in ipairs(segment.messages) do
+		if message.producer_id == producer_id and message.producer_sequence == producer_sequence then
+			return message
+		end
+	end
+	return nil
+end
+
+local function resolve_batch(segment: Segment, prepared: { any }): (boolean, number, { any }?, string?)
+	local results = table.create(#prepared)
+	local found_count = 0
+	local producer_states = segment.producer_states
+	for index, event in ipairs(prepared) do
+		local existing = find_event(segment, event.event_id)
+		if existing == nil and event.producer_id ~= nil then
+			existing = find_producer_event(segment, event.producer_id, event.producer_sequence)
+		end
+		if existing ~= nil then
+			if existing.payload_digest ~= event.payload_digest
+				or (event.producer_id ~= nil and (
+					existing.producer_id ~= event.producer_id
+					or existing.producer_sequence ~= event.producer_sequence
+				))
+			then
+				return false, 0, nil, "event or producer sequence already exists with different content"
+			end
+			found_count += 1
+			results[index] = {
+				event_id = existing.event_id,
+				sequence = existing.sequence,
+				segment = segment.segment,
+				duplicate = true,
+			}
+		elseif event.producer_id ~= nil then
+			local state = producer_states[event.producer_id]
+			if state ~= nil and event.producer_sequence <= state.sequence then
+				if event.producer_sequence == state.sequence
+					and (state.event_id ~= event.event_id or state.payload_digest ~= event.payload_digest)
+				then
+					return false, 0, nil, "latest producer sequence already exists with different content"
+				end
+				found_count += 1
+				results[index] = {
+					event_id = event.event_id,
+					producer_id = event.producer_id,
+					producer_sequence = event.producer_sequence,
+					sequence = if event.producer_sequence == state.sequence then state.stream_sequence else nil,
+					duplicate = true,
+					historical = event.producer_sequence < state.sequence,
+				}
+			else
+				results[index] = nil
+			end
+		else
+			results[index] = nil
+		end
+	end
+	if found_count == #prepared then
+		return true, found_count, results, nil
+	end
+	return false, found_count, results, nil
+end
+
+local function resolve_head_producer_retry(head: Head, prepared: { any }): ({ any }?, string?)
+	local states = head.producer_states
+	local results = table.create(#prepared)
+	for index, event in ipairs(prepared) do
+		if event.producer_id == nil then
+			return nil, nil
+		end
+		local state = states[event.producer_id]
+		if state == nil or event.producer_sequence > state.sequence then
+			return nil, nil
+		end
+		if event.producer_sequence == state.sequence
+			and (state.event_id ~= event.event_id or state.payload_digest ~= event.payload_digest)
+		then
+			return nil, "latest producer sequence already exists with different content"
+		end
+		results[index] = {
+			event_id = event.event_id,
+			producer_id = event.producer_id,
+			producer_sequence = event.producer_sequence,
+			sequence = if event.producer_sequence == state.sequence then state.stream_sequence else nil,
+			duplicate = true,
+			historical = event.producer_sequence < state.sequence,
+		}
+	end
+	return results, nil
+end
+
+function Stream.PublishBatchAsync(self: StreamType, route_key: string, events: { any }): any
+	if not valid_text(route_key, MAX_ROUTE_KEY_BYTES) then
+		return { code = "invalid", message = "route_key must be 1..128 bytes" }
+	end
+	local prepared, prepare_error = prepare_events(events, self._options)
+	if prepared == nil then
+		return { code = "invalid", message = prepare_error }
+	end
+	local now = self._options.now()
+	if not safe_integer(now, 0) then
+		return { code = "invalid", message = "clock must return a non-negative safe integer timestamp" }
+	end
+	for _, event in ipairs(prepared) do
+		event.created_at = now
+	end
+	local partition = self:GetPartition(route_key)
+	for _ = 1, 4 do
+		local head, head_error = self:_ReadHead(partition)
+		if head == nil then
+			return { code = "unknown", message = head_error, partition = partition }
+		end
+		local historical_results, historical_error = resolve_head_producer_retry(head, prepared)
+		if historical_error ~= nil then
+			return { code = "conflict", message = historical_error, partition = partition }
+		end
+		if historical_results ~= nil then
+			return {
+				code = "committed",
+				duplicate = true,
+				historical = true,
+				count = #prepared,
+				items = historical_results,
+				partition = partition,
+			}
+		end
+		if head.active_segment >= MAX_SAFE_INTEGER or head.next_sequence >= MAX_SAFE_INTEGER then
+			return { code = "capacity", message = "partition sequence space is exhausted", partition = partition }
+		end
+		local key = segment_key(self._hash, partition, head.active_segment)
+		local updated, update_error = datastore_update(self._store, key, function(raw)
+			local current: Segment
+			if raw == nil then
+				current = new_segment(self._name, partition, head.active_segment, head.next_sequence, now, head.producer_states)
+			else
+				local valid, validation_error = validate_segment(raw, self._name, partition, head.active_segment, self._options)
+				if valid == nil then
+					error("segment corrupt during append: " .. tostring(validation_error), 0)
+				end
+				current = valid
+			end
+			if current.sealed then
+				return nil
+			end
+			local current_producers = current.producer_states
+			local missing = table.create(#prepared)
+			local missing_count = 0
+			local missing_bytes = 0
+			local planned_sequences: { [string]: number } = {}
+			for _, event in ipairs(prepared) do
+				local existing = find_event(current, event.event_id)
+				if existing ~= nil then
+					if existing.payload_digest ~= event.payload_digest
+						or (event.producer_id ~= nil and (
+							existing.producer_id ~= event.producer_id
+							or existing.producer_sequence ~= event.producer_sequence
+						))
+					then
+						error("EVENT_ID_CONFLICT", 0)
+					end
+				elseif event.producer_id ~= nil then
+					local producer_existing = find_producer_event(current, event.producer_id, event.producer_sequence)
+					if producer_existing ~= nil then
+						if producer_existing.event_id ~= event.event_id or producer_existing.payload_digest ~= event.payload_digest then
+							error("PRODUCER_SEQUENCE_CONFLICT", 0)
+						end
+					else
+						local last_sequence = planned_sequences[event.producer_id]
+						if last_sequence == nil then
+							local state = current_producers[event.producer_id]
+							last_sequence = if state == nil then 0 else state.sequence
+						end
+						if event.producer_sequence <= last_sequence then
+							local state = current_producers[event.producer_id]
+							if event.producer_sequence == last_sequence
+								and state ~= nil
+								and (state.event_id ~= event.event_id or state.payload_digest ~= event.payload_digest)
+							then
+								error("PRODUCER_SEQUENCE_CONFLICT", 0)
+							end
+						elseif event.producer_sequence ~= last_sequence + 1 then
+							error("PRODUCER_SEQUENCE_GAP", 0)
+						else
+							planned_sequences[event.producer_id] = event.producer_sequence
+							missing_count += 1
+							missing_bytes += event.payload_bytes
+							missing[missing_count] = event
+						end
+					end
+				else
+					missing_count += 1
+					missing_bytes += event.payload_bytes
+					missing[missing_count] = event
+				end
+			end
+			if missing_count == 0 then
+				return nil
+			end
+			local producer_count = 0
+			for _ in pairs(current_producers) do
+				producer_count += 1
+			end
+			for producer_id in pairs(planned_sequences) do
+				if current_producers[producer_id] == nil then
+					producer_count += 1
+				end
+			end
+			if producer_count > MAX_PRODUCERS_PER_PARTITION then
+				error("PRODUCER_CAPACITY", 0)
+			end
+			if #current.messages + missing_count > self._options.max_segment_messages
+				or current.bytes + missing_bytes > self._options.max_segment_bytes
+			then
+				local sealed = table.clone(current)
+				sealed.producer_states = table.clone(current_producers)
+				sealed.sealed = true
+				sealed.integrity = segment_integrity(sealed.chain_integrity, true, sealed.producer_states)
+				return sealed
+			end
+			local messages = table.clone(current.messages)
+			local producer_states = table.clone(current_producers)
+			local chain = current.chain_integrity
+			local sequence = current.last_sequence
+			for index = 1, missing_count do
+				local event = missing[index]
+				sequence += 1
+				local message: Message = {
+					sequence = sequence,
+					event_id = event.event_id,
+					payload = event.payload,
+					payload_digest = event.payload_digest,
+					payload_bytes = event.payload_bytes,
+					created_at = event.created_at,
+					producer_id = event.producer_id,
+					producer_sequence = event.producer_sequence,
+				}
+				messages[#messages + 1] = message
+				chain = next_integrity(chain, message)
+				if event.producer_id ~= nil then
+					producer_states[event.producer_id] = {
+						sequence = event.producer_sequence,
+						stream_sequence = sequence,
+						event_id = event.event_id,
+						payload_digest = event.payload_digest,
+					}
+				end
+			end
+			local validated_producers, producer_error = validate_producer_states(producer_states)
+			if validated_producers == nil then
+				error("PRODUCER_CAPACITY: " .. tostring(producer_error), 0)
+			end
+			local new_bytes = current.bytes + missing_bytes
+			local sealed = #messages >= self._options.max_segment_messages
+				or new_bytes >= self._options.max_segment_bytes
+			return {
+				format = 3,
+				stream = self._name,
+				partition = partition,
+				segment = head.active_segment,
+				created_at = current.created_at,
+				first_sequence = current.first_sequence,
+				last_sequence = sequence,
+				bytes = new_bytes,
+				sealed = sealed,
+				chain_integrity = chain,
+				integrity = segment_integrity(chain, sealed, producer_states),
+				messages = messages,
+				producer_states = producer_states,
+			}
+		end)
+		if update_error ~= nil then
+			local transform_error = tostring(update_error)
+			if string.find(transform_error, "PRODUCER_CAPACITY", 1, true) ~= nil then
+				return { code = "capacity", message = "partition has reached its fixed producer identity limit", partition = partition }
+			elseif string.find(transform_error, "PRODUCER_SEQUENCE_GAP", 1, true) ~= nil then
+				return { code = "conflict", message = "producer_sequence must be exactly the next sequence for this producer", partition = partition }
+			elseif string.find(transform_error, "PRODUCER_SEQUENCE_CONFLICT", 1, true) ~= nil
+				or string.find(transform_error, "EVENT_ID_CONFLICT", 1, true) ~= nil
+			then
+				return { code = "conflict", message = "event or producer sequence already exists with different content", partition = partition }
+			end
+			local segment, read_error = self:_ReadSegment(partition, head.active_segment)
+			if segment ~= nil then
+				local all_found, _, results, conflict_error = resolve_batch(segment, prepared)
+				if conflict_error ~= nil then
+					return { code = "conflict", message = conflict_error, partition = partition }
+				end
+				if all_found then
+					if segment.sealed then
+						self:_AdvanceHead(partition, segment)
+					end
+					return {
+						code = "committed",
+						duplicate = true,
+						reconciled = true,
+						count = #prepared,
+						items = results,
+						partition = partition,
+						segment = segment.segment,
+					}
+				end
+				if segment.sealed then
+					local advanced, advance_error = self:_AdvanceHead(partition, segment)
+					if advanced then
+						continue
+					end
+					return { code = if is_capacity_error(advance_error) then "capacity" else "unknown", message = advance_error, partition = partition }
+				end
+			else
+				local refreshed, refresh_error = self:_RefreshHead(partition)
+				if refreshed ~= nil and refreshed.active_segment > head.active_segment then
+					continue
+				end
+				return {
+					code = "unknown",
+					message = "append outcome could not be proven: " .. tostring(read_error or update_error or refresh_error),
+					partition = partition,
+					segment = head.active_segment,
+				}
+			end
+			return {
+				code = "unknown",
+				message = "append outcome could not be proven: " .. tostring(update_error),
+				partition = partition,
+				segment = head.active_segment,
+			}
+		end
+		if updated ~= nil then
+			local segment, validation_error = validate_segment(updated, self._name, partition, head.active_segment, self._options)
+			if segment == nil then
+				return { code = "corrupt", message = validation_error, partition = partition }
+			end
+			local all_found, _, results, conflict_error = resolve_batch(segment, prepared)
+			if conflict_error ~= nil then
+				return { code = "conflict", message = conflict_error, partition = partition }
+			end
+			if not all_found or results == nil then
+				if segment.sealed then
+					local advanced, advance_error = self:_AdvanceHead(partition, segment)
+					if advanced then
+						continue
+					end
+					return { code = if is_capacity_error(advance_error) then "capacity" else "retryable", message = advance_error, partition = partition }
+				end
+				return { code = "unknown", message = "append committed without all requested events", partition = partition }
+			end
+			if segment.sealed then
+				local advanced = self:_AdvanceHead(partition, segment)
+				return {
+					code = "committed",
+					partition = partition,
+					segment = segment.segment,
+					count = #prepared,
+					items = results,
+					rollover_pending = not advanced,
+				}
+			end
+			return {
+				code = "committed",
+				partition = partition,
+				segment = segment.segment,
+				count = #prepared,
+				items = results,
+			}
+		end
+		local segment, read_error = self:_ReadSegment(partition, head.active_segment)
+		if segment == nil then
+			local refreshed, refresh_error = self:_RefreshHead(partition)
+			if refreshed ~= nil and refreshed.active_segment > head.active_segment then
+				continue
+			end
+			return { code = "unknown", message = read_error or refresh_error or "append was not observable", partition = partition }
+		end
+		local all_found, _, results, conflict_error = resolve_batch(segment, prepared)
+		if conflict_error ~= nil then
+			return { code = "conflict", message = conflict_error, partition = partition }
+		end
+		if all_found then
+			return {
+				code = "committed",
+				duplicate = true,
+				partition = partition,
+				segment = segment.segment,
+				count = #prepared,
+				items = results,
+			}
+		end
+		if segment.sealed then
+			local advanced, advance_error = self:_AdvanceHead(partition, segment)
+			if advanced then
+				continue
+			end
+			return { code = if is_capacity_error(advance_error) then "capacity" else "retryable", message = advance_error, partition = partition }
+		end
+		return { code = "unknown", message = "append did not produce a verifiable batch", partition = partition }
+	end
+	return { code = "retryable", message = "partition rollover retry limit reached", partition = partition }
+end
+
+function Stream.GetProducerSequenceAsync(self: StreamType, route_key: string, producer_id: string): any
+	if not valid_text(route_key, MAX_ROUTE_KEY_BYTES) or not valid_text(producer_id, MAX_PRODUCER_ID_BYTES) then
+		return { code = "invalid", message = "route_key must be 1..128 bytes and producer_id 1..64 bytes" }
+	end
+	local partition = self:GetPartition(route_key)
+	local head, head_error = self:_RefreshHead(partition)
+	if head == nil then
+		return { code = "unknown", message = head_error, partition = partition }
+	end
+	local segment, segment_error = self:_ReadSegment(partition, head.active_segment)
+	if segment_error ~= nil then
+		return { code = "unknown", message = segment_error, partition = partition }
+	end
+	local states = if segment ~= nil then segment.producer_states else head.producer_states
+	local state = states[producer_id]
+	local sequence = if state == nil then 0 else state.sequence
+	return {
+		code = "ok",
+		partition = partition,
+		sequence = sequence,
+		next_sequence = sequence + 1,
+		observed_stream_sequence = if state == nil then nil else state.stream_sequence,
+	}
+end
+
+function Stream.PublishAsync(
+	self: StreamType,
+	route_key: string,
+	event_id: string,
+	payload: any,
+	producer_id: string?,
+	producer_sequence: number?
+): any
+	local result = self:PublishBatchAsync(route_key, {
+		{
+			event_id = event_id,
+			payload = payload,
+			producer_id = producer_id,
+			producer_sequence = producer_sequence,
+		},
+	})
+	if result.code ~= "committed" then
+		return result
+	end
+	local first = result.items and result.items[1]
+	return {
+		code = "committed",
+		duplicate = result.duplicate,
+		historical = result.historical,
+		reconciled = result.reconciled,
+		partition = result.partition,
+		segment = first and first.segment or result.segment,
+		sequence = first and first.sequence,
+		rollover_pending = result.rollover_pending,
+	}
+end
+
+local function validate_lease_seconds(value: any): boolean
+	return integer_at_least(value, MIN_LEASE_SECONDS) and value <= MAX_LEASE_SECONDS
+end
+
+local function claim_result(self: StreamType, record: CursorRecord, group: string, partition: number, owner_token: string, lease_seconds: number): any
+	local claim_key = group .. "\0" .. tostring(partition)
+	local claim: any = table.freeze({})
+	self._claims[claim] = {
+		group = group,
+		partition = partition,
+		owner_token = owner_token,
+		generation = record.generation,
+		segment = record.segment,
+		offset = record.offset,
+		lease_until = record.lease_until,
+		lease_seconds = lease_seconds,
+		cursor_key = cursor_key(self._hash, group, partition),
+		claim_key = claim_key,
+		released = false,
+	}
+	return { code = "claimed", claim = claim, generation = record.generation, position = { segment = record.segment, offset = record.offset } }
+end
+
+local function same_group_configuration(
+	group: ConsumerGroup,
+	start_mode: string,
+	retention_protected: boolean,
+	explicit_segment: number?,
+	explicit_offset: number?
+): boolean
+	return group.start_mode == start_mode
+		and group.retention_protected == retention_protected
+		and group.explicit_segment == explicit_segment
+		and group.explicit_offset == explicit_offset
+end
+
+function Stream.RegisterConsumerGroupAsync(self: StreamType, group: string, start_position: any, retention_protected: boolean?): any
+	if not valid_text(group, MAX_GROUP_NAME_BYTES) then
+		return { code = "invalid", message = "group must be 1..96 bytes" }
+	end
+	local protected = if retention_protected == nil then true else retention_protected
+	if type(protected) ~= "boolean" then
+		return { code = "invalid", message = "retention_protected must be a boolean" }
+	end
+	local start_mode: string
+	local explicit_segment: number? = nil
+	local explicit_offset: number? = nil
+	if start_position == nil or start_position == "earliest" then
+		start_mode = "earliest"
+	elseif start_position == "latest" then
+		start_mode = "latest"
+	elseif type(start_position) == "table"
+		and safe_integer(start_position.segment, 1)
+		and safe_integer(start_position.offset, 1)
+	then
+		start_mode = "position"
+		explicit_segment = start_position.segment
+		explicit_offset = start_position.offset
+	else
+		return { code = "invalid", message = "start_position must be earliest, latest, or { segment, offset }" }
+	end
+
+	local lease, lease_error = self:_AcquireMaintenanceLease()
+	if lease == nil then
+		return { code = if lease_error == "maintenance_busy" then "busy" else "unknown", message = lease_error }
+	end
+	local function finish(result: any): any
+		self:_ReleaseMaintenanceLease(lease)
+		return result
+	end
+	local fenced, fence_error = self:_FenceRetentionGeneration(lease)
+	if not fenced then
+		return finish({ code = "fenced", message = fence_error })
+	end
+	local registry, registry_error = self:_ReadGroupRegistry()
+	if registry_error ~= nil or registry == nil then
+		return finish({ code = "unknown", message = registry_error or "consumer-group registry disappeared" })
+	end
+	local existing = find_consumer_group(registry, group)
+	if existing ~= nil then
+		if existing.removing then
+			return finish({ code = "removed", message = "consumer group removal is in progress" })
+		end
+		if same_group_configuration(existing, start_mode, protected, explicit_segment, explicit_offset) then
+			return finish({ code = "exists" })
+		end
+		return finish({ code = "conflict", message = "consumer group already exists with a different start or retention policy" })
+	end
+	if #registry.groups >= MAX_CONSUMER_GROUPS then
+		return finish({ code = "capacity", message = "stream consumer-group limit reached" })
+	end
+
+	local positions = table.create(self._partitions)
+	for partition = 1, self._partitions do
+		local head, head_error = self:_RefreshHead(partition)
+		if head == nil then
+			return finish({ code = "unknown", message = head_error })
+		end
+		local position: GroupPosition
+		if start_mode == "earliest" then
+			local floor = registry.floors[partition]
+			position = { segment = floor.segment, offset = 1 }
+		elseif start_mode == "latest" then
+			local active, segment_error = self:_ReadSegment(partition, head.active_segment)
+			if segment_error ~= nil then
+				return finish({ code = "unknown", message = segment_error })
+			end
+			if active == nil then
+				position = { segment = head.active_segment, offset = 1 }
+			elseif active.sealed then
+				position = { segment = head.active_segment + 1, offset = 1 }
+			else
+				position = { segment = head.active_segment, offset = #active.messages + 1 }
+			end
+		else
+			position = { segment = explicit_segment :: number, offset = explicit_offset :: number }
+			if position.segment < registry.floors[partition].segment then
+				return finish({
+					code = "expired",
+					message = "explicit start position is below the retained floor",
+					partition = partition,
+					earliest_segment = registry.floors[partition].segment,
+					earliest_sequence = registry.floors[partition].sequence,
+				})
+			end
+			if position.segment > head.active_segment + 1 then
+				return finish({ code = "invalid", message = "explicit start position is ahead of the partition head", partition = partition })
+			end
+			if position.segment == head.active_segment + 1 then
+				local active, segment_error = self:_ReadSegment(partition, head.active_segment)
+				if segment_error ~= nil or active == nil or not active.sealed or position.offset ~= 1 then
+					return finish({ code = "invalid", message = "next-segment start requires a sealed active segment and offset 1", partition = partition })
+				end
+			else
+				local selected, segment_error = self:_ReadSegment(partition, position.segment)
+				if segment_error ~= nil then
+					return finish({ code = "corrupt", message = segment_error, partition = partition })
+				end
+				if selected == nil then
+					if position.segment ~= head.active_segment or position.offset ~= 1 then
+						return finish({ code = "invalid", message = "explicit start segment does not exist", partition = partition })
+					end
+				elseif position.offset > #selected.messages + 1 then
+					return finish({ code = "invalid", message = "explicit start offset exceeds the segment", partition = partition })
+				end
+			end
+		end
+		positions[partition] = position
+	end
+
+	local key = group_registry_key(self._hash)
+	local updated, update_error = datastore_update(self._store, key, function(raw)
+		local current, validation_error = validate_group_registry(raw, self._name, self._partitions)
+		if current == nil then
+			error("consumer-group registry corrupt during registration: " .. tostring(validation_error), 0)
+		end
+		if current.lease_owner ~= lease.owner or current.lease_generation ~= lease.generation or current.lease_until <= self._options.now() then
+			return nil
+		end
+		if find_consumer_group(current, group) ~= nil then
+			return nil
+		end
+		if #current.groups >= MAX_CONSUMER_GROUPS then
+			return nil
+		end
+		local next_registry = copy_group_registry(current)
+		local next_groups = table.clone(current.groups)
+		table.insert(next_groups, {
+			name = group,
+			retention_protected = protected,
+			removing = false,
+			start_mode = start_mode,
+			explicit_segment = explicit_segment,
+			explicit_offset = explicit_offset,
+			positions = positions,
+		})
+		next_registry.groups = next_groups
+		return next_registry
+	end)
+	if update_error ~= nil or updated == nil then
+		local observed, read_error = self:_ReadGroupRegistry()
+		if observed ~= nil then
+			local found = find_consumer_group(observed, group)
+			if found ~= nil and same_group_configuration(found, start_mode, protected, explicit_segment, explicit_offset) then
+				return finish({ code = "registered", reconciled = true })
+			end
+		end
+		return finish({ code = "unknown", message = tostring(update_error or "registration was not committed") .. (read_error and "; " .. read_error or "") })
+	end
+	return finish({ code = "registered" })
+end
+
+local function update_cursor_for_group_removal(self: StreamType, group: string, partition: number): (boolean, string?)
+	local key = cursor_key(self._hash, group, partition)
+	local updated, update_error = datastore_update(self._store, key, function(raw)
+		if raw == nil then
+			return nil
+		end
+		local current, validation_error = validate_cursor(raw, self._name, group, partition)
+		if current == nil then
+			error("consumer cursor corrupt during group removal: " .. tostring(validation_error), 0)
+		end
+		if current.generation >= MAX_SAFE_INTEGER then
+			error("consumer cursor fencing generation is exhausted", 0)
+		end
+		local next_record = copy_cursor(current)
+		next_record.generation += 1
+		next_record.owner_token = nil
+		next_record.lease_until = 0
+		return next_record
+	end)
+	if update_error ~= nil then
+		return false, update_error
+	end
+	if updated == nil then
+		local observed, read_error = datastore_get(self._store, key, self._get_options)
+		if read_error ~= nil then
+			return false, read_error
+		end
+		if observed == nil then
+			return true, nil
+		end
+		local current, validation_error = validate_cursor(observed, self._name, group, partition)
+		if current == nil then
+			return false, validation_error
+		end
+		if current.owner_token == nil then
+			return true, nil
+		end
+		return false, "cursor invalidation was not confirmed"
+	end
+	return true, nil
+end
+
+function Stream.RemoveConsumerGroupAsync(self: StreamType, group: string, confirm: boolean): any
+	if not valid_text(group, MAX_GROUP_NAME_BYTES) then
+		return { code = "invalid", message = "group must be 1..96 bytes" }
+	end
+	if confirm ~= true then
+		return { code = "invalid", message = "confirm=true is required because group removal is destructive" }
+	end
+	local lease, lease_error = self:_AcquireMaintenanceLease()
+	if lease == nil then
+		return { code = if lease_error == "maintenance_busy" then "busy" else "unknown", message = lease_error }
+	end
+	local function finish(result: any): any
+		self:_ReleaseMaintenanceLease(lease)
+		return result
+	end
+	local fenced, fence_error = self:_FenceRetentionGeneration(lease)
+	if not fenced then
+		return finish({ code = "fenced", message = fence_error })
+	end
+	local registry, registry_error = self:_ReadGroupRegistry()
+	if registry_error ~= nil or registry == nil then
+		return finish({ code = "unknown", message = registry_error or "consumer-group registry is missing" })
+	end
+	local entry = find_consumer_group(registry, group)
+	if entry == nil then
+		return finish({ code = "not_found" })
+	end
+	local registry_key = group_registry_key(self._hash)
+	if not entry.removing then
+		local marked, mark_error = datastore_update(self._store, registry_key, function(raw)
+			local current, validation_error = validate_group_registry(raw, self._name, self._partitions)
+			if current == nil then
+				error("consumer-group registry corrupt while marking removal: " .. tostring(validation_error), 0)
+			end
+			if current.lease_owner ~= lease.owner or current.lease_generation ~= lease.generation or current.lease_until <= self._options.now() then
+				return nil
+			end
+			local next_registry = copy_group_registry(current)
+			local next_groups = table.clone(current.groups)
+			for index, candidate in ipairs(next_groups) do
+				if candidate.name == group then
+					local removing_entry = table.clone(candidate)
+					removing_entry.removing = true
+					next_groups[index] = removing_entry
+					break
+				end
+			end
+			next_registry.groups = next_groups
+			return next_registry
+		end)
+		if mark_error ~= nil or marked == nil then
+			local observed, read_error = self:_ReadGroupRegistry()
+			local current_entry = observed and find_consumer_group(observed, group)
+			if current_entry == nil or not current_entry.removing then
+				return finish({ code = "unknown", message = mark_error or read_error or "group removal marker was not committed" })
+			end
+		end
+	end
+	for partition = 1, self._partitions do
+		local invalidated, invalidate_error = update_cursor_for_group_removal(self, group, partition)
+		if not invalidated then
+			return finish({
+				code = "cleanup_pending",
+				message = invalidate_error,
+				partition = partition,
+				group_removing = true,
+			})
+		end
+		local removed, remove_error = datastore_remove(self._store, cursor_key(self._hash, group, partition))
+		if not removed then
+			return finish({
+				code = "cleanup_pending",
+				message = remove_error,
+				partition = partition,
+				group_removing = true,
+			})
+		end
+	end
+	local updated, update_error = datastore_update(self._store, registry_key, function(raw)
+		local current, validation_error = validate_group_registry(raw, self._name, self._partitions)
+		if current == nil then
+			error("consumer-group registry corrupt during final removal: " .. tostring(validation_error), 0)
+		end
+		if current.lease_owner ~= lease.owner or current.lease_generation ~= lease.generation or current.lease_until <= self._options.now() then
+			return nil
+		end
+		local next_groups = table.create(math.max(0, #current.groups - 1))
+		for _, candidate in ipairs(current.groups) do
+			if candidate.name ~= group then
+				next_groups[#next_groups + 1] = candidate
+			end
+		end
+		local next_registry = copy_group_registry(current)
+		next_registry.groups = next_groups
+		return next_registry
+	end)
+	if update_error ~= nil or updated == nil then
+		local observed, read_error = self:_ReadGroupRegistry()
+		if read_error ~= nil or observed == nil or find_consumer_group(observed, group) ~= nil then
+			return finish({ code = "unknown", message = update_error or read_error or "final group removal was not confirmed" })
+		end
+	end
+	return finish({ code = "removed", cleanup_pending = false })
+end
+
+function Stream._DeleteBelowRetentionFloor(self: StreamType, partition: number, lease: MaintenanceLease, limit: number): (number, string?)
+	local removed = 0
+	while removed < limit do
+		local registry, registry_error = self:_ReadGroupRegistry()
+		if registry_error ~= nil or registry == nil then
+			return removed, registry_error or "consumer-group registry is missing"
+		end
+		local floor = registry.floors[partition]
+		local head, head_error = self:_RefreshHead(partition)
+		if head == nil then
+			return removed, head_error
+		end
+		if head.cleanup_segment >= floor.segment then
+			return removed, nil
+		end
+		local segment_id = head.cleanup_segment
+		local ok, remove_error = datastore_remove(self._store, segment_key(self._hash, partition, segment_id))
+		if not ok then
+			return removed, "segment_remove_failed: " .. tostring(remove_error)
+		end
+		local key = head_key(self._hash, partition)
+		local updated, update_error = datastore_update(self._store, key, function(raw)
+			local current, validation_error = validate_head(raw, self._name, partition)
+			if current == nil then
+				error("head corrupt during segment cleanup: " .. tostring(validation_error), 0)
+			end
+			if current.cleanup_segment > segment_id then
+				return nil
+			end
+			if current.cleanup_segment ~= segment_id then
+				error("cleanup cursor moved backwards", 0)
+			end
+			local next_head = copy_head(current)
+			next_head.cleanup_segment = segment_id + 1
+			if next_head.retained_segment < floor.segment then
+				next_head.retained_segment = floor.segment
+				next_head.retained_sequence = floor.sequence
+			end
+			return next_head
+		end)
+		if update_error ~= nil or updated == nil then
+			local refreshed, refresh_error = self:_RefreshHead(partition)
+			if refreshed == nil or refreshed.cleanup_segment <= segment_id then
+				return removed, "cleanup_cursor_outcome_unknown: " .. tostring(refresh_error or update_error)
+			end
+		else
+			local checked, validation_error = validate_head(updated, self._name, partition)
+			if checked == nil then
+				return removed, "cleanup_cursor_corrupt: " .. tostring(validation_error)
+			end
+		end
+		removed += 1
+	end
+	return removed, nil
+end
+
+local function sync_retention_head(
+	self: StreamType,
+	partition: number,
+	floor: RetentionFloor,
+	generation: number
+): (boolean, string?)
+	local key = head_key(self._hash, partition)
+	local updated, update_error = datastore_update(self._store, key, function(raw)
+		local current, validation_error = validate_head(raw, self._name, partition)
+		if current == nil then
+			error("head corrupt while syncing retention floor: " .. tostring(validation_error), 0)
+		end
+		if current.retention_generation > generation then
+			return nil
+		end
+		if current.retained_segment >= floor.segment and current.retention_generation == generation then
+			return nil
+		end
+		local next_head = copy_head(current)
+		if next_head.retained_segment < floor.segment then
+			next_head.retained_segment = floor.segment
+			next_head.retained_sequence = floor.sequence
+		end
+		next_head.retention_generation = math.max(next_head.retention_generation, generation)
+		return next_head
+	end)
+	if update_error ~= nil or updated == nil then
+		local refreshed, refresh_error = self:_RefreshHead(partition)
+		if refreshed ~= nil and refreshed.retained_segment >= floor.segment then
+			return true, nil
+		end
+		return false, "retention_head_sync_unknown: " .. tostring(refresh_error or update_error)
+	end
+	local checked, validation_error = validate_head(updated, self._name, partition)
+	if checked == nil then
+		return false, "retention_head_sync_corrupt: " .. tostring(validation_error)
+	end
+	self._heads[partition] = checked
+	return true, nil
+end
+
+local function advance_sealed_active_segment(self: StreamType, partition: number): (boolean, string?)
+	local head, head_error = self:_RefreshHead(partition)
+	if head == nil then
+		return false, head_error
+	end
+	local segment, segment_error = self:_ReadSegment(partition, head.active_segment)
+	if segment_error ~= nil then
+		return false, segment_error
+	end
+	if segment == nil or not segment.sealed then
+		return true, nil
+	end
+	return self:_AdvanceHead(partition, segment)
+end
+
+function Stream.PruneAsync(self: StreamType, partition: number, max_segments: number?): any
+	if not integer_at_least(partition, 1) or partition > self._partitions then
+		return { code = "invalid", message = "partition is outside this stream" }
+	end
+	local limit = max_segments or 4
+	if not integer_at_least(limit, 1) or limit > 32 then
+		return { code = "invalid", message = "max_segments must be 1..32" }
+	end
+	local now = self._options.now()
+	if not safe_integer(now, 0) then
+		return { code = "invalid", message = "clock must return a non-negative safe integer timestamp" }
+	end
+	local lease, lease_error = self:_AcquireMaintenanceLease()
+	if lease == nil then
+		return { code = if lease_error == "maintenance_busy" then "busy" else "unknown", message = lease_error }
+	end
+	local function finish(result: any): any
+		self:_ReleaseMaintenanceLease(lease)
+		return result
+	end
+	local fenced, fence_error = self:_FenceRetentionGeneration(lease)
+	if not fenced then
+		return finish({ code = "fenced", message = fence_error })
+	end
+	local registry, registry_error = self:_ReadGroupRegistry()
+	if registry_error ~= nil or registry == nil then
+		return finish({ code = "unknown", message = registry_error or "consumer-group registry is missing" })
+	end
+	local floor = registry.floors[partition]
+	local synced, sync_error = sync_retention_head(self, partition, floor, lease.generation)
+	if not synced then
+		return finish({ code = "unknown", message = sync_error, retained_segment = floor.segment })
+	end
+	local removed, cleanup_error = self._DeleteBelowRetentionFloor(self, partition, lease, limit)
+	if cleanup_error ~= nil then
+		local current = self:_RefreshHead(partition)
+		return finish({
+			code = "unknown",
+			message = cleanup_error,
+			removed = removed,
+			retained_segment = floor.segment,
+			retained_sequence = floor.sequence,
+			cleanup_pending = current ~= nil and current.cleanup_segment < floor.segment,
+		})
+	end
+	if removed >= limit then
+		local current = self:_RefreshHead(partition)
+		return finish({
+			code = "pruned",
+			removed = removed,
+			retained_segment = floor.segment,
+			retained_sequence = floor.sequence,
+			cleanup_pending = current ~= nil and current.cleanup_segment < floor.segment,
+		})
+	end
+	local advanced_before_scan, advance_before_error = advance_sealed_active_segment(self, partition)
+	if not advanced_before_scan and not is_capacity_error(advance_before_error) then
+		return finish({ code = "unknown", message = advance_before_error, removed = removed })
+	end
+
+	local head, head_error = self:_RefreshHead(partition)
+	if head == nil then
+		return finish({ code = "unknown", message = head_error, removed = removed })
+	end
+	local protected_positions = {}
+	for _, entry in ipairs(registry.groups) do
+		if entry.retention_protected and not entry.removing then
+			local key = cursor_key(self._hash, entry.name, partition)
+			local raw, cursor_read_error = datastore_get(self._store, key, self._get_options)
+			if cursor_read_error ~= nil then
+				return finish({ code = "unknown", message = "consumer cursor read failed: " .. cursor_read_error, removed = removed })
+			end
+			if raw == nil then
+				protected_positions[#protected_positions + 1] = {
+					group = entry.name,
+					segment = entry.positions[partition].segment,
+				}
+			else
+				local cursor, cursor_error = validate_cursor(raw, self._name, entry.name, partition)
+				if cursor == nil then
+					return finish({ code = "corrupt", message = cursor_error, removed = removed })
+				end
+				protected_positions[#protected_positions + 1] = {
+					group = entry.name,
+					segment = cursor.segment,
+				}
+			end
+		end
+	end
+	local target_segment = floor.segment
+	local target_sequence = floor.sequence
+	local candidate_count = 0
+	local forced_expiry = false
+	local blocked_reason = nil
+	local remaining_limit = limit - removed
+	while candidate_count < remaining_limit and target_segment < head.active_segment do
+		local segment, segment_error = self:_ReadSegment(partition, target_segment)
+		if segment_error ~= nil or segment == nil then
+			return finish({ code = "corrupt", message = segment_error or "retained segment is missing", removed = removed })
+		end
+		if not segment.sealed then
+			break
+		end
+		if now < segment.created_at then
+			return finish({ code = "invalid", message = "clock is behind the stored segment creation time", removed = removed })
+		end
+		local age = now - segment.created_at
+		local forced = self._options.max_segment_age_seconds ~= nil and age >= self._options.max_segment_age_seconds
+		local old_enough = age >= self._options.min_segment_age_seconds
+		local consumers_passed = true
+		for _, position in ipairs(protected_positions) do
+			if position.segment <= target_segment then
+				consumers_passed = false
+				break
+			end
+		end
+		if not forced and (not old_enough or not consumers_passed) then
+			blocked_reason = if not old_enough then "minimum_age" else "protected_consumer"
+			break
+		end
+		if forced and not consumers_passed then
+			forced_expiry = true
+		end
+		target_segment += 1
+		target_sequence = segment.last_sequence + 1
+		candidate_count += 1
+	end
+	if candidate_count == 0 then
+		if blocked_reason ~= nil then
+			return finish({
+				code = "blocked",
+				reason = blocked_reason,
+				removed = removed,
+				retained_segment = floor.segment,
+				retained_sequence = floor.sequence,
+			})
+		end
+		return finish({
+			code = "idle",
+			removed = removed,
+			retained_segment = floor.segment,
+			retained_sequence = floor.sequence,
+		})
+	end
+
+	local registry_key = group_registry_key(self._hash)
+	local updated, update_error = datastore_update(self._store, registry_key, function(raw)
+		local current, validation_error = validate_group_registry(raw, self._name, self._partitions)
+		if current == nil then
+			error("consumer-group registry corrupt during retention floor advance: " .. tostring(validation_error), 0)
+		end
+		if current.lease_owner ~= lease.owner
+			or current.lease_generation ~= lease.generation
+			or current.lease_until <= self._options.now()
+		then
+			return nil
+		end
+		local live_floor = current.floors[partition]
+		if live_floor.segment ~= floor.segment or live_floor.sequence ~= floor.sequence then
+			return nil
+		end
+		local next_registry = copy_group_registry(current)
+		local next_floors = table.clone(current.floors)
+		next_floors[partition] = { segment = target_segment, sequence = target_sequence }
+		next_registry.floors = next_floors
+		return next_registry
+	end)
+	if update_error ~= nil or updated == nil then
+		local observed, read_error = self:_ReadGroupRegistry()
+		if observed == nil or observed.floors[partition].segment < target_segment then
+			return finish({
+				code = "unknown",
+				message = "retention floor outcome unknown: " .. tostring(read_error or update_error),
+				removed = removed,
+			})
+		end
+		registry = observed
+		floor = observed.floors[partition]
+	else
+		local checked, validation_error = validate_group_registry(updated, self._name, self._partitions)
+		if checked == nil then
+			return finish({ code = "corrupt", message = validation_error, removed = removed })
+		end
+		registry = checked
+		floor = checked.floors[partition]
+	end
+	synced, sync_error = sync_retention_head(self, partition, floor, lease.generation)
+	if not synced then
+		return finish({ code = "unknown", message = sync_error, removed = removed, retained_segment = floor.segment, retained_sequence = floor.sequence })
+	end
+	local deleted, delete_error = self._DeleteBelowRetentionFloor(self, partition, lease, limit - removed)
+	removed += deleted
+	local advanced_after_prune, advance_after_error = advance_sealed_active_segment(self, partition)
+	if not advanced_after_prune and not is_capacity_error(advance_after_error) then
+		return finish({ code = "unknown", message = advance_after_error, removed = removed, retained_segment = floor.segment, retained_sequence = floor.sequence })
+	end
+	local refreshed = self:_RefreshHead(partition)
+	if delete_error ~= nil then
+		return finish({
+			code = "unknown",
+			message = delete_error,
+			removed = removed,
+			retained_segment = floor.segment,
+			retained_sequence = floor.sequence,
+			cleanup_pending = refreshed ~= nil and refreshed.cleanup_segment < floor.segment,
+			forced_expiry = forced_expiry,
+		})
+	end
+	return finish({
+		code = "pruned",
+		removed = removed,
+		retained_segment = floor.segment,
+		retained_sequence = floor.sequence,
+		cleanup_pending = refreshed ~= nil and refreshed.cleanup_segment < floor.segment,
+		forced_expiry = forced_expiry,
+	})
+end
+
+function Stream.GetRetentionStateAsync(self: StreamType, partition: number): any
+	if not integer_at_least(partition, 1) or partition > self._partitions then
+		return { code = "invalid", message = "partition is outside this stream" }
+	end
+	local head, read_error = self:_RefreshHead(partition)
+	if head == nil then
+		return { code = "unknown", message = read_error }
+	end
+	local registry, registry_error = self:_ReadGroupRegistry()
+	if registry_error ~= nil or registry == nil then
+		return { code = "unknown", message = registry_error or "consumer-group registry is missing" }
+	end
+	local floor = registry.floors[partition]
+	return {
+		code = "ok",
+		partition = partition,
+		active_segment = head.active_segment,
+		retained_segment = floor.segment,
+		retained_sequence = floor.sequence,
+		cleanup_segment = head.cleanup_segment,
+		max_retained_segments = self._options.max_retained_segments,
+		min_segment_age_seconds = self._options.min_segment_age_seconds,
+		max_segment_age_seconds = self._options.max_segment_age_seconds,
+	}
+end
+
+function Stream.ClaimConsumerAsync(self: StreamType, group: string, partition: number, owner_token: string, lease_seconds: number?): any
+	if not valid_text(group, MAX_GROUP_NAME_BYTES) then
+		return { code = "invalid", message = "group must be 1..96 bytes" }
+	end
+	if not integer_at_least(partition, 1) or partition > self._partitions then
+		return { code = "invalid", message = "partition is outside this stream" }
+	end
+	if not valid_text(owner_token, 128) then
+		return { code = "invalid", message = "owner_token must be 1..128 bytes and unique to this worker incarnation" }
+	end
+	local duration = lease_seconds or 30
+	if not validate_lease_seconds(duration) then
+		return { code = "invalid", message = "lease_seconds must be 5..120" }
+	end
+	local now = self._options.now()
+	if not safe_integer(now, 0) or now > MAX_SAFE_INTEGER - duration then
+		return { code = "invalid", message = "clock or lease expiry exceeds the safe integer range" }
+	end
+	local registry, registry_error = self:_ReadGroupRegistry()
+	if registry_error ~= nil then
+		return { code = "unknown", message = registry_error }
+	end
+	if registry == nil then
+		return { code = "not_registered", message = "consumer group must be registered before it can claim a partition" }
+	end
+	local registration = find_consumer_group(registry, group)
+	if registration == nil then
+		return { code = "not_registered", message = "consumer group must be registered before it can claim a partition" }
+	end
+	if registration.removing then
+		return { code = "removed", message = "consumer group removal is in progress" }
+	end
+	local start_position = registration.positions[partition]
+	local head, head_error = self:_RefreshHead(partition)
+	if head == nil then
+		return { code = "unknown", message = head_error }
+	end
+	local key = cursor_key(self._hash, group, partition)
+	local initial_cursor, initial_cursor_error = datastore_get(self._store, key, self._get_options)
+	if initial_cursor_error ~= nil then
+		return { code = "unknown", message = "consumer cursor read failed: " .. initial_cursor_error }
+	end
+	if initial_cursor == nil then
+		if start_position.segment < registry.floors[partition].segment then
+			return {
+				code = "expired",
+				earliest_segment = registry.floors[partition].segment,
+				earliest_sequence = registry.floors[partition].sequence,
+				position = { segment = start_position.segment, offset = start_position.offset },
+			}
+		end
+	else
+		local existing, existing_error = validate_cursor(initial_cursor, self._name, group, partition)
+		if existing == nil then
+			return { code = "corrupt", message = existing_error }
+		end
+		if existing.segment < registry.floors[partition].segment then
+			return {
+				code = "expired",
+				earliest_segment = registry.floors[partition].segment,
+				earliest_sequence = registry.floors[partition].sequence,
+				position = { segment = existing.segment, offset = existing.offset },
+			}
+		end
+	end
+	if start_position.segment > head.active_segment + 1 then
+		return { code = "corrupt", message = "registered consumer start position is ahead of the partition head" }
+	end
+	local function release_expired_claim(current: CursorRecord)
+		if current.owner_token ~= owner_token then
+			return
+		end
+		datastore_update(self._store, key, function(raw)
+			local live = validate_cursor(raw, self._name, group, partition)
+			if live == nil or live.owner_token ~= owner_token or live.generation ~= current.generation then
+				return nil
+			end
+			local released = copy_cursor(live)
+			released.owner_token = nil
+			released.lease_until = 0
+			return released
+		end)
+	end
+	local updated, update_error = datastore_update(self._store, key, function(raw)
+		local current: CursorRecord
+		if raw == nil then
+			current = {
+				format = 3,
+				stream = self._name,
+				group = group,
+				partition = partition,
+				segment = start_position.segment,
+				offset = start_position.offset,
+				generation = 0,
+				owner_token = nil,
+				lease_until = 0,
+			}
+		else
+			local valid, validation_error = validate_cursor(raw, self._name, group, partition)
+			if valid == nil then
+				error("consumer cursor corrupt: " .. tostring(validation_error), 0)
+			end
+			current = valid
+		end
+		if current.owner_token ~= owner_token and current.owner_token ~= nil and current.lease_until > now then
+			return nil
+		end
+		if current.generation >= MAX_SAFE_INTEGER then
+			return nil
+		end
+		local next_record = copy_cursor(current)
+		if current.owner_token ~= owner_token or current.lease_until <= now then
+			next_record.generation += 1
+		end
+		next_record.owner_token = owner_token
+		next_record.lease_until = now + duration
+		return next_record
+	end)
+	local latest_registry, latest_registry_error = self:_ReadGroupRegistry()
+	if latest_registry_error ~= nil or latest_registry == nil then
+		return { code = "unknown", message = latest_registry_error or "consumer-group registry disappeared during claim" }
+	end
+	local latest_registration = find_consumer_group(latest_registry, group)
+	if latest_registration == nil or latest_registration.removing then
+		return { code = "removed", message = "consumer group is no longer active" }
+	end
+	local latest_floor = latest_registry.floors[partition]
+	if update_error ~= nil or updated == nil then
+		local observed, read_error = datastore_get(self._store, key, self._get_options)
+		if read_error ~= nil then
+			return { code = "unknown", message = tostring(update_error or "claim was not returned") .. "; reconciliation failed: " .. read_error }
+		end
+		local current, validation_error = validate_cursor(observed, self._name, group, partition)
+		if current == nil then
+			if update_error ~= nil then
+				return { code = "unknown", message = update_error }
+			end
+			return { code = "corrupt", message = validation_error }
+		end
+		if current.segment < latest_floor.segment then
+			release_expired_claim(current)
+			return { code = "expired", earliest_segment = latest_floor.segment, earliest_sequence = latest_floor.sequence }
+		end
+		if current.owner_token == owner_token and current.lease_until > now then
+			return claim_result(self, current, group, partition, owner_token, duration)
+		end
+		if current.owner_token ~= nil and current.lease_until > now then
+			return { code = "busy", lease_until = current.lease_until, generation = current.generation }
+		end
+		return { code = "unknown", message = update_error or "claim outcome was not confirmed" }
+	end
+	local current, validation_error = validate_cursor(updated, self._name, group, partition)
+	if current == nil then
+		return { code = "corrupt", message = validation_error }
+	end
+	if current.segment < latest_floor.segment then
+		release_expired_claim(current)
+		return { code = "expired", earliest_segment = latest_floor.segment, earliest_sequence = latest_floor.sequence }
+	end
+	if current.owner_token ~= owner_token then
+		return { code = "busy", lease_until = current.lease_until, generation = current.generation }
+	end
+	return claim_result(self, current, group, partition, owner_token, duration)
+end
+
+function Stream.RenewConsumerAsync(self: StreamType, claim: any): any
+	local state = self._claims[claim]
+	if state == nil or state.released then
+		return { code = "invalid", message = "claim does not belong to this stream instance" }
+	end
+	local now = self._options.now()
+	if not safe_integer(now, 0) or now > MAX_SAFE_INTEGER - state.lease_seconds then
+		return { code = "invalid", message = "clock or lease expiry exceeds the safe integer range" }
+	end
+	local updated, update_error = datastore_update(self._store, state.cursor_key, function(raw)
+		local current, validation_error = validate_cursor(raw, self._name, state.group, state.partition)
+		if current == nil then
+			if raw == nil then
+				return nil
+			end
+			error("consumer cursor corrupt during renewal: " .. tostring(validation_error), 0)
+		end
+		if current.owner_token ~= state.owner_token or current.generation ~= state.generation or current.lease_until <= now then
+			return nil
+		end
+		local next_record = copy_cursor(current)
+		next_record.lease_until = now + state.lease_seconds
+		return next_record
+	end)
+	if update_error ~= nil or updated == nil then
+		local observed, read_error = datastore_get(self._store, state.cursor_key, self._get_options)
+		if read_error ~= nil then
+			return { code = "unknown", message = tostring(update_error or "renewal not returned") .. "; reconciliation failed: " .. read_error }
+		end
+		if observed == nil then
+			state.released = true
+			return { code = "fenced" }
+		end
+		local current, validation_error = validate_cursor(observed, self._name, state.group, state.partition)
+		if current == nil then
+			return { code = "corrupt", message = validation_error }
+		end
+		if current.owner_token == state.owner_token and current.generation == state.generation and current.lease_until > now then
+			state.lease_until = current.lease_until
+			return { code = "renewed", lease_until = current.lease_until }
+		end
+		return { code = "fenced", generation = current.generation }
+	end
+	local current, validation_error = validate_cursor(updated, self._name, state.group, state.partition)
+	if current == nil then
+		return { code = "corrupt", message = validation_error }
+	end
+	state.lease_until = current.lease_until
+	return { code = "renewed", lease_until = current.lease_until }
+end
+
+local function checkpoint(
+	self: StreamType,
+	claim: any,
+	state: ClaimState,
+	expected_segment: number,
+	expected_offset: number,
+	next_segment: number,
+	next_offset: number
+): any
+	local now = self._options.now()
+	if not safe_integer(now, 0) or now > MAX_SAFE_INTEGER - state.lease_seconds
+		or not safe_integer(next_segment, 1) or not safe_integer(next_offset, 1)
+	then
+		return { code = "capacity", message = "checkpoint position or lease expiry exceeds the safe integer range" }
+	end
+	local updated, update_error = datastore_update(self._store, state.cursor_key, function(raw)
+		local current, validation_error = validate_cursor(raw, self._name, state.group, state.partition)
+		if current == nil then
+			if raw == nil then
+				return nil
+			end
+			error("consumer cursor corrupt during checkpoint: " .. tostring(validation_error), 0)
+		end
+		if current.owner_token ~= state.owner_token or current.generation ~= state.generation or current.lease_until <= now then
+			return nil
+		end
+		if current.segment ~= expected_segment or current.offset ~= expected_offset then
+			return nil
+		end
+		local next_record = copy_cursor(current)
+		next_record.segment = next_segment
+		next_record.offset = next_offset
+		next_record.lease_until = now + state.lease_seconds
+		return next_record
+	end)
+	if update_error ~= nil or updated == nil then
+		local observed, read_error = datastore_get(self._store, state.cursor_key, self._get_options)
+		if read_error ~= nil then
+			return { code = "unknown", message = tostring(update_error or "checkpoint not returned") .. "; reconciliation failed: " .. read_error }
+		end
+		if observed == nil then
+			state.released = true
+			return { code = "fenced" }
+		end
+		local current, validation_error = validate_cursor(observed, self._name, state.group, state.partition)
+		if current == nil then
+			return { code = "corrupt", message = validation_error }
+		end
+		if current.owner_token ~= state.owner_token or current.generation ~= state.generation or current.lease_until <= now then
+			return { code = "fenced", generation = current.generation }
+		end
+		if current.segment == next_segment and current.offset == next_offset then
+			state.segment = current.segment
+			state.offset = current.offset
+			state.lease_until = current.lease_until
+			return { code = "committed", reconciled = true, claim = claim }
+		end
+		if current.segment ~= expected_segment or current.offset ~= expected_offset then
+			return { code = "conflict", position = { segment = current.segment, offset = current.offset } }
+		end
+		return { code = "unknown", message = update_error or "checkpoint was not committed" }
+	end
+	local current, validation_error = validate_cursor(updated, self._name, state.group, state.partition)
+	if current == nil then
+		return { code = "corrupt", message = validation_error }
+	end
+	state.segment = current.segment
+	state.offset = current.offset
+	state.lease_until = current.lease_until
+	return { code = "committed", claim = claim }
+end
+
+function Stream.ConsumeBatchAsync(self: StreamType, claim: any, handler: (any, any) -> (boolean, string?), batch_size: number?): any
+	local state = self._claims[claim]
+	if state == nil or state.released then
+		return { code = "invalid", message = "claim does not belong to this stream instance" }
+	end
+	if type(handler) ~= "function" then
+		return { code = "invalid", message = "handler must be a function" }
+	end
+	local limit = batch_size or self._options.max_batch_messages
+	if not integer_at_least(limit, 1) or limit > self._options.max_batch_messages then
+		return { code = "invalid", message = "batch_size is outside the configured bound" }
+	end
+	if self._busy[state.claim_key] then
+		return { code = "busy" }
+	end
+	self._busy[state.claim_key] = true
+	local function finish(result: any): any
+		self._busy[state.claim_key] = nil
+		return result
+	end
+	local current_time = self._options.now()
+	if not safe_integer(current_time, 0) or state.lease_until <= current_time then
+		return finish({ code = "fenced", generation = state.generation })
+	end
+	local registry, registry_error = self:_ReadGroupRegistry()
+	if registry_error ~= nil then
+		return finish({ code = "unknown", message = registry_error })
+	end
+	if registry == nil then
+		return finish({ code = "removed", message = "consumer-group registry is missing" })
+	end
+	local registration = find_consumer_group(registry, state.group)
+	if registration == nil or registration.removing then
+		return finish({ code = "removed", message = "consumer group is no longer active" })
+	end
+	local retention_floor = registry.floors[state.partition]
+	local expected_segment = state.segment
+	local expected_offset = state.offset
+	local head, head_error = self:_RefreshHead(state.partition)
+	if head == nil then
+		return finish({ code = "unknown", message = head_error })
+	end
+	if expected_segment < retention_floor.segment then
+		return finish({
+			code = "expired",
+			earliest_segment = retention_floor.segment,
+			earliest_sequence = retention_floor.sequence,
+			position = { segment = expected_segment, offset = expected_offset },
+		})
+	end
+	local segment, read_error = self:_ReadSegment(state.partition, expected_segment)
+	if read_error ~= nil then
+		return finish({ code = "corrupt", message = read_error })
+	end
+	if segment == nil then
+		if expected_segment < head.active_segment then
+			return finish({ code = "corrupt", message = "retained consumer segment is missing" })
+		end
+		if expected_segment > head.active_segment then
+			if expected_segment ~= head.active_segment + 1 then
+				return finish({ code = "corrupt", message = "consumer cursor is more than one segment ahead of the partition head" })
+			end
+			local previous, previous_error = self:_ReadSegment(state.partition, head.active_segment)
+			if previous_error ~= nil or previous == nil or not previous.sealed then
+				return finish({ code = "corrupt", message = previous_error or "previous segment is missing or not sealed" })
+			end
+			local advanced, advance_error = self:_AdvanceHead(state.partition, previous)
+			if not advanced then
+				return finish({ code = if is_capacity_error(advance_error) then "capacity" else "unknown", message = advance_error or "rollover repair was not confirmed" })
+			end
+			local repaired, repair_error = self:_RefreshHead(state.partition)
+			if repaired == nil or repaired.active_segment ~= expected_segment then
+				return finish({ code = "unknown", message = repair_error or "rollover repair did not reach the consumer cursor" })
+			end
+			return finish({ code = "idle", claim = claim, rollover_repaired = true })
+		end
+		return finish({ code = "idle", claim = claim })
+	end
+	if expected_offset > #segment.messages + 1 then
+		return finish({ code = "corrupt", message = "consumer cursor offset exceeds segment bounds" })
+	end
+	if expected_offset == #segment.messages + 1 then
+		if not segment.sealed then
+			return finish({ code = "idle", claim = claim })
+		end
+		local skipped = checkpoint(self, claim, state, expected_segment, expected_offset, expected_segment + 1, 1)
+		return finish(skipped)
+	end
+	local last_index = math.min(#segment.messages, expected_offset + limit - 1)
+	local messages = table.create(last_index - expected_offset + 1)
+	for index = expected_offset, last_index do
+		local row = segment.messages[index]
+		messages[#messages + 1] = table.freeze({
+			sequence = row.sequence,
+			event_id = row.event_id,
+			payload = row.payload,
+			created_at = row.created_at,
+			producer_id = row.producer_id,
+			producer_sequence = row.producer_sequence,
+		})
+	end
+	local next_segment = expected_segment
+	local next_offset = last_index + 1
+	if next_offset == #segment.messages + 1 and segment.sealed then
+		next_segment += 1
+		next_offset = 1
+	end
+	local context = table.freeze({
+		stream = self._name,
+		group = state.group,
+		partition = state.partition,
+		fence_generation = state.generation,
+		first_sequence = segment.messages[expected_offset].sequence,
+		last_sequence = segment.messages[last_index].sequence,
+	})
+	local handler_ok, accepted, handler_message = pcall(handler, table.freeze(messages), context)
+	if not handler_ok then
+		return finish({ code = "retryable", message = tostring(accepted), count = #messages })
+	end
+	if accepted ~= true then
+		return finish({ code = "retryable", message = tostring(handler_message or "handler did not confirm the batch"), count = #messages })
+	end
+	local latest_registry, latest_registry_error = self:_ReadGroupRegistry()
+	if latest_registry_error ~= nil then
+		return finish({ code = "unknown", message = latest_registry_error })
+	end
+	local latest_floor = latest_registry and latest_registry.floors[state.partition]
+	local latest_group = latest_registry and find_consumer_group(latest_registry, state.group)
+	if latest_group == nil or latest_group.removing then
+		return finish({ code = "removed", message = "consumer group was removed while the handler was running" })
+	end
+	if latest_floor == nil or expected_segment < latest_floor.segment then
+		return finish({
+			code = "expired",
+			earliest_segment = latest_floor and latest_floor.segment,
+			earliest_sequence = latest_floor and latest_floor.sequence,
+			message = "retention advanced while the handler was running",
+		})
+	end
+	local result = checkpoint(self, claim, state, expected_segment, expected_offset, next_segment, next_offset)
+	if result.code == "committed" then
+		result.count = #messages
+		result.first_sequence = context.first_sequence
+		result.last_sequence = context.last_sequence
+	end
+	return finish(result)
+end
+
+function Stream.ReleaseConsumerAsync(self: StreamType, claim: any): any
+	local state = self._claims[claim]
+	if state == nil or state.released then
+		return { code = "invalid", message = "claim does not belong to this stream instance" }
+	end
+	local updated, update_error = datastore_update(self._store, state.cursor_key, function(raw)
+		local current, validation_error = validate_cursor(raw, self._name, state.group, state.partition)
+		if current == nil then
+			if raw == nil then
+				return nil
+			end
+			error("consumer cursor corrupt during release: " .. tostring(validation_error), 0)
+		end
+		if current.owner_token ~= state.owner_token or current.generation ~= state.generation then
+			return nil
+		end
+		local next_record = copy_cursor(current)
+		next_record.owner_token = nil
+		next_record.lease_until = 0
+		return next_record
+	end)
+	if update_error ~= nil or updated == nil then
+		local observed, read_error = datastore_get(self._store, state.cursor_key, self._get_options)
+		if read_error ~= nil then
+			return { code = "unknown", message = tostring(update_error or "release not returned") .. "; reconciliation failed: " .. read_error }
+		end
+		if observed == nil then
+			state.released = true
+			return { code = "fenced" }
+		end
+		local current, validation_error = validate_cursor(observed, self._name, state.group, state.partition)
+		if current == nil then
+			return { code = "corrupt", message = validation_error }
+		end
+		if current.owner_token == nil and current.generation == state.generation then
+			state.released = true
+			return { code = "released", reconciled = true }
+		end
+		return { code = "fenced", generation = current.generation }
+	end
+	local current, validation_error = validate_cursor(updated, self._name, state.group, state.partition)
+	if current == nil then
+		return { code = "corrupt", message = validation_error }
+	end
+	state.released = true
+	return { code = "released" }
+end
+
+return table.freeze(DurableStreams)
+
+end)()
+
+local RecordStoreEmbeddedDurableStreamPublisher = (function()
+local Publisher = {}
+local Client = {}
+Client.__index = Client
+
+local MAX_EVENT_ID_BYTES = 128
+local MAX_PRODUCER_ID_BYTES = 64
+local MAX_BATCH_MESSAGES = 32
+local MAX_PENDING_MESSAGES = 4096
+local MAX_PAYLOAD_DEPTH = 32
+local MAX_PAYLOAD_NODES = 4096
+local MAX_SAFE_INTEGER = 9007199254740991
+
+type ClientType = {
+	_stream: any,
+	_route_key: string,
+	_producer_id: string,
+	_next_sequence: number,
+	_queue: { any },
+	_head: number,
+	_tail: number,
+	_count: number,
+	_capacity: number,
+	_max_batch_messages: number,
+	_flush_delay_seconds: number,
+	_busy: boolean,
+	_closing: boolean,
+	_closed: boolean,
+	_scheduled: boolean,
+	_schedule_generation: number,
+	_schedule: (number, () -> ()) -> (),
+	_defer: (...any) -> any,
+	_on_result: ((any, number) -> ())?,
+	_on_error: ((string) -> ())?,
+	_pending_event_ids: { [string]: boolean },
+	Enqueue: (self: ClientType, event_id: string, payload: any) -> any,
+	FlushAsync: (self: ClientType) -> any,
+	CloseAsync: (self: ClientType) -> any,
+	GetPendingCount: (self: ClientType) -> number,
+}
+
+local function finite(value: any): boolean
+	return type(value) == "number" and value == value and value ~= math.huge and value ~= -math.huge
+end
+
+local function integer_at_least(value: any, minimum: number): boolean
+	return finite(value) and math.floor(value) == value and value >= minimum
+end
+
+local function valid_text(value: any, maximum: number): boolean
+	return type(value) == "string" and #value > 0 and #value <= maximum
+end
+
+local function clone_payload(value: any, seen: { [any]: boolean }, depth: number, nodes: { number }): any
+	if depth > MAX_PAYLOAD_DEPTH then
+		error("payload exceeds maximum nesting depth", 0)
+	end
+	local kind = type(value)
+	if kind == "boolean" or kind == "string" then
+		return value
+	elseif kind == "number" then
+		if not finite(value) then
+			error("payload numbers must be finite", 0)
+		end
+		return value
+	elseif kind ~= "table" then
+		error("unsupported payload type " .. kind, 0)
+	end
+	if getmetatable(value) ~= nil then
+		error("payload tables must not have metatables", 0)
+	end
+	if seen[value] then
+		error("cyclic payload tables are unsupported", 0)
+	end
+	nodes[1] += 1
+	if nodes[1] > MAX_PAYLOAD_NODES then
+		error("payload exceeds maximum node count", 0)
+	end
+	seen[value] = true
+	local count = 0
+	local numeric_keys = true
+	local string_keys = true
+	local maximum_index = 0
+	for key in pairs(value) do
+		count += 1
+		if type(key) == "number" and integer_at_least(key, 1) then
+			maximum_index = math.max(maximum_index, key)
+		else
+			numeric_keys = false
+		end
+		if type(key) ~= "string" then
+			string_keys = false
+		end
+	end
+	local copied: any = {}
+	if count > 0 and numeric_keys and maximum_index == count then
+		for index = 1, count do
+			copied[index] = clone_payload(value[index], seen, depth + 1, nodes)
+		end
+	elseif count == 0 or string_keys then
+		for key, child in pairs(value) do
+			copied[key] = clone_payload(child, seen, depth + 1, nodes)
+		end
+	else
+		seen[value] = nil
+		error("payload tables must be dense arrays or string-keyed objects", 0)
+	end
+	seen[value] = nil
+	return table.freeze(copied)
+end
+
+local function snapshot_payload(value: any): (any?, string?)
+	local ok, copied = pcall(function()
+		return clone_payload(value, {}, 0, { 0 })
+	end)
+	if not ok then
+		return nil, tostring(copied)
+	end
+	return copied, nil
+end
+
+local function notify_result(self: ClientType, result: any, count: number)
+	if self._on_result ~= nil then
+		local ok, callback_error = pcall(self._on_result, result, count)
+		if not ok and self._on_error ~= nil then
+			pcall(self._on_error, tostring(callback_error))
+		end
+	end
+end
+
+local function cancel_schedule(self: ClientType)
+	self._schedule_generation += 1
+	self._scheduled = false
+end
+
+local function schedule_flush(self: ClientType, delay_seconds: number)
+	if self._closed or self._count == 0 or self._scheduled then return end
+	self._schedule_generation += 1
+	local generation = self._schedule_generation
+	self._scheduled = true
+	local ok, schedule_error = pcall(self._schedule, delay_seconds, function()
+		if self._closed or not self._scheduled or generation ~= self._schedule_generation then return end
+		local rejection_handled = false
+		local deferred, accepted, defer_error = pcall(self._defer, function()
+			if self._closed or not self._scheduled or generation ~= self._schedule_generation then return end
+			self._scheduled = false
+			if self._count > 0 then self:FlushAsync() end
+		end, function(result: any)
+			rejection_handled = true
+			if self._closed or not self._scheduled or generation ~= self._schedule_generation then return end
+			self._scheduled = false
+			if self._on_error ~= nil then
+				pcall(self._on_error, "flush request admission was rejected: " .. tostring(result and (result.message or result.code) or "unknown"))
+			end
+			schedule_flush(self, math.max(self._flush_delay_seconds, 0.1))
+		end)
+		if (not deferred or accepted == false) and not rejection_handled and self._scheduled then
+			self._scheduled = false
+			if self._on_error ~= nil then
+				pcall(self._on_error, "flush scheduling failed: " .. tostring(if deferred then defer_error or "request admission rejected" else accepted))
+			end
+			schedule_flush(self, math.max(self._flush_delay_seconds, 0.1))
+		end
+	end)
+	if not ok then
+		self._scheduled = false
+		if self._on_error ~= nil then pcall(self._on_error, "flush scheduling failed: " .. tostring(schedule_error)) end
+	end
+end
+
+function Publisher.OpenAsync(
+	stream: any,
+	route_key: string,
+	producer_id: string,
+	raw_options: any?
+): (ClientType?, string?)
+	if stream == nil
+		or type(stream.PublishBatchAsync) ~= "function"
+		or type(stream.GetProducerSequenceAsync) ~= "function"
+	then
+		return nil, "durable stream must expose PublishBatchAsync and GetProducerSequenceAsync"
+	end
+	if not valid_text(route_key, 128) then
+		return nil, "route_key must be 1..128 bytes"
+	end
+	if not valid_text(producer_id, MAX_PRODUCER_ID_BYTES) then
+		return nil, "producer_id must be 1..64 bytes"
+	end
+	if raw_options ~= nil and type(raw_options) ~= "table" then
+		return nil, "options must be a table"
+	end
+	local options = raw_options or {}
+	local max_batch_messages = options.max_batch_messages or MAX_BATCH_MESSAGES
+	local capacity = options.max_pending_messages or 256
+	local flush_delay_seconds = options.flush_delay_seconds or 0.025
+	local schedule = options.schedule
+	local defer = options.defer
+	local on_result = options.on_result
+	local on_error = options.on_error
+	if not integer_at_least(max_batch_messages, 1) or max_batch_messages > MAX_BATCH_MESSAGES then
+		return nil, "max_batch_messages must be 1..32"
+	end
+	if not integer_at_least(capacity, max_batch_messages) or capacity > MAX_PENDING_MESSAGES then
+		return nil, "max_pending_messages must be max_batch_messages..4096"
+	end
+	if not finite(flush_delay_seconds) or flush_delay_seconds < 0 or flush_delay_seconds > 5 then
+		return nil, "flush_delay_seconds must be 0..5"
+	end
+	if schedule ~= nil and type(schedule) ~= "function" then
+		return nil, "schedule must be a function"
+	end
+	if defer ~= nil and type(defer) ~= "function" then
+		return nil, "defer must be a function"
+	end
+	if on_result ~= nil and type(on_result) ~= "function" then
+		return nil, "on_result must be a function"
+	end
+	if on_error ~= nil and type(on_error) ~= "function" then
+		return nil, "on_error must be a function"
+	end
+	local sequence_state = stream:GetProducerSequenceAsync(route_key, producer_id)
+	if type(sequence_state) ~= "table" or sequence_state.code ~= "ok"
+		or not integer_at_least(sequence_state.sequence, 0)
+		or sequence_state.sequence >= MAX_SAFE_INTEGER
+	then
+		return nil, "producer sequence could not be initialized: " .. tostring(sequence_state and sequence_state.message or sequence_state and sequence_state.code or "invalid response")
+	end
+	local selected_schedule = schedule or function(delay_seconds: number, callback: () -> ())
+		task.delay(delay_seconds, callback)
+	end
+	local selected_defer = defer or function(callback: () -> (), on_rejected: ((any) -> ())?)
+		return RecordStoreEmbeddedRequestAdmission.defer_background(callback, on_rejected)
+	end
+	local client: any = {
+		_stream = stream,
+		_route_key = route_key,
+		_producer_id = producer_id,
+		_next_sequence = sequence_state.sequence + 1,
+		_queue = table.create(capacity),
+		_head = 1,
+		_tail = 1,
+		_count = 0,
+		_capacity = capacity,
+		_max_batch_messages = max_batch_messages,
+		_flush_delay_seconds = flush_delay_seconds,
+		_busy = false,
+		_closing = false,
+		_closed = false,
+		_scheduled = false,
+		_schedule_generation = 0,
+		_schedule = selected_schedule,
+		_defer = selected_defer,
+		_on_result = on_result,
+		_on_error = on_error,
+		_pending_event_ids = {},
+	}
+	return setmetatable(client, Client) :: ClientType, nil
+end
+
+function Client.GetPendingCount(self: ClientType): number
+	return self._count
+end
+
+function Client.Enqueue(self: ClientType, event_id: string, payload: any): any
+	if self._closed or self._closing then
+		return { code = "closed" }
+	end
+	if not valid_text(event_id, MAX_EVENT_ID_BYTES) then
+		return { code = "invalid", message = "event_id must be 1..128 bytes" }
+	end
+	if self._pending_event_ids[event_id] then
+		return { code = "conflict", message = "event_id is already pending in this publisher" }
+	end
+	if self._count >= self._capacity then
+		return { code = "capacity", message = "publisher ring buffer is full", pending = self._count }
+	end
+	if self._next_sequence >= MAX_SAFE_INTEGER then
+		return { code = "capacity", message = "producer sequence space is exhausted" }
+	end
+	local copied_payload, payload_error = snapshot_payload(payload)
+	if payload_error ~= nil then
+		return { code = "invalid", message = payload_error }
+	end
+	local sequence = self._next_sequence
+	self._next_sequence += 1
+	self._queue[self._tail] = {
+		event_id = event_id,
+		payload = copied_payload,
+		producer_id = self._producer_id,
+		producer_sequence = sequence,
+	}
+	self._tail = self._tail % self._capacity + 1
+	self._count += 1
+	self._pending_event_ids[event_id] = true
+	if self._count >= self._max_batch_messages then
+		cancel_schedule(self)
+		schedule_flush(self, 0)
+	else
+		schedule_flush(self, self._flush_delay_seconds)
+	end
+	return { code = "queued", durable = false, producer_sequence = sequence, pending = self._count }
+end
+
+function Client.FlushAsync(self: ClientType): any
+	if self._closed then
+		return { code = "closed" }
+	end
+	if self._busy then
+		return { code = "busy", pending = self._count }
+	end
+	if self._count == 0 then
+		cancel_schedule(self)
+		return { code = "idle", pending = 0 }
+	end
+	cancel_schedule(self)
+	self._busy = true
+	local batch_count = math.min(self._count, self._max_batch_messages)
+	local events = table.create(batch_count)
+	for index = 1, batch_count do
+		local queue_index = (self._head + index - 2) % self._capacity + 1
+		events[index] = self._queue[queue_index]
+	end
+	local ok, result = pcall(function()
+		return self._stream:PublishBatchAsync(self._route_key, events)
+	end)
+	if not ok then
+		result = { code = "unknown", message = tostring(result) }
+	end
+	if type(result) ~= "table" then
+		result = { code = "unknown", message = "durable stream returned a malformed result" }
+	end
+	if result.code == "committed" then
+		if result.count ~= batch_count then
+			result = {
+				code = "unknown",
+				message = "durable stream reported a committed batch with a mismatched event count",
+				expected_count = batch_count,
+				committed_count = result.count,
+			}
+		else
+			for _ = 1, batch_count do
+				local queued = self._queue[self._head]
+				self._pending_event_ids[queued.event_id] = nil
+				self._queue[self._head] = nil
+				self._head = self._head % self._capacity + 1
+				self._count -= 1
+			end
+		end
+	end
+	self._busy = false
+	notify_result(self, result, batch_count)
+	if self._count > 0 and result.code == "committed" then
+		schedule_flush(self, if self._count >= self._max_batch_messages then 0 else self._flush_delay_seconds)
+	end
+	return result
+end
+
+function Client.CloseAsync(self: ClientType): any
+	if self._closed then
+		return { code = "closed" }
+	end
+	self._closing = true
+	cancel_schedule(self)
+	while self._count > 0 do
+		local result = self:FlushAsync()
+		if result.code ~= "committed" then
+			return result
+		end
+	end
+	self._closed = true
+	cancel_schedule(self)
+	return { code = "closed", flushed = true, pending = 0 }
+end
+
+return table.freeze(Publisher)
+
+end)()
+
+local RecordStoreEmbeddedDurableStreamWorker = (function()
+local Worker = {}
+local Client = {}
+Client.__index = Client
+
+local MAX_BATCH_MESSAGES = 32
+
+type ClientType = {
+	_stream: any,
+	_group: string,
+	_partition: number,
+	_owner_token: string,
+	_handler: (any, any) -> (boolean, string?),
+	_lease_seconds: number,
+	_batch_size: number,
+	_min_poll_delay: number,
+	_max_poll_delay: number,
+	_jitter_fraction: number,
+	_backoff: number,
+	_claim: any,
+	_running: boolean,
+	_inflight: boolean,
+	_wake_pending: boolean,
+	_scheduled: boolean,
+	_schedule_generation: number,
+	_heartbeat_generation: number,
+	_heartbeat_busy: boolean,
+	_schedule: (number, () -> ()) -> (),
+	_defer: (...any) -> any,
+	_defer_lease_renewal: (...any) -> any,
+	_random: () -> number,
+	_on_result: ((any) -> ())?,
+	_on_error: ((string) -> ())?,
+	Start: (self: ClientType) -> any,
+	Wake: (self: ClientType) -> any,
+	StopAsync: (self: ClientType) -> any,
+	GetStatus: (self: ClientType) -> any,
+}
+
+local function finite(value: any): boolean
+	return type(value) == "number" and value == value and value ~= math.huge and value ~= -math.huge
+end
+
+local function valid_text(value: any, maximum: number): boolean
+	return type(value) == "string" and #value > 0 and #value <= maximum
+end
+
+local function integer_at_least(value: any, minimum: number): boolean
+	return finite(value) and math.floor(value) == value and value >= minimum
+end
+
+local function notify_result(self: ClientType, result: any)
+	if self._on_result ~= nil then
+		local ok, callback_error = pcall(self._on_result, result)
+		if not ok and self._on_error ~= nil then
+			pcall(self._on_error, tostring(callback_error))
+		end
+	end
+end
+
+local function cancel_poll(self: ClientType)
+	self._schedule_generation += 1
+	self._scheduled = false
+end
+
+local function cancel_heartbeat(self: ClientType)
+	self._heartbeat_generation += 1
+end
+
+local function schedule_poll(self: ClientType, delay_seconds: number)
+	if not self._running or self._scheduled then return end
+	self._schedule_generation += 1
+	local generation = self._schedule_generation
+	self._scheduled = true
+	local ok, schedule_error = pcall(self._schedule, delay_seconds, function()
+		if not self._running or not self._scheduled or generation ~= self._schedule_generation then return end
+		local rejection_handled = false
+		local deferred, accepted, defer_error = pcall(self._defer, function()
+			if not self._running or not self._scheduled or generation ~= self._schedule_generation then return end
+			self._scheduled = false
+			self:_Poll()
+		end, function(result: any)
+			rejection_handled = true
+			if not self._running or not self._scheduled or generation ~= self._schedule_generation then return end
+			self._scheduled = false
+			if self._on_error ~= nil then
+				pcall(self._on_error, "consumer poll admission was rejected: " .. tostring(result and (result.message or result.code) or "unknown"))
+			end
+			schedule_poll(self, self._min_poll_delay)
+		end)
+		if (not deferred or accepted == false) and not rejection_handled and self._scheduled then
+			self._scheduled = false
+			if self._on_error ~= nil then
+				pcall(self._on_error, "poll scheduling failed: " .. tostring(if deferred then defer_error or "request admission rejected" else accepted))
+			end
+			schedule_poll(self, self._min_poll_delay)
+		end
+	end)
+	if not ok then
+		self._scheduled = false
+		if self._on_error ~= nil then pcall(self._on_error, "poll scheduling failed: " .. tostring(schedule_error)) end
+	end
+end
+
+local function next_backoff(self: ClientType, worked: boolean): number
+	if worked then
+		self._backoff = self._min_poll_delay
+	else
+		self._backoff = math.min(self._max_poll_delay, math.max(self._min_poll_delay, self._backoff * 2))
+	end
+	local random_value = self._random()
+	if not finite(random_value) then
+		random_value = 0.5
+	end
+	random_value = math.clamp(random_value, 0, 1)
+	local factor = 1 + ((random_value * 2) - 1) * self._jitter_fraction
+	return math.clamp(self._backoff * factor, self._min_poll_delay, self._max_poll_delay)
+end
+
+local function schedule_heartbeat(self: ClientType, claim: any, delay_override: number?)
+	if not self._running or self._claim ~= claim then return end
+	self._heartbeat_generation += 1
+	local generation = self._heartbeat_generation
+	local ok, schedule_error = pcall(self._schedule, delay_override or self._lease_seconds / 3, function()
+		if not self._running or generation ~= self._heartbeat_generation or self._claim ~= claim then return end
+		local rejection_handled = false
+		local deferred, accepted, defer_error = pcall(self._defer_lease_renewal, self._lease_seconds / 2, function()
+			if not self._running or generation ~= self._heartbeat_generation or self._claim ~= claim or self._heartbeat_busy then return end
+			self._heartbeat_busy = true
+			local success, result = pcall(function()
+				return self._stream:RenewConsumerAsync(claim)
+			end)
+			self._heartbeat_busy = false
+			if not success or type(result) ~= "table" or result.code ~= "renewed" then
+				self._claim = nil
+				cancel_heartbeat(self)
+				if self._on_error ~= nil then
+					pcall(self._on_error, "consumer lease renewal was not confirmed: " .. tostring(if success then result and result.message or result and result.code else result))
+				end
+				self:Wake()
+				return
+			end
+			schedule_heartbeat(self, claim)
+		end, function(result: any)
+			rejection_handled = true
+			if not self._running or generation ~= self._heartbeat_generation or self._claim ~= claim then return end
+			if self._on_error ~= nil then
+				pcall(self._on_error, "consumer lease renewal admission was rejected: " .. tostring(result and (result.message or result.code) or "unknown"))
+			end
+			schedule_heartbeat(self, claim, 0.1)
+		end)
+		if (not deferred or accepted == false) and not rejection_handled then
+			if self._on_error ~= nil then
+				pcall(self._on_error, "heartbeat scheduling failed: " .. tostring(if deferred then defer_error or "request admission rejected" else accepted))
+			end
+			schedule_heartbeat(self, claim, 0.1)
+		end
+	end)
+	if not ok then
+		if self._on_error ~= nil then pcall(self._on_error, "heartbeat scheduling failed: " .. tostring(schedule_error)) end
+	end
+end
+
+function Worker.Open(
+	stream: any,
+	group: string,
+	partition: number,
+	owner_token: string,
+	handler: (any, any) -> (boolean, string?),
+	raw_options: any?
+): (ClientType?, string?)
+	if stream == nil
+		or type(stream.ClaimConsumerAsync) ~= "function"
+		or type(stream.RenewConsumerAsync) ~= "function"
+		or type(stream.ConsumeBatchAsync) ~= "function"
+		or type(stream.ReleaseConsumerAsync) ~= "function"
+	then
+		return nil, "durable stream does not expose the consumer lease and batch APIs"
+	end
+	if not valid_text(group, 96) then
+		return nil, "group must be 1..96 bytes"
+	end
+	if not integer_at_least(partition, 1) then
+		return nil, "partition must be a positive integer"
+	end
+	if not valid_text(owner_token, 128) then
+		return nil, "owner_token must be 1..128 bytes and unique to this worker incarnation"
+	end
+	if type(handler) ~= "function" then
+		return nil, "handler must be a function"
+	end
+	if raw_options ~= nil and type(raw_options) ~= "table" then
+		return nil, "options must be a table"
+	end
+	local options = raw_options or {}
+	local lease_seconds = options.lease_seconds or 30
+	local stream_batch_limit = if type(stream._options) == "table" and integer_at_least(stream._options.max_batch_messages, 1)
+		then math.min(stream._options.max_batch_messages, MAX_BATCH_MESSAGES)
+		else MAX_BATCH_MESSAGES
+	local batch_size = options.batch_size or stream_batch_limit
+	local max_poll_delay = options.max_poll_delay or math.min(5, lease_seconds / 3)
+	local min_poll_delay = options.min_poll_delay or math.min(0.1, max_poll_delay)
+	local jitter_fraction = if options.jitter_fraction == nil then 0.2 else options.jitter_fraction
+	local schedule = options.schedule
+	local defer = options.defer
+	local random = options.random or math.random
+	local on_result = options.on_result
+	local on_error = options.on_error
+	if not integer_at_least(lease_seconds, 5) or lease_seconds > 120 then
+		return nil, "lease_seconds must be 5..120"
+	end
+	if not integer_at_least(batch_size, 1) or batch_size > stream_batch_limit then
+		return nil, "batch_size exceeds the configured durable-stream batch limit"
+	end
+	if not finite(min_poll_delay) or min_poll_delay < 0.01 or not finite(max_poll_delay)
+		or max_poll_delay < min_poll_delay or max_poll_delay > lease_seconds / 3
+	then
+		return nil, "poll delay bounds must satisfy 0.01 <= min <= max <= lease_seconds / 3"
+	end
+	if not finite(jitter_fraction) or jitter_fraction < 0 or jitter_fraction > 0.5 then
+		return nil, "jitter_fraction must be 0..0.5"
+	end
+	if schedule ~= nil and type(schedule) ~= "function" then
+		return nil, "schedule must be a function"
+	end
+	if defer ~= nil and type(defer) ~= "function" then
+		return nil, "defer must be a function"
+	end
+	if type(random) ~= "function" then
+		return nil, "random must be a function"
+	end
+	if on_result ~= nil and type(on_result) ~= "function" then
+		return nil, "on_result must be a function"
+	end
+	if on_error ~= nil and type(on_error) ~= "function" then
+		return nil, "on_error must be a function"
+	end
+	local selected_schedule = schedule or function(delay_seconds: number, callback: () -> ())
+		task.delay(delay_seconds, callback)
+	end
+	local selected_defer = defer or function(callback: () -> (), on_rejected: ((any) -> ())?)
+		return RecordStoreEmbeddedRequestAdmission.defer_background(callback, on_rejected)
+	end
+	local selected_defer_lease_renewal = if defer ~= nil then function(
+		_lease_remaining_seconds: number,
+		callback: () -> (),
+		on_rejected: ((any) -> ())?
+	)
+		return selected_defer(callback, on_rejected)
+	end else function(
+		lease_remaining_seconds: number,
+		callback: () -> (),
+		on_rejected: ((any) -> ())?
+	)
+		return RecordStoreEmbeddedRequestAdmission.defer_lease_renewal(lease_remaining_seconds, callback, on_rejected)
+	end
+	local client: any = {
+		_stream = stream,
+		_group = group,
+		_partition = partition,
+		_owner_token = owner_token,
+		_handler = handler,
+		_lease_seconds = lease_seconds,
+		_batch_size = batch_size,
+		_min_poll_delay = min_poll_delay,
+		_max_poll_delay = max_poll_delay,
+		_jitter_fraction = jitter_fraction,
+		_backoff = min_poll_delay,
+		_claim = nil,
+		_running = false,
+		_inflight = false,
+		_wake_pending = false,
+		_scheduled = false,
+		_schedule_generation = 0,
+		_heartbeat_generation = 0,
+		_heartbeat_busy = false,
+		_schedule = selected_schedule,
+		_defer = selected_defer,
+		_defer_lease_renewal = selected_defer_lease_renewal,
+		_random = random,
+		_on_result = on_result,
+		_on_error = on_error,
+	}
+	return setmetatable(client, Client) :: ClientType, nil
+end
+
+function Client.GetStatus(self: ClientType): any
+	return {
+		running = self._running,
+		inflight = self._inflight,
+		claimed = self._claim ~= nil,
+		backoff_seconds = self._backoff,
+		scheduled = self._scheduled,
+	}
+end
+
+function Client.Start(self: ClientType): any
+	if self._running then
+		return { code = "started", already_running = true }
+	end
+	if self._inflight then
+		return { code = "busy", message = "previous poll has not finished" }
+	end
+	self._running = true
+	self._backoff = self._min_poll_delay
+	schedule_poll(self, 0)
+	return { code = "started" }
+end
+
+function Client.Wake(self: ClientType): any
+	if not self._running then
+		return { code = "stopped" }
+	end
+	if self._inflight then
+		self._wake_pending = true
+		return { code = "coalesced" }
+	end
+	self._wake_pending = false
+	self._backoff = self._min_poll_delay
+	cancel_poll(self)
+	schedule_poll(self, 0)
+	return { code = "scheduled" }
+end
+
+function Client._Poll(self: ClientType)
+	if not self._running or self._inflight then
+		return
+	end
+	self._inflight = true
+	local ok, result = pcall(function()
+		local claim = self._claim
+		if claim == nil then
+			local claimed = self._stream:ClaimConsumerAsync(
+				self._group,
+				self._partition,
+				self._owner_token,
+				self._lease_seconds
+			)
+			if type(claimed) ~= "table" or claimed.code ~= "claimed" then
+				return claimed
+			end
+			claim = claimed.claim
+			self._claim = claim
+			schedule_heartbeat(self, claim)
+		end
+		if not self._running then
+			return { code = "stopping" }
+		end
+		return self._stream:ConsumeBatchAsync(claim, self._handler, self._batch_size)
+	end)
+	if not ok then
+		result = { code = "unknown", message = tostring(result) }
+	elseif type(result) ~= "table" then
+		result = { code = "unknown", message = "consumer API returned a malformed result" }
+	end
+	if result.code == "fenced" or result.code == "expired" or result.code == "removed" or result.code == "invalid" then
+		self._claim = nil
+		cancel_heartbeat(self)
+	end
+	self._inflight = false
+	notify_result(self, result)
+	if not self._running then
+		if self._claim ~= nil then
+			local release_ok, release_result = pcall(function()
+				return self._stream:ReleaseConsumerAsync(self._claim)
+			end)
+			if not release_ok or type(release_result) ~= "table"
+				or (release_result.code ~= "released" and release_result.code ~= "fenced")
+			then
+				if self._on_error ~= nil then
+					pcall(self._on_error, "consumer stop could not confirm lease release: " .. tostring(if release_ok then release_result and release_result.message or release_result and release_result.code else release_result))
+				end
+			end
+			self._claim = nil
+		end
+		cancel_heartbeat(self)
+		return
+	end
+	if self._wake_pending then
+		self._wake_pending = false
+		self._backoff = self._min_poll_delay
+		schedule_poll(self, 0)
+		return
+	end
+	local worked = result.code == "committed" and (result.count or 0) > 0
+	local delay_seconds = next_backoff(self, worked)
+	schedule_poll(self, delay_seconds)
+end
+
+function Client.StopAsync(self: ClientType): any
+	if not self._running and self._claim == nil then
+		return { code = "stopped" }
+	end
+	self._running = false
+	self._wake_pending = false
+	cancel_poll(self)
+	cancel_heartbeat(self)
+	if self._inflight then
+		return { code = "stopping" }
+	end
+	if self._claim == nil then
+		return { code = "stopped" }
+	end
+	local ok, result = pcall(function()
+		return self._stream:ReleaseConsumerAsync(self._claim)
+	end)
+	if not ok or type(result) ~= "table" then
+		return { code = "unknown", message = tostring(result) }
+	end
+	if result.code == "released" or result.code == "fenced" then
+		self._claim = nil
+		return { code = "stopped", release = result }
+	end
+	return { code = result.code or "unknown", message = result.message }
+end
+
+return table.freeze(Worker)
+
+end)()
+
+local RecordStoreEmbeddedTransientMessaging = (function()
+	local TransientMessaging = {}
+	local Client = {}
+	Client.__index = Client
+	local MAX_NAMESPACE_BYTES = 64
+	local MAX_STREAM_NAME_BYTES = 96
+	local MAX_SERVER_ID_BYTES = 128
+	local MAX_MESSAGE_BYTES = 1024
+	local MAX_PAYLOAD_DEPTH = 16
+	local MAX_PAYLOAD_NODES = 256
+	type ClientType = {
+		_service: any, _http: any, _namespace: string, _server_id: string,
+		_max_message_bytes: number, _on_error: ((string, any) -> ())?,
+		_subscriptions: { [number]: any }, _next_subscription: number, _closed: boolean,
+		PublishStreamWakeup: (self: ClientType, stream: string, partition: number, sequence: number?) -> any,
+		SubscribeStreamWakeups: (self: ClientType, stream: string, partition: number, handler: (any, any) -> ()) -> any,
+		Close: (self: ClientType) -> (),
+	}
+	local function finite(value: any): boolean
+		return type(value) == "number" and value == value and value ~= math.huge and value ~= -math.huge
+	end
+	local function integer_at_least(value: any, minimum: number): boolean
+		return finite(value) and math.floor(value) == value and value >= minimum
+	end
+	local function valid_text(value: any, maximum: number): boolean
+		return type(value) == "string" and #value > 0 and #value <= maximum
+	end
+	local function clone_payload(value: any, seen: { [any]: boolean }, depth: number, nodes: { number }): (any, string)
+		if depth > MAX_PAYLOAD_DEPTH then error("payload exceeds maximum nesting depth", 0) end
+		local kind = type(value)
+		if kind == "nil" then error("payload cannot be nil", 0)
+		elseif kind == "boolean" or kind == "string" then return value, kind .. ":" .. tostring(value)
+		elseif kind == "number" then
+			if not finite(value) then error("payload numbers must be finite", 0) end
+			return value, "number:" .. string.format("%.17g", value)
+		elseif kind ~= "table" then error("unsupported payload type " .. kind, 0) end
+		if getmetatable(value) ~= nil then error("payload tables must not have metatables", 0) end
+		if seen[value] then error("cyclic payload tables are unsupported", 0) end
+		nodes[1] += 1
+		if nodes[1] > MAX_PAYLOAD_NODES then error("payload exceeds maximum node count", 0) end
+		seen[value] = true
+		local count, numeric_keys, string_keys, maximum_index = 0, true, true, 0
+		for key in pairs(value) do
+			count += 1
+			if type(key) == "number" and integer_at_least(key, 1) then maximum_index = math.max(maximum_index, key)
+			else numeric_keys = false end
+			if type(key) ~= "string" then string_keys = false end
+		end
+		local copy: any = {}
+		local parts = table.create(count * 2)
+		if count > 0 and numeric_keys and maximum_index == count then
+			for index = 1, count do
+				local child, encoded = clone_payload(value[index], seen, depth + 1, nodes)
+				copy[index], parts[index] = child, encoded
+			end
+		elseif count == 0 or string_keys then
+			local keys = {}
+			for key in pairs(value) do table.insert(keys, key) end
+			table.sort(keys)
+			for index, key in ipairs(keys) do
+				local child, encoded = clone_payload(value[key], seen, depth + 1, nodes)
+				copy[key] = child
+				parts[index * 2 - 1], parts[index * 2] = "key:" .. key, encoded
+			end
+		else
+			seen[value] = nil
+			error("payload tables must be dense arrays or string-keyed objects", 0)
+		end
+		seen[value] = nil
+		return table.freeze(copy), if count > 0 and numeric_keys and maximum_index == count
+			then "array:" .. table.concat(parts, "|") else "object:" .. table.concat(parts, "|")
+	end
+	local function normalize_payload(value: any): (any?, string?)
+		local ok, copied = pcall(function() return clone_payload(value, {}, 0, { 0 }) end)
+		if not ok then return nil, tostring(copied) end
+		return copied, nil
+	end
+	local function physical_topic(namespace: string, stream: string, partition: number): string
+		return "rs2x" .. RecordStoreEmbeddedSHA256.digest(namespace .. "\0wakeup\0" .. stream .. "\0" .. tostring(partition))
+	end
+	local function safe_message_id(self: ClientType): (string?, string?)
+		local ok, value = pcall(function() return self._http:GenerateGUID(false) end)
+		if not ok then return nil, "message_id_generation_failed: " .. tostring(value) end
+		if not valid_text(value, 128) then return nil, "message_id_generation_failed: invalid GUID" end
+		return value, nil
+	end
+	local function encode_envelope(self: ClientType, stream: string, partition: number, sequence: number?): (any?, string?, string?)
+		local message_id, id_error = safe_message_id(self)
+		if message_id == nil then return nil, nil, id_error end
+		local envelope: any = {
+			version = 1, namespace = self._namespace, kind = "wakeup", message_id = message_id,
+			sender = self._server_id,
+			payload = { stream = stream, partition = partition, sequence = sequence },
+		}
+		local ok, encoded = pcall(function() return self._http:JSONEncode(envelope) end)
+		if not ok then return nil, nil, "invalid_payload: JSON encoding failed: " .. tostring(encoded) end
+		if type(encoded) ~= "string" or #encoded > self._max_message_bytes then
+			return nil, nil, "message_too_large: encoded wake-up exceeds configured byte limit"
+		end
+		return envelope, message_id, nil
+	end
+	function TransientMessaging.new(messaging_service: any, http_service: any, raw_options: any?): (ClientType?, string?)
+		if messaging_service == nil or type(messaging_service.PublishAsync) ~= "function" or type(messaging_service.SubscribeAsync) ~= "function" then
+			return nil, "MessagingService with PublishAsync and SubscribeAsync is required"
+		end
+		if http_service == nil or type(http_service.GenerateGUID) ~= "function" or type(http_service.JSONEncode) ~= "function" then
+			return nil, "HttpService with GenerateGUID and JSONEncode is required"
+		end
+		if raw_options ~= nil and type(raw_options) ~= "table" then return nil, "options must be a table" end
+		local options = raw_options or {}
+		local namespace, server_id = options.namespace, options.server_id
+		local max_message_bytes, on_error = options.max_message_bytes or MAX_MESSAGE_BYTES, options.on_error
+		if not valid_text(namespace, MAX_NAMESPACE_BYTES) then return nil, "namespace must be 1..64 bytes" end
+		if not valid_text(server_id, MAX_SERVER_ID_BYTES) then return nil, "server_id must be 1..128 bytes" end
+		if not integer_at_least(max_message_bytes, 128) or max_message_bytes > MAX_MESSAGE_BYTES then return nil, "max_message_bytes must be 128..1024" end
+		if on_error ~= nil and type(on_error) ~= "function" then return nil, "on_error must be a function" end
+		return setmetatable({
+			_service = messaging_service, _http = http_service, _namespace = namespace, _server_id = server_id,
+			_max_message_bytes = max_message_bytes, _on_error = on_error,
+			_subscriptions = {}, _next_subscription = 0, _closed = false,
+		}, Client) :: any, nil
+	end
+	function Client.PublishStreamWakeup(self: ClientType, stream: string, partition: number, sequence: number?): any
+		if self._closed then return { code = "closed" } end
+		if not valid_text(stream, MAX_STREAM_NAME_BYTES) then return { code = "invalid", message = "stream must be 1..96 bytes" } end
+		if not integer_at_least(partition, 1) then return { code = "invalid", message = "partition must be a positive integer" } end
+		if sequence ~= nil and not integer_at_least(sequence, 1) then return { code = "invalid", message = "sequence must be a positive integer when supplied" } end
+		local envelope, message_id, envelope_error = encode_envelope(self, stream, partition, sequence)
+		if envelope == nil then
+			local code = if string.sub(envelope_error or "", 1, 17) == "message_too_large" then "capacity" else "invalid"
+			return { code = code, message = envelope_error }
+		end
+		local topic = physical_topic(self._namespace, stream, partition)
+		local ok, publish_error = pcall(function() self._service:PublishAsync(topic, envelope) end)
+		if not ok then return { code = "unknown", message = tostring(publish_error), message_id = message_id, topic_hash = topic } end
+		return { code = "published", message_id = message_id, topic_hash = topic }
+	end
+	function Client.SubscribeStreamWakeups(self: ClientType, stream: string, partition: number, handler: (any, any) -> ()): any
+		if self._closed then return { code = "closed" } end
+		if not valid_text(stream, MAX_STREAM_NAME_BYTES) then return { code = "invalid", message = "stream must be 1..96 bytes" } end
+		if not integer_at_least(partition, 1) then return { code = "invalid", message = "partition must be a positive integer" } end
+		if type(handler) ~= "function" then return { code = "invalid", message = "handler must be a function" } end
+		local topic = physical_topic(self._namespace, stream, partition)
+		local callback = function(message: any)
+			if self._closed or type(message) ~= "table" or type(message.Data) ~= "table" then return end
+			local envelope = message.Data
+			if envelope.version ~= 1 or envelope.namespace ~= self._namespace or envelope.kind ~= "wakeup"
+				or not valid_text(envelope.message_id, 128) or not valid_text(envelope.sender, MAX_SERVER_ID_BYTES)
+				or type(envelope.payload) ~= "table" or envelope.payload.stream ~= stream or envelope.payload.partition ~= partition
+				or (envelope.payload.sequence ~= nil and not integer_at_least(envelope.payload.sequence, 1))
+			then return end
+			local payload, payload_error = normalize_payload(envelope.payload)
+			if payload_error ~= nil or payload == nil then return end
+			local context = table.freeze({
+				version = envelope.version, kind = "wakeup", message_id = envelope.message_id,
+				sender = envelope.sender, sent_at = message.Sent,
+			})
+			local handler_ok, handler_error = pcall(handler, payload, context)
+			if not handler_ok and self._on_error ~= nil then pcall(self._on_error, tostring(handler_error), context) end
+		end
+		local ok, connection = pcall(function() return self._service:SubscribeAsync(topic, callback) end)
+		if not ok or connection == nil or type(connection.Disconnect) ~= "function" then
+			return { code = "unknown", message = tostring(connection or "SubscribeAsync returned no connection") }
+		end
+		self._next_subscription += 1
+		local subscription_id = self._next_subscription
+		local handle: any = { connected = true, _connection = connection, _owner = self, _id = subscription_id }
+		function handle:Disconnect()
+			if not self.connected then return end
+			self.connected = false
+			local live = self._connection
+			if live ~= nil then pcall(function() live:Disconnect() end) end
+			local owner = self._owner
+			if owner ~= nil then owner._subscriptions[self._id] = nil end
+		end
+		self._subscriptions[subscription_id] = handle
+		return { code = "subscribed", subscription = handle, topic_hash = topic }
+	end
+	function Client.Close(self: ClientType)
+		if self._closed then return end
+		self._closed = true
+		local handles = {}
+		for _, handle in pairs(self._subscriptions) do handles[#handles + 1] = handle end
+		for _, handle in ipairs(handles) do handle:Disconnect() end
+	end
+	return table.freeze(TransientMessaging)
+end)()
+
+RecordStore.SHA256 = RecordStoreEmbeddedSHA256
+RecordStore.DurableStreams = RecordStoreEmbeddedDurableStreams
+RecordStore.DurableStreamPublisher = RecordStoreEmbeddedDurableStreamPublisher
+RecordStore.DurableStreamWorker = RecordStoreEmbeddedDurableStreamWorker
+RecordStore.TransientMessaging = RecordStoreEmbeddedTransientMessaging
 RecordStore.MailboxV2 = MailboxV2
 RecordStore.is_retryable_result = is_retryable_result
 RecordStore.get_diagnostic_code = get_diagnostic_code

@@ -1,6 +1,6 @@
 --!strict
 local MigrationRunner = {}
-local SHA256 = require(script.Parent:WaitForChild("RecordStoreSHA256"))
+local SHA256 = require(script.Parent:WaitForChild("RecordStore")).SHA256
 
 export type HistoricalPurchase = {
 	PurchaseId: string,
