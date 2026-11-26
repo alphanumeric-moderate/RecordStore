@@ -1620,6 +1620,55 @@ assert(inheritance_after_failed_terminal ~= nil
 	and inheritance_after_failed_terminal.inherited_lane == "normal",
 	"priority inheritance was not applied after failed-dependency terminal processing completed")
 
+-- A terminal admission rejection must also return before collected inheritance candidates are applied.
+local admission_terminal_before_inheritance = new_scheduler()
+local initial_admission_policy = admission_terminal_before_inheritance:Stats().policy
+assert(admission_terminal_before_inheritance:SetPolicy({
+	revision = initial_admission_policy.revision + 1,
+	max_read_units_in_flight = 2,
+	read_critical_reserve = 1,
+}), "initial terminal-admission fixture policy was rejected")
+enqueue(admission_terminal_before_inheritance, {
+	id = "terminal-admission-rejected",
+	owner_id = "terminal-admission-rejected-owner",
+	lane = "normal",
+	read_units = 2,
+	write_units = 0,
+	estimated_bytes = 1024,
+	handler_slots = 1,
+})
+enqueue(admission_terminal_before_inheritance, {
+	id = "terminal-admission-prerequisite",
+	owner_id = "terminal-admission-owner",
+	lane = "background",
+})
+enqueue(admission_terminal_before_inheritance, {
+	id = "terminal-admission-dependent",
+	owner_id = "terminal-admission-owner",
+	lane = "high",
+	service_class = "interactive",
+	dependencies = { "terminal-admission-prerequisite" },
+})
+local reduced_admission_policy = admission_terminal_before_inheritance:Stats().policy
+assert(admission_terminal_before_inheritance:SetPolicy({
+	revision = reduced_admission_policy.revision + 1,
+	max_read_units_in_flight = 1,
+	read_critical_reserve = 0,
+}), "reduced terminal-admission fixture policy was rejected")
+local admission_terminal, admission_terminal_status = admission_terminal_before_inheritance:TakeNext()
+assert(admission_terminal ~= nil and admission_terminal.id == "terminal-admission-rejected"
+	and admission_terminal_status == "admission_rejected",
+	"terminal admission rejection did not retain reverse-queue preflight ordering")
+assert(admission_terminal_before_inheritance.known["terminal-admission-prerequisite"].inherited_lane == nil,
+	"priority inheritance ran before a terminal admission rejection was returned")
+local inheritance_after_admission_terminal, inheritance_after_admission_status =
+	admission_terminal_before_inheritance:TakeNext()
+assert(inheritance_after_admission_terminal ~= nil
+	and inheritance_after_admission_terminal.id == "terminal-admission-prerequisite"
+	and inheritance_after_admission_status == "success"
+	and inheritance_after_admission_terminal.inherited_lane == "normal",
+	"priority inheritance was not applied after terminal admission rejection processing completed")
+
 -- When multiple high dependents become eligible together, the oldest dependent
 -- remains the inherited-priority owner as in the original ascending queue sweep.
 local ordered_inheritance = new_scheduler()
