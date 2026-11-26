@@ -421,6 +421,63 @@ do
 		"DRR deficit remained after its final queued and in-flight lane item completed")
 end
 
+do
+	local now = 1_800_000_000_000
+	local governor = Scheduler.new({ now_ms = function() return now end })
+	local accepted = governor:Enqueue({
+		id = "terminal-scan-simple-item",
+		owner_id = "terminal-scan-simple-owner",
+		lane = "normal",
+		work_class = "maintenance",
+	})
+	assert(accepted.code == "accepted", "terminal-scan simple item was not accepted")
+	assert(governor.terminal_preflight_count == 0,
+		"simple non-expiring, non-batchable work was unnecessarily marked for terminal preflight")
+	assert(governor.terminal_preflight_policy_revision == governor.policy.revision,
+		"terminal-preflight scan revision did not start aligned with the active policy")
+
+	local prior_policy = governor:Stats().policy
+	local updated, update_message = governor:SetPolicy({
+		revision = prior_policy.revision + 1,
+		mode = "read_only",
+	})
+	assert(updated, "terminal-preflight policy invalidation failed: " .. tostring(update_message))
+	assert(governor.terminal_preflight_policy_revision == nil,
+		"policy update did not invalidate the terminal-preflight scan revision")
+	local rejected, rejected_status = governor:TakeNext()
+	assert(rejected ~= nil and rejected.id == "terminal-scan-simple-item"
+		and rejected_status == "admission_rejected"
+		and rejected.terminal_result.code == "read_only",
+		"skipping unnecessary terminal sweeps caused a policy change to bypass terminal admission")
+	assert(governor.terminal_preflight_count == 0,
+		"terminal admission removal did not release its preflight candidate count")
+	local empty, empty_status = governor:TakeNext()
+	assert(empty == nil and empty_status == "empty", "terminal-preflight empty queue did not remain empty")
+	assert(governor.terminal_preflight_policy_revision == governor.policy.revision,
+		"complete policy-revision sweep did not restore the preflight fast path")
+end
+
+do
+	local now = 1_800_000_000_000
+	local governor = Scheduler.new({ now_ms = function() return now end })
+	local accepted = governor:Enqueue({
+		id = "terminal-scan-expiring-item",
+		owner_id = "terminal-scan-expiring-owner",
+		lane = "normal",
+		work_class = "maintenance",
+		expires_at_ms = now + 100,
+	})
+	assert(accepted.code == "accepted", "expiring terminal-scan item was not accepted")
+	assert(governor.terminal_preflight_count == 1,
+		"expiring work was omitted from terminal preflight")
+	now += 100
+	local expired, expired_status = governor:TakeNext()
+	assert(expired ~= nil and expired.id == "terminal-scan-expiring-item" and expired_status == "expired",
+		"terminal-preflight optimization lost expiry handling")
+	assert(governor.terminal_preflight_count == 0,
+		"expired item did not release its terminal-preflight candidate count")
+end
+
 print("[scheduler-acceptance] bounded fairness, low-budget reserve, throttle recovery, and lease-margin isolation passed.")
 
 print("[scheduler-bugfix] policy atomicity, incomplete admission estimates, and false-lane rejection passed.")
