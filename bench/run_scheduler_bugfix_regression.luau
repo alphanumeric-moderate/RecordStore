@@ -592,6 +592,48 @@ end
 do
 	local now = 1_800_000_000_000
 	local governor = Scheduler.new({ now_ms = function() return now end })
+	local function enqueue(id, expiry)
+		local accepted = governor:Enqueue({
+			id = id,
+			owner_id = id .. "-owner",
+			lane = "normal",
+			work_class = "maintenance",
+			due_at_ms = now + 150,
+			expires_at_ms = expiry,
+		})
+		assert(accepted.code == "accepted", "policy-rebuild fixture was not accepted: " .. id)
+	end
+	enqueue("terminal-index-rebuild-older", now + 200)
+	enqueue("terminal-index-rebuild-ordinary", nil)
+	enqueue("terminal-index-rebuild-newer", now + 200)
+	local before = governor:Stats().policy
+	local updated, update_error = governor:SetPolicy({
+		revision = before.revision + 1,
+		mode = before.mode,
+	})
+	assert(updated, "terminal-index policy revision update failed: " .. tostring(update_error))
+	local empty, empty_status = governor:TakeNext()
+	assert(empty == nil and empty_status == "empty",
+		"future-due policy-rebuild fixture unexpectedly dispatched work")
+	local order = governor.terminal_preflight_order
+	assert(governor.terminal_preflight_policy_revision == governor.policy.revision
+		and governor.terminal_preflight_count == 2
+		and governor.terminal_preflight_tail == 2
+		and order[1] == governor.known["terminal-index-rebuild-older"]
+		and order[2] == governor.known["terminal-index-rebuild-newer"],
+		"full policy-revision sweep did not rebuild the candidate index in queue order")
+	now += 200
+	local newer, newer_status = governor:TakeNext()
+	assert(newer ~= nil and newer.id == "terminal-index-rebuild-newer" and newer_status == "expired",
+		"rebuilt candidate index did not retain newest-first expiry order")
+	local older, older_status = governor:TakeNext()
+	assert(older ~= nil and older.id == "terminal-index-rebuild-older" and older_status == "expired",
+		"rebuilt candidate index lost its earlier expiry")
+end
+
+do
+	local now = 1_800_000_000_000
+	local governor = Scheduler.new({ now_ms = function() return now end })
 	local accepted = governor:Enqueue({
 		id = "terminal-index-rescheduled",
 		owner_id = "terminal-index-rescheduled-owner",
