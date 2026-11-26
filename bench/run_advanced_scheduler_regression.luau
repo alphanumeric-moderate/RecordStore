@@ -1439,6 +1439,29 @@ assert(untimed_prerequisite ~= nil and untimed_status == "success",
 	"untimed prerequisite was not selectable")
 assert(untimed_prerequisite.inherited_lane == nil,
 	"a high-lane dependent without a deadline or interactive service class inherited urgency")
+assert(#untimed_inheritance.selection_scratch.priority_inheritance_indices == 0,
+	"non-inheritable high-lane dependencies were retained as inheritance candidates")
+
+local completed_dependency_inheritance = new_scheduler()
+enqueue(completed_dependency_inheritance, {
+	id = "completed-inheritance-prerequisite",
+	owner_id = "completed-inheritance-owner",
+	lane = "background",
+})
+take(completed_dependency_inheritance, "completed-inheritance-prerequisite")
+enqueue(completed_dependency_inheritance, {
+	id = "completed-inheritance-dependent",
+	owner_id = "completed-inheritance-owner",
+	lane = "high",
+	service_class = "interactive",
+	dependencies = { "completed-inheritance-prerequisite" },
+})
+local completed_dependent, completed_dependent_status = completed_dependency_inheritance:TakeNext()
+assert(completed_dependent ~= nil and completed_dependent_status == "success"
+	and completed_dependent.id == "completed-inheritance-dependent",
+	"dependent with an already-completed prerequisite was not selectable")
+assert(#completed_dependency_inheritance.selection_scratch.priority_inheritance_indices == 0,
+	"fully resolved dependencies were retained as inheritance candidates")
 
 local interactive_inheritance = new_scheduler()
 enqueue(interactive_inheritance, {
@@ -1457,6 +1480,8 @@ local interactive_prerequisite, interactive_status = interactive_inheritance:Tak
 assert(interactive_prerequisite ~= nil and interactive_status == "success"
 	and interactive_prerequisite.inherited_lane == "normal",
 	"interactive service class did not qualify for bounded priority inheritance")
+assert(#interactive_inheritance.selection_scratch.priority_inheritance_indices == 1,
+	"eligible unresolved dependencies were omitted from inheritance candidates")
 
 end
 
@@ -1537,6 +1562,168 @@ assert(delayed_prerequisite ~= nil and delayed_status == "success"
 	"priority inheritance was not applied when the prerequisite became ready")
 assert(delayed_inheritance:MarkCompleted(delayed_prerequisite.id, "committed"))
 take(delayed_inheritance, "delayed-urgent-dependent")
+
+-- Terminal handling must finish before applying candidates collected by the fused reverse scan.
+-- The older expiry is deliberately behind a newer dependent in scan order.
+local terminal_before_inheritance = new_scheduler()
+enqueue(terminal_before_inheritance, {
+	id = "terminal-order-expired",
+	owner_id = "terminal-order-expiry-owner",
+	lane = "normal",
+	expires_at_ms = now_ms,
+})
+enqueue(terminal_before_inheritance, {
+	id = "terminal-order-prerequisite",
+	owner_id = "terminal-order-owner",
+	lane = "background",
+	available_at_ms = now_ms + 100,
+})
+enqueue(terminal_before_inheritance, {
+	id = "terminal-order-dependent",
+	owner_id = "terminal-order-owner",
+	lane = "high",
+	service_class = "interactive",
+	dependencies = { "terminal-order-prerequisite" },
+})
+local terminal_first, terminal_first_status = terminal_before_inheritance:TakeNext()
+assert(terminal_first ~= nil and terminal_first.id == "terminal-order-expired"
+	and terminal_first_status == "expired",
+	"terminal queue outcome did not retain reverse-queue processing order")
+assert(terminal_before_inheritance.known["terminal-order-prerequisite"].inherited_lane == nil,
+	"priority inheritance ran after candidates were collected but before terminal preflight returned")
+now_ms += 100
+local inheritance_after_terminal, inheritance_after_terminal_status = terminal_before_inheritance:TakeNext()
+assert(inheritance_after_terminal ~= nil and inheritance_after_terminal.id == "terminal-order-prerequisite"
+	and inheritance_after_terminal_status == "success"
+	and inheritance_after_terminal.inherited_lane == "normal",
+	"priority inheritance was not applied after terminal queue processing completed")
+
+-- Failed prerequisites must also terminate before any previously collected inheritance candidate is applied.
+local failed_dependency_before_inheritance = new_scheduler()
+enqueue(failed_dependency_before_inheritance, {
+	id = "terminal-failed-prerequisite",
+	owner_id = "terminal-failed-owner",
+	lane = "background",
+})
+local dispatched_failed_prerequisite, dispatched_failed_status =
+	failed_dependency_before_inheritance:TakeNext()
+assert(dispatched_failed_prerequisite ~= nil and dispatched_failed_status == "success"
+	and dispatched_failed_prerequisite.id == "terminal-failed-prerequisite",
+	"failed-dependency fixture prerequisite was not dispatched")
+enqueue(failed_dependency_before_inheritance, {
+	id = "terminal-failed-dependent",
+	owner_id = "terminal-failed-owner",
+	lane = "high",
+	service_class = "interactive",
+	dependencies = { "terminal-failed-prerequisite" },
+})
+assert(failed_dependency_before_inheritance:MarkCompleted("terminal-failed-prerequisite", "permanent"),
+	"failed-dependency fixture prerequisite did not terminalize")
+enqueue(failed_dependency_before_inheritance, {
+	id = "terminal-failure-order-prerequisite",
+	owner_id = "terminal-failure-order-owner",
+	lane = "background",
+})
+enqueue(failed_dependency_before_inheritance, {
+	id = "terminal-failure-order-dependent",
+	owner_id = "terminal-failure-order-owner",
+	lane = "high",
+	service_class = "interactive",
+	dependencies = { "terminal-failure-order-prerequisite" },
+})
+local failed_terminal, failed_terminal_status = failed_dependency_before_inheritance:TakeNext()
+assert(failed_terminal ~= nil and failed_terminal.id == "terminal-failed-dependent"
+	and failed_terminal_status == "dependency_failed",
+	"failed dependency did not retain reverse-queue terminal processing order")
+assert(failed_dependency_before_inheritance.known["terminal-failure-order-prerequisite"].inherited_lane == nil,
+	"priority inheritance ran before a failed-dependency terminal outcome was returned")
+local inheritance_after_failed_terminal, inheritance_after_failed_terminal_status =
+	failed_dependency_before_inheritance:TakeNext()
+assert(inheritance_after_failed_terminal ~= nil
+	and inheritance_after_failed_terminal.id == "terminal-failure-order-prerequisite"
+	and inheritance_after_failed_terminal_status == "success"
+	and inheritance_after_failed_terminal.inherited_lane == "normal",
+	"priority inheritance was not applied after failed-dependency terminal processing completed")
+
+-- A terminal admission rejection must also return before collected inheritance candidates are applied.
+local admission_terminal_before_inheritance = new_scheduler()
+local initial_admission_policy = admission_terminal_before_inheritance:Stats().policy
+assert(admission_terminal_before_inheritance:SetPolicy({
+	revision = initial_admission_policy.revision + 1,
+	max_read_units_in_flight = 2,
+	read_critical_reserve = 1,
+}), "initial terminal-admission fixture policy was rejected")
+enqueue(admission_terminal_before_inheritance, {
+	id = "terminal-admission-rejected",
+	owner_id = "terminal-admission-rejected-owner",
+	lane = "normal",
+	read_units = 2,
+	write_units = 0,
+	estimated_bytes = 1024,
+	handler_slots = 1,
+})
+enqueue(admission_terminal_before_inheritance, {
+	id = "terminal-admission-prerequisite",
+	owner_id = "terminal-admission-owner",
+	lane = "background",
+})
+enqueue(admission_terminal_before_inheritance, {
+	id = "terminal-admission-dependent",
+	owner_id = "terminal-admission-owner",
+	lane = "high",
+	service_class = "interactive",
+	dependencies = { "terminal-admission-prerequisite" },
+})
+local reduced_admission_policy = admission_terminal_before_inheritance:Stats().policy
+assert(admission_terminal_before_inheritance:SetPolicy({
+	revision = reduced_admission_policy.revision + 1,
+	max_read_units_in_flight = 1,
+	read_critical_reserve = 0,
+}), "reduced terminal-admission fixture policy was rejected")
+local admission_terminal, admission_terminal_status = admission_terminal_before_inheritance:TakeNext()
+assert(admission_terminal ~= nil and admission_terminal.id == "terminal-admission-rejected"
+	and admission_terminal_status == "admission_rejected",
+	"terminal admission rejection did not retain reverse-queue preflight ordering")
+assert(admission_terminal_before_inheritance.known["terminal-admission-prerequisite"].inherited_lane == nil,
+	"priority inheritance ran before a terminal admission rejection was returned")
+local inheritance_after_admission_terminal, inheritance_after_admission_status =
+	admission_terminal_before_inheritance:TakeNext()
+assert(inheritance_after_admission_terminal ~= nil
+	and inheritance_after_admission_terminal.id == "terminal-admission-prerequisite"
+	and inheritance_after_admission_status == "success"
+	and inheritance_after_admission_terminal.inherited_lane == "normal",
+	"priority inheritance was not applied after terminal admission rejection processing completed")
+
+-- When multiple high dependents become eligible together, the oldest dependent
+-- remains the inherited-priority owner as in the original ascending queue sweep.
+local ordered_inheritance = new_scheduler()
+local ordered_ready_at = now_ms + 25
+enqueue(ordered_inheritance, {
+	id = "ordered-inheritance-prerequisite",
+	owner_id = "ordered-inheritance-owner",
+	lane = "background",
+	available_at_ms = ordered_ready_at,
+})
+enqueue(ordered_inheritance, {
+	id = "ordered-inheritance-oldest",
+	owner_id = "ordered-inheritance-owner",
+	lane = "high",
+	service_class = "interactive",
+	dependencies = { "ordered-inheritance-prerequisite" },
+})
+enqueue(ordered_inheritance, {
+	id = "ordered-inheritance-newest",
+	owner_id = "ordered-inheritance-owner",
+	lane = "high",
+	service_class = "interactive",
+	dependencies = { "ordered-inheritance-prerequisite" },
+})
+now_ms = ordered_ready_at
+local ordered_prerequisite, ordered_status = ordered_inheritance:TakeNext()
+assert(ordered_prerequisite ~= nil and ordered_status == "success"
+	and ordered_prerequisite.id == "ordered-inheritance-prerequisite"
+	and ordered_prerequisite.inherited_from == "ordered-inheritance-oldest",
+	"scan fusion changed priority-inheritance ownership order")
 
 -- Urgent-deadline selection is bounded so deadlines do not starve older lane work.
 local urgent = new_scheduler()
