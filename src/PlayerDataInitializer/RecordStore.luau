@@ -1876,7 +1876,10 @@ do
 						clear_admission_preflight(item)
 						return item, "admission_rejected"
 					end
-					if item.lane == "high" and #(item.dependencies or {}) > 0 then
+					if item.lane == "high"
+						and (finite(item.deadline_ms) or item.service_class == "interactive" or item.service_class == "critical")
+						and (item.pending_dependency_count or 0) > 0
+					then
 						priority_indices[#priority_indices + 1] = index
 					end
 				end
