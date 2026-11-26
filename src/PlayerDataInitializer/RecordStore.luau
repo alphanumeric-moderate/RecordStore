@@ -1614,7 +1614,7 @@ do
 			for _, dependency in ipairs(dependencies) do
 				if not valid_text(dependency, 128) or dependency == value.id or seen_dependencies[dependency] then return { code = "invalid", message = "dependency IDs must be unique, valid and not self-referential" } end
 				seen_dependencies[dependency] = true
-				if not self.completed[dependency] and not self.known[dependency] then
+				if not self.completed[dependency] and not self.known[dependency] and self.failed[dependency] == nil then
 					return { code = "invalid", message = "dependency is missing; enqueue its prerequisite before the dependent item" }
 				end
 			end
