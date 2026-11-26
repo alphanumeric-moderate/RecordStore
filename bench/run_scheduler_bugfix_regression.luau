@@ -589,4 +589,35 @@ do
 		"terminal candidate index retained items after all expiry work terminated")
 end
 
+do
+	local now = 1_800_000_000_000
+	local governor = Scheduler.new({ now_ms = function() return now end })
+	local accepted = governor:Enqueue({
+		id = "terminal-index-rescheduled",
+		owner_id = "terminal-index-rescheduled-owner",
+		lane = "normal",
+		work_class = "maintenance",
+		expires_at_ms = now + 100,
+	})
+	assert(accepted.code == "accepted", "rescheduled terminal-index fixture was not accepted")
+	local item = governor.known["terminal-index-rescheduled"]
+	assert(governor.terminal_preflight_count == 1 and governor.terminal_preflight_order[1] == item,
+		"new expiring work was not added to the ordered preflight index")
+	local selected, selected_status = governor:TakeNext()
+	assert(selected == item and selected_status == "success",
+		"unexpired terminal-index item was not selected")
+	assert(governor.terminal_preflight_count == 0 and governor.terminal_preflight_order[1] == nil,
+		"selection did not unlink the in-flight item from terminal preflight")
+	local rescheduled, reschedule_error = governor:Reschedule(item.id, now + 50)
+	assert(rescheduled, "terminal-index item could not be requeued: " .. tostring(reschedule_error))
+	assert(governor.terminal_preflight_count == 1 and governor.terminal_preflight_order[2] == item,
+		"retry requeue did not append the item back to the ordered preflight index")
+	now += 100
+	local expired, expired_status = governor:TakeNext()
+	assert(expired == item and expired_status == "expired",
+		"requeued candidate was not terminalized at its original expiry")
+	assert(governor.terminal_preflight_count == 0,
+		"requeued candidate remained in terminal preflight after expiry")
+end
+
 print("[scheduler-bugfix] policy atomicity, incomplete admission estimates, and false-lane rejection passed.")
