@@ -288,7 +288,7 @@ do
 				algorithm = "drr", shadow_algorithm = "weighted", shadow_enabled = false, shadow_sample_rate = 0,
 			},
 			in_flight = 0, by_class = {}, active_tickets = {}, queue = {}, queue_count = 0, queue_tail = 0, queue_positions = {}, due = {}, due_heap = {}, queued_due_heap = {},
-			terminal_preflight_count = 0, terminal_preflight_policy_revision = 1, terminal_preflight_items = {},
+			terminal_preflight_count = 0, terminal_preflight_policy_revision = 1, terminal_preflight_items = {}, terminal_preflight_order = {}, terminal_preflight_positions = {}, terminal_preflight_tail = 0,
 			wake_heap = {}, wake_sequence = 0,
 			read_units_in_flight = 0, write_units_in_flight = 0,
 			estimated_bytes_in_flight = 0, handler_slots_in_flight = 0,
@@ -1546,6 +1546,66 @@ do
 				compact_queue_storage(self)
 			end
 		end
+		local function compact_terminal_preflight_order(self: EmbeddedSchedulerDynamicRecord)
+			local tail = self.terminal_preflight_tail
+			if tail <= math.max(self.policy.queue_capacity, self.terminal_preflight_count * 2) then
+				return
+			end
+			local order = self.terminal_preflight_order
+			local positions = self.terminal_preflight_positions
+			local write_index = 0
+			for read_index = 1, tail do
+				local item = order[read_index]
+				if item ~= nil and self.terminal_preflight_items[item] == true then
+					write_index += 1
+					order[write_index] = item
+					positions[item] = write_index
+				end
+			end
+			for index = write_index + 1, tail do
+				order[index] = nil
+			end
+			self.terminal_preflight_tail = write_index
+		end
+		local function add_terminal_preflight_tracking(self: EmbeddedSchedulerDynamicRecord, item: EmbeddedSchedulerDynamicRecord)
+			if self.terminal_preflight_items[item] == true then
+				return
+			end
+			self.terminal_preflight_count += 1
+			self.terminal_preflight_items[item] = true
+			self.terminal_preflight_tail += 1
+			local position = self.terminal_preflight_tail
+			self.terminal_preflight_order[position] = item
+			self.terminal_preflight_positions[item] = position
+		end
+		local function remove_terminal_preflight_tracking(self: EmbeddedSchedulerDynamicRecord, item: EmbeddedSchedulerDynamicRecord)
+			if self.terminal_preflight_items[item] ~= true then
+				return
+			end
+			local position = self.terminal_preflight_positions[item]
+			if position ~= nil then
+				self.terminal_preflight_order[position] = nil
+			end
+			self.terminal_preflight_positions[item] = nil
+			self.terminal_preflight_items[item] = nil
+			self.terminal_preflight_count -= 1
+		end
+		local function rebuild_terminal_preflight_order(self: EmbeddedSchedulerDynamicRecord)
+			local order = self.terminal_preflight_order
+			local positions = self.terminal_preflight_positions
+			table.clear(order)
+			table.clear(positions)
+			local write_index = 0
+			for index = 1, self.queue_tail do
+				local item = self.queue[index]
+				if item ~= nil and self.terminal_preflight_items[item] == true then
+					write_index += 1
+					order[write_index] = item
+					positions[item] = write_index
+				end
+			end
+			self.terminal_preflight_tail = write_index
+		end
 		local function refresh_terminal_preflight_requirement(
 			self: EmbeddedSchedulerDynamicRecord,
 			item: EmbeddedSchedulerDynamicRecord
@@ -1556,17 +1616,14 @@ do
 				or dependencies_pending
 				or type(item.admission_preflight_terminal_result) == "table"
 			local was_required = self.terminal_preflight_items[item] == true
-			if was_required ~= required then
-				if required then
-					self.terminal_preflight_count += 1
-					self.terminal_preflight_items[item] = true
-				else
-					self.terminal_preflight_count = math.max(0, self.terminal_preflight_count - 1)
-					self.terminal_preflight_items[item] = nil
-				end
+			if required and not was_required then
+				add_terminal_preflight_tracking(self, item)
+			elseif was_required and not required then
+				remove_terminal_preflight_tracking(self, item)
 			end
 		end
 		local function append_queued_item(self: EmbeddedSchedulerDynamicRecord, item: EmbeddedSchedulerDynamicRecord)
+			compact_terminal_preflight_order(self)
 			refresh_terminal_preflight_requirement(self, item)
 			self.queue_tail += 1
 			self.queue[self.queue_tail] = item
@@ -1585,10 +1642,7 @@ do
 			self.queue[index] = nil
 			self.queue_positions[item.id] = nil
 			self.queue_count -= 1
-			if self.terminal_preflight_items[item] == true then
-				self.terminal_preflight_count = math.max(0, self.terminal_preflight_count - 1)
-				self.terminal_preflight_items[item] = nil
-			end
+			remove_terminal_preflight_tracking(self, item)
 			maybe_compact_queue_storage(self)
 			return item
 		end
@@ -1841,90 +1895,103 @@ do
 			local now = now_ms()
 			local priority_indices = self.selection_scratch.priority_inheritance_indices
 			table.clear(priority_indices)
-			if self.terminal_preflight_count > 0
-				or self.terminal_preflight_policy_revision ~= self.policy.revision
-			then
-			for index = self.queue_tail, 1, -1 do
-				local item = self.queue[index]
-				if item ~= nil then
-				local failed_dependency = item.failed_dependency_id
-				if failed_dependency ~= nil then
-					remove_queued_item(self, index, item)
-					item.queued = false
-					unindex_retry_item(self, item)
-					local dependency_code = self.failed[failed_dependency]
-					item.terminal_result = {
-						code = "dependency_failed", message = "prerequisite reached a non-success terminal outcome",
-						dependency_id = failed_dependency, dependency_code = dependency_code,
-					}
-					release_dependencies(self, item)
-					self.known[item.id] = nil
-					remember_terminal(self, item.id, "dependency_failed")
-					clear_admission_preflight(item)
-					return item, "dependency_failed"
-				elseif item.expires_at_ms and item.expires_at_ms <= now then
-					remove_queued_item(self, index, item)
-					item.queued = false
-					unindex_retry_item(self, item)
-					self.stats.scheduled_expired += 1
-					item.terminal_result = { code = "expired", message = "scheduled work expired before it could start" }
-					release_dependencies(self, item)
-					self.known[item.id] = nil
-					remember_terminal(self, item.id, "expired")
-					clear_admission_preflight(item)
-					return item, "expired"
-				else
-					if item.batchable ~= true then
-						operation_metric_key(self, item.operation_class or "default")
-					end
-					local batch_count = selected_batch_size(self, item, self.selection_scratch.batch_dimensions)
-					local admission_terminal_result = item.admission_preflight_terminal_result
-					if item.admission_preflight_policy_revision ~= self.policy.revision
-						or item.admission_preflight_batch_count ~= batch_count
-						or admission_terminal_result == nil
-					then
-						local scratch = self.selection_scratch
-						local dimensions = estimate_dimensions(item, batch_count, scratch.dimensions)
-						local candidate_cost = effective_cost(item, batch_count, dimensions)
-						local admission = admission_decision(
-							self,
-							item.work_class,
-							item.operation_class,
-							candidate_cost,
-							item.mutating ~= false,
-							item.service_class == "critical" or item.lane == "lease_renewal",
-							dimensions,
-							nil,
-							false,
-							scratch.admission_result
-						)
-						admission_terminal_result = if admission.terminal then table.clone(admission) else false
-						item.admission_preflight_policy_revision = self.policy.revision
-						item.admission_preflight_batch_count = batch_count
-						item.admission_preflight_terminal_result = admission_terminal_result
-					end
-					refresh_terminal_preflight_requirement(self, item)
-					if type(admission_terminal_result) == "table" then
-						self.stats.rejected += 1
-						remove_queued_item(self, index, item)
-						item.queued = false
-						unindex_retry_item(self, item)
-						unregister_dependency_waiters(self, item)
-						item.terminal_result = admission_terminal_result
-						self.known[item.id] = item
-						clear_admission_preflight(item)
-						return item, "admission_rejected"
-					end
-					if item.lane == "high"
-						and (finite(item.deadline_ms) or item.service_class == "interactive" or item.service_class == "critical")
-						and (item.pending_dependency_count or 0) > 0
-					then
-						priority_indices[#priority_indices + 1] = index
+			local terminal_preflight_policy_changed = self.terminal_preflight_policy_revision ~= self.policy.revision
+			if self.terminal_preflight_count > 0 or terminal_preflight_policy_changed then
+				if not terminal_preflight_policy_changed then
+					compact_terminal_preflight_order(self)
+				end
+				local scan_full_queue = terminal_preflight_policy_changed
+				local scan_order = if scan_full_queue then self.queue else self.terminal_preflight_order
+				local scan_tail = if scan_full_queue then self.queue_tail else self.terminal_preflight_tail
+				for scan_index = scan_tail, 1, -1 do
+					local item = scan_order[scan_index]
+					local index = if scan_full_queue then scan_index
+						elseif item ~= nil then self.queue_positions[item.id]
+						else nil
+					if item ~= nil and index ~= nil and self.queue[index] == item then
+						local failed_dependency = item.failed_dependency_id
+						if failed_dependency ~= nil then
+							remove_queued_item(self, index, item)
+							item.queued = false
+							unindex_retry_item(self, item)
+							local dependency_code = self.failed[failed_dependency]
+							item.terminal_result = {
+								code = "dependency_failed", message = "prerequisite reached a non-success terminal outcome",
+								dependency_id = failed_dependency, dependency_code = dependency_code,
+							}
+							release_dependencies(self, item)
+							self.known[item.id] = nil
+							remember_terminal(self, item.id, "dependency_failed")
+							clear_admission_preflight(item)
+							return item, "dependency_failed"
+						elseif item.expires_at_ms and item.expires_at_ms <= now then
+							remove_queued_item(self, index, item)
+							item.queued = false
+							unindex_retry_item(self, item)
+							self.stats.scheduled_expired += 1
+							item.terminal_result = { code = "expired", message = "scheduled work expired before it could start" }
+							release_dependencies(self, item)
+							self.known[item.id] = nil
+							remember_terminal(self, item.id, "expired")
+							clear_admission_preflight(item)
+							return item, "expired"
+						else
+							if item.batchable ~= true then
+								operation_metric_key(self, item.operation_class or "default")
+							end
+							local batch_count = selected_batch_size(self, item, self.selection_scratch.batch_dimensions)
+							local admission_terminal_result = item.admission_preflight_terminal_result
+							if item.admission_preflight_policy_revision ~= self.policy.revision
+								or item.admission_preflight_batch_count ~= batch_count
+								or admission_terminal_result == nil
+							then
+								local scratch = self.selection_scratch
+								local dimensions = estimate_dimensions(item, batch_count, scratch.dimensions)
+								local candidate_cost = effective_cost(item, batch_count, dimensions)
+								local admission = admission_decision(
+									self,
+									item.work_class,
+									item.operation_class,
+									candidate_cost,
+									item.mutating ~= false,
+									item.service_class == "critical" or item.lane == "lease_renewal",
+									dimensions,
+									nil,
+									false,
+									scratch.admission_result
+								)
+								admission_terminal_result = if admission.terminal then table.clone(admission) else false
+								item.admission_preflight_policy_revision = self.policy.revision
+								item.admission_preflight_batch_count = batch_count
+								item.admission_preflight_terminal_result = admission_terminal_result
+							end
+							refresh_terminal_preflight_requirement(self, item)
+							if type(admission_terminal_result) == "table" then
+								self.stats.rejected += 1
+								remove_queued_item(self, index, item)
+								item.queued = false
+								unindex_retry_item(self, item)
+								unregister_dependency_waiters(self, item)
+								item.terminal_result = admission_terminal_result
+								self.known[item.id] = item
+								clear_admission_preflight(item)
+								return item, "admission_rejected"
+							end
+							if item.lane == "high"
+								and (finite(item.deadline_ms) or item.service_class == "interactive" or item.service_class == "critical")
+								and (item.pending_dependency_count or 0) > 0
+							then
+								priority_indices[#priority_indices + 1] = index
+							end
+						end
+					elseif not scan_full_queue and self.terminal_preflight_items[item] == true then
+						remove_terminal_preflight_tracking(self, item)
 					end
 				end
-			end
+				if terminal_preflight_policy_changed then
+					rebuild_terminal_preflight_order(self)
+					self.terminal_preflight_policy_revision = self.policy.revision
 				end
-				self.terminal_preflight_policy_revision = self.policy.revision
 			end
 			local index, urgent_fallback = choose_index(
 				self, self.policy.algorithm or "drr", renewal_mode, priority_indices
