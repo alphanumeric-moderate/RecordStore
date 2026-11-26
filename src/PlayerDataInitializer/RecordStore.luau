@@ -1553,8 +1553,13 @@ do
 			local required = item.batchable == true or item.expires_at_ms ~= nil
 				or #(item.dependencies or {}) > 0
 				or type(item.admission_preflight_terminal_result) == "table"
-			if item.needs_terminal_preflight ~= required then
-				self.terminal_preflight_count += if required then 1 else -1
+			local was_required = item.needs_terminal_preflight == true
+			if was_required ~= required then
+				if required then
+					self.terminal_preflight_count += 1
+				else
+					self.terminal_preflight_count = math.max(0, self.terminal_preflight_count - 1)
+				end
 				item.needs_terminal_preflight = required
 			end
 		end
