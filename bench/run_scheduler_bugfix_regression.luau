@@ -662,4 +662,42 @@ do
 		"requeued candidate remained in terminal preflight after expiry")
 end
 
+do
+	local now = 1_800_000_000_000
+	local governor = Scheduler.new({ now_ms = function() return now end })
+	local stable = governor:Enqueue({
+		id = "terminal-index-churn-stable",
+		owner_id = "terminal-index-churn-stable-owner",
+		lane = "normal",
+		work_class = "maintenance",
+		expires_at_ms = now + 1000,
+	})
+	assert(stable.code == "accepted", "stable terminal-index churn candidate was not accepted")
+	local stable_item = governor.known["terminal-index-churn-stable"]
+
+	for index = 1, 96 do
+		local id = "terminal-index-churn-" .. tostring(index)
+		local accepted = governor:Enqueue({
+			id = id,
+			owner_id = id .. "-owner",
+			lane = "normal",
+			work_class = "maintenance",
+			expires_at_ms = now + 1,
+		})
+		assert(accepted.code == "accepted", "terminal-index churn candidate was not accepted")
+		now += 1
+		local expired, expired_status = governor:TakeNext()
+		assert(expired ~= nil and expired.id == id and expired_status == "expired",
+			"newest terminal-index churn candidate was not expired")
+	end
+
+	assert(governor.terminal_preflight_count == 1
+		and governor.terminal_preflight_items[stable_item] == true
+		and governor.terminal_preflight_order[1] == stable_item
+		and governor.terminal_preflight_positions[stable_item] ~= nil,
+		"terminal-index churn lost the long-lived candidate")
+	assert(governor.terminal_preflight_tail <= 64,
+		"terminal-index tombstones grew beyond the bounded compaction threshold")
+end
+
 print("[scheduler-bugfix] policy atomicity, incomplete admission estimates, and false-lane rejection passed.")
