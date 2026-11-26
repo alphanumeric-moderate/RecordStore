@@ -288,6 +288,7 @@ do
 				algorithm = "drr", shadow_algorithm = "weighted", shadow_enabled = false, shadow_sample_rate = 0,
 			},
 			in_flight = 0, by_class = {}, active_tickets = {}, queue = {}, queue_count = 0, queue_tail = 0, queue_positions = {}, due = {}, due_heap = {}, queued_due_heap = {},
+			terminal_preflight_count = 0, terminal_preflight_policy_revision = 1,
 			wake_heap = {}, wake_sequence = 0,
 			read_units_in_flight = 0, write_units_in_flight = 0,
 			estimated_bytes_in_flight = 0, handler_slots_in_flight = 0,
@@ -434,6 +435,7 @@ do
 			local valid, message = policy_valid(next_policy)
 			if not valid then return false, message end
 			self.policy = next_policy
+			self.terminal_preflight_policy_revision = nil
 			self.retry_tokens = math.min(self.retry_tokens, self.policy.retry_token_capacity)
 			return true, nil
 		end
@@ -1544,7 +1546,20 @@ do
 				compact_queue_storage(self)
 			end
 		end
+		local function refresh_terminal_preflight_requirement(
+			self: EmbeddedSchedulerDynamicRecord,
+			item: EmbeddedSchedulerDynamicRecord
+		)
+			local required = item.batchable == true or item.expires_at_ms ~= nil
+				or #(item.dependencies or {}) > 0
+				or type(item.admission_preflight_terminal_result) == "table"
+			if item.needs_terminal_preflight ~= required then
+				self.terminal_preflight_count += if required then 1 else -1
+				item.needs_terminal_preflight = required
+			end
+		end
 		local function append_queued_item(self: EmbeddedSchedulerDynamicRecord, item: EmbeddedSchedulerDynamicRecord)
+			refresh_terminal_preflight_requirement(self, item)
 			self.queue_tail += 1
 			self.queue[self.queue_tail] = item
 			self.queue_count += 1
@@ -1562,6 +1577,10 @@ do
 			self.queue[index] = nil
 			self.queue_positions[item.id] = nil
 			self.queue_count -= 1
+			if item.needs_terminal_preflight == true then
+				self.terminal_preflight_count = math.max(0, self.terminal_preflight_count - 1)
+				item.needs_terminal_preflight = false
+			end
 			maybe_compact_queue_storage(self)
 			return item
 		end
@@ -1814,6 +1833,9 @@ do
 			local now = now_ms()
 			local priority_indices = self.selection_scratch.priority_inheritance_indices
 			table.clear(priority_indices)
+			if self.terminal_preflight_count > 0
+				or self.terminal_preflight_policy_revision ~= self.policy.revision
+			then
 			for index = self.queue_tail, 1, -1 do
 				local item = self.queue[index]
 				if item ~= nil then
@@ -1872,6 +1894,7 @@ do
 						item.admission_preflight_policy_revision = self.policy.revision
 						item.admission_preflight_batch_count = batch_count
 						item.admission_preflight_terminal_result = admission_terminal_result
+						refresh_terminal_preflight_requirement(self, item)
 					end
 					if type(admission_terminal_result) == "table" then
 						self.stats.rejected += 1
@@ -1893,6 +1916,8 @@ do
 				end
 			end
 				end
+				self.terminal_preflight_policy_revision = self.policy.revision
+			end
 			local index, urgent_fallback = choose_index(
 				self, self.policy.algorithm or "drr", renewal_mode, priority_indices
 			)
