@@ -9,7 +9,8 @@ local READY_SCENARIOS = {
 	{ name = "quarter-ready", stride = 4, ready_count = function(count) return math.floor(count / 4) end, expect_selection = true },
 	{ name = "none-ready", stride = math.huge, ready_count = function(_count) return 0 end, expect_selection = false },
 	{ name = "owner-saturated", stride = 1, ready_count = function(count) return count end, owner_saturated = true, expect_selection = false },
-	{ name = "dependency-heavy", stride = 2, ready_count = function(count) return math.ceil(count / 2) end, dependency_pairs = true, expect_selection = true },
+	{ name = "dependency-heavy", stride = 2, ready_count = function(count) return math.ceil(count / 2) end, dependency_pairs = true, inheritable = true, expect_selection = true },
+	{ name = "non-inheritable-dependency-heavy", stride = 2, ready_count = function(count) return math.ceil(count / 2) end, dependency_pairs = true, expect_selection = true },
 }
 local ALGORITHMS = { "fifo", "weighted", "deadline", "drr" }
 local REPEATS = 2
@@ -39,12 +40,18 @@ local function enqueue_profile_item(
 		("enqueue failed for %s: %s"):format(id, tostring(accepted.message)))
 end
 
-local function enqueue_dependent(governor: any, id: string, owner_id: string, prerequisite_id: string)
+local function enqueue_dependent(
+	governor: any,
+	id: string,
+	owner_id: string,
+	prerequisite_id: string,
+	inheritable: boolean
+)
 	local accepted = governor:Enqueue({
 		id = id,
 		owner_id = owner_id,
 		lane = "high",
-		service_class = "interactive",
+		service_class = if inheritable then "interactive" else "normal",
 		work_class = "profile",
 		operation_class = "read",
 		read_units = 1,
@@ -108,7 +115,7 @@ local function build_queue(algorithm: string, count: number, scenario: any)
 			if index % 2 == 1 then
 				enqueue_profile_item(governor, prerequisite_id, owner_id, nil, "background")
 			else
-				enqueue_dependent(governor, item_id, owner_id, prerequisite_id)
+				enqueue_dependent(governor, item_id, owner_id, prerequisite_id, scenario.inheritable == true)
 			end
 		else
 			enqueue_profile_item(
