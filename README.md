@@ -159,6 +159,8 @@ The retention floor is stored in the same durable consumer-group registry that s
 
 The bounded producer helper amortizes writes across multiple pending events. Its in-memory queue is not durable until FlushAsync returns a confirmed `committed` result; uncertain or failed batches remain queued for retry. The managed consumer worker adds single-flight polling, bounded exponential backoff, lease heartbeat, wake coalescing, and release on shutdown. Both are part of the main RecordStore module:
 
+Background publisher flushes, consumer polling, and worker lease heartbeats pass through RecordStore's shared request-admission scheduler when advanced scheduling is enabled. These stream operations use the background lane; heartbeats carry an explicit deadline and expiry but do not consume the critical capacity reserved for profile-session lease renewal. If advanced scheduling is disabled, they use the existing deferred-work fallback. Direct stream API calls retain their synchronous result contracts.
+
 ```luau
 local Publisher = RecordStore.DurableStreamPublisher
 local publisher = assert(Publisher.OpenAsync(

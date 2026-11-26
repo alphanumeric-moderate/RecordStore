@@ -18178,7 +18178,23 @@ RecordStore.shutdown = function()
 		task.wait(0.05)
 	end
 end
-	return { start = start_scheduler }
+	return {
+		start = start_scheduler,
+		schedule = function(
+			owner_id: string,
+			work_id: string,
+			callback: (...any) -> any,
+			options: EmbeddedSchedulerScheduleOptions?
+		): EmbeddedSchedulerScheduleResult
+			return RecordStore.schedule_work(owner_id, work_id, callback, options)
+		end,
+		is_enabled = function(): boolean
+			return scheduler_enabled
+		end,
+		is_shutting_down = function(): boolean
+			return closing
+		end,
+	}
 end)())
 
 RecordStore._internals = {}
@@ -21921,6 +21937,104 @@ return table.freeze(SHA256)
 
 end)()
 
+local RecordStoreEmbeddedRequestAdmission = (function()
+	local runtime = rawget(RecordStore, "_scheduler_runtime") :: any
+	if type(runtime) ~= "table" or type(runtime.schedule) ~= "function" then
+		error("RecordStore background request admission is unavailable", 2)
+	end
+	local sequence = 0
+
+	local function enqueue(
+		callback: () -> (),
+		critical: boolean,
+		lease_remaining_seconds: number?,
+		on_rejected: ((any) -> ())?
+	): (boolean, string?)
+		if type(callback) ~= "function" then
+			return false, "background callback must be a function"
+		end
+		if runtime.is_shutting_down() then
+			return false, "RecordStore is shutting down"
+		end
+		if not runtime.is_enabled() then
+			task.defer(callback)
+			return true, nil
+		end
+
+		sequence += 1
+		local now_ms = now_local() * 1000
+		local remaining_ms = if critical then math.max(100, (lease_remaining_seconds or 1) * 1000) else nil
+		local callback_started = false
+		local rejection_delivered = false
+		local function deliver_rejection(result: any)
+			if callback_started or rejection_delivered or runtime.is_shutting_down() then return end
+			rejection_delivered = true
+			if not runtime.is_enabled() then
+				task.defer(callback)
+			elseif on_rejected ~= nil then
+				pcall(on_rejected, result)
+			end
+		end
+		local options: EmbeddedSchedulerScheduleOptions = {
+			lane = "background",
+			work_class = "background",
+			operation_class = "update_async",
+			due_at_ms = now_ms,
+			deadline_ms = if critical then now_ms + math.max(10, (remaining_ms :: number) * 0.75) else nil,
+			expires_at_ms = if critical then now_ms + (remaining_ms :: number) else nil,
+			read_units = if critical then 1 else 2,
+			write_units = if critical then 1 else 2,
+			estimated_bytes = 32768,
+			handler_slots = 1,
+			cost = 1,
+			max_retries = 0,
+			mutating = true,
+			on_complete = deliver_rejection,
+		}
+		local result = runtime.schedule(
+			"recordstore:durable-streams",
+			"stream:" .. tostring(sequence),
+			function()
+				callback_started = true
+				callback()
+				return { code = "completed" }
+			end,
+			options
+		)
+		if type(result) == "table" and result.code == "accepted" then
+			return true, nil
+		end
+		if runtime.is_shutting_down() then
+			return false, "RecordStore is shutting down"
+		end
+		if not runtime.is_enabled() then
+			task.defer(callback)
+			return true, nil
+		end
+		deliver_rejection(result)
+		return false, tostring(if type(result) == "table" then result.message or result.code else "scheduler admission failed")
+	end
+
+	return table.freeze({
+		defer_background = function(callback: () -> (), on_rejected: ((any) -> ())?): (boolean, string?)
+			return enqueue(callback, false, nil, on_rejected)
+		end,
+		defer_lease_renewal = function(
+			lease_remaining_seconds: number,
+			callback: () -> (),
+			on_rejected: ((any) -> ())?
+		): (boolean, string?)
+			if type(lease_remaining_seconds) ~= "number" or lease_remaining_seconds ~= lease_remaining_seconds
+				or lease_remaining_seconds <= 0 or lease_remaining_seconds == math.huge
+				or lease_remaining_seconds == -math.huge
+			then
+				return false, "lease_remaining_seconds must be positive and finite"
+			end
+			return enqueue(callback, true, lease_remaining_seconds, on_rejected)
+		end,
+	})
+end)()
+
 local RecordStoreEmbeddedDurableStreams = (function()
 	local SHA256 = RecordStoreEmbeddedSHA256
 
@@ -24860,7 +24974,7 @@ type ClientType = {
 	_scheduled: boolean,
 	_schedule_generation: number,
 	_schedule: (number, () -> ()) -> (),
-	_defer: (() -> ()) -> (),
+	_defer: (...any) -> any,
 	_on_result: ((any, number) -> ())?,
 	_on_error: ((string) -> ())?,
 	_pending_event_ids: { [string]: boolean },
@@ -24965,28 +25079,37 @@ local function cancel_schedule(self: ClientType)
 end
 
 local function schedule_flush(self: ClientType, delay_seconds: number)
-	if self._closed or self._count == 0 or self._scheduled then
-		return
-	end
+	if self._closed or self._count == 0 or self._scheduled then return end
 	self._schedule_generation += 1
 	local generation = self._schedule_generation
 	self._scheduled = true
 	local ok, schedule_error = pcall(self._schedule, delay_seconds, function()
-		if self._closed or not self._scheduled or generation ~= self._schedule_generation then
-			return
-		end
-		self._scheduled = false
-		self._defer(function()
-			if not self._closed and self._count > 0 then
-				self:FlushAsync()
+		if self._closed or not self._scheduled or generation ~= self._schedule_generation then return end
+		local rejection_handled = false
+		local deferred, accepted, defer_error = pcall(self._defer, function()
+			if self._closed or not self._scheduled or generation ~= self._schedule_generation then return end
+			self._scheduled = false
+			if self._count > 0 then self:FlushAsync() end
+		end, function(result: any)
+			rejection_handled = true
+			if self._closed or not self._scheduled or generation ~= self._schedule_generation then return end
+			self._scheduled = false
+			if self._on_error ~= nil then
+				pcall(self._on_error, "flush request admission was rejected: " .. tostring(result and (result.message or result.code) or "unknown"))
 			end
+			schedule_flush(self, math.max(self._flush_delay_seconds, 0.1))
 		end)
+		if (not deferred or accepted == false) and not rejection_handled and self._scheduled then
+			self._scheduled = false
+			if self._on_error ~= nil then
+				pcall(self._on_error, "flush scheduling failed: " .. tostring(if deferred then defer_error or "request admission rejected" else accepted))
+			end
+			schedule_flush(self, math.max(self._flush_delay_seconds, 0.1))
+		end
 	end)
 	if not ok then
 		self._scheduled = false
-		if self._on_error ~= nil then
-			pcall(self._on_error, "flush scheduling failed: " .. tostring(schedule_error))
-		end
+		if self._on_error ~= nil then pcall(self._on_error, "flush scheduling failed: " .. tostring(schedule_error)) end
 	end
 end
 
@@ -25050,8 +25173,8 @@ function Publisher.OpenAsync(
 	local selected_schedule = schedule or function(delay_seconds: number, callback: () -> ())
 		task.delay(delay_seconds, callback)
 	end
-	local selected_defer = defer or function(callback: () -> ())
-		task.defer(callback)
+	local selected_defer = defer or function(callback: () -> (), on_rejected: ((any) -> ())?)
+		return RecordStoreEmbeddedRequestAdmission.defer_background(callback, on_rejected)
 	end
 	local client: any = {
 		_stream = stream,
@@ -25226,7 +25349,8 @@ type ClientType = {
 	_heartbeat_generation: number,
 	_heartbeat_busy: boolean,
 	_schedule: (number, () -> ()) -> (),
-	_defer: (() -> ()) -> (),
+	_defer: (...any) -> any,
+	_defer_lease_renewal: (...any) -> any,
 	_random: () -> number,
 	_on_result: ((any) -> ())?,
 	_on_error: ((string) -> ())?,
@@ -25267,26 +25391,37 @@ local function cancel_heartbeat(self: ClientType)
 end
 
 local function schedule_poll(self: ClientType, delay_seconds: number)
-	if not self._running or self._scheduled then
-		return
-	end
+	if not self._running or self._scheduled then return end
 	self._schedule_generation += 1
 	local generation = self._schedule_generation
 	self._scheduled = true
 	local ok, schedule_error = pcall(self._schedule, delay_seconds, function()
-		if not self._running or not self._scheduled or generation ~= self._schedule_generation then
-			return
-		end
-		self._scheduled = false
-		self._defer(function()
+		if not self._running or not self._scheduled or generation ~= self._schedule_generation then return end
+		local rejection_handled = false
+		local deferred, accepted, defer_error = pcall(self._defer, function()
+			if not self._running or not self._scheduled or generation ~= self._schedule_generation then return end
+			self._scheduled = false
 			self:_Poll()
+		end, function(result: any)
+			rejection_handled = true
+			if not self._running or not self._scheduled or generation ~= self._schedule_generation then return end
+			self._scheduled = false
+			if self._on_error ~= nil then
+				pcall(self._on_error, "consumer poll admission was rejected: " .. tostring(result and (result.message or result.code) or "unknown"))
+			end
+			schedule_poll(self, self._min_poll_delay)
 		end)
+		if (not deferred or accepted == false) and not rejection_handled and self._scheduled then
+			self._scheduled = false
+			if self._on_error ~= nil then
+				pcall(self._on_error, "poll scheduling failed: " .. tostring(if deferred then defer_error or "request admission rejected" else accepted))
+			end
+			schedule_poll(self, self._min_poll_delay)
+		end
 	end)
 	if not ok then
 		self._scheduled = false
-		if self._on_error ~= nil then
-			pcall(self._on_error, "poll scheduling failed: " .. tostring(schedule_error))
-		end
+		if self._on_error ~= nil then pcall(self._on_error, "poll scheduling failed: " .. tostring(schedule_error)) end
 	end
 end
 
@@ -25305,20 +25440,15 @@ local function next_backoff(self: ClientType, worked: boolean): number
 	return math.clamp(self._backoff * factor, self._min_poll_delay, self._max_poll_delay)
 end
 
-local function schedule_heartbeat(self: ClientType, claim: any)
-	if not self._running or self._claim ~= claim then
-		return
-	end
+local function schedule_heartbeat(self: ClientType, claim: any, delay_override: number?)
+	if not self._running or self._claim ~= claim then return end
 	self._heartbeat_generation += 1
 	local generation = self._heartbeat_generation
-	local ok, schedule_error = pcall(self._schedule, self._lease_seconds / 3, function()
-		if not self._running or generation ~= self._heartbeat_generation or self._claim ~= claim then
-			return
-		end
-		self._defer(function()
-			if not self._running or generation ~= self._heartbeat_generation or self._claim ~= claim or self._heartbeat_busy then
-				return
-			end
+	local ok, schedule_error = pcall(self._schedule, delay_override or self._lease_seconds / 3, function()
+		if not self._running or generation ~= self._heartbeat_generation or self._claim ~= claim then return end
+		local rejection_handled = false
+		local deferred, accepted, defer_error = pcall(self._defer_lease_renewal, self._lease_seconds / 2, function()
+			if not self._running or generation ~= self._heartbeat_generation or self._claim ~= claim or self._heartbeat_busy then return end
 			self._heartbeat_busy = true
 			local success, result = pcall(function()
 				return self._stream:RenewConsumerAsync(claim)
@@ -25334,10 +25464,23 @@ local function schedule_heartbeat(self: ClientType, claim: any)
 				return
 			end
 			schedule_heartbeat(self, claim)
+		end, function(result: any)
+			rejection_handled = true
+			if not self._running or generation ~= self._heartbeat_generation or self._claim ~= claim then return end
+			if self._on_error ~= nil then
+				pcall(self._on_error, "consumer lease renewal admission was rejected: " .. tostring(result and (result.message or result.code) or "unknown"))
+			end
+			schedule_heartbeat(self, claim, 0.1)
 		end)
+		if (not deferred or accepted == false) and not rejection_handled then
+			if self._on_error ~= nil then
+				pcall(self._on_error, "heartbeat scheduling failed: " .. tostring(if deferred then defer_error or "request admission rejected" else accepted))
+			end
+			schedule_heartbeat(self, claim, 0.1)
+		end
 	end)
-	if not ok and self._on_error ~= nil then
-		pcall(self._on_error, "heartbeat scheduling failed: " .. tostring(schedule_error))
+	if not ok then
+		if self._on_error ~= nil then pcall(self._on_error, "heartbeat scheduling failed: " .. tostring(schedule_error)) end
 	end
 end
 
@@ -25418,8 +25561,21 @@ function Worker.Open(
 	local selected_schedule = schedule or function(delay_seconds: number, callback: () -> ())
 		task.delay(delay_seconds, callback)
 	end
-	local selected_defer = defer or function(callback: () -> ())
-		task.defer(callback)
+	local selected_defer = defer or function(callback: () -> (), on_rejected: ((any) -> ())?)
+		return RecordStoreEmbeddedRequestAdmission.defer_background(callback, on_rejected)
+	end
+	local selected_defer_lease_renewal = if defer ~= nil then function(
+		_lease_remaining_seconds: number,
+		callback: () -> (),
+		on_rejected: ((any) -> ())?
+	)
+		return selected_defer(callback, on_rejected)
+	end else function(
+		lease_remaining_seconds: number,
+		callback: () -> (),
+		on_rejected: ((any) -> ())?
+	)
+		return RecordStoreEmbeddedRequestAdmission.defer_lease_renewal(lease_remaining_seconds, callback, on_rejected)
 	end
 	local client: any = {
 		_stream = stream,
@@ -25443,6 +25599,7 @@ function Worker.Open(
 		_heartbeat_busy = false,
 		_schedule = selected_schedule,
 		_defer = selected_defer,
+		_defer_lease_renewal = selected_defer_lease_renewal,
 		_random = random,
 		_on_result = on_result,
 		_on_error = on_error,
