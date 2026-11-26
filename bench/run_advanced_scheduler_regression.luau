@@ -1439,6 +1439,29 @@ assert(untimed_prerequisite ~= nil and untimed_status == "success",
 	"untimed prerequisite was not selectable")
 assert(untimed_prerequisite.inherited_lane == nil,
 	"a high-lane dependent without a deadline or interactive service class inherited urgency")
+assert(#untimed_inheritance.selection_scratch.priority_inheritance_indices == 0,
+	"non-inheritable high-lane dependencies were retained as inheritance candidates")
+
+local completed_dependency_inheritance = new_scheduler()
+enqueue(completed_dependency_inheritance, {
+	id = "completed-inheritance-prerequisite",
+	owner_id = "completed-inheritance-owner",
+	lane = "background",
+})
+take(completed_dependency_inheritance, "completed-inheritance-prerequisite")
+enqueue(completed_dependency_inheritance, {
+	id = "completed-inheritance-dependent",
+	owner_id = "completed-inheritance-owner",
+	lane = "high",
+	service_class = "interactive",
+	dependencies = { "completed-inheritance-prerequisite" },
+})
+local completed_dependent, completed_dependent_status = completed_dependency_inheritance:TakeNext()
+assert(completed_dependent ~= nil and completed_dependent_status == "success"
+	and completed_dependent.id == "completed-inheritance-dependent",
+	"dependent with an already-completed prerequisite was not selectable")
+assert(#completed_dependency_inheritance.selection_scratch.priority_inheritance_indices == 0,
+	"fully resolved dependencies were retained as inheritance candidates")
 
 local interactive_inheritance = new_scheduler()
 enqueue(interactive_inheritance, {
