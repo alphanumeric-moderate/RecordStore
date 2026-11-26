@@ -82,7 +82,7 @@ These facilities remain process-local optimizations. They are not new durable me
 
 ## Benchmarks and verification
 
-- `scheduler_backlog_scaling.bench.luau`: first `TakeNext` at 128/512/2048/8192 queued entries across FIFO, weighted, deadline, and DRR, including ready, partially-ready, future-blocked, owner-cap-saturated, and dependency-heavy queues. Queue setup is outside the timed interval.
+- `scheduler_backlog_scaling.bench.luau`: first `TakeNext` at 128/512/2048/8192 queued entries across FIFO, weighted, deadline, and DRR, including ready, partially-ready, future-blocked, owner-cap-saturated, and dependency-heavy queues. The dependency-heavy case asserts that only an eligible prerequisite is dispatched and that the reported ready count matches the constructed queue. Queue setup is outside the timed interval.
 - `update_validation_pipeline.bench.luau` and `patch_update_pipeline.bench.luau`: matched large-profile mutation/validation workloads.
 - `v2_trace_ring.bench.luau` and `v2_read_coalescer.bench.luau`: bounded process-local structure throughput and cache churn.
 - PlayerData.Set regressions cover an interleaved newer same-field mutation during uncertain-write reconciliation.
