@@ -9,7 +9,7 @@ local READY_SCENARIOS = {
 	{ name = "quarter-ready", stride = 4, ready_count = function(count) return math.floor(count / 4) end, expect_selection = true },
 	{ name = "none-ready", stride = math.huge, ready_count = function(_count) return 0 end, expect_selection = false },
 	{ name = "owner-saturated", stride = 1, ready_count = function(count) return count end, owner_saturated = true, expect_selection = false },
-	{ name = "dependency-heavy", stride = 2, ready_count = function(count) return math.floor(count / 2) end, dependency_pairs = true, expect_selection = true },
+	{ name = "dependency-heavy", stride = 2, ready_count = function(count) return math.ceil(count / 2) end, dependency_pairs = true, expect_selection = true },
 }
 local ALGORITHMS = { "fifo", "weighted", "deadline", "drr" }
 local REPEATS = 2
@@ -140,6 +140,12 @@ for _, algorithm in ipairs(ALGORITHMS) do
 						"ready workload failed to select an item")
 					assert((selected.available_at_ms or 0) <= NOW_MS,
 						"selector returned an item that was not ready")
+					if scenario.dependency_pairs then
+						assert(selected.lane == "background" and #(selected.dependencies or {}) == 0,
+							"dependency-heavy workload selected a blocked dependent")
+					end
+					assert(expected_ready == scenario.ready_count(queue_size),
+						"scenario readiness diagnostic differs from the built queue")
 					assert(governor:Stats().queue_items == queue_size - 1,
 						"successful selection did not remove exactly one queue item")
 				else
