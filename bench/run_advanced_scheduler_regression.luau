@@ -1538,8 +1538,15 @@ assert(delayed_prerequisite ~= nil and delayed_status == "success"
 assert(delayed_inheritance:MarkCompleted(delayed_prerequisite.id, "committed"))
 take(delayed_inheritance, "delayed-urgent-dependent")
 
--- A terminal queue outcome is processed before any priority inheritance side effect.
+-- Terminal handling must finish before applying candidates collected by the fused reverse scan.
+-- The older expiry is deliberately behind a newer dependent in scan order.
 local terminal_before_inheritance = new_scheduler()
+enqueue(terminal_before_inheritance, {
+	id = "terminal-order-expired",
+	owner_id = "terminal-order-expiry-owner",
+	lane = "normal",
+	expires_at_ms = now_ms,
+})
 enqueue(terminal_before_inheritance, {
 	id = "terminal-order-prerequisite",
 	owner_id = "terminal-order-owner",
@@ -1553,24 +1560,65 @@ enqueue(terminal_before_inheritance, {
 	service_class = "interactive",
 	dependencies = { "terminal-order-prerequisite" },
 })
-enqueue(terminal_before_inheritance, {
-	id = "terminal-order-expired",
-	owner_id = "terminal-order-expiry-owner",
-	lane = "normal",
-	expires_at_ms = now_ms,
-})
 local terminal_first, terminal_first_status = terminal_before_inheritance:TakeNext()
 assert(terminal_first ~= nil and terminal_first.id == "terminal-order-expired"
 	and terminal_first_status == "expired",
 	"terminal queue outcome did not retain reverse-queue processing order")
 assert(terminal_before_inheritance.known["terminal-order-prerequisite"].inherited_lane == nil,
-	"priority inheritance ran before a higher-priority terminal queue outcome was returned")
+	"priority inheritance ran after candidates were collected but before terminal preflight returned")
 now_ms += 100
 local inheritance_after_terminal, inheritance_after_terminal_status = terminal_before_inheritance:TakeNext()
 assert(inheritance_after_terminal ~= nil and inheritance_after_terminal.id == "terminal-order-prerequisite"
 	and inheritance_after_terminal_status == "success"
 	and inheritance_after_terminal.inherited_lane == "normal",
 	"priority inheritance was not applied after terminal queue processing completed")
+
+-- Failed prerequisites must also terminate before any previously collected inheritance candidate is applied.
+local failed_dependency_before_inheritance = new_scheduler()
+enqueue(failed_dependency_before_inheritance, {
+	id = "terminal-failed-prerequisite",
+	owner_id = "terminal-failed-owner",
+	lane = "background",
+})
+local dispatched_failed_prerequisite, dispatched_failed_status =
+	failed_dependency_before_inheritance:TakeNext()
+assert(dispatched_failed_prerequisite ~= nil and dispatched_failed_status == "success"
+	and dispatched_failed_prerequisite.id == "terminal-failed-prerequisite",
+	"failed-dependency fixture prerequisite was not dispatched")
+enqueue(failed_dependency_before_inheritance, {
+	id = "terminal-failed-dependent",
+	owner_id = "terminal-failed-owner",
+	lane = "high",
+	service_class = "interactive",
+	dependencies = { "terminal-failed-prerequisite" },
+})
+assert(failed_dependency_before_inheritance:MarkCompleted("terminal-failed-prerequisite", "permanent"),
+	"failed-dependency fixture prerequisite did not terminalize")
+enqueue(failed_dependency_before_inheritance, {
+	id = "terminal-failure-order-prerequisite",
+	owner_id = "terminal-failure-order-owner",
+	lane = "background",
+})
+enqueue(failed_dependency_before_inheritance, {
+	id = "terminal-failure-order-dependent",
+	owner_id = "terminal-failure-order-owner",
+	lane = "high",
+	service_class = "interactive",
+	dependencies = { "terminal-failure-order-prerequisite" },
+})
+local failed_terminal, failed_terminal_status = failed_dependency_before_inheritance:TakeNext()
+assert(failed_terminal ~= nil and failed_terminal.id == "terminal-failed-dependent"
+	and failed_terminal_status == "dependency_failed",
+	"failed dependency did not retain reverse-queue terminal processing order")
+assert(failed_dependency_before_inheritance.known["terminal-failure-order-prerequisite"].inherited_lane == nil,
+	"priority inheritance ran before a failed-dependency terminal outcome was returned")
+local inheritance_after_failed_terminal, inheritance_after_failed_terminal_status =
+	failed_dependency_before_inheritance:TakeNext()
+assert(inheritance_after_failed_terminal ~= nil
+	and inheritance_after_failed_terminal.id == "terminal-failure-order-prerequisite"
+	and inheritance_after_failed_terminal_status == "success"
+	and inheritance_after_failed_terminal.inherited_lane == "normal",
+	"priority inheritance was not applied after failed-dependency terminal processing completed")
 
 -- When multiple high dependents become eligible together, the oldest dependent
 -- remains the inherited-priority owner as in the original ascending queue sweep.
