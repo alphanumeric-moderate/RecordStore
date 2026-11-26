@@ -1480,6 +1480,8 @@ local interactive_prerequisite, interactive_status = interactive_inheritance:Tak
 assert(interactive_prerequisite ~= nil and interactive_status == "success"
 	and interactive_prerequisite.inherited_lane == "normal",
 	"interactive service class did not qualify for bounded priority inheritance")
+assert(#interactive_inheritance.selection_scratch.priority_inheritance_indices == 1,
+	"eligible unresolved dependencies were omitted from inheritance candidates")
 
 end
 
