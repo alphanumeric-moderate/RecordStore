@@ -43,6 +43,7 @@ This PR is a performance refactor. The existing V2 service surface on `main` is 
 - Keep terminal completed/failed history in head-indexed bounded arrays, compacting only after the head passes its bound or backing tail grows beyond twice the limit. Dependency-referenced terminal outcomes remain retained until their final dependency is released.
 - Keep the bounded handoff-status cache in a fixed-capacity circular buffer instead of shifting entries from the front.
 - Clear inherited-priority links by visiting the completed dependent's bounded dependency list instead of scanning every known work item.
+- Fuse the reverse-order terminal preflight scan with priority-inheritance candidate collection. Only collect high-lane dependents that meet the existing deadline/interactive/critical inheritance predicate and still have unresolved dependencies. Only when no terminal item is returned, process those queue indexes in original ascending order; the selector skips its former full-queue inheritance pass. This preserves terminal-before-inheritance behavior and deterministic ownership when dependents share a prerequisite while avoiding scratch entries and selector-side calls for non-inheritable or fully resolved dependents.
 
 Readiness, dependencies, expiry, admission/backpressure, retries, owner caps, priority inheritance, deadlines, FIFO tie-breaking, urgent streaks, DRR cursor/deficits, and critical/lease-renewal reserves remain authoritative and unchanged.
 - Cache each queued item's unresolved-dependency count and failed-prerequisite ID. A reverse dependency index updates only dependents when a prerequisite completes; selection, admission, and scheduler metrics use O(1) readiness checks rather than re-walking every dependency list. Removing or terminalizing a dependent unregisters its waiter entries; dependency-history reference counts remain separately enforced.
@@ -63,6 +64,13 @@ These facilities remain process-local optimizations. They are not new durable me
 - Preserve mutations that arrive while an earlier write is uncertain; reconciliation must not overwrite the newest same-field update.
 - Keep leave, shutdown, and unknown-write recovery behavior covered by regression tests.
 
+## Remaining scheduler and runtime gates
+
+- `TakeNext` still performs its reverse terminal preflight scan. It preserves newest-queued terminal-first behavior across dependency failures, expiries, and policy/batch admission rejections. The scan now also collects priority-inheritance candidates, removing the separate selector-wide inheritance pass; replacing terminal preflight with heaps or indexes still needs a proof that mixed terminal outcomes retain exactly the same ordering and update semantics.
+- Candidate selection remains a queue scan. FIFO, weighted, deadline, and DRR decisions depend on current readiness, owner capacity, budget/admission state, lane inheritance, age, deadlines, and fairness state. A heap keyed by stale priority values is not a safe drop-in replacement. The backlog benchmark includes dependency-heavy cases to measure this path before further restructuring.
+- Selective `@native` compilation remains gated on profiling pure kernels in the target Roblox runtime. Lune timing is not a substitute.
+- Roblox Script Profiler/MicroProfiler traces, GC observations, throttling/cache fault tests, and multi-server acceptance remain required before making production performance claims.
+
 ## Luau implementation guidance
 
 - Prefer stable table layouts and dense numeric arrays in hot paths.
@@ -74,7 +82,7 @@ These facilities remain process-local optimizations. They are not new durable me
 
 ## Benchmarks and verification
 
-- `scheduler_backlog_scaling.bench.luau`: first `TakeNext` at 128/512/2048/8192 queued entries across FIFO, weighted, deadline, and DRR, including ready, partially-ready, future-blocked, and owner-cap-saturated queues. Queue setup is outside the timed interval.
+- `scheduler_backlog_scaling.bench.luau`: first `TakeNext` at 128/512/2048/8192 queued entries across FIFO, weighted, deadline, and DRR, including ready, partially-ready, future-blocked, owner-cap-saturated, inheritable dependency-heavy, and non-inheritable dependency-heavy queues. Both dependency-heavy cases assert that only an eligible prerequisite is dispatched and that the reported ready count matches the constructed queue. Queue setup is outside the timed interval.
 - `update_validation_pipeline.bench.luau` and `patch_update_pipeline.bench.luau`: matched large-profile mutation/validation workloads.
 - `v2_trace_ring.bench.luau` and `v2_read_coalescer.bench.luau`: bounded process-local structure throughput and cache churn.
 - PlayerData.Set regressions cover an interleaved newer same-field mutation during uncertain-write reconciliation.

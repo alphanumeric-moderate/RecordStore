@@ -12,6 +12,7 @@ for _, path in {
 	"bench/run_durable_streams_regression.luau",
 	"src/PlayerDataInitializer/RecordStoreMaintenanceDataStoreAdapter.luau",
 	"bench/run_scheduler_bugfix_regression.luau",
+	"bench/scheduler_backlog_scaling.bench.luau",
 	"src/PlayerDataInitializer/PurchaseReceiptProcessor.luau",
 	"src/PlayerDataInitializer/PurchaseDataStoreAuthority.luau",
 	"src/PlayerDataInitializer/PurchaseAuthorityMigrationRunner.luau",
