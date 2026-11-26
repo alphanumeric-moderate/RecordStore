@@ -1623,7 +1623,9 @@ do
 			end
 		end
 		local function append_queued_item(self: EmbeddedSchedulerDynamicRecord, item: EmbeddedSchedulerDynamicRecord)
-			compact_terminal_preflight_order(self)
+			if self.terminal_preflight_tail > self.terminal_preflight_count then
+				compact_terminal_preflight_order(self)
+			end
 			refresh_terminal_preflight_requirement(self, item)
 			self.queue_tail += 1
 			self.queue[self.queue_tail] = item
@@ -1897,7 +1899,9 @@ do
 			table.clear(priority_indices)
 			local terminal_preflight_policy_changed = self.terminal_preflight_policy_revision ~= self.policy.revision
 			if self.terminal_preflight_count > 0 or terminal_preflight_policy_changed then
-				if not terminal_preflight_policy_changed then
+				if not terminal_preflight_policy_changed
+					and self.terminal_preflight_tail > self.terminal_preflight_count
+				then
 					compact_terminal_preflight_order(self)
 				end
 				local scan_full_queue = terminal_preflight_policy_changed
