@@ -1548,7 +1548,7 @@ do
 		end
 		local function compact_terminal_preflight_order(self: EmbeddedSchedulerDynamicRecord)
 			local tail = self.terminal_preflight_tail
-			if tail <= math.max(self.policy.queue_capacity, self.terminal_preflight_count * 2) then
+			if tail <= math.max(64, self.terminal_preflight_count * 2) then
 				return
 			end
 			local order = self.terminal_preflight_order
@@ -1623,7 +1623,7 @@ do
 			end
 		end
 		local function append_queued_item(self: EmbeddedSchedulerDynamicRecord, item: EmbeddedSchedulerDynamicRecord)
-			if self.terminal_preflight_tail > self.terminal_preflight_count then
+			if self.terminal_preflight_tail > math.max(64, self.terminal_preflight_count * 2) then
 				compact_terminal_preflight_order(self)
 			end
 			refresh_terminal_preflight_requirement(self, item)
@@ -1900,7 +1900,7 @@ do
 			local terminal_preflight_policy_changed = self.terminal_preflight_policy_revision ~= self.policy.revision
 			if self.terminal_preflight_count > 0 or terminal_preflight_policy_changed then
 				if not terminal_preflight_policy_changed
-					and self.terminal_preflight_tail > self.terminal_preflight_count
+					and self.terminal_preflight_tail > math.max(64, self.terminal_preflight_count * 2)
 				then
 					compact_terminal_preflight_order(self)
 				end
