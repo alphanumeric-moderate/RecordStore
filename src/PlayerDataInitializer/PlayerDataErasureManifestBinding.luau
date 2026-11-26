@@ -1,6 +1,6 @@
 --!strict
 local ErasureBinding = {}
-local SHA256 = require(script.Parent:WaitForChild("RecordStoreSHA256"))
+local SHA256 = require(script.Parent:WaitForChild("RecordStore")).SHA256
 
 export type RuntimeOptions = {
 	record_store: any?,
