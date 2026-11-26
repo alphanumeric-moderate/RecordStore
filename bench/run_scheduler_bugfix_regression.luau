@@ -479,6 +479,28 @@ do
 end
 
 do
+	local now = 1_800_000_000_000
+	local governor = Scheduler.new({ now_ms = function() return now end })
+	local accepted = governor:Enqueue({
+		id = "terminal-scan-caller-flag",
+		owner_id = "terminal-scan-caller-flag-owner",
+		lane = "normal",
+		work_class = "maintenance",
+		expires_at_ms = now + 100,
+		needs_terminal_preflight = true,
+	})
+	assert(accepted.code == "accepted", "caller-controlled terminal-preflight flag fixture was not accepted")
+	assert(governor.terminal_preflight_count == 1,
+		"caller-supplied internal flag undercounted terminal-preflight candidates")
+	now += 100
+	local expired, expired_status = governor:TakeNext()
+	assert(expired ~= nil and expired.id == "terminal-scan-caller-flag" and expired_status == "expired",
+		"caller-supplied internal flag bypassed expiry preflight")
+	assert(governor.terminal_preflight_count == 0,
+		"caller-flag expiry did not release its terminal-preflight candidate")
+end
+
+do
 	local governor = new_governor()
 	local prerequisite = governor:Enqueue({
 		id = "terminal-scan-pending-prerequisite",

@@ -288,7 +288,7 @@ do
 				algorithm = "drr", shadow_algorithm = "weighted", shadow_enabled = false, shadow_sample_rate = 0,
 			},
 			in_flight = 0, by_class = {}, active_tickets = {}, queue = {}, queue_count = 0, queue_tail = 0, queue_positions = {}, due = {}, due_heap = {}, queued_due_heap = {},
-			terminal_preflight_count = 0, terminal_preflight_policy_revision = 1,
+			terminal_preflight_count = 0, terminal_preflight_policy_revision = 1, terminal_preflight_items = {},
 			wake_heap = {}, wake_sequence = 0,
 			read_units_in_flight = 0, write_units_in_flight = 0,
 			estimated_bytes_in_flight = 0, handler_slots_in_flight = 0,
@@ -1555,14 +1555,15 @@ do
 			local required = item.batchable == true or item.expires_at_ms ~= nil
 				or dependencies_pending
 				or type(item.admission_preflight_terminal_result) == "table"
-			local was_required = item.needs_terminal_preflight == true
+			local was_required = self.terminal_preflight_items[item] == true
 			if was_required ~= required then
 				if required then
 					self.terminal_preflight_count += 1
+					self.terminal_preflight_items[item] = true
 				else
 					self.terminal_preflight_count = math.max(0, self.terminal_preflight_count - 1)
+					self.terminal_preflight_items[item] = nil
 				end
-				item.needs_terminal_preflight = required
 			end
 		end
 		local function append_queued_item(self: EmbeddedSchedulerDynamicRecord, item: EmbeddedSchedulerDynamicRecord)
@@ -1584,9 +1585,9 @@ do
 			self.queue[index] = nil
 			self.queue_positions[item.id] = nil
 			self.queue_count -= 1
-			if item.needs_terminal_preflight == true then
+			if self.terminal_preflight_items[item] == true then
 				self.terminal_preflight_count = math.max(0, self.terminal_preflight_count - 1)
-				item.needs_terminal_preflight = false
+				self.terminal_preflight_items[item] = nil
 			end
 			maybe_compact_queue_storage(self)
 			return item
