@@ -98,7 +98,9 @@ Durable event streams are exposed by the main `RecordStore` ModuleScript. They a
 ```luau
 local DataStoreService = game:GetService("DataStoreService")
 local HttpService = game:GetService("HttpService")
-local RecordStore = require(script.Parent.RecordStore)
+local ServerScriptService = game:GetService("ServerScriptService")
+local initializer = ServerScriptService:WaitForChild("PlayerDataInitializer")
+local RecordStore = require(initializer:WaitForChild("RecordStore"))
 local DurableStreams = RecordStore.DurableStreams
 
 local store = DataStoreService:GetDataStore("ApplicationEventStreams", "global")
