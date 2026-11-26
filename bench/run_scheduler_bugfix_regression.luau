@@ -536,4 +536,57 @@ end
 
 print("[scheduler-acceptance] bounded fairness, low-budget reserve, throttle recovery, and lease-margin isolation passed.")
 
+do
+	local now = 1_800_000_000_000
+	local governor = Scheduler.new({ now_ms = function() return now end })
+	local older = governor:Enqueue({
+		id = "terminal-index-older-expiry",
+		owner_id = "terminal-index-older-owner",
+		lane = "normal",
+		work_class = "maintenance",
+		expires_at_ms = now + 100,
+	})
+	assert(older.code == "accepted", "older terminal-index candidate was not accepted")
+	for index = 1, 32 do
+		local accepted = governor:Enqueue({
+			id = "terminal-index-ordinary-" .. tostring(index),
+			owner_id = "terminal-index-ordinary-owner-" .. tostring(index),
+			lane = "normal",
+			work_class = "maintenance",
+		})
+		assert(accepted.code == "accepted", "ordinary terminal-index fixture was not accepted")
+	end
+	local newer = governor:Enqueue({
+		id = "terminal-index-newer-expiry",
+		owner_id = "terminal-index-newer-owner",
+		lane = "normal",
+		work_class = "maintenance",
+		expires_at_ms = now + 100,
+	})
+	assert(newer.code == "accepted", "newer terminal-index candidate was not accepted")
+	assert(governor.terminal_preflight_count == 2,
+		"terminal-index candidate count included ordinary work or omitted expiring work")
+	local order = governor.terminal_preflight_order
+	assert(type(order) == "table" and governor.terminal_preflight_tail == 2
+		and order[1] == governor.known["terminal-index-older-expiry"]
+		and order[2] == governor.known["terminal-index-newer-expiry"],
+		"ordered preflight index did not exclude ordinary work or preserve queue order")
+
+	now += 100
+	local first_expired, first_status = governor:TakeNext()
+	assert(first_expired ~= nil and first_expired.id == "terminal-index-newer-expiry"
+		and first_status == "expired",
+		"candidate-only preflight changed newest-first expiry terminalization")
+	assert(governor.terminal_preflight_count == 1
+		and order[1] == governor.known["terminal-index-older-expiry"]
+		and order[2] == nil,
+		"terminal candidate removal did not unlink exactly the expired item")
+	local second_expired, second_status = governor:TakeNext()
+	assert(second_expired ~= nil and second_expired.id == "terminal-index-older-expiry"
+		and second_status == "expired",
+		"candidate-only preflight skipped the remaining expiry candidate")
+	assert(governor.terminal_preflight_count == 0,
+		"terminal candidate index retained items after all expiry work terminated")
+end
+
 print("[scheduler-bugfix] policy atomicity, incomplete admission estimates, and false-lane rejection passed.")
