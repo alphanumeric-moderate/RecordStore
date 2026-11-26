@@ -1550,8 +1550,10 @@ do
 			self: EmbeddedSchedulerDynamicRecord,
 			item: EmbeddedSchedulerDynamicRecord
 		)
+			local dependencies_pending = (item.pending_dependency_count or 0) > 0
+				or item.failed_dependency_id ~= nil
 			local required = item.batchable == true or item.expires_at_ms ~= nil
-				or #(item.dependencies or {}) > 0
+				or dependencies_pending
 				or type(item.admission_preflight_terminal_result) == "table"
 			local was_required = item.needs_terminal_preflight == true
 			if was_required ~= required then
@@ -1899,8 +1901,8 @@ do
 						item.admission_preflight_policy_revision = self.policy.revision
 						item.admission_preflight_batch_count = batch_count
 						item.admission_preflight_terminal_result = admission_terminal_result
-						refresh_terminal_preflight_requirement(self, item)
 					end
+					refresh_terminal_preflight_requirement(self, item)
 					if type(admission_terminal_result) == "table" then
 						self.stats.rejected += 1
 						remove_queued_item(self, index, item)
