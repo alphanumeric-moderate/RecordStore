@@ -415,6 +415,59 @@ local stale_producer_retry = idempotency_stream:PublishBatchAsync("producer-rout
 })
 assert(stale_producer_retry.code == "committed" and stale_producer_retry.duplicate == true,
 	"an older producer sequence was not deduplicated after a later sequence committed")
+local capacity_client, capacity_client_error = DurableStreams.new(store, {
+	max_segment_messages = 64,
+	max_segment_bytes = 262144,
+	max_payload_bytes = 1024,
+	max_batch_messages = 1,
+	max_retained_segments = 8,
+	min_segment_age_seconds = 0,
+	now = function()
+		return now
+	end,
+})
+assert(capacity_client ~= nil, capacity_client_error)
+local capacity_stream, capacity_stream_error = capacity_client:OpenStreamAsync("application.producer-capacity", 1)
+assert(capacity_stream ~= nil, capacity_stream_error)
+
+for index = 1, 128 do
+	local producer_id = string.format("capacity-producer-%03d", index)
+	local event_id = string.format("capacity-event-%03d", index)
+	local accepted = capacity_stream:PublishBatchAsync("capacity-route", {
+		{ event_id = event_id, producer_id = producer_id, producer_sequence = 1, payload = { value = index } },
+	})
+	assert(accepted.code == "committed",
+		"producer checkpoint capacity rejected an allowed producer: " .. tostring(index) .. " / " .. tostring(accepted.message))
+end
+
+local capacity_rejected = capacity_stream:PublishBatchAsync("capacity-route", {
+	{ event_id = "capacity-event-129", producer_id = "capacity-producer-129", producer_sequence = 1, payload = { value = 129 } },
+})
+assert(capacity_rejected.code == "capacity",
+	"partition accepted a 129th producer identity beyond its fixed checkpoint bound")
+
+local capacity_reopened_client, capacity_reopen_error = DurableStreams.new(store, {
+	max_segment_messages = 64,
+	max_segment_bytes = 262144,
+	max_payload_bytes = 1024,
+	max_batch_messages = 1,
+	max_retained_segments = 8,
+	min_segment_age_seconds = 0,
+	now = function()
+		return now
+	end,
+})
+assert(capacity_reopened_client ~= nil, capacity_reopen_error)
+local capacity_reopened_stream, capacity_reopened_error =
+	capacity_reopened_client:OpenStreamAsync("application.producer-capacity", 1)
+assert(capacity_reopened_stream ~= nil, capacity_reopened_error)
+local preserved_producer = capacity_reopened_stream:GetProducerSequenceAsync("capacity-route", "capacity-producer-001")
+assert(preserved_producer.code == "ok" and preserved_producer.sequence == 1 and preserved_producer.next_sequence == 2,
+	"bounded producer checkpoints were not preserved in the partition head after segment rollover")
+local rejected_producer = capacity_reopened_stream:GetProducerSequenceAsync("capacity-route", "capacity-producer-129")
+assert(rejected_producer.code == "ok" and rejected_producer.sequence == 0 and rejected_producer.next_sequence == 1,
+	"rejected producer identity was persisted despite the capacity result")
+
 print("[durable-streams] partition append, rollover, integrity, consumer fencing, batch checkpoint, replay and recovery passed")
 
 local scheduled_callbacks = {}
