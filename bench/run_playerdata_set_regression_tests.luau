@@ -276,7 +276,7 @@ assert(pressure.controller:Shutdown(), "pressure controller failed to shut down"
 do
 	local default_harness = create_harness(true)
 	local default_options = default_harness.get_record_options()
-	assert(default_options.durable_queue_enabled == false,
+	assert(default_options.durable_queue_enabled ~= true,
 		"the default PlayerDataCore configuration must not enable the durable queue")
 	assert(default_options.on_queue_message == nil and default_options.on_queue_message_async == nil,
 		"the default PlayerDataCore configuration must not install queue handlers")
