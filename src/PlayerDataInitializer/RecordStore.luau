@@ -14304,13 +14304,15 @@ local function reconcile(self: Record, template: JsonValue): (ResultCode, string
 	-- Inspect plain templates without allocating a detached template tree. The
 	-- traversal also determines whether any default can actually be inserted,
 	-- allowing no-op reconciliation to skip the profile clone entirely.
-	local function inspect_template(target_value: unknown, template_value: unknown): (boolean, boolean, boolean)
+	local function inspect_template(target_value: unknown, template_value: unknown): (boolean, boolean, boolean, string?)
 		local active_tables: { [any]: boolean } = {}
 		local defaults_missing = false
 		local custom_iterator = false
+		local invalid_message: string? = nil
 
 		local function visit(target: unknown, current: unknown, depth: number, track_defaults: boolean): boolean
 			if depth > 64 then
+				invalid_message = "template exceeds the maximum nesting depth"
 				return false
 			end
 			if current == nil then
@@ -14323,6 +14325,7 @@ local function reconcile(self: Record, template: JsonValue): (ResultCode, string
 			elseif current_type == "string" then
 				return true
 			elseif current_type ~= "table" then
+				invalid_message = "template contains an unsupported value type"
 				return false
 			end
 
@@ -14332,6 +14335,7 @@ local function reconcile(self: Record, template: JsonValue): (ResultCode, string
 				return true
 			end
 			if active_tables[table_value] then
+				invalid_message = "template contains a cycle"
 				return false
 			end
 			active_tables[table_value] = true
@@ -14350,6 +14354,7 @@ local function reconcile(self: Record, template: JsonValue): (ResultCode, string
 					local numeric_key = key :: number
 					if not math.isfinite(numeric_key) or math.floor(numeric_key) ~= numeric_key or numeric_key < 1 then
 						active_tables[table_value] = nil
+						invalid_message = "template tables must use dense arrays or string-keyed objects"
 						return false
 					end
 					numeric_keys += 1
@@ -14358,6 +14363,7 @@ local function reconcile(self: Record, template: JsonValue): (ResultCode, string
 					end
 				else
 					active_tables[table_value] = nil
+					invalid_message = "template tables must use dense arrays or string-keyed objects"
 					return false
 				end
 
@@ -14389,22 +14395,24 @@ local function reconcile(self: Record, template: JsonValue): (ResultCode, string
 
 			if string_keys > 0 and numeric_keys > 0 then
 				active_tables[table_value] = nil
+				invalid_message = "template tables must use dense arrays or string-keyed objects"
 				return false
 			end
 			if numeric_keys > 0 and max_numeric_key ~= numeric_keys then
 				active_tables[table_value] = nil
+				invalid_message = "template arrays must be dense arrays"
 				return false
 			end
 			active_tables[table_value] = nil
 			return true
 		end
 
-		return visit(target_value, template_value, 1, true), defaults_missing, custom_iterator
+		return visit(target_value, template_value, 1, true), defaults_missing, custom_iterator, invalid_message
 	end
 
-	local template_valid, defaults_missing, custom_iterator = inspect_template(state.data, template)
+	local template_valid, defaults_missing, custom_iterator, template_error = inspect_template(state.data, template)
 	if not custom_iterator and not template_valid then
-		return "validation", "template is invalid"
+		return "validation", template_error or "template is invalid"
 	end
 
 	if not custom_iterator and not defaults_missing then
