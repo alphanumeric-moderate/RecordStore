@@ -1546,9 +1546,12 @@ do
 				compact_queue_storage(self)
 			end
 		end
+		local function terminal_preflight_compaction_limit(self: EmbeddedSchedulerDynamicRecord): number
+			return math.max(64, self.terminal_preflight_count * 2)
+		end
 		local function compact_terminal_preflight_order(self: EmbeddedSchedulerDynamicRecord)
 			local tail = self.terminal_preflight_tail
-			if tail <= math.max(64, self.terminal_preflight_count * 2) then
+			if tail <= terminal_preflight_compaction_limit(self) then
 				return
 			end
 			local order = self.terminal_preflight_order
@@ -1593,17 +1596,24 @@ do
 		local function rebuild_terminal_preflight_order(self: EmbeddedSchedulerDynamicRecord)
 			local order = self.terminal_preflight_order
 			local positions = self.terminal_preflight_positions
+			local tracked_items = self.terminal_preflight_items
 			table.clear(order)
 			table.clear(positions)
 			local write_index = 0
 			for index = 1, self.queue_tail do
 				local item = self.queue[index]
-				if item ~= nil and self.terminal_preflight_items[item] == true then
+				if item ~= nil and tracked_items[item] == true then
 					write_index += 1
 					order[write_index] = item
 					positions[item] = write_index
 				end
 			end
+			for item in pairs(tracked_items) do
+				if positions[item] == nil then
+					tracked_items[item] = nil
+				end
+			end
+			self.terminal_preflight_count = write_index
 			self.terminal_preflight_tail = write_index
 		end
 		local function refresh_terminal_preflight_requirement(
@@ -1623,7 +1633,7 @@ do
 			end
 		end
 		local function append_queued_item(self: EmbeddedSchedulerDynamicRecord, item: EmbeddedSchedulerDynamicRecord)
-			if self.terminal_preflight_tail > math.max(64, self.terminal_preflight_count * 2) then
+			if self.terminal_preflight_tail > terminal_preflight_compaction_limit(self) then
 				compact_terminal_preflight_order(self)
 			end
 			refresh_terminal_preflight_requirement(self, item)
@@ -1900,7 +1910,7 @@ do
 			local terminal_preflight_policy_changed = self.terminal_preflight_policy_revision ~= self.policy.revision
 			if self.terminal_preflight_count > 0 or terminal_preflight_policy_changed then
 				if not terminal_preflight_policy_changed
-					and self.terminal_preflight_tail > math.max(64, self.terminal_preflight_count * 2)
+					and self.terminal_preflight_tail > terminal_preflight_compaction_limit(self)
 				then
 					compact_terminal_preflight_order(self)
 				end
