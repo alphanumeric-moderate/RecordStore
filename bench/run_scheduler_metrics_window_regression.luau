@@ -34,21 +34,27 @@ local percentile_cache = new_scheduler()
 for sample = 1, 256 do
 	percentile_cache:Observe("lease_renewal", true, sample)
 end
-local original_sort = table.sort
-local sort_calls = 0
-table.sort = function(values, comparator)
-	sort_calls += 1
-	return original_sort(values, comparator)
-end
+local sample_window = percentile_cache.latency_samples_by_operation.lease_renewal
+local first_revision = sample_window.revision
 local first_advice = percentile_cache:LeaseRenewalAdvice()
-local first_sort_calls = sort_calls
+assert(first_advice.lease_renewal_p95_ms == 244,
+	"lease advice changed the exact P95 percentile")
+assert(sample_window.cached_p95_revision == first_revision and sample_window.cached_p95 == 244,
+	"lease advice did not memoize the exact P95 for the current sample revision")
+
 local second_advice = percentile_cache:LeaseRenewalAdvice()
-local second_sort_calls = sort_calls
-table.sort = original_sort
-assert(first_advice.lease_renewal_p95_ms == 244 and second_advice.lease_renewal_p95_ms == 244,
-	"cached P95 changed the exact percentile")
-assert(first_sort_calls == 1 and second_sort_calls == first_sort_calls,
-	"unchanged latency samples were sorted again instead of reusing the exact cached P95")
+assert(second_advice.lease_renewal_p95_ms == 244
+	and sample_window.cached_p95_revision == first_revision
+	and sample_window.cached_p95 == 244,
+	"repeated lease advice changed the unchanged sample-window P95 cache")
+
+percentile_cache:Observe("lease_renewal", true, 257)
+local next_revision = sample_window.revision
+local updated_advice = percentile_cache:LeaseRenewalAdvice()
+assert(next_revision > first_revision and updated_advice.lease_renewal_p95_ms == 245,
+	"new latency samples did not invalidate and refresh the exact P95 cache")
+assert(sample_window.cached_p95_revision == next_revision and sample_window.cached_p95 == 245,
+	"refreshed P95 was not associated with the new sample revision")
 
 local queue = new_scheduler()
 for sample = 1, 300 do
