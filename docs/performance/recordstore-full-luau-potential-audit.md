@@ -441,19 +441,11 @@ For every change:
 
 Lune, local mocks and hosted CPU simulations do not prove Roblox VM native compilation, live DataStore caching/throttling, MemoryStore TTL semantics or MessagingService delivery. Those require Roblox runtime acceptance.
 
-## 10. Robin Review requirements
+## 10. Review process and implementation verification
 
-The repository Robin workflow was diff-only at the audited base. A 16,384 token output cap is now present, but output size alone does not enable full source inspection.
+Robin Review was intentionally not run for the Phase A–C implementation tranche, as requested. The branch-specific workflow skips pull-request synchronize events for this audit branch; a manual `/robin` command remains possible but was not used.
 
-This PR changes the workflow so:
-- opening this audit branch requests Robin agent mode with read-only repository tools;
-- manual /robin commands use agent mode;
-- reasoning effort remains low;
-- output cap remains 16,384;
-- agent turn budget is explicitly 40;
-- review instructions tell Robin to read the complete target module in chunks, inspect AGENTS.md, the performance program, README, callers, relevant tests and benchmarks, and classify findings using the same sections as this document.
-
-Robin is not a substitute for CI. Its findings must be checked against source and tests. Type checks, regressions, lint/build and platform acceptance remain separate verification evidence. After each implementation push, run required CI and manually request another Robin pass; the default workflow does not automatically rerun on every synchronize event.
+Implementation verification is based on the repository's strict Luau type-check and targeted/full regression workflows. This is distinct from a complete independent source review and from Roblox Studio/MicroProfiler acceptance. The branch's CI results are linked from the PR description; no live Roblox performance claim is made here.
 
 ## 11. Ordered implementation roadmap
 
@@ -486,7 +478,36 @@ Robin is not a substitute for CI. Its findings must be checked against source an
 - Profile pure kernels in Roblox; selectively try native compilation only after baseline.
 - Decide removal candidates with actual downstream usage and stored-data evidence, not code volume.
 
-## 12. Acceptance criteria
+## 12. Phase A–C implementation progress
+
+The following items have now been implemented on this audit branch. The original main revision and its benchmark inputs remain the comparison base; results are not described as a speedup until the current paired benchmark job finishes.
+
+### Phase A — baselines
+
+- Reused the existing `lease_renewal_advice` benchmark, which repeatedly queries the same latency sample windows, to exercise P95 cache reuse.
+- Reused the existing `durable_stream_publish_batch` workload with 64-message segments and 16-message batches to exercise segment lookup at increasing occupancy.
+- Added focused regression coverage for exact P95 behavior after the 256-entry sample ring wraps, DRR cursor movement, and large mixed-producer stream batches.
+- CI now runs the new tests on the PR branch. Hosted benchmark output is required before claiming measured performance gains.
+
+### Phase B — scheduler hot paths
+
+- **Implemented:** exact P95 values are memoized per latency sample-window revision. Every accepted sample append/overwrite advances the revision; repeated service-time scoring and lease-renewal advice reuse the cached value until the window changes. The 256-sample capacity and percentile rank calculation are unchanged.
+- **Implemented:** DRR's cursor lookup uses binary search over the same lexicographically sorted lane-key list. Cursor rotation, missing-cursor fallback and lane sort order remain unchanged.
+- **Deferred:** completion-time active-lane reference counts. Effective lane assignment can change as inherited priority expires, independently of queue membership. A lifecycle-maintained counter is unsafe until time-dependent lane identity can be represented and tested correctly.
+- **Deferred:** replacement of the candidate selector's ordered lane structure and additional round-bound changes. The existing sorted representation remains the reference until broader queue-size × lane-count measurements justify a redesign.
+
+### Phase C — Mailbox V2 and Durable Streams
+
+- **Implemented:** Durable Streams builds temporary event-ID and producer-sequence maps only when `segment.messages * prepared_batch_size >= 256`. Small combinations retain the linear scan. The maps are rebuilt from the current segment inside each operation/UpdateAsync transform invocation; they are never persisted or shared across retries.
+- **Implemented:** the transient maps preserve first-match behavior and the existing distinction between event-ID conflicts and producer-sequence conflicts. The tests cover a 48-message segment, mixed producer/non-producer batches, commit-then-error reconciliation, duplicate retry, changed event payload and changed producer event identity.
+- **Implemented:** Mailbox V2 uses one module-local priority-rank table instead of allocating a rank table per queue read/process call, and preallocates the bounded queue snapshot array from the observed index-row count. Age-based priority promotion, high-priority burst limiting, FIFO tie-breaks, claims and recovery order are unchanged.
+- **Deferred:** persistent Mailbox route/segment/order indexes and changes to candidate sorting. Queue order is dependent on age, high-priority burst state and durable claims; no persisted index is introduced without a separate ordering and recovery proof.
+
+### Explicitly unchanged
+
+No DataStore key, persisted envelope/segment/sidecar format, public API, lease/fencing contract, UpdateAsync replay rule, or durable idempotency rule was intentionally changed. The embedded scheduler and Mailbox V2 remain embedded as required by the repository design. Phases D–F remain on the roadmap and were not implemented as part of this first tranche.
+
+## 13. Acceptance criteria
 
 This audit is complete as a roadmap only when:
 - every major source area above has an explicit optimization, redesign, keep or conditional-removal decision;
@@ -496,7 +517,7 @@ This audit is complete as a roadmap only when:
 - Robin can inspect repository files in agent mode for this PR and manual /robin requests;
 - subsequent implementation PRs keep strict type-check, relevant regressions, full CI and required Roblox acceptance evidence.
 
-## 13. References
+## 14. References
 
 - Existing performance program: docs/performance/recordstore-optimization-program.md
 - Repository engineering contract: AGENTS.md
