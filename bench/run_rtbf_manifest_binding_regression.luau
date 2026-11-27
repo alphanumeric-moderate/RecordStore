@@ -4,7 +4,7 @@ local RecordStore = Shim.load()
 local initializer = Shim.environment.game:GetService("ServerScriptService"):WaitForChild("PlayerDataInitializer")
 local RecordStoreV2Factory = Shim.environment.require(initializer:WaitForChild("RecordStoreV2"))
 local Manifest = Shim.environment.require(initializer:WaitForChild("RecordStoreApplicationInventory"))
-local SHA256 = Shim.environment.require(initializer:WaitForChild("RecordStoreSHA256"))
+local SHA256 = RecordStore.SHA256
 local ErasureBinding = Shim.environment.require(initializer:WaitForChild("PlayerDataErasureManifestBinding"))
 
 local function expect(value, message)
