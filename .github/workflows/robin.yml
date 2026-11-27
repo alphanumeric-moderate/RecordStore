@@ -18,7 +18,7 @@ jobs:
     with:
       agent-mode: "off"
       reasoning-effort: "low"
-      max-output-tokens: "4096"
+      max-output-tokens: "8192"
     secrets:
       LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
       LLM_BASE_URL: ${{ secrets.LLM_BASE_URL }}
