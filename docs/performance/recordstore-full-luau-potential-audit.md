@@ -487,7 +487,7 @@ The following items have now been implemented on this audit branch. The original
 - Reused the existing `lease_renewal_advice` benchmark, which repeatedly queries the same latency sample windows, to exercise P95 cache reuse.
 - Reused the existing `durable_stream_publish_batch` workload with 64-message segments and 16-message batches to exercise segment lookup at increasing occupancy.
 - Added focused regression coverage for exact P95 behavior after the 256-entry sample ring wraps, DRR cursor movement, and large mixed-producer stream batches.
-- CI now runs the new tests on the PR branch. Hosted benchmark output is required before claiming measured performance gains.
+- CI runs the new tests on the PR branch. At this report update, no paired Bencher timings were available: the repository workflow requires both `vars.BENCHER_PROJECT` and `secrets.BENCHER_API_KEY`, and the current attempt had not published results. No measured speedup is claimed.
 
 ### Phase B — scheduler hot paths
 
@@ -514,7 +514,7 @@ This audit is complete as a roadmap only when:
 - every high-priority candidate has a location, rationale, invariant, test plan and benchmark plan;
 - no performance claim is made without paired measurements;
 - no removal is unconditional without usage and persisted-data evidence;
-- Robin can inspect repository files in agent mode for this PR and manual /robin requests;
+- Review tooling remains optional; CI evidence and verification claims stand independently, and no Robin result is required or counted for this implementation tranche;
 - subsequent implementation PRs keep strict type-check, relevant regressions, full CI and required Roblox acceptance evidence.
 
 ## 14. References
