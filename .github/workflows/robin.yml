@@ -23,6 +23,7 @@ jobs:
       reasoning-effort: "low"
       max-output-tokens: "16384"
       agent-max-turns: "60"
+      review-on-synchronize: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.ref == 'audit/recordstore-full-luau-potential-2026-11-27' }}
       review-instructions: |
         MANDATORY FULL-MODULE COVERAGE: This PR's deliverable is an audit of the
         entire RecordStore core, even though runtime source is intentionally not
