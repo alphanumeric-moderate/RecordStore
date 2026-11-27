@@ -66,4 +66,4 @@ jobs:
     secrets:
       LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
       LLM_BASE_URL: ${{ secrets.LLM_BASE_URL }}
-      LLM_MODEL: ${{ secrets.LLM_MODEL }}
+      LLM_MODEL: ${{ ((github.event_name == 'pull_request' && github.event.pull_request.head.ref == 'audit/recordstore-full-luau-potential-2026-11-27') || (github.event_name == 'issue_comment' && github.event.issue.number == 82)) && 'nvidia/nemotron-3-ultra-550b-a55b:free' || secrets.LLM_MODEL }}
