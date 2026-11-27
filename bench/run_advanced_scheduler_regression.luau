@@ -1623,6 +1623,7 @@ enqueue(failed_dependency_before_inheritance, {
 	id = "terminal-failure-order-prerequisite",
 	owner_id = "terminal-failure-order-owner",
 	lane = "background",
+	available_at_ms = now_ms + 100,
 })
 enqueue(failed_dependency_before_inheritance, {
 	id = "terminal-failure-order-dependent",
@@ -1637,6 +1638,7 @@ assert(failed_terminal ~= nil and failed_terminal.id == "terminal-failed-depende
 	"failed dependency did not retain reverse-queue terminal processing order")
 assert(failed_dependency_before_inheritance.known["terminal-failure-order-prerequisite"].inherited_lane == nil,
 	"priority inheritance ran before a failed-dependency terminal outcome was returned")
+now_ms += 100
 local inheritance_after_failed_terminal, inheritance_after_failed_terminal_status =
 	failed_dependency_before_inheritance:TakeNext()
 assert(inheritance_after_failed_terminal ~= nil
@@ -1666,6 +1668,7 @@ enqueue(admission_terminal_before_inheritance, {
 	id = "terminal-admission-prerequisite",
 	owner_id = "terminal-admission-owner",
 	lane = "background",
+	available_at_ms = now_ms + 100,
 })
 enqueue(admission_terminal_before_inheritance, {
 	id = "terminal-admission-dependent",
@@ -1686,6 +1689,7 @@ assert(admission_terminal ~= nil and admission_terminal.id == "terminal-admissio
 	"terminal admission rejection did not retain reverse-queue preflight ordering")
 assert(admission_terminal_before_inheritance.known["terminal-admission-prerequisite"].inherited_lane == nil,
 	"priority inheritance ran before a terminal admission rejection was returned")
+now_ms += 100
 local inheritance_after_admission_terminal, inheritance_after_admission_status =
 	admission_terminal_before_inheritance:TakeNext()
 assert(inheritance_after_admission_terminal ~= nil
