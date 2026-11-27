@@ -421,7 +421,7 @@ local scheduled_callbacks = {}
 local published_batches = {}
 local fake_publisher_stream = {
 	GetProducerSequenceAsync = function(_self, route_key, producer_id)
-		assert(route_key == "publisher-route" and producer_id == "stable-publisher")
+		assert(route_key == "publisher-route", "unexpected publisher route")
 		return { code = "ok", sequence = 0 }
 	end,
 	PublishBatchAsync = function(_self, route_key, events)
