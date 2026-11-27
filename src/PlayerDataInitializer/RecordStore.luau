@@ -22313,6 +22313,7 @@ local MAX_SEGMENT_MESSAGES = 64
 local MAX_SEGMENT_BYTES = 262144
 local MAX_PAYLOAD_BYTES = 32768
 local MAX_BATCH_MESSAGES = 32
+local SEGMENT_LOOKUP_INDEX_THRESHOLD = 256
 local MIN_LEASE_SECONDS = 5
 local MAX_LEASE_SECONDS = 120
 local MAX_PAYLOAD_DEPTH = 32
@@ -22357,6 +22358,11 @@ type Segment = {
 	integrity: string,
 	messages: { Message },
 	producer_states: ProducerStates,
+}
+
+type SegmentIndexes = {
+	by_event_id: { [string]: Message },
+	by_producer_sequence: { [string]: { [number]: Message } },
 }
 
 type Head = {
@@ -23571,15 +23577,69 @@ local function find_producer_event(segment: Segment, producer_id: string, produc
 	return nil
 end
 
+local function build_segment_indexes(segment: Segment): SegmentIndexes
+	local indexes: SegmentIndexes = {
+		by_event_id = {},
+		by_producer_sequence = {},
+	}
+	for index = 1, #segment.messages do
+		local message = segment.messages[index]
+		if indexes.by_event_id[message.event_id] == nil then
+			indexes.by_event_id[message.event_id] = message
+		end
+		local producer_id = message.producer_id
+		local producer_sequence = message.producer_sequence
+		if producer_id ~= nil and producer_sequence ~= nil then
+			local producer_sequences = indexes.by_producer_sequence[producer_id]
+			if producer_sequences == nil then
+				producer_sequences = {}
+				indexes.by_producer_sequence[producer_id] = producer_sequences
+			end
+			if producer_sequences[producer_sequence] == nil then
+				producer_sequences[producer_sequence] = message
+			end
+		end
+	end
+	return indexes
+end
+
+local function find_segment_event(
+	segment: Segment,
+	event_id: string,
+	producer_id: string?,
+	producer_sequence: number?,
+	indexes: SegmentIndexes?
+): Message?
+	if indexes ~= nil then
+		local existing = indexes.by_event_id[event_id]
+		if existing ~= nil or producer_id == nil or producer_sequence == nil then
+			return existing
+		end
+		local producer_sequences = indexes.by_producer_sequence[producer_id]
+		return if producer_sequences ~= nil then producer_sequences[producer_sequence] else nil
+	end
+	local existing = find_event(segment, event_id)
+	if existing == nil and producer_id ~= nil and producer_sequence ~= nil then
+		existing = find_producer_event(segment, producer_id, producer_sequence)
+	end
+	return existing
+end
+
 local function resolve_batch(segment: Segment, prepared: { any }): (boolean, number, { any }?, string?)
 	local results: { any } = table.create(#prepared)
 	local found_count = 0
 	local producer_states = segment.producer_states
+	local segment_indexes = if #segment.messages * #prepared >= SEGMENT_LOOKUP_INDEX_THRESHOLD
+		then build_segment_indexes(segment)
+		else nil
 	for index, event in ipairs(prepared) do
-		local existing = find_event(segment, event.event_id)
-		if existing == nil and event.producer_id ~= nil then
-			existing = find_producer_event(segment, event.producer_id, event.producer_sequence)
-		end
+		local existing = find_segment_event(
+			segment,
+			event.event_id,
+			event.producer_id,
+			event.producer_sequence,
+			segment_indexes
+		)
 		if existing ~= nil then
 			if existing.payload_digest ~= event.payload_digest
 				or (event.producer_id ~= nil and (
@@ -23708,12 +23768,17 @@ function Stream.PublishBatchAsync(self: StreamType, route_key: string, events: {
 				return nil
 			end
 			local current_producers = current.producer_states
+			local segment_indexes = if #current.messages * #prepared >= SEGMENT_LOOKUP_INDEX_THRESHOLD
+				then build_segment_indexes(current)
+				else nil
 			local missing = table.create(#prepared)
 			local missing_count = 0
 			local missing_bytes = 0
 			local planned_sequences: { [string]: number } = {}
 			for _, event in ipairs(prepared) do
-				local existing = find_event(current, event.event_id)
+				local existing = if segment_indexes ~= nil
+					then segment_indexes.by_event_id[event.event_id]
+					else find_event(current, event.event_id)
 				if existing ~= nil then
 					if existing.payload_digest ~= event.payload_digest
 						or (event.producer_id ~= nil and (
@@ -23724,7 +23789,15 @@ function Stream.PublishBatchAsync(self: StreamType, route_key: string, events: {
 						error("EVENT_ID_CONFLICT", 0)
 					end
 				elseif event.producer_id ~= nil then
-					local producer_existing = find_producer_event(current, event.producer_id, event.producer_sequence)
+					local producer_existing: Message? = nil
+					if segment_indexes ~= nil then
+						local producer_sequences = segment_indexes.by_producer_sequence[event.producer_id]
+						if producer_sequences ~= nil then
+							producer_existing = producer_sequences[event.producer_sequence]
+						end
+					else
+						producer_existing = find_producer_event(current, event.producer_id, event.producer_sequence)
+					end
 					if producer_existing ~= nil then
 						if producer_existing.event_id ~= event.event_id or producer_existing.payload_digest ~= event.payload_digest then
 							error("PRODUCER_SEQUENCE_CONFLICT", 0)
