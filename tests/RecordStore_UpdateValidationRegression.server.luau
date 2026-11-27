@@ -153,7 +153,7 @@ local custom_iterator_template = setmetatable({}, {
 })
 status, message = record:Reconcile(custom_iterator_template)
 assert(status == "success", message)
-assert(validator_calls == 7, "custom-iterator Reconcile did not validate exactly once")
+assert(validator_calls == 7, "custom-iterator Reconcile expected 7 validator calls, got " .. tostring(validator_calls))
 assert(record.Data.IterableDefaults.Value == 11,
 	"Reconcile did not preserve custom generalized iteration semantics")
 
