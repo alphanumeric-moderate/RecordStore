@@ -159,6 +159,57 @@ enqueue(drr_high_burst, {
 take(drr_high_burst, "drr-high-first")
 take(drr_high_burst, "drr-normal-after-burst")
 
+-- A cursor in the middle of the sorted lane list must rotate after its exact lane,
+-- even when earlier lane keys are inserted after the previous selection.
+local cursor_search = new_scheduler()
+for owner_index = 8, 17 do
+	local owner_id = ("cursor-%02d"):format(owner_index)
+	for item_index = 1, 2 do
+		enqueue(cursor_search, {
+			id = ("cursor-search-%02d-%d"):format(owner_index, item_index),
+			owner_id = owner_id,
+			lane = "normal",
+			work_class = "cursor-search",
+			service_class = "normal",
+			operation_class = "read",
+		})
+	end
+end
+take(cursor_search, "cursor-search-08-1")
+for owner_index = 0, 7 do
+	local owner_id = ("cursor-%02d"):format(owner_index)
+	for item_index = 1, 2 do
+		enqueue(cursor_search, {
+			id = ("cursor-search-%02d-%d"):format(owner_index, item_index),
+			owner_id = owner_id,
+			lane = "normal",
+			work_class = "cursor-search",
+			service_class = "normal",
+			operation_class = "read",
+		})
+	end
+end
+take(cursor_search, "cursor-search-09-1")
+
+-- When the previous cursor lane has drained, selection starts at the first live lane.
+local missing_cursor = new_scheduler()
+enqueue(missing_cursor, {
+	id = "missing-cursor-a",
+	owner_id = "missing-cursor-a",
+	lane = "normal",
+	work_class = "missing-cursor",
+	service_class = "normal",
+})
+enqueue(missing_cursor, {
+	id = "missing-cursor-b",
+	owner_id = "missing-cursor-b",
+	lane = "normal",
+	work_class = "missing-cursor",
+	service_class = "normal",
+})
+take(missing_cursor, "missing-cursor-a")
+take(missing_cursor, "missing-cursor-b")
+
 -- DRR shares service across equally weighted owner/work-class lanes.
 local fair = new_scheduler()
 for index = 1, 5 do
