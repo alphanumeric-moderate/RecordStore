@@ -560,11 +560,11 @@ do
 	end
 	assert(compacted, "newest terminal item did not exercise queue compaction")
 	assert(next(expected) == nil, "policy revision sweep left queued work unchecked")
-	assert(governor.terminal_preflight_policy_revision == governor.policy.revision,
-		"policy revision sweep did not restore its fast-path revision after compaction")
 	local none, none_status = governor:TakeNext()
 	assert(none == nil and none_status == "empty",
 		"policy revision sweep left an item dispatchable after read-only rejection")
+	assert(governor.terminal_preflight_policy_revision == governor.policy.revision,
+		"empty follow-up sweep did not restore its fast-path revision after compaction")
 end
 
 
