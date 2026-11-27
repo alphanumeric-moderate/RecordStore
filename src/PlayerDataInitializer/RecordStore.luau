@@ -289,6 +289,7 @@ do
 			},
 			in_flight = 0, by_class = {}, active_tickets = {}, queue = {}, queue_count = 0, queue_tail = 0, queue_positions = {}, due = {}, due_heap = {}, queued_due_heap = {},
 			terminal_preflight_count = 0, terminal_preflight_policy_revision = 1, terminal_preflight_items = {}, terminal_preflight_order = {}, terminal_preflight_positions = {}, terminal_preflight_tail = 0,
+			operation_metric_preflight_count = 0, operation_metric_preflight_order = {}, operation_metric_preflight_positions = {}, operation_metric_preflight_tail = 0,
 			wake_heap = {}, wake_sequence = 0,
 			read_units_in_flight = 0, write_units_in_flight = 0,
 			estimated_bytes_in_flight = 0, handler_slots_in_flight = 0,
@@ -1546,8 +1547,14 @@ do
 				compact_queue_storage(self)
 			end
 		end
+		local function scheduler_index_compaction_limit(live_count: number): number
+			return math.max(64, live_count * 2)
+		end
 		local function terminal_preflight_compaction_limit(self: EmbeddedSchedulerDynamicRecord): number
-			return math.max(64, self.terminal_preflight_count * 2)
+			return scheduler_index_compaction_limit(self.terminal_preflight_count)
+		end
+		local function operation_metric_preflight_compaction_limit(self: EmbeddedSchedulerDynamicRecord): number
+			return scheduler_index_compaction_limit(self.operation_metric_preflight_count)
 		end
 		local function compact_terminal_preflight_order(self: EmbeddedSchedulerDynamicRecord)
 			local tail = self.terminal_preflight_tail
@@ -1632,11 +1639,77 @@ do
 				remove_terminal_preflight_tracking(self, item)
 			end
 		end
+		local function compact_operation_metric_preflight_order(self: EmbeddedSchedulerDynamicRecord)
+			local tail = self.operation_metric_preflight_tail
+			if tail <= operation_metric_preflight_compaction_limit(self) then
+				return
+			end
+			local order = self.operation_metric_preflight_order
+			local positions = self.operation_metric_preflight_positions
+			local write_index = 0
+			for read_index = 1, tail do
+				local item = order[read_index]
+				if item ~= nil and positions[item] ~= nil then
+					write_index += 1
+					order[write_index] = item
+					positions[item] = write_index
+				end
+			end
+			for index = write_index + 1, tail do
+				order[index] = nil
+			end
+			self.operation_metric_preflight_tail = write_index
+		end
+		local function add_operation_metric_preflight(self: EmbeddedSchedulerDynamicRecord, item: EmbeddedSchedulerDynamicRecord)
+			if self.operation_metric_preflight_positions[item] ~= nil then
+				return
+			end
+			if self.operation_metric_preflight_tail > operation_metric_preflight_compaction_limit(self) then
+				compact_operation_metric_preflight_order(self)
+			end
+			self.operation_metric_preflight_count += 1
+			self.operation_metric_preflight_tail += 1
+			local position = self.operation_metric_preflight_tail
+			self.operation_metric_preflight_order[position] = item
+			self.operation_metric_preflight_positions[item] = position
+		end
+		local function remove_operation_metric_preflight(self: EmbeddedSchedulerDynamicRecord, item: EmbeddedSchedulerDynamicRecord)
+			local position = self.operation_metric_preflight_positions[item]
+			if position == nil then
+				return
+			end
+			self.operation_metric_preflight_order[position] = nil
+			self.operation_metric_preflight_positions[item] = nil
+			self.operation_metric_preflight_count -= 1
+		end
+		local function drain_operation_metric_preflight(self: EmbeddedSchedulerDynamicRecord, now: number)
+			local order = self.operation_metric_preflight_order
+			local positions = self.operation_metric_preflight_positions
+			for index = self.operation_metric_preflight_tail, 1, -1 do
+				local item = order[index]
+				if item ~= nil and positions[item] == index then
+					order[index] = nil
+					positions[item] = nil
+					self.operation_metric_preflight_count -= 1
+					if item.queued == true and self.known[item.id] == item
+						and item.failed_dependency_id == nil
+						and (item.expires_at_ms == nil or item.expires_at_ms > now)
+					then
+						operation_metric_key(self, item.operation_class or "default")
+					end
+				end
+			end
+			table.clear(order)
+			table.clear(positions)
+			self.operation_metric_preflight_count = 0
+			self.operation_metric_preflight_tail = 0
+		end
 		local function append_queued_item(self: EmbeddedSchedulerDynamicRecord, item: EmbeddedSchedulerDynamicRecord)
 			if self.terminal_preflight_tail > terminal_preflight_compaction_limit(self) then
 				compact_terminal_preflight_order(self)
 			end
 			refresh_terminal_preflight_requirement(self, item)
+			add_operation_metric_preflight(self, item)
 			self.queue_tail += 1
 			self.queue[self.queue_tail] = item
 			self.queue_count += 1
@@ -1655,6 +1728,7 @@ do
 			self.queue_positions[item.id] = nil
 			self.queue_count -= 1
 			remove_terminal_preflight_tracking(self, item)
+			remove_operation_metric_preflight(self, item)
 			maybe_compact_queue_storage(self)
 			return item
 		end
@@ -1905,6 +1979,7 @@ do
 		end
 		function governor:TakeNext(renewal_mode)
 			local now = now_ms()
+			drain_operation_metric_preflight(self, now)
 			local priority_indices = self.selection_scratch.priority_inheritance_indices
 			table.clear(priority_indices)
 			local terminal_preflight_policy_changed = self.terminal_preflight_policy_revision ~= self.policy.revision
@@ -1950,9 +2025,6 @@ do
 							clear_admission_preflight(item)
 							return item, "expired"
 						else
-							if item.batchable ~= true then
-								operation_metric_key(self, item.operation_class or "default")
-							end
 							local batch_count = selected_batch_size(self, item, self.selection_scratch.batch_dimensions)
 							local admission_terminal_result = item.admission_preflight_terminal_result
 							if item.admission_preflight_policy_revision ~= self.policy.revision
