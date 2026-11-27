@@ -169,8 +169,18 @@ do
 			lane_row_pool = {},
 			lane_has_urgent = {},
 			lane_oldest_index = {},
+			active_lane_keys = {},
 		}
 	end
+
+	local SCHEDULER_SERVICE_CLASSES: { [string]: boolean } = {
+		critical = true,
+		interactive = true,
+		normal = true,
+		bulk = true,
+		best_effort = true,
+	}
+	local SCHEDULER_DIMENSION_FIELDS: { string } = { "read_units", "write_units", "handler_slots" }
 
 	local function copy_bounded(value: any, maximum_nodes: number): any
 		local seen = {}
@@ -278,6 +288,8 @@ do
 				algorithm = "drr", shadow_algorithm = "weighted", shadow_enabled = false, shadow_sample_rate = 0,
 			},
 			in_flight = 0, by_class = {}, active_tickets = {}, queue = {}, queue_count = 0, queue_tail = 0, queue_positions = {}, due = {}, due_heap = {}, queued_due_heap = {},
+			terminal_preflight_count = 0, terminal_preflight_policy_revision = 1, terminal_preflight_items = {}, terminal_preflight_order = {}, terminal_preflight_positions = {}, terminal_preflight_tail = 0,
+			operation_metric_preflight_count = 0, operation_metric_preflight_order = {}, operation_metric_preflight_positions = {}, operation_metric_preflight_tail = 0,
 			wake_heap = {}, wake_sequence = 0,
 			read_units_in_flight = 0, write_units_in_flight = 0,
 			estimated_bytes_in_flight = 0, handler_slots_in_flight = 0,
@@ -424,6 +436,7 @@ do
 			local valid, message = policy_valid(next_policy)
 			if not valid then return false, message end
 			self.policy = next_policy
+			self.terminal_preflight_policy_revision = nil
 			self.retry_tokens = math.min(self.retry_tokens, self.policy.retry_token_capacity)
 			return true, nil
 		end
@@ -1534,7 +1547,169 @@ do
 				compact_queue_storage(self)
 			end
 		end
+		local function scheduler_index_compaction_limit(live_count: number): number
+			return math.max(64, live_count * 2)
+		end
+		local function terminal_preflight_compaction_limit(self: EmbeddedSchedulerDynamicRecord): number
+			return scheduler_index_compaction_limit(self.terminal_preflight_count)
+		end
+		local function operation_metric_preflight_compaction_limit(self: EmbeddedSchedulerDynamicRecord): number
+			return scheduler_index_compaction_limit(self.operation_metric_preflight_count)
+		end
+		local function compact_terminal_preflight_order(self: EmbeddedSchedulerDynamicRecord)
+			local tail = self.terminal_preflight_tail
+			if tail <= terminal_preflight_compaction_limit(self) then
+				return
+			end
+			local order = self.terminal_preflight_order
+			local positions = self.terminal_preflight_positions
+			local write_index = 0
+			for read_index = 1, tail do
+				local item = order[read_index]
+				if item ~= nil and self.terminal_preflight_items[item] == true then
+					write_index += 1
+					order[write_index] = item
+					positions[item] = write_index
+				end
+			end
+			for index = write_index + 1, tail do
+				order[index] = nil
+			end
+			self.terminal_preflight_tail = write_index
+		end
+		local function add_terminal_preflight_tracking(self: EmbeddedSchedulerDynamicRecord, item: EmbeddedSchedulerDynamicRecord)
+			if self.terminal_preflight_items[item] == true then
+				return
+			end
+			self.terminal_preflight_count += 1
+			self.terminal_preflight_items[item] = true
+			self.terminal_preflight_tail += 1
+			local position = self.terminal_preflight_tail
+			self.terminal_preflight_order[position] = item
+			self.terminal_preflight_positions[item] = position
+		end
+		local function remove_terminal_preflight_tracking(self: EmbeddedSchedulerDynamicRecord, item: EmbeddedSchedulerDynamicRecord)
+			if self.terminal_preflight_items[item] ~= true then
+				return
+			end
+			local position = self.terminal_preflight_positions[item]
+			if position ~= nil then
+				self.terminal_preflight_order[position] = nil
+			end
+			self.terminal_preflight_positions[item] = nil
+			self.terminal_preflight_items[item] = nil
+			self.terminal_preflight_count -= 1
+		end
+		local function rebuild_terminal_preflight_order(self: EmbeddedSchedulerDynamicRecord)
+			local order = self.terminal_preflight_order
+			local positions = self.terminal_preflight_positions
+			local tracked_items = self.terminal_preflight_items
+			table.clear(order)
+			table.clear(positions)
+			local write_index = 0
+			for index = 1, self.queue_tail do
+				local item = self.queue[index]
+				if item ~= nil and tracked_items[item] == true then
+					write_index += 1
+					order[write_index] = item
+					positions[item] = write_index
+				end
+			end
+			for item in pairs(tracked_items) do
+				if positions[item] == nil then
+					tracked_items[item] = nil
+				end
+			end
+			self.terminal_preflight_count = write_index
+			self.terminal_preflight_tail = write_index
+		end
+		local function refresh_terminal_preflight_requirement(
+			self: EmbeddedSchedulerDynamicRecord,
+			item: EmbeddedSchedulerDynamicRecord
+		)
+			local dependencies_pending = (item.pending_dependency_count or 0) > 0
+				or item.failed_dependency_id ~= nil
+			local required = item.batchable == true or item.expires_at_ms ~= nil
+				or dependencies_pending
+				or type(item.admission_preflight_terminal_result) == "table"
+			local was_required = self.terminal_preflight_items[item] == true
+			if required and not was_required then
+				add_terminal_preflight_tracking(self, item)
+			elseif was_required and not required then
+				remove_terminal_preflight_tracking(self, item)
+			end
+		end
+		local function compact_operation_metric_preflight_order(self: EmbeddedSchedulerDynamicRecord)
+			local tail = self.operation_metric_preflight_tail
+			if tail <= operation_metric_preflight_compaction_limit(self) then
+				return
+			end
+			local order = self.operation_metric_preflight_order
+			local positions = self.operation_metric_preflight_positions
+			local write_index = 0
+			for read_index = 1, tail do
+				local item = order[read_index]
+				if item ~= nil and positions[item] ~= nil then
+					write_index += 1
+					order[write_index] = item
+					positions[item] = write_index
+				end
+			end
+			for index = write_index + 1, tail do
+				order[index] = nil
+			end
+			self.operation_metric_preflight_tail = write_index
+		end
+		local function add_operation_metric_preflight(self: EmbeddedSchedulerDynamicRecord, item: EmbeddedSchedulerDynamicRecord)
+			if self.operation_metric_preflight_positions[item] ~= nil then
+				return
+			end
+			if self.operation_metric_preflight_tail > operation_metric_preflight_compaction_limit(self) then
+				compact_operation_metric_preflight_order(self)
+			end
+			self.operation_metric_preflight_count += 1
+			self.operation_metric_preflight_tail += 1
+			local position = self.operation_metric_preflight_tail
+			self.operation_metric_preflight_order[position] = item
+			self.operation_metric_preflight_positions[item] = position
+		end
+		local function remove_operation_metric_preflight(self: EmbeddedSchedulerDynamicRecord, item: EmbeddedSchedulerDynamicRecord)
+			local position = self.operation_metric_preflight_positions[item]
+			if position == nil then
+				return
+			end
+			self.operation_metric_preflight_order[position] = nil
+			self.operation_metric_preflight_positions[item] = nil
+			self.operation_metric_preflight_count -= 1
+		end
+		local function drain_operation_metric_preflight(self: EmbeddedSchedulerDynamicRecord, now: number)
+			local order = self.operation_metric_preflight_order
+			local positions = self.operation_metric_preflight_positions
+			for index = self.operation_metric_preflight_tail, 1, -1 do
+				local item = order[index]
+				if item ~= nil and positions[item] == index then
+					order[index] = nil
+					positions[item] = nil
+					self.operation_metric_preflight_count -= 1
+					if item.queued == true and self.known[item.id] == item
+						and item.failed_dependency_id == nil
+						and (item.expires_at_ms == nil or item.expires_at_ms > now)
+					then
+						operation_metric_key(self, item.operation_class or "default")
+					end
+				end
+			end
+			table.clear(order)
+			table.clear(positions)
+			self.operation_metric_preflight_count = 0
+			self.operation_metric_preflight_tail = 0
+		end
 		local function append_queued_item(self: EmbeddedSchedulerDynamicRecord, item: EmbeddedSchedulerDynamicRecord)
+			if self.terminal_preflight_tail > terminal_preflight_compaction_limit(self) then
+				compact_terminal_preflight_order(self)
+			end
+			refresh_terminal_preflight_requirement(self, item)
+			add_operation_metric_preflight(self, item)
 			self.queue_tail += 1
 			self.queue[self.queue_tail] = item
 			self.queue_count += 1
@@ -1552,6 +1727,8 @@ do
 			self.queue[index] = nil
 			self.queue_positions[item.id] = nil
 			self.queue_count -= 1
+			remove_terminal_preflight_tracking(self, item)
+			remove_operation_metric_preflight(self, item)
 			maybe_compact_queue_storage(self)
 			return item
 		end
@@ -1575,8 +1752,7 @@ do
 			if value.due_at_ms ~= nil and not finite(value.due_at_ms) then return { code = "invalid", message = "due_at_ms must be finite" } end
 			if value.deadline_ms ~= nil and not finite(value.deadline_ms) then return { code = "invalid", message = "deadline_ms must be finite" } end
 			if value.expires_at_ms ~= nil and not finite(value.expires_at_ms) then return { code = "invalid", message = "expires_at_ms must be finite" } end
-			local valid_service_classes = { critical = true, interactive = true, normal = true, bulk = true, best_effort = true }
-			if value.service_class ~= nil and not valid_service_classes[value.service_class] then return { code = "invalid", message = "unsupported service_class" } end
+			if value.service_class ~= nil and not SCHEDULER_SERVICE_CLASSES[value.service_class] then return { code = "invalid", message = "unsupported service_class" } end
 			if value.mutating ~= nil and type(value.mutating) ~= "boolean" then return { code = "invalid", message = "mutating must be boolean" } end
 			if value.batchable ~= nil and type(value.batchable) ~= "boolean" then return { code = "invalid", message = "batchable must be boolean" } end
 			if value.batchable == true then
@@ -1605,12 +1781,11 @@ do
 			for _, dependency in ipairs(dependencies) do
 				if not valid_text(dependency, 128) or dependency == value.id or seen_dependencies[dependency] then return { code = "invalid", message = "dependency IDs must be unique, valid and not self-referential" } end
 				seen_dependencies[dependency] = true
-				if not self.completed[dependency] and not self.known[dependency] then
+				if not self.completed[dependency] and not self.known[dependency] and self.failed[dependency] == nil then
 					return { code = "invalid", message = "dependency is missing; enqueue its prerequisite before the dependent item" }
 				end
 			end
-			local dimensions = { "read_units", "write_units", "handler_slots" }
-			for _, field in ipairs(dimensions) do
+			for _, field in ipairs(SCHEDULER_DIMENSION_FIELDS) do
 				if value[field] ~= nil and (not finite(value[field]) or value[field] < 0 or value[field] > 64 or math.floor(value[field]) ~= value[field]) then
 					return { code = "invalid", message = field .. " must be an integer in 0..64" }
 				end
@@ -1804,87 +1979,106 @@ do
 		end
 		function governor:TakeNext(renewal_mode)
 			local now = now_ms()
+			drain_operation_metric_preflight(self, now)
 			local priority_indices = self.selection_scratch.priority_inheritance_indices
 			table.clear(priority_indices)
-			for index = self.queue_tail, 1, -1 do
-				local item = self.queue[index]
-				if item ~= nil then
-				local failed_dependency = item.failed_dependency_id
-				if failed_dependency ~= nil then
-					remove_queued_item(self, index, item)
-					item.queued = false
-					unindex_retry_item(self, item)
-					local dependency_code = self.failed[failed_dependency]
-					item.terminal_result = {
-						code = "dependency_failed", message = "prerequisite reached a non-success terminal outcome",
-						dependency_id = failed_dependency, dependency_code = dependency_code,
-					}
-					release_dependencies(self, item)
-					self.known[item.id] = nil
-					remember_terminal(self, item.id, "dependency_failed")
-					clear_admission_preflight(item)
-					return item, "dependency_failed"
-				elseif item.expires_at_ms and item.expires_at_ms <= now then
-					remove_queued_item(self, index, item)
-					item.queued = false
-					unindex_retry_item(self, item)
-					self.stats.scheduled_expired += 1
-					item.terminal_result = { code = "expired", message = "scheduled work expired before it could start" }
-					release_dependencies(self, item)
-					self.known[item.id] = nil
-					remember_terminal(self, item.id, "expired")
-					clear_admission_preflight(item)
-					return item, "expired"
-				else
-					if item.batchable ~= true then
-						operation_metric_key(self, item.operation_class or "default")
+			local terminal_preflight_policy_changed = self.terminal_preflight_policy_revision ~= self.policy.revision
+			if self.terminal_preflight_count > 0 or terminal_preflight_policy_changed then
+				if not terminal_preflight_policy_changed
+					and self.terminal_preflight_tail > terminal_preflight_compaction_limit(self)
+				then
+					compact_terminal_preflight_order(self)
+				end
+				local scan_full_queue = terminal_preflight_policy_changed
+				local scan_order = if scan_full_queue then self.queue else self.terminal_preflight_order
+				local scan_tail = if scan_full_queue then self.queue_tail else self.terminal_preflight_tail
+				for scan_index = scan_tail, 1, -1 do
+					local item = scan_order[scan_index]
+					local index = if scan_full_queue then scan_index
+						elseif item ~= nil then self.queue_positions[item.id]
+						else nil
+					if item ~= nil and index ~= nil and self.queue[index] == item then
+						local failed_dependency = item.failed_dependency_id
+						if failed_dependency ~= nil then
+							remove_queued_item(self, index, item)
+							item.queued = false
+							unindex_retry_item(self, item)
+							local dependency_code = self.failed[failed_dependency]
+							item.terminal_result = {
+								code = "dependency_failed", message = "prerequisite reached a non-success terminal outcome",
+								dependency_id = failed_dependency, dependency_code = dependency_code,
+							}
+							release_dependencies(self, item)
+							self.known[item.id] = nil
+							remember_terminal(self, item.id, "dependency_failed")
+							clear_admission_preflight(item)
+							return item, "dependency_failed"
+						elseif item.expires_at_ms and item.expires_at_ms <= now then
+							remove_queued_item(self, index, item)
+							item.queued = false
+							unindex_retry_item(self, item)
+							self.stats.scheduled_expired += 1
+							item.terminal_result = { code = "expired", message = "scheduled work expired before it could start" }
+							release_dependencies(self, item)
+							self.known[item.id] = nil
+							remember_terminal(self, item.id, "expired")
+							clear_admission_preflight(item)
+							return item, "expired"
+						else
+							local batch_count = selected_batch_size(self, item, self.selection_scratch.batch_dimensions)
+							local admission_terminal_result = item.admission_preflight_terminal_result
+							if item.admission_preflight_policy_revision ~= self.policy.revision
+								or item.admission_preflight_batch_count ~= batch_count
+								or admission_terminal_result == nil
+							then
+								local scratch = self.selection_scratch
+								local dimensions = estimate_dimensions(item, batch_count, scratch.dimensions)
+								local candidate_cost = effective_cost(item, batch_count, dimensions)
+								local admission = admission_decision(
+									self,
+									item.work_class,
+									item.operation_class,
+									candidate_cost,
+									item.mutating ~= false,
+									item.service_class == "critical" or item.lane == "lease_renewal",
+									dimensions,
+									nil,
+									false,
+									scratch.admission_result
+								)
+								admission_terminal_result = if admission.terminal then table.clone(admission) else false
+								item.admission_preflight_policy_revision = self.policy.revision
+								item.admission_preflight_batch_count = batch_count
+								item.admission_preflight_terminal_result = admission_terminal_result
+							end
+							refresh_terminal_preflight_requirement(self, item)
+							if type(admission_terminal_result) == "table" then
+								self.stats.rejected += 1
+								remove_queued_item(self, index, item)
+								item.queued = false
+								unindex_retry_item(self, item)
+								unregister_dependency_waiters(self, item)
+								item.terminal_result = admission_terminal_result
+								self.known[item.id] = item
+								clear_admission_preflight(item)
+								return item, "admission_rejected"
+							end
+							if item.lane == "high"
+								and (finite(item.deadline_ms) or item.service_class == "interactive" or item.service_class == "critical")
+								and (item.pending_dependency_count or 0) > 0
+							then
+								priority_indices[#priority_indices + 1] = index
+							end
+						end
+					elseif not scan_full_queue and self.terminal_preflight_items[item] == true then
+						remove_terminal_preflight_tracking(self, item)
 					end
-					local batch_count = selected_batch_size(self, item, self.selection_scratch.batch_dimensions)
-					local admission_terminal_result = item.admission_preflight_terminal_result
-					if item.admission_preflight_policy_revision ~= self.policy.revision
-						or item.admission_preflight_batch_count ~= batch_count
-						or admission_terminal_result == nil
-					then
-						local scratch = self.selection_scratch
-						local dimensions = estimate_dimensions(item, batch_count, scratch.dimensions)
-						local candidate_cost = effective_cost(item, batch_count, dimensions)
-						local admission = admission_decision(
-							self,
-							item.work_class,
-							item.operation_class,
-							candidate_cost,
-							item.mutating ~= false,
-							item.service_class == "critical" or item.lane == "lease_renewal",
-							dimensions,
-							nil,
-							false,
-							scratch.admission_result
-						)
-						admission_terminal_result = if admission.terminal then table.clone(admission) else false
-						item.admission_preflight_policy_revision = self.policy.revision
-						item.admission_preflight_batch_count = batch_count
-						item.admission_preflight_terminal_result = admission_terminal_result
-					end
-					if type(admission_terminal_result) == "table" then
-						self.stats.rejected += 1
-						remove_queued_item(self, index, item)
-						item.queued = false
-						unindex_retry_item(self, item)
-						unregister_dependency_waiters(self, item)
-						item.terminal_result = admission_terminal_result
-						self.known[item.id] = item
-						clear_admission_preflight(item)
-						return item, "admission_rejected"
-					end
-					if item.lane == "high"
-						and (finite(item.deadline_ms) or item.service_class == "interactive" or item.service_class == "critical")
-						and (item.pending_dependency_count or 0) > 0
-					then
-						priority_indices[#priority_indices + 1] = index
-					end
+				end
+				if terminal_preflight_policy_changed then
+					rebuild_terminal_preflight_order(self)
+					self.terminal_preflight_policy_revision = self.policy.revision
 				end
 			end
-				end
 			local index, urgent_fallback = choose_index(
 				self, self.policy.algorithm or "drr", renewal_mode, priority_indices
 			)
@@ -2170,16 +2364,26 @@ do
 				self.completed[id] = nil
 				remember_terminal(self, id, tostring(code or "unknown"))
 			end
-			local active_lane_keys = {}
-			local instant = now_ms()
-			for index = 1, self.queue_tail do
-				local queued = self.queue[index]
-				if queued ~= nil then active_lane_keys[lane_key(queued, instant)] = true end
+			local drr_deficit = self.drr_deficit
+			if next(drr_deficit) ~= nil then
+				if self.queue_count == 0 and next(self.active_owner) == nil then
+					table.clear(drr_deficit)
+				else
+					local active_lane_keys = self.selection_scratch.active_lane_keys
+					table.clear(active_lane_keys)
+					local instant = now_ms()
+					for index = 1, self.queue_tail do
+						local queued = self.queue[index]
+						if queued ~= nil then active_lane_keys[lane_key(queued, instant)] = true end
+					end
+					for _, known_item in pairs(self.known) do
+						if known_item.dispatch_state == "in_flight" then active_lane_keys[lane_key(known_item, instant)] = true end
+					end
+					for key in pairs(drr_deficit) do
+						if not active_lane_keys[key] then drr_deficit[key] = nil end
+					end
+				end
 			end
-			for _, known_item in pairs(self.known) do
-				if known_item.dispatch_state == "in_flight" then active_lane_keys[lane_key(known_item, instant)] = true end
-			end
-			for key in pairs(self.drr_deficit) do if not active_lane_keys[key] then self.drr_deficit[key] = nil end end
 			self.stats.completed += 1
 			prune_terminal_history(self)
 			return true
@@ -14182,13 +14386,15 @@ local function reconcile(self: Record, template: JsonValue): (ResultCode, string
 	-- Inspect plain templates without allocating a detached template tree. The
 	-- traversal also determines whether any default can actually be inserted,
 	-- allowing no-op reconciliation to skip the profile clone entirely.
-	local function inspect_template(target_value: unknown, template_value: unknown): (boolean, boolean, boolean)
+	local function inspect_template(target_value: unknown, template_value: unknown): (boolean, boolean, boolean, string?)
 		local active_tables: { [any]: boolean } = {}
 		local defaults_missing = false
 		local custom_iterator = false
+		local invalid_message: string? = nil
 
 		local function visit(target: unknown, current: unknown, depth: number, track_defaults: boolean): boolean
 			if depth > 64 then
+				invalid_message = "template exceeds the maximum nesting depth"
 				return false
 			end
 			if current == nil then
@@ -14201,6 +14407,7 @@ local function reconcile(self: Record, template: JsonValue): (ResultCode, string
 			elseif current_type == "string" then
 				return true
 			elseif current_type ~= "table" then
+				invalid_message = "template contains an unsupported value type"
 				return false
 			end
 
@@ -14210,6 +14417,7 @@ local function reconcile(self: Record, template: JsonValue): (ResultCode, string
 				return true
 			end
 			if active_tables[table_value] then
+				invalid_message = "template contains a cycle"
 				return false
 			end
 			active_tables[table_value] = true
@@ -14228,6 +14436,7 @@ local function reconcile(self: Record, template: JsonValue): (ResultCode, string
 					local numeric_key = key :: number
 					if not math.isfinite(numeric_key) or math.floor(numeric_key) ~= numeric_key or numeric_key < 1 then
 						active_tables[table_value] = nil
+						invalid_message = "template tables must use dense arrays or string-keyed objects"
 						return false
 					end
 					numeric_keys += 1
@@ -14236,6 +14445,7 @@ local function reconcile(self: Record, template: JsonValue): (ResultCode, string
 					end
 				else
 					active_tables[table_value] = nil
+					invalid_message = "template tables must use dense arrays or string-keyed objects"
 					return false
 				end
 
@@ -14267,22 +14477,24 @@ local function reconcile(self: Record, template: JsonValue): (ResultCode, string
 
 			if string_keys > 0 and numeric_keys > 0 then
 				active_tables[table_value] = nil
+				invalid_message = "template tables must use dense arrays or string-keyed objects"
 				return false
 			end
 			if numeric_keys > 0 and max_numeric_key ~= numeric_keys then
 				active_tables[table_value] = nil
+				invalid_message = "template arrays must be dense arrays"
 				return false
 			end
 			active_tables[table_value] = nil
 			return true
 		end
 
-		return visit(target_value, template_value, 1, true), defaults_missing, custom_iterator
+		return visit(target_value, template_value, 1, true), defaults_missing, custom_iterator, invalid_message
 	end
 
-	local template_valid, defaults_missing, custom_iterator = inspect_template(state.data, template)
+	local template_valid, defaults_missing, custom_iterator, template_error = inspect_template(state.data, template)
 	if not custom_iterator and not template_valid then
-		return "validation", "template is invalid"
+		return "validation", template_error or "template is invalid"
 	end
 
 	if not custom_iterator and not defaults_missing then
@@ -21844,7 +22056,7 @@ RecordStore.Mock = (function()
 	return Mock
 end)()
 
-local RecordStoreEmbeddedSHA256 = (function()
+RecordStore._internals.sha256 = (function()
 local SHA256 = {}
 
 local MODULUS = 4294967296
@@ -21962,7 +22174,7 @@ return table.freeze(SHA256)
 
 end)()
 
-local RecordStoreEmbeddedRequestAdmission = (function()
+RecordStore._internals.request_admission = (function()
 	local runtime = rawget(RecordStore, "_scheduler_runtime") :: any
 	if type(runtime) ~= "table" or type(runtime.schedule) ~= "function" then
 		error("RecordStore background request admission is unavailable", 2)
@@ -22061,8 +22273,8 @@ local RecordStoreEmbeddedRequestAdmission = (function()
 	})
 end)()
 
-local RecordStoreEmbeddedDurableStreams = (function()
-	local SHA256 = RecordStoreEmbeddedSHA256
+RecordStore._internals.durable_streams = (function()
+	local SHA256 = RecordStore._internals.sha256
 
 local DurableStreams = {}
 local Stream = {}
@@ -23339,7 +23551,7 @@ local function find_producer_event(segment: Segment, producer_id: string, produc
 end
 
 local function resolve_batch(segment: Segment, prepared: { any }): (boolean, number, { any }?, string?)
-	local results = table.create(#prepared)
+	local results: { any } = table.create(#prepared)
 	local found_count = 0
 	local producer_states = segment.producer_states
 	for index, event in ipairs(prepared) do
@@ -24969,8 +25181,9 @@ return table.freeze(DurableStreams)
 
 end)()
 
-local RecordStoreEmbeddedDurableStreamPublisher = (function()
+RecordStore._internals.durable_stream_publisher = (function()
 local Publisher = {}
+local RequestAdmission = RecordStore._internals.request_admission
 local Client = {}
 Client.__index = Client
 
@@ -24999,9 +25212,9 @@ type ClientType = {
 	_closed: boolean,
 	_scheduled: boolean,
 	_schedule_generation: number,
-	_schedule: (number, () -> ()) -> (),
-	_defer: (...any) -> any,
-	_on_result: ((any, number) -> ())?,
+	_schedule: (number, () -> ()) -> any,
+	_defer: (...any) -> (boolean, string?),
+	_on_result: ((any, number) -> any)?,
 	_on_error: ((string) -> ())?,
 	_pending_event_ids: { [string]: boolean },
 	Enqueue: (self: ClientType, event_id: string, payload: any) -> any,
@@ -25200,7 +25413,7 @@ function Publisher.OpenAsync(
 		task.delay(delay_seconds, callback)
 	end
 	local selected_defer = defer or function(callback: () -> (), on_rejected: ((any) -> ())?)
-		return RecordStoreEmbeddedRequestAdmission.defer_background(callback, on_rejected)
+		return RequestAdmission.defer_background(callback, on_rejected)
 	end
 	local client: any = {
 		_stream = stream,
@@ -25347,8 +25560,9 @@ return table.freeze(Publisher)
 
 end)()
 
-local RecordStoreEmbeddedDurableStreamWorker = (function()
+RecordStore._internals.durable_stream_worker = (function()
 local Worker = {}
+local RequestAdmission = RecordStore._internals.request_admission
 local Client = {}
 Client.__index = Client
 
@@ -25374,12 +25588,13 @@ type ClientType = {
 	_schedule_generation: number,
 	_heartbeat_generation: number,
 	_heartbeat_busy: boolean,
-	_schedule: (number, () -> ()) -> (),
-	_defer: (...any) -> any,
-	_defer_lease_renewal: (...any) -> any,
+	_schedule: (number, () -> ()) -> any,
+	_defer: (...any) -> (boolean, string?),
+	_defer_lease_renewal: (...any) -> (boolean, string?),
 	_random: () -> number,
-	_on_result: ((any) -> ())?,
+	_on_result: ((any) -> any)?,
 	_on_error: ((string) -> ())?,
+	_Poll: (self: ClientType) -> (),
 	Start: (self: ClientType) -> any,
 	Wake: (self: ClientType) -> any,
 	StopAsync: (self: ClientType) -> any,
@@ -25588,7 +25803,7 @@ function Worker.Open(
 		task.delay(delay_seconds, callback)
 	end
 	local selected_defer = defer or function(callback: () -> (), on_rejected: ((any) -> ())?)
-		return RecordStoreEmbeddedRequestAdmission.defer_background(callback, on_rejected)
+		return RequestAdmission.defer_background(callback, on_rejected)
 	end
 	local selected_defer_lease_renewal = if defer ~= nil then function(
 		_lease_remaining_seconds: number,
@@ -25601,7 +25816,7 @@ function Worker.Open(
 		callback: () -> (),
 		on_rejected: ((any) -> ())?
 	)
-		return RecordStoreEmbeddedRequestAdmission.defer_lease_renewal(lease_remaining_seconds, callback, on_rejected)
+		return RequestAdmission.defer_lease_renewal(lease_remaining_seconds, callback, on_rejected)
 	end
 	local client: any = {
 		_stream = stream,
@@ -25767,8 +25982,9 @@ return table.freeze(Worker)
 
 end)()
 
-local RecordStoreEmbeddedTransientMessaging = (function()
+RecordStore._internals.transient_messaging = (function()
 	local TransientMessaging = {}
+	local SHA256 = RecordStore._internals.sha256
 	local Client = {}
 	Client.__index = Client
 	local MAX_NAMESPACE_BYTES = 64
@@ -25782,7 +25998,7 @@ local RecordStoreEmbeddedTransientMessaging = (function()
 		_max_message_bytes: number, _on_error: ((string, any) -> ())?,
 		_subscriptions: { [number]: any }, _next_subscription: number, _closed: boolean,
 		PublishStreamWakeup: (self: ClientType, stream: string, partition: number, sequence: number?) -> any,
-		SubscribeStreamWakeups: (self: ClientType, stream: string, partition: number, handler: (any, any) -> ()) -> any,
+		SubscribeStreamWakeups: (self: ClientType, stream: string, partition: number, handler: (any, any) -> any) -> any,
 		Close: (self: ClientType) -> (),
 	}
 	local function finite(value: any): boolean
@@ -25845,7 +26061,7 @@ local RecordStoreEmbeddedTransientMessaging = (function()
 		return copied, nil
 	end
 	local function physical_topic(namespace: string, stream: string, partition: number): string
-		return "rs2x" .. RecordStoreEmbeddedSHA256.digest(namespace .. "\0wakeup\0" .. stream .. "\0" .. tostring(partition))
+		return "rs2x" .. SHA256.digest(namespace .. "\0wakeup\0" .. stream .. "\0" .. tostring(partition))
 	end
 	local function safe_message_id(self: ClientType): (string?, string?)
 		local ok, value = pcall(function() return self._http:GenerateGUID(false) end)
@@ -25904,7 +26120,7 @@ local RecordStoreEmbeddedTransientMessaging = (function()
 		if not ok then return { code = "unknown", message = tostring(publish_error), message_id = message_id, topic_hash = topic } end
 		return { code = "published", message_id = message_id, topic_hash = topic }
 	end
-	function Client.SubscribeStreamWakeups(self: ClientType, stream: string, partition: number, handler: (any, any) -> ()): any
+	function Client.SubscribeStreamWakeups(self: ClientType, stream: string, partition: number, handler: (any, any) -> any): any
 		if self._closed then return { code = "closed" } end
 		if not valid_text(stream, MAX_STREAM_NAME_BYTES) then return { code = "invalid", message = "stream must be 1..96 bytes" } end
 		if not integer_at_least(partition, 1) then return { code = "invalid", message = "partition must be a positive integer" } end
@@ -25955,11 +26171,11 @@ local RecordStoreEmbeddedTransientMessaging = (function()
 	return table.freeze(TransientMessaging)
 end)()
 
-RecordStore.SHA256 = RecordStoreEmbeddedSHA256
-RecordStore.DurableStreams = RecordStoreEmbeddedDurableStreams
-RecordStore.DurableStreamPublisher = RecordStoreEmbeddedDurableStreamPublisher
-RecordStore.DurableStreamWorker = RecordStoreEmbeddedDurableStreamWorker
-RecordStore.TransientMessaging = RecordStoreEmbeddedTransientMessaging
+RecordStore.SHA256 = RecordStore._internals.sha256
+RecordStore.DurableStreams = RecordStore._internals.durable_streams
+RecordStore.DurableStreamPublisher = RecordStore._internals.durable_stream_publisher
+RecordStore.DurableStreamWorker = RecordStore._internals.durable_stream_worker
+RecordStore.TransientMessaging = RecordStore._internals.transient_messaging
 RecordStore.MailboxV2 = MailboxV2
 RecordStore.is_retryable_result = is_retryable_result
 RecordStore.get_diagnostic_code = get_diagnostic_code

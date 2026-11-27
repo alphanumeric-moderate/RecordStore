@@ -5,7 +5,8 @@ local Authority = Shim.environment.require(initializer:WaitForChild("PurchaseEnt
 local Coordinator = Shim.environment.require(initializer:WaitForChild("PurchaseEntitlementReceiptCoordinator"))
 local ReceiptHandler = Shim.environment.require(initializer:WaitForChild("PurchaseEntitlementReceiptHandler"))
 local Enum = Shim.environment.Enum
-local SHA256 = Shim.environment.require(initializer:WaitForChild("RecordStoreSHA256"))
+local RecordStore = Shim.environment.require(initializer:WaitForChild("RecordStore"))
+local SHA256 = RecordStore.SHA256
 
 local function expect(value, message)
 	if not value then error(message, 2) end

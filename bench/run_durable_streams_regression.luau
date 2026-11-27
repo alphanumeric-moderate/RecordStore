@@ -421,7 +421,8 @@ local scheduled_callbacks = {}
 local published_batches = {}
 local fake_publisher_stream = {
 	GetProducerSequenceAsync = function(_self, route_key, producer_id)
-		assert(route_key == "publisher-route" and producer_id == "stable-publisher")
+		assert(route_key == "publisher-route" and producer_id == "stable-publisher",
+			"unexpected publisher route or producer")
 		return { code = "ok", sequence = 0 }
 	end,
 	PublishBatchAsync = function(_self, route_key, events)
@@ -467,7 +468,15 @@ local queued_third = publisher:Enqueue("publisher-event-3", { value = 33 })
 assert(queued_third.code == "queued" and queued_third.producer_sequence == 3, "publisher did not continue after a confirmed batch")
 local publisher_closed = publisher:CloseAsync()
 assert(publisher_closed.code == "closed" and publisher:GetPendingCount() == 0, "CloseAsync must flush pending items before closing")
-local bounded_publisher, bounded_error = Publisher.OpenAsync(fake_publisher_stream, "publisher-route", "bounded-publisher", {
+local fake_bounded_publisher_stream = {
+	GetProducerSequenceAsync = function(_self, route_key, producer_id)
+		assert(route_key == "publisher-route" and producer_id == "bounded-publisher",
+			"unexpected bounded-publisher route or producer")
+		return { code = "ok", sequence = 0 }
+	end,
+	PublishBatchAsync = fake_publisher_stream.PublishBatchAsync,
+}
+local bounded_publisher, bounded_error = Publisher.OpenAsync(fake_bounded_publisher_stream, "publisher-route", "bounded-publisher", {
 	max_batch_messages = 2,
 	max_pending_messages = 2,
 	schedule = function() end,
