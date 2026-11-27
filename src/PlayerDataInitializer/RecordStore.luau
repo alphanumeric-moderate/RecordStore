@@ -1419,11 +1419,19 @@ do
 				table.sort(lane_keys)
 				local lane_count = #lane_keys
 				local start_index = 1
-				if self.drr_cursor_key ~= nil then
-					for i, key in ipairs(lane_keys) do
-						if key == self.drr_cursor_key then
-							start_index = (i % lane_count) + 1
+				local cursor_key = self.drr_cursor_key
+				if type(cursor_key) == "string" then
+					local low, high = 1, lane_count
+					while low <= high do
+						local middle = math.floor((low + high) / 2)
+						local key = lane_keys[middle]
+						if key == cursor_key then
+							start_index = (middle % lane_count) + 1
 							break
+						elseif key < cursor_key then
+							low = middle + 1
+						else
+							high = middle - 1
 						end
 					end
 				end
