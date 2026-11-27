@@ -21966,7 +21966,7 @@ RecordStore.Mock = (function()
 	return Mock
 end)()
 
-local RecordStoreEmbeddedSHA256 = (function()
+RecordStore._internals.sha256 = (function()
 local SHA256 = {}
 
 local MODULUS = 4294967296
@@ -22084,7 +22084,7 @@ return table.freeze(SHA256)
 
 end)()
 
-local RecordStoreEmbeddedRequestAdmission = (function()
+RecordStore._internals.request_admission = (function()
 	local runtime = rawget(RecordStore, "_scheduler_runtime") :: any
 	if type(runtime) ~= "table" or type(runtime.schedule) ~= "function" then
 		error("RecordStore background request admission is unavailable", 2)
@@ -22183,8 +22183,8 @@ local RecordStoreEmbeddedRequestAdmission = (function()
 	})
 end)()
 
-local RecordStoreEmbeddedDurableStreams = (function()
-	local SHA256 = RecordStoreEmbeddedSHA256
+RecordStore._internals.durable_streams = (function()
+	local SHA256 = RecordStore._internals.sha256
 
 local DurableStreams = {}
 local Stream = {}
@@ -23461,7 +23461,7 @@ local function find_producer_event(segment: Segment, producer_id: string, produc
 end
 
 local function resolve_batch(segment: Segment, prepared: { any }): (boolean, number, { any }?, string?)
-	local results = table.create(#prepared)
+	local results: { any } = table.create(#prepared)
 	local found_count = 0
 	local producer_states = segment.producer_states
 	for index, event in ipairs(prepared) do
@@ -25091,8 +25091,9 @@ return table.freeze(DurableStreams)
 
 end)()
 
-local RecordStoreEmbeddedDurableStreamPublisher = (function()
+RecordStore._internals.durable_stream_publisher = (function()
 local Publisher = {}
+local RequestAdmission = RecordStore._internals.request_admission
 local Client = {}
 Client.__index = Client
 
@@ -25122,7 +25123,7 @@ type ClientType = {
 	_scheduled: boolean,
 	_schedule_generation: number,
 	_schedule: (number, () -> ()) -> (),
-	_defer: (...any) -> any,
+	_defer: (...any) -> (boolean, string?),
 	_on_result: ((any, number) -> ())?,
 	_on_error: ((string) -> ())?,
 	_pending_event_ids: { [string]: boolean },
@@ -25214,7 +25215,10 @@ end
 
 local function notify_result(self: ClientType, result: any, count: number)
 	if self._on_result ~= nil then
-		local ok, callback_error = pcall(self._on_result, result, count)
+		local ok, callback_error = pcall(function()
+			self._on_result(result, count)
+			return nil
+		end)
 		if not ok and self._on_error ~= nil then
 			pcall(self._on_error, tostring(callback_error))
 		end
@@ -25231,7 +25235,8 @@ local function schedule_flush(self: ClientType, delay_seconds: number)
 	self._schedule_generation += 1
 	local generation = self._schedule_generation
 	self._scheduled = true
-	local ok, schedule_error = pcall(self._schedule, delay_seconds, function()
+	local ok, schedule_error = pcall(function()
+		self._schedule(delay_seconds, function()
 		if self._closed or not self._scheduled or generation ~= self._schedule_generation then return end
 		local rejection_handled = false
 		local deferred, accepted, defer_error = pcall(self._defer, function()
@@ -25254,6 +25259,8 @@ local function schedule_flush(self: ClientType, delay_seconds: number)
 			end
 			schedule_flush(self, math.max(self._flush_delay_seconds, 0.1))
 		end
+		end)
+		return nil
 	end)
 	if not ok then
 		self._scheduled = false
@@ -25322,7 +25329,7 @@ function Publisher.OpenAsync(
 		task.delay(delay_seconds, callback)
 	end
 	local selected_defer = defer or function(callback: () -> (), on_rejected: ((any) -> ())?)
-		return RecordStoreEmbeddedRequestAdmission.defer_background(callback, on_rejected)
+		return RequestAdmission.defer_background(callback, on_rejected)
 	end
 	local client: any = {
 		_stream = stream,
@@ -25469,8 +25476,9 @@ return table.freeze(Publisher)
 
 end)()
 
-local RecordStoreEmbeddedDurableStreamWorker = (function()
+RecordStore._internals.durable_stream_worker = (function()
 local Worker = {}
+local RequestAdmission = RecordStore._internals.request_admission
 local Client = {}
 Client.__index = Client
 
@@ -25497,11 +25505,12 @@ type ClientType = {
 	_heartbeat_generation: number,
 	_heartbeat_busy: boolean,
 	_schedule: (number, () -> ()) -> (),
-	_defer: (...any) -> any,
-	_defer_lease_renewal: (...any) -> any,
+	_defer: (...any) -> (boolean, string?),
+	_defer_lease_renewal: (...any) -> (boolean, string?),
 	_random: () -> number,
 	_on_result: ((any) -> ())?,
 	_on_error: ((string) -> ())?,
+	_Poll: (self: ClientType) -> (),
 	Start: (self: ClientType) -> any,
 	Wake: (self: ClientType) -> any,
 	StopAsync: (self: ClientType) -> any,
@@ -25522,7 +25531,10 @@ end
 
 local function notify_result(self: ClientType, result: any)
 	if self._on_result ~= nil then
-		local ok, callback_error = pcall(self._on_result, result)
+		local ok, callback_error = pcall(function()
+			self._on_result(result)
+			return nil
+		end)
 		if not ok and self._on_error ~= nil then
 			pcall(self._on_error, tostring(callback_error))
 		end
@@ -25543,7 +25555,8 @@ local function schedule_poll(self: ClientType, delay_seconds: number)
 	self._schedule_generation += 1
 	local generation = self._schedule_generation
 	self._scheduled = true
-	local ok, schedule_error = pcall(self._schedule, delay_seconds, function()
+	local ok, schedule_error = pcall(function()
+		self._schedule(delay_seconds, function()
 		if not self._running or not self._scheduled or generation ~= self._schedule_generation then return end
 		local rejection_handled = false
 		local deferred, accepted, defer_error = pcall(self._defer, function()
@@ -25566,6 +25579,8 @@ local function schedule_poll(self: ClientType, delay_seconds: number)
 			end
 			schedule_poll(self, self._min_poll_delay)
 		end
+		end)
+		return nil
 	end)
 	if not ok then
 		self._scheduled = false
@@ -25592,7 +25607,8 @@ local function schedule_heartbeat(self: ClientType, claim: any, delay_override: 
 	if not self._running or self._claim ~= claim then return end
 	self._heartbeat_generation += 1
 	local generation = self._heartbeat_generation
-	local ok, schedule_error = pcall(self._schedule, delay_override or self._lease_seconds / 3, function()
+	local ok, schedule_error = pcall(function()
+		self._schedule(delay_override or self._lease_seconds / 3, function()
 		if not self._running or generation ~= self._heartbeat_generation or self._claim ~= claim then return end
 		local rejection_handled = false
 		local deferred, accepted, defer_error = pcall(self._defer_lease_renewal, self._lease_seconds / 2, function()
@@ -25626,6 +25642,8 @@ local function schedule_heartbeat(self: ClientType, claim: any, delay_override: 
 			end
 			schedule_heartbeat(self, claim, 0.1)
 		end
+		end)
+		return nil
 	end)
 	if not ok then
 		if self._on_error ~= nil then pcall(self._on_error, "heartbeat scheduling failed: " .. tostring(schedule_error)) end
@@ -25710,7 +25728,7 @@ function Worker.Open(
 		task.delay(delay_seconds, callback)
 	end
 	local selected_defer = defer or function(callback: () -> (), on_rejected: ((any) -> ())?)
-		return RecordStoreEmbeddedRequestAdmission.defer_background(callback, on_rejected)
+		return RequestAdmission.defer_background(callback, on_rejected)
 	end
 	local selected_defer_lease_renewal = if defer ~= nil then function(
 		_lease_remaining_seconds: number,
@@ -25723,7 +25741,7 @@ function Worker.Open(
 		callback: () -> (),
 		on_rejected: ((any) -> ())?
 	)
-		return RecordStoreEmbeddedRequestAdmission.defer_lease_renewal(lease_remaining_seconds, callback, on_rejected)
+		return RequestAdmission.defer_lease_renewal(lease_remaining_seconds, callback, on_rejected)
 	end
 	local client: any = {
 		_stream = stream,
@@ -25889,8 +25907,9 @@ return table.freeze(Worker)
 
 end)()
 
-local RecordStoreEmbeddedTransientMessaging = (function()
+RecordStore._internals.transient_messaging = (function()
 	local TransientMessaging = {}
+	local SHA256 = RecordStore._internals.sha256
 	local Client = {}
 	Client.__index = Client
 	local MAX_NAMESPACE_BYTES = 64
@@ -25967,7 +25986,7 @@ local RecordStoreEmbeddedTransientMessaging = (function()
 		return copied, nil
 	end
 	local function physical_topic(namespace: string, stream: string, partition: number): string
-		return "rs2x" .. RecordStoreEmbeddedSHA256.digest(namespace .. "\0wakeup\0" .. stream .. "\0" .. tostring(partition))
+		return "rs2x" .. SHA256.digest(namespace .. "\0wakeup\0" .. stream .. "\0" .. tostring(partition))
 	end
 	local function safe_message_id(self: ClientType): (string?, string?)
 		local ok, value = pcall(function() return self._http:GenerateGUID(false) end)
@@ -26046,7 +26065,10 @@ local RecordStoreEmbeddedTransientMessaging = (function()
 				version = envelope.version, kind = "wakeup", message_id = envelope.message_id,
 				sender = envelope.sender, sent_at = message.Sent,
 			})
-			local handler_ok, handler_error = pcall(handler, payload, context)
+			local handler_ok, handler_error = pcall(function()
+				handler(payload, context)
+				return nil
+			end)
 			if not handler_ok and self._on_error ~= nil then pcall(self._on_error, tostring(handler_error), context) end
 		end
 		local ok, connection = pcall(function() return self._service:SubscribeAsync(topic, callback) end)
@@ -26077,11 +26099,11 @@ local RecordStoreEmbeddedTransientMessaging = (function()
 	return table.freeze(TransientMessaging)
 end)()
 
-RecordStore.SHA256 = RecordStoreEmbeddedSHA256
-RecordStore.DurableStreams = RecordStoreEmbeddedDurableStreams
-RecordStore.DurableStreamPublisher = RecordStoreEmbeddedDurableStreamPublisher
-RecordStore.DurableStreamWorker = RecordStoreEmbeddedDurableStreamWorker
-RecordStore.TransientMessaging = RecordStoreEmbeddedTransientMessaging
+RecordStore.SHA256 = RecordStore._internals.sha256
+RecordStore.DurableStreams = RecordStore._internals.durable_streams
+RecordStore.DurableStreamPublisher = RecordStore._internals.durable_stream_publisher
+RecordStore.DurableStreamWorker = RecordStore._internals.durable_stream_worker
+RecordStore.TransientMessaging = RecordStore._internals.transient_messaging
 RecordStore.MailboxV2 = MailboxV2
 RecordStore.is_retryable_result = is_retryable_result
 RecordStore.get_diagnostic_code = get_diagnostic_code
