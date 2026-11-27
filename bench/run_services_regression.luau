@@ -21,6 +21,7 @@ local core = {
 			return mailbox
 		end,
 	},
+	SHA256 = { digest = function(value) return tostring(value) end },
 }
 local raw_v2_options = table.freeze({})
 local bundle = Services.new(core, table.freeze({ v2 = raw_v2_options }))
@@ -60,10 +61,12 @@ for namespace, entries in pairs(namespaces) do
 			namespace .. "." .. alias .. " does not refer to the canonical module")
 	end
 end
-for _, module_name in { "RecordStoreV2", "RecordStoreV2Acceleration", "RecordStoreSHA256" } do
+for _, module_name in { "RecordStoreV2", "RecordStoreV2Acceleration" } do
 	expect(bundle.Modules[module_name] == Shim.environment.require(initializer:WaitForChild(module_name)),
 		"incorrect module identity for " .. module_name)
 end
+expect(bundle.Modules.RecordStoreSHA256 == core.SHA256,
+	"service registry did not preserve the embedded core SHA-256 implementation")
 expect(table.isfrozen(bundle) and table.isfrozen(bundle.Modules), "bundle/module registry is mutable")
 expect(not pcall(function() bundle.Outbox.MailboxAdapter = {} end), "namespace allowed adapter replacement")
 
