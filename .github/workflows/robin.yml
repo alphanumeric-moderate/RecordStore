@@ -14,55 +14,16 @@ permissions:
 
 jobs:
   review:
-    if: github.event_name != 'pull_request' || github.event.action != 'synchronize' || github.event.pull_request.head.ref != 'audit/recordstore-full-luau-potential-2026-11-27'
     uses: antongulin/robin/.github/workflows/review.yml@main
     with:
-      # Repository-read mode is scoped to this full-module audit PR and manual /robin.
-      # Other PR-open reviews retain the existing diff-only mode.
-      agent-mode: ${{ ((github.event_name == 'pull_request' && github.event.pull_request.head.ref == 'audit/recordstore-full-luau-potential-2026-11-27') || (github.event_name == 'issue_comment' && startsWith(github.event.comment.body, '/robin'))) && 'auto' || 'off' }}
+      # Agent mode is limited to the full-module audit PR and explicit /robin commands on PR #82.
+      agent-mode: ${{ ((github.event_name == 'pull_request' && github.event.pull_request.head.ref == 'audit/recordstore-full-luau-potential-2026-11-27') || (github.event_name == 'issue_comment' && github.event.issue.number == 82 && (startsWith(github.event.comment.body, '/robin') || startsWith(github.event.comment.body, '/review'))) ) && 'auto' || 'off' }}
       reasoning-effort: "low"
-      max-output-tokens: "16384"
+      max-output-tokens: "8192"
       agent-max-turns: "60"
-      review-on-synchronize: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.ref != 'audit/recordstore-full-luau-potential-2026-11-27' }}
-      review-instructions: |
-        MANDATORY FULL-MODULE COVERAGE: This PR's deliverable is an audit of the
-        entire RecordStore core, even though runtime source is intentionally not
-        changed in this PR. You MUST inspect the source file itself, not infer
-        coverage from the diff, documentation, search results or prior reports.
-
-        Call the read_file repository tool on the exact path
-        src/PlayerDataInitializer/RecordStore.luau. The file is approximately
-        26,193 lines / 1.06 MB. Robin's read_file returns at most 2,000 lines
-        per call and supplies a continuation location. Follow that continuation
-        and read successive chunks until the final source line is reached.
-        The expected coverage is roughly 14 consecutive reads, with no gaps.
-        Preserve a line-range coverage ledger during context compaction. Do not
-        substitute grep or a filename search for reading the file. Do not stop
-        after inspecting the PR diff or the audit document.
-
-        After the complete module read, inspect AGENTS.md, README.md,
-        docs/performance/recordstore-optimization-program.md, relevant callers,
-        tests, regression runners and benchmarks. Use repository search to trace
-        callers and related definitions where required.
-
-        Classify findings under Luau optimizations, redesign candidates,
-        removal candidates, type-check/static analysis, correctness/security,
-        and test/benchmark coverage. Give exact paths and line references,
-        concrete failure or cost reasoning, severity and confidence. Prioritize
-        correctness bugs and unsound types as well as performance opportunities.
-
-        The final review MUST state the exact RecordStore.luau line ranges
-        inspected and whether coverage reached EOF. If tool limits prevent
-        complete coverage, explicitly mark the review incomplete and identify
-        the ranges not read; never report a clean full-module review without
-        that coverage evidence.
-
-        Do not recommend mechanical loop rewrites, broad @native enablement,
-        stale caches, or feature removal without workload, API and persisted-data
-        compatibility evidence. Preserve RecordStore durability, UpdateAsync
-        purity, fencing, idempotency, isolation and fail-closed behavior.
-        Do not claim tests, type-checks, benchmarks or Roblox runtime acceptance
-        were run unless their actual CI/tool results are available.
+      # Robin itself filters issue_comment to authorized slash commands.
+      review-on-synchronize: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.ref == 'audit/recordstore-full-luau-potential-2026-11-27' }}
+      review-instructions-file: ${{ ((github.event_name == 'pull_request' && github.event.pull_request.head.ref == 'audit/recordstore-full-luau-potential-2026-11-27') || (github.event_name == 'issue_comment' && github.event.issue.number == 82)) && '.github/robin-recordstore-full-audit.md' || '' }}
     secrets:
       LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
       LLM_BASE_URL: ${{ secrets.LLM_BASE_URL }}
