@@ -25212,9 +25212,9 @@ type ClientType = {
 	_closed: boolean,
 	_scheduled: boolean,
 	_schedule_generation: number,
-	_schedule: (number, () -> ()) -> (),
+	_schedule: (number, () -> ()) -> any,
 	_defer: (...any) -> (boolean, string?),
-	_on_result: ((any, number) -> ())?,
+	_on_result: ((any, number) -> any)?,
 	_on_error: ((string) -> ())?,
 	_pending_event_ids: { [string]: boolean },
 	Enqueue: (self: ClientType, event_id: string, payload: any) -> any,
@@ -25305,10 +25305,7 @@ end
 
 local function notify_result(self: ClientType, result: any, count: number)
 	if self._on_result ~= nil then
-		local ok, callback_error = pcall(function()
-			self._on_result(result, count)
-			return nil
-		end)
+		local ok, callback_error = pcall(self._on_result, result, count)
 		if not ok and self._on_error ~= nil then
 			pcall(self._on_error, tostring(callback_error))
 		end
@@ -25325,8 +25322,7 @@ local function schedule_flush(self: ClientType, delay_seconds: number)
 	self._schedule_generation += 1
 	local generation = self._schedule_generation
 	self._scheduled = true
-	local ok, schedule_error = pcall(function()
-		self._schedule(delay_seconds, function()
+	local ok, schedule_error = pcall(self._schedule, delay_seconds, function()
 		if self._closed or not self._scheduled or generation ~= self._schedule_generation then return end
 		local rejection_handled = false
 		local deferred, accepted, defer_error = pcall(self._defer, function()
@@ -25349,8 +25345,6 @@ local function schedule_flush(self: ClientType, delay_seconds: number)
 			end
 			schedule_flush(self, math.max(self._flush_delay_seconds, 0.1))
 		end
-		end)
-		return nil
 	end)
 	if not ok then
 		self._scheduled = false
@@ -25594,11 +25588,11 @@ type ClientType = {
 	_schedule_generation: number,
 	_heartbeat_generation: number,
 	_heartbeat_busy: boolean,
-	_schedule: (number, () -> ()) -> (),
+	_schedule: (number, () -> ()) -> any,
 	_defer: (...any) -> (boolean, string?),
 	_defer_lease_renewal: (...any) -> (boolean, string?),
 	_random: () -> number,
-	_on_result: ((any) -> ())?,
+	_on_result: ((any) -> any)?,
 	_on_error: ((string) -> ())?,
 	_Poll: (self: ClientType) -> (),
 	Start: (self: ClientType) -> any,
@@ -25621,10 +25615,7 @@ end
 
 local function notify_result(self: ClientType, result: any)
 	if self._on_result ~= nil then
-		local ok, callback_error = pcall(function()
-			self._on_result(result)
-			return nil
-		end)
+		local ok, callback_error = pcall(self._on_result, result)
 		if not ok and self._on_error ~= nil then
 			pcall(self._on_error, tostring(callback_error))
 		end
@@ -25645,8 +25636,7 @@ local function schedule_poll(self: ClientType, delay_seconds: number)
 	self._schedule_generation += 1
 	local generation = self._schedule_generation
 	self._scheduled = true
-	local ok, schedule_error = pcall(function()
-		self._schedule(delay_seconds, function()
+	local ok, schedule_error = pcall(self._schedule, delay_seconds, function()
 		if not self._running or not self._scheduled or generation ~= self._schedule_generation then return end
 		local rejection_handled = false
 		local deferred, accepted, defer_error = pcall(self._defer, function()
@@ -25669,8 +25659,6 @@ local function schedule_poll(self: ClientType, delay_seconds: number)
 			end
 			schedule_poll(self, self._min_poll_delay)
 		end
-		end)
-		return nil
 	end)
 	if not ok then
 		self._scheduled = false
@@ -25697,8 +25685,7 @@ local function schedule_heartbeat(self: ClientType, claim: any, delay_override: 
 	if not self._running or self._claim ~= claim then return end
 	self._heartbeat_generation += 1
 	local generation = self._heartbeat_generation
-	local ok, schedule_error = pcall(function()
-		self._schedule(delay_override or self._lease_seconds / 3, function()
+	local ok, schedule_error = pcall(self._schedule, delay_override or self._lease_seconds / 3, function()
 		if not self._running or generation ~= self._heartbeat_generation or self._claim ~= claim then return end
 		local rejection_handled = false
 		local deferred, accepted, defer_error = pcall(self._defer_lease_renewal, self._lease_seconds / 2, function()
@@ -25732,8 +25719,6 @@ local function schedule_heartbeat(self: ClientType, claim: any, delay_override: 
 			end
 			schedule_heartbeat(self, claim, 0.1)
 		end
-		end)
-		return nil
 	end)
 	if not ok then
 		if self._on_error ~= nil then pcall(self._on_error, "heartbeat scheduling failed: " .. tostring(schedule_error)) end
@@ -26013,7 +25998,7 @@ RecordStore._internals.transient_messaging = (function()
 		_max_message_bytes: number, _on_error: ((string, any) -> ())?,
 		_subscriptions: { [number]: any }, _next_subscription: number, _closed: boolean,
 		PublishStreamWakeup: (self: ClientType, stream: string, partition: number, sequence: number?) -> any,
-		SubscribeStreamWakeups: (self: ClientType, stream: string, partition: number, handler: (any, any) -> ()) -> any,
+		SubscribeStreamWakeups: (self: ClientType, stream: string, partition: number, handler: (any, any) -> any) -> any,
 		Close: (self: ClientType) -> (),
 	}
 	local function finite(value: any): boolean
@@ -26135,7 +26120,7 @@ RecordStore._internals.transient_messaging = (function()
 		if not ok then return { code = "unknown", message = tostring(publish_error), message_id = message_id, topic_hash = topic } end
 		return { code = "published", message_id = message_id, topic_hash = topic }
 	end
-	function Client.SubscribeStreamWakeups(self: ClientType, stream: string, partition: number, handler: (any, any) -> ()): any
+	function Client.SubscribeStreamWakeups(self: ClientType, stream: string, partition: number, handler: (any, any) -> any): any
 		if self._closed then return { code = "closed" } end
 		if not valid_text(stream, MAX_STREAM_NAME_BYTES) then return { code = "invalid", message = "stream must be 1..96 bytes" } end
 		if not integer_at_least(partition, 1) then return { code = "invalid", message = "partition must be a positive integer" } end
@@ -26155,10 +26140,7 @@ RecordStore._internals.transient_messaging = (function()
 				version = envelope.version, kind = "wakeup", message_id = envelope.message_id,
 				sender = envelope.sender, sent_at = message.Sent,
 			})
-			local handler_ok, handler_error = pcall(function()
-				handler(payload, context)
-				return nil
-			end)
+			local handler_ok, handler_error = pcall(handler, payload, context)
 			if not handler_ok and self._on_error ~= nil then pcall(self._on_error, tostring(handler_error), context) end
 		end
 		local ok, connection = pcall(function() return self._service:SubscribeAsync(topic, callback) end)
