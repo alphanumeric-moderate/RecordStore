@@ -17,7 +17,7 @@ jobs:
     uses: antongulin/robin/.github/workflows/review.yml@main
     with:
       agent-mode: "off"
-      reasoning-effort: "off"
+      reasoning-effort: "low"
       max-output-tokens: "16384"
     secrets:
       LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
