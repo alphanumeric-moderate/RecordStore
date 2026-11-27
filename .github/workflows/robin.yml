@@ -21,7 +21,7 @@ jobs:
       # Other PR-open reviews retain the existing diff-only mode.
       agent-mode: ${{ ((github.event_name == 'pull_request' && github.event.pull_request.head.ref == 'audit/recordstore-full-luau-potential-2026-11-27') || (github.event_name == 'issue_comment' && startsWith(github.event.comment.body, '/robin'))) && 'auto' || 'off' }}
       reasoning-effort: "low"
-      max-output-tokens: "16384"
+      max-output-tokens: "8192"
       agent-max-turns: "60"
       review-on-synchronize: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.ref != 'audit/recordstore-full-luau-potential-2026-11-27' }}
       review-instructions: |
