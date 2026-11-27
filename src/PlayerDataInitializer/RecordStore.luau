@@ -3360,6 +3360,11 @@ do
 	local VERSION = 2
 	local MAX_KEY_LENGTH = 50
 	local DEFAULT_MAX_SEGMENTS = 64
+	local PRIORITY_RANK: { [string]: number } = {
+		high = 1,
+		normal = 2,
+		background = 3,
+	}
 	local DEFAULT_SEGMENT_MAX_MESSAGES = 32
 	local DEFAULT_PREPARATION_SHARDS = 16
 	local DEFAULT_PREPARATION_ENTRIES = 16
@@ -5850,7 +5855,7 @@ do
 		if rows_error ~= nil then
 			return {}, ok(storage_error_code(rows_error), nil, nil, rows_error)
 		end
-		local result: { EmbeddedMailboxDict } = {}
+		local result: { EmbeddedMailboxDict } = table.create(#rows)
 		local seen: { [string]: boolean } = {}
 		for _, row in rows do
 			local route = tostring(row.route)
@@ -5908,13 +5913,12 @@ do
 					return {}, ok("corrupt", route, nil, "ready mailbox message contains malformed priority, counter, time or ordering metadata")
 				end
 				seen[route] = true
-				table.insert(result, self:_record_snapshot(record))
+				result[#result + 1] = self:_record_snapshot(record)
 			end
 		end
-		local rank = { high = 1, normal = 2, background = 3 }
 		table.sort(result, function(left, right)
-			local left_rank = rank[tostring(left.Priority)] :: number
-			local right_rank = rank[tostring(right.Priority)] :: number
+			local left_rank = PRIORITY_RANK[tostring(left.Priority)]
+			local right_rank = PRIORITY_RANK[tostring(right.Priority)]
 			if left_rank ~= right_rank then return left_rank < right_rank end
 			if left.CreatedAt ~= right.CreatedAt then
 				return (left.CreatedAt :: number) < (right.CreatedAt :: number)
@@ -6310,12 +6314,11 @@ do
 			return ok("empty", nil, nil, nil)
 		end
 		local now = self:_now()
-		local rank = { high = 1, normal = 2, background = 3 }
 		table.sort(queue, function(left, right)
 			local left_age = math.max(0, now - (left.CreatedAt :: number))
 			local right_age = math.max(0, now - (right.CreatedAt :: number))
-			local left_rank = rank[tostring(left.Priority)] or 2
-			local right_rank = rank[tostring(right.Priority)] or 2
+			local left_rank = PRIORITY_RANK[tostring(left.Priority)] or 2
+			local right_rank = PRIORITY_RANK[tostring(right.Priority)] or 2
 			if left_age >= (self.options.priority_aging_ms :: number) * 2 then left_rank = 1
 			elseif left_age >= (self.options.priority_aging_ms :: number) then left_rank = math.min(left_rank, 2) end
 			if right_age >= (self.options.priority_aging_ms :: number) * 2 then right_rank = 1
