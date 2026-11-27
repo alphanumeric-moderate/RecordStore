@@ -30,6 +30,26 @@ end
 assert(renewal_advice:LeaseRenewalAdvice().lease_renewal_p95_ms == 288,
 	"lease advice did not use the most recent latency samples")
 
+local percentile_cache = new_scheduler()
+for sample = 1, 256 do
+	percentile_cache:Observe("lease_renewal", true, sample)
+end
+local original_sort = table.sort
+local sort_calls = 0
+table.sort = function(values, comparator)
+	sort_calls += 1
+	return original_sort(values, comparator)
+end
+local first_advice = percentile_cache:LeaseRenewalAdvice()
+local first_sort_calls = sort_calls
+local second_advice = percentile_cache:LeaseRenewalAdvice()
+local second_sort_calls = sort_calls
+table.sort = original_sort
+assert(first_advice.lease_renewal_p95_ms == 244 and second_advice.lease_renewal_p95_ms == 244,
+	"cached P95 changed the exact percentile")
+assert(first_sort_calls == 1 and second_sort_calls == first_sort_calls,
+	"unchanged latency samples were sorted again instead of reusing the exact cached P95")
+
 local queue = new_scheduler()
 for sample = 1, 300 do
 	now_ms += sample
