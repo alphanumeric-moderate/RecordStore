@@ -833,7 +833,7 @@ enqueue(failed_flow, { id = "must-not-run", owner_id = "flow-owner", lane = "hig
 local failing = failed_flow:TakeNext()
 assert(failing ~= nil and failing.id == "failing-step", "workflow dependency was selected out of order")
 assert(failed_flow:MarkCompleted(failing.id, "unknown"), "unknown prerequisite outcome did not terminalize")
-	assert(failed_flow.known["blocked"].failed_dependency_id == "failing-step",
+	assert(failed_flow.known["must-not-run"].failed_dependency_id == "failing-step",
 		"failed prerequisite was not propagated through the reverse waiter index")
 local blocked, blocked_status = failed_flow:TakeNext()
 assert(blocked ~= nil and blocked_status == "dependency_failed", "dependent work did not return dependency_failed")
