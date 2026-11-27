@@ -460,6 +460,35 @@ end
 do
 	local now = 1_800_000_000_000
 	local governor = Scheduler.new({ now_ms = function() return now end })
+	local prior_policy = governor:Stats().policy
+	local configured, configure_error = governor:SetPolicy({
+		revision = prior_policy.revision + 1,
+		mode = "read_only",
+	})
+	assert(configured, "post-policy enqueue setup failed: " .. tostring(configure_error))
+
+	local accepted = governor:Enqueue({
+		id = "terminal-scan-enqueued-after-policy",
+		owner_id = "terminal-scan-after-policy-owner",
+		lane = "normal",
+		work_class = "maintenance",
+	})
+	assert(accepted.code == "accepted", "simple work enqueued after policy change was not accepted")
+	local item = governor.known["terminal-scan-enqueued-after-policy"]
+	assert(governor.terminal_preflight_count == 1
+		and governor.terminal_preflight_items[item] == true,
+		"enqueue did not index a simple item rejected by the current policy")
+	local rejected, rejected_status = governor:TakeNext()
+	assert(rejected == item and rejected_status == "admission_rejected"
+		and rejected.terminal_result.code == "read_only",
+		"simple work enqueued after the policy change bypassed terminal admission")
+	assert(governor.terminal_preflight_count == 0,
+		"post-policy admission rejection retained a terminal-preflight candidate")
+end
+
+do
+	local now = 1_800_000_000_000
+	local governor = Scheduler.new({ now_ms = function() return now end })
 	local accepted = governor:Enqueue({
 		id = "terminal-scan-expiring-item",
 		owner_id = "terminal-scan-expiring-owner",
@@ -698,6 +727,23 @@ do
 		"terminal-index churn lost the long-lived candidate")
 	assert(governor.terminal_preflight_tail <= 64,
 		"terminal-index tombstones grew beyond the bounded compaction threshold")
+	local indexed_count = 0
+	for item in pairs(governor.terminal_preflight_items) do
+		indexed_count += 1
+		local position = governor.terminal_preflight_positions[item]
+		assert(position ~= nil and governor.terminal_preflight_order[position] == item,
+			"terminal-index churn left an item without a reciprocal order position")
+	end
+	assert(indexed_count == governor.terminal_preflight_count,
+		"terminal-index churn left its item set and count inconsistent")
+	for position = 1, governor.terminal_preflight_tail do
+		local item = governor.terminal_preflight_order[position]
+		if item ~= nil then
+			assert(governor.terminal_preflight_items[item] == true
+				and governor.terminal_preflight_positions[item] == position,
+				"terminal-index churn left a stale or mismatched order entry")
+		end
+	end
 end
 
 print("[scheduler-bugfix] policy atomicity, incomplete admission estimates, and false-lane rejection passed.")
