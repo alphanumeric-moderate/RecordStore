@@ -486,6 +486,88 @@ do
 		"post-policy admission rejection retained a terminal-preflight candidate")
 end
 
+
+do
+	local governor = new_governor()
+	local initial_policy = governor:Stats().policy
+	local configured, configure_error = governor:SetPolicy({
+		revision = initial_policy.revision + 1,
+		queue_capacity = 32,
+	})
+	assert(configured, "queue-compaction policy setup failed: " .. tostring(configure_error))
+	local empty, empty_status = governor:TakeNext()
+	assert(empty == nil and empty_status == "empty",
+		"queue-compaction setup did not complete its policy revision sweep")
+
+	local expected = {}
+	for index = 1, 32 do
+		local id = "terminal-policy-compaction-original-" .. tostring(index)
+		local accepted = governor:Enqueue({
+			id = id,
+			owner_id = id .. "-owner",
+			lane = "normal",
+			work_class = "maintenance",
+		})
+		assert(accepted.code == "accepted", "queue-compaction original item was not accepted")
+		expected[id] = true
+	end
+	for index = 1, 24 do
+		local selected, status = governor:TakeNext()
+		assert(selected ~= nil and status == "success",
+			"queue-compaction fixture could not dispatch its initial work")
+		assert(governor:MarkCompleted(selected.id, "success"),
+			"queue-compaction fixture could not complete its initial work")
+		expected[selected.id] = nil
+	end
+	assert(governor.queue_count == 8 and governor.queue_tail == 32,
+		"queue-compaction fixture did not retain eight sparse queue slots")
+
+	local latest_id = "terminal-policy-compaction-newest"
+	local latest = governor:Enqueue({
+		id = latest_id,
+		owner_id = latest_id .. "-owner",
+		lane = "normal",
+		work_class = "maintenance",
+	})
+	assert(latest.code == "accepted", "queue-compaction newest item was not accepted")
+	expected[latest_id] = true
+	assert(governor.queue_count == 9 and governor.queue_tail == 33,
+		"queue-compaction fixture did not extend the sparse queue beyond capacity")
+
+	local active_policy = governor:Stats().policy
+	local read_only, read_only_error = governor:SetPolicy({
+		revision = active_policy.revision + 1,
+		mode = "read_only",
+	})
+	assert(read_only, "queue-compaction read-only policy update failed: " .. tostring(read_only_error))
+
+	local rejected_count = 0
+	local compacted = false
+	while rejected_count < 9 do
+		local rejected, rejected_status = governor:TakeNext()
+		assert(rejected ~= nil and rejected_status == "admission_rejected"
+			and rejected.terminal_result.code == "read_only",
+			"policy revision sweep skipped queued work after queue storage compaction")
+		assert(expected[rejected.id] == true,
+			"policy revision sweep rejected an unexpected or duplicate work item")
+		expected[rejected.id] = nil
+		rejected_count += 1
+		if rejected.id == latest_id then
+			compacted = true
+			assert(governor.queue_count == 8 and governor.queue_tail == 8,
+				"terminal removal did not compact the sparse queue as expected")
+		end
+	end
+	assert(compacted, "newest terminal item did not exercise queue compaction")
+	assert(next(expected) == nil, "policy revision sweep left queued work unchecked")
+	assert(governor.terminal_preflight_policy_revision == governor.policy.revision,
+		"policy revision sweep did not restore its fast-path revision after compaction")
+	local none, none_status = governor:TakeNext()
+	assert(none == nil and none_status == "empty",
+		"policy revision sweep left an item dispatchable after read-only rejection")
+end
+
+
 do
 	local now = 1_800_000_000_000
 	local governor = Scheduler.new({ now_ms = function() return now end })
