@@ -134,5 +134,11 @@ expect(diagnostics[#diagnostics].category == "invalid_event",
 	"unsafe destination UserId was not rejected at the outbox adapter boundary")
 
 destination:Close()
+local pending_after_close = table.clone(event)
+pending_after_close.State = "pending"
+expect(not adapter.Dispatch(pending_after_close),
+	"outbox adapter dispatched to a destination after its session closed")
+expect(diagnostics[#diagnostics].category == "destination_mailbox_unavailable",
+	"closed destination session was not rejected by its activation guard")
 Mock.reset()
 Shim.close()
