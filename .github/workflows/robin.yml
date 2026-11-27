@@ -21,17 +21,40 @@ jobs:
       agent-mode: ${{ ((github.event_name == 'pull_request' && github.event.pull_request.head.ref == 'audit/recordstore-full-luau-potential-2026-11-27') || (github.event_name == 'issue_comment' && startsWith(github.event.comment.body, '/robin'))) && 'auto' || 'off' }}
       reasoning-effort: "low"
       max-output-tokens: "16384"
-      agent-max-turns: "40"
+      agent-max-turns: "60"
       review-instructions: |
-        For changes to src/PlayerDataInitializer/RecordStore.luau, do not review
-        the diff alone. Read the complete target file using repository tools in
-        bounded chunks. Also inspect AGENTS.md, README.md,
+        MANDATORY FULL-MODULE COVERAGE: This PR's deliverable is an audit of the
+        entire RecordStore core, even though runtime source is intentionally not
+        changed in this PR. You MUST inspect the source file itself, not infer
+        coverage from the diff, documentation, search results or prior reports.
+
+        Call the read_file repository tool on the exact path
+        src/PlayerDataInitializer/RecordStore.luau. The file is approximately
+        26,193 lines / 1.06 MB. Robin's read_file returns at most 2,000 lines
+        per call and supplies a continuation location. Follow that continuation
+        and read successive chunks until the final source line is reached.
+        The expected coverage is roughly 14 consecutive reads, with no gaps.
+        Preserve a line-range coverage ledger during context compaction. Do not
+        substitute grep or a filename search for reading the file. Do not stop
+        after inspecting the PR diff or the audit document.
+
+        After the complete module read, inspect AGENTS.md, README.md,
         docs/performance/recordstore-optimization-program.md, relevant callers,
-        tests, regression runners and benchmarks.
+        tests, regression runners and benchmarks. Use repository search to trace
+        callers and related definitions where required.
+
         Classify findings under Luau optimizations, redesign candidates,
         removal candidates, type-check/static analysis, correctness/security,
         and test/benchmark coverage. Give exact paths and line references,
-        concrete failure or cost reasoning, severity and confidence.
+        concrete failure or cost reasoning, severity and confidence. Prioritize
+        correctness bugs and unsound types as well as performance opportunities.
+
+        The final review MUST state the exact RecordStore.luau line ranges
+        inspected and whether coverage reached EOF. If tool limits prevent
+        complete coverage, explicitly mark the review incomplete and identify
+        the ranges not read; never report a clean full-module review without
+        that coverage evidence.
+
         Do not recommend mechanical loop rewrites, broad @native enablement,
         stale caches, or feature removal without workload, API and persisted-data
         compatibility evidence. Preserve RecordStore durability, UpdateAsync
