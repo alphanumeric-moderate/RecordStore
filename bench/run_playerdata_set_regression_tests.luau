@@ -283,7 +283,48 @@ do
 	assert(default_harness.controller:Shutdown(), "default PlayerData regression controller failed to shut down")
 end
 
-assert(controller:Shutdown(), "PlayerData.Set regression controller failed to shut down")
+-- Shutdown during an in-progress advanced-scheduler inspection must prevent player
+-- signal connections and profile loading after the startup coroutine resumes.
+do
+	local snapshot_calls = 0
+	local startup_record_store = {
+		get_scheduler_snapshot = function()
+			snapshot_calls += 1
+			coroutine.yield()
+			return nil
+		end,
+		configure_scheduler_policy = function() return "success", nil end,
+		configure_scheduler_rollout = function() return "success", nil end,
+		set_scheduler_enabled = function() return true, nil end,
+	}
+	local startup_harness = create_harness(true, nil, {
+		RecordStore = startup_record_store,
+	}, true)
+	local connection_count = 0
+	for _, signal in ipairs({ startup_harness.players.PlayerAdded, startup_harness.players.PlayerRemoving }) do
+		local connect = signal.Connect
+		function signal:Connect(callback)
+			connection_count += 1
+			return connect(self, callback)
+		end
+	end
+
+	local startup = coroutine.create(function()
+		return startup_harness.controller:Start()
+	end)
+	local resumed, result = coroutine.resume(startup)
+	assert(resumed and coroutine.status(startup) == "suspended" and snapshot_calls == 1,
+		"PlayerData startup did not pause during scheduler inspection")
+	assert(startup_harness.controller:Shutdown(),
+		"PlayerData shutdown during scheduler inspection failed")
+	resumed, result = coroutine.resume(startup)
+	assert(resumed and coroutine.status(startup) == "dead" and result == false,
+		"PlayerData startup continued after shutdown")
+	assert(connection_count == 0,
+		"PlayerData connected player signals after shutdown")
+	assert(startup_harness.get_record_options() == nil,
+		"PlayerData began loading a profile after startup was cancelled")
+end
 
 print("[PlayerData.Set] Lune integration regression passed")
 
