@@ -86,6 +86,9 @@ type SampleWindow = {
 	values: { number },
 	head: number,
 	count: number,
+	revision: number,
+	cached_p95_revision: number?,
+	cached_p95: number?,
 }
 local RecordStoreScheduler: EmbeddedSchedulerModule = {} :: EmbeddedSchedulerModule
 do
@@ -109,7 +112,7 @@ do
 	local SAMPLE_WINDOW_CAPACITY = 256
 
 	local function new_sample_window(): SampleWindow
-		return { values = {}, head = 1, count = 0 }
+		return { values = {}, head = 1, count = 0, revision = 0 }
 	end
 
 	local function append_sample(window: SampleWindow, value: number)
@@ -117,10 +120,11 @@ do
 			local index = (window.head - 1 + window.count) % SAMPLE_WINDOW_CAPACITY + 1
 			window.values[index] = value
 			window.count += 1
-			return
+		else
+			window.values[window.head] = value
+			window.head = window.head % SAMPLE_WINDOW_CAPACITY + 1
 		end
-		window.values[window.head] = value
-		window.head = window.head % SAMPLE_WINDOW_CAPACITY + 1
+		window.revision += 1
 	end
 
 	local function sample_window_values(window: SampleWindow): { number }
@@ -130,6 +134,19 @@ do
 			values[index] = window.values[source_index]
 		end
 		return values
+	end
+
+	local function sample_window_p95(window: SampleWindow): number?
+		if window.count == 0 then return nil end
+		if window.cached_p95_revision == window.revision then
+			return window.cached_p95
+		end
+		local ordered = sample_window_values(window)
+		table.sort(ordered)
+		local percentile = ordered[math.ceil(#ordered * 0.95)]
+		window.cached_p95 = percentile
+		window.cached_p95_revision = window.revision
+		return percentile
 	end
 
 	local function key_count(value: any): number
@@ -1161,10 +1178,8 @@ do
 			if cached ~= nil then return cached end
 			local estimate = self.latency_ewma[metric_kind] or 0
 			local samples = self.latency_samples_by_operation[metric_kind]
-			if samples ~= nil and samples.count > 0 then
-				local ordered = sample_window_values(samples)
-				table.sort(ordered)
-				estimate = math.max(estimate, ordered[math.ceil(#ordered * 0.95)] or 0)
+			if samples ~= nil then
+				estimate = math.max(estimate, sample_window_p95(samples) or 0)
 			end
 			cache[metric_kind] = estimate
 			return estimate
@@ -2565,10 +2580,8 @@ do
 		function governor:LeaseRenewalAdvice()
 			local function p95_for(operation: string): number?
 				local source = self.latency_samples_by_operation[operation]
-				if source == nil or source.count == 0 then return nil end
-				local samples = sample_window_values(source)
-				table.sort(samples)
-				return samples[math.clamp(math.ceil(#samples * 0.95), 1, #samples)]
+				if source == nil then return nil end
+				return sample_window_p95(source)
 			end
 			return {
 				lease_renewal_p95_ms = p95_for("lease_renewal"),
