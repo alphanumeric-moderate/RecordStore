@@ -3,7 +3,7 @@ name: Robin
 
 on:
   pull_request:
-    types: [opened, reopened, ready_for_review]
+    types: [opened, reopened, ready_for_review, synchronize]
   issue_comment:
     types: [created]
 
@@ -14,6 +14,7 @@ permissions:
 
 jobs:
   review:
+    if: github.event_name != 'pull_request' || github.event.action != 'synchronize' || github.event.pull_request.head.ref == 'audit/recordstore-full-luau-potential-2026-11-27'
     uses: antongulin/robin/.github/workflows/review.yml@main
     with:
       # Repository-read mode is scoped to this full-module audit PR and manual /robin.
