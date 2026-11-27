@@ -443,9 +443,13 @@ Lune, local mocks and hosted CPU simulations do not prove Roblox VM native compi
 
 ## 10. Review process and implementation verification
 
-Robin Review was intentionally not run for the Phase A–C implementation tranche, as requested. The branch-specific workflow skips pull-request synchronize events for this audit branch; a manual `/robin` command remains possible but was not used.
+Robin Review was intentionally not run during the Phase A–C implementation work, as requested. The workflow configuration has since been corrected: synchronize events on this audit branch now invoke agent mode, and the workflow log confirms that the repository snapshot was extracted successfully.
 
-Implementation verification is based on the repository's strict Luau type-check and targeted/full regression workflows. This is distinct from a complete independent source review and from Roblox Studio/MicroProfiler acceptance. The branch's CI results are linked from the PR description; no live Roblox performance claim is made here.
+The first corrected run still failed before the model returned a first response. Robin attempted five agent requests, then five diff-only fallback requests; all failed with `OpenRouter stall: no first response`. The workflow and repository-snapshot stages therefore ran, but no review was produced. This error is not evidence that the required source reads failed: the log shows failure before the first agent tool turn could complete.
+
+Manual `/robin` commands are evaluated using the default-branch workflow. PR #83 updates that workflow and adds a PR-#82-specific full-module instruction file; it must be merged before a manual command on PR #82 uses the new agent-mode configuration. A successful provider response and complete file-coverage ledger are still required before counting Robin as a full-module review.
+
+Implementation verification remains based on strict Luau type-check and targeted/full regression workflows. This is distinct from an independent source review and from Roblox Studio/MicroProfiler acceptance. No live Roblox performance claim is made here.
 
 ## 11. Ordered implementation roadmap
 
