@@ -3,7 +3,7 @@ name: Robin
 
 on:
   pull_request:
-    types: [opened, reopened, ready_for_review]
+    types: [opened, reopened, ready_for_review, synchronize]
   issue_comment:
     types: [created]
 
@@ -16,9 +16,14 @@ jobs:
   review:
     uses: antongulin/robin/.github/workflows/review.yml@main
     with:
-      agent-mode: "off"
+      # Agent mode is limited to the full-module audit PR and explicit /robin commands on PR #82.
+      agent-mode: ${{ ((github.event_name == 'pull_request' && github.event.pull_request.head.ref == 'audit/recordstore-full-luau-potential-2026-11-27') || (github.event_name == 'issue_comment' && github.event.issue.number == 82 && (startsWith(github.event.comment.body, '/robin') || startsWith(github.event.comment.body, '/review'))) ) && 'auto' || 'off' }}
       reasoning-effort: "low"
-      max-output-tokens: "16384"
+      max-output-tokens: "8192"
+      agent-max-turns: "60"
+      # Robin itself filters issue_comment to authorized slash commands.
+      review-on-synchronize: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.ref == 'audit/recordstore-full-luau-potential-2026-11-27' }}
+      review-instructions-file: ${{ ((github.event_name == 'pull_request' && github.event.pull_request.head.ref == 'audit/recordstore-full-luau-potential-2026-11-27') || (github.event_name == 'issue_comment' && github.event.issue.number == 82)) && '.github/robin-recordstore-full-audit.md' || '' }}
     secrets:
       LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
       LLM_BASE_URL: ${{ secrets.LLM_BASE_URL }}
