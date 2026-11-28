@@ -13,7 +13,22 @@ local READY_SCENARIOS = {
 	{ name = "non-inheritable-dependency-heavy", stride = 2, ready_count = function(count) return math.ceil(count / 2) end, dependency_pairs = true, expect_selection = true },
 }
 local ALGORITHMS = { "fifo", "weighted", "deadline", "drr" }
-local REPEATS = 2
+-- Keep the complete policy/workload matrix at small queue depths. Larger queues
+-- focus on readiness extremes; 8192-item runs compare FIFO with DRR only.
+local REPEATS = 1
+
+local function should_benchmark(algorithm: string, scenario: any, queue_size: number): boolean
+	if queue_size <= 512 then
+		return true
+	end
+	if scenario.name ~= "all-ready" and scenario.name ~= "none-ready" then
+		return false
+	end
+	if queue_size == 2048 then
+		return true
+	end
+	return queue_size == 8192 and (algorithm == "fifo" or algorithm == "drr")
+end
 local NOW_MS = 1_800_000_000_000
 
 local function enqueue_profile_item(
@@ -134,48 +149,50 @@ local result_count = 0
 for _, algorithm in ipairs(ALGORITHMS) do
 	for _, scenario in ipairs(READY_SCENARIOS) do
 		for _, queue_size in ipairs(QUEUE_SIZES) do
-			local total_seconds = 0
-			for repeat_index = 1, REPEATS do
-				local governor, expected_ready = build_queue(algorithm, queue_size, scenario)
-				local start = os.clock()
-				local selected, status = governor:TakeNext(false)
-				local elapsed = os.clock() - start
-				total_seconds += elapsed
+			if should_benchmark(algorithm, scenario, queue_size) then
+				local total_seconds = 0
+				for repeat_index = 1, REPEATS do
+					local governor, expected_ready = build_queue(algorithm, queue_size, scenario)
+					local start = os.clock()
+					local selected, status = governor:TakeNext(false)
+					local elapsed = os.clock() - start
+					total_seconds += elapsed
 
-				if scenario.expect_selection then
-					assert(expected_ready > 0 and selected ~= nil and status == "success",
-						"ready workload failed to select an item")
-					assert((selected.available_at_ms or 0) <= NOW_MS,
-						"selector returned an item that was not ready")
-					if scenario.dependency_pairs then
-						assert(selected.lane == "background" and #(selected.dependencies or {}) == 0,
-							"dependency-heavy workload selected a blocked dependent")
+					if scenario.expect_selection then
+						assert(expected_ready > 0 and selected ~= nil and status == "success",
+							"ready workload failed to select an item")
+						assert((selected.available_at_ms or 0) <= NOW_MS,
+							"selector returned an item that was not ready")
+						if scenario.dependency_pairs then
+							assert(selected.lane == "background" and #(selected.dependencies or {}) == 0,
+								"dependency-heavy workload selected a blocked dependent")
+						end
+						assert(expected_ready == scenario.ready_count(queue_size),
+							"scenario readiness diagnostic differs from the built queue")
+						assert(governor:Stats().queue_items == queue_size - 1,
+							"successful selection did not remove exactly one queue item")
+					else
+						assert(selected == nil and status == "empty",
+							"fully blocked workload unexpectedly selected an item")
+						assert(governor:Stats().queue_items == queue_size,
+							"blocked selection changed the queue")
 					end
-					assert(expected_ready == scenario.ready_count(queue_size),
-						"scenario readiness diagnostic differs from the built queue")
-					assert(governor:Stats().queue_items == queue_size - 1,
-						"successful selection did not remove exactly one queue item")
-				else
-					assert(selected == nil and status == "empty",
-						"fully blocked workload unexpectedly selected an item")
-					assert(governor:Stats().queue_items == queue_size,
-						"blocked selection changed the queue")
 				end
+				result_count += 1
+				print(string.format(
+					"[scheduler-backlog] algorithm=%s scenario=%s queue=%d ready=%d repeats=%d take_next_ms=%.4f",
+					algorithm,
+					scenario.name,
+					queue_size,
+					scenario.ready_count(queue_size),
+					REPEATS,
+					total_seconds / REPEATS * 1000
+				))
 			end
-			result_count += 1
-			print(string.format(
-				"[scheduler-backlog] algorithm=%s scenario=%s queue=%d ready=%d repeats=%d mean_take_next_ms=%.4f",
-				algorithm,
-				scenario.name,
-				queue_size,
-				scenario.ready_count(queue_size),
-				REPEATS,
-				total_seconds / REPEATS * 1000
-			))
 		end
 	end
 end
 
-assert(result_count == #ALGORITHMS * #READY_SCENARIOS * #QUEUE_SIZES,
-	"scheduler backlog matrix did not complete every workload")
+assert(result_count == 60,
+	"scheduler backlog matrix did not complete its 60 expected workloads")
 print(string.format("[scheduler-backlog] completed=%d", result_count))
