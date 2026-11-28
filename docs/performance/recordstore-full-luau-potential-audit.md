@@ -559,21 +559,22 @@ All five Hyperfine samples completed with zero command exit codes. The PR Benche
 
 ### Benchmark workflow correction and current verification limits
 
-**Paired benchmark evidence on the current implementation head (Bencher, Ubuntu 24.04, Hyperfine median, five runs).** The comparison used main baseline SHA `4813492555759ed4ba70c3ec03d9d32be622bc0d` and PR head `e8a8b54657d3969c8d71c730e3ed8de3b76bc6b6`; see the [Bencher report](https://bencher.dev/perf/alphanumeric-moderate-s-project/reports/01a2229a-dc8b-70b4-bcfb-6c7d68375d8c) and [GitHub Actions run](https://github.com/alphanumeric-moderate/RecordStore/actions/runs/46156246595).
+**Paired benchmark evidence on the current source implementation (Bencher, Ubuntu 24.04, Hyperfine median, five runs).** The run used main baseline SHA `4813492555759ed4ba70c3ec03d9d32be622bc0d` and source head `e8a8b54657d3969c8d71c730e3ed8de3b76bc6b6` (the following audit-only commit does not change source): see the [Bencher report](https://bencher.dev/perf/alphanumeric-moderate-s-project/reports/01a222a5-9ef1-77ac-8fa4-352e6d4ed65d) and [GitHub Actions run](https://github.com/alphanumeric-moderate/RecordStore/actions/runs/46156962770).
 
 | Workload | Main baseline | PR result | Change |
 |---|---:|---:|---:|
-| Large profile update/save | 238.77 ms | 212.22 ms | -11.1% |
-| Update validation pipeline | 329.64 ms | 335.30 ms | +1.7% |
-| Patch validation pipeline | 239.52 ms | 243.90 ms | +1.8% |
-| Reconcile pipeline | 666.73 ms | 679.53 ms | +1.9% |
-| Legacy migration/history | 117.26 ms | 128.62 ms | +9.7% |
-| Durable Streams batch publish | 4,839.92 ms | 4,855.94 ms | +0.3% |
-| Durable Streams single publish | 62,250.30 ms | 62,354.51 ms | +0.2% |
+| Large profile update/save | 238.77 ms | 201.02 ms | -15.8% |
+| Update validation pipeline | 329.64 ms | 323.65 ms | -1.8% |
+| Patch validation pipeline | 239.52 ms | 234.36 ms | -2.2% |
+| Reconcile pipeline | 666.73 ms | 661.11 ms | -0.8% |
+| Legacy migration/history | 117.26 ms | 119.04 ms | +1.5% |
+| Durable Streams batch publish | 4,839.92 ms | 4,804.40 ms | -0.7% |
+| Durable Streams single publish | 62,250.30 ms | 61,854.51 ms | -0.6% |
+| DRR lane-cardinality diagnostic | No baseline | 6,170.82 ms | New benchmark |
 
-The report contains no Bencher alerts. The Update/Patch/Reconcile and Durable Streams differences are within their configured limits; legacy migration/history is higher and should remain monitored rather than being attributed to the DRR change. These are hosted Lune/Hyperfine observations, not Roblox DataStore or Script Profiler evidence.
+The report contains no Bencher alerts. Existing paired workloads remain within their configured alert limits. The new DRR aggregate row has no historical baseline yet, so it is a recorded observation rather than a regression/speedup claim. These are hosted Lune/Hyperfine observations, not Roblox DataStore or Script Profiler evidence.
 
-The direct DRR lane-cardinality diagnostic completed all 17 valid queue-depth × lane-count shapes. The workflow also registers a Hyperfine command for it, but the current published report does not contain a separate lane-cardinality benchmark row. Treat its direct results as diagnostic output only; no aggregate time series or threshold claim is made for that metric yet.
+The direct DRR lane-cardinality diagnostic completed all 17 valid queue-depth × lane-count shapes. It is also present as a separate published Hyperfine/Bencher benchmark row. Its 6,170.82 ms aggregate is the time for the complete 17-shape diagnostic command, not a single `TakeNext` latency; the per-shape selection medians are printed by the direct diagnostic step.
 
 The CodSpeed CPU-simulation action previously hit the explicit 16-minute step timeout (about 971 seconds) on both the base and PR revisions. The step timeout was raised to 35 minutes and the job timeout to 40 minutes, and the duplicate PlayerData.Set benchmark entry was removed. The current-head simulation remains in progress; do not report it as passing until its workflow run completes.
 
