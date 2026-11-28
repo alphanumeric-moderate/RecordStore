@@ -167,22 +167,23 @@ assert(maximum_cost_drr:SetPolicy({
 	revision = maximum_cost_policy.revision + 1,
 	algorithm = "drr",
 	drr_quantum = 1,
-	max_item_cost = 256,
+	max_item_cost = 32,
 }), "maximum-cost DRR policy was rejected")
 enqueue(maximum_cost_drr, {
 	id = "minimum-weight-maximum-cost",
 	owner_id = "minimum-weight-owner",
-	work_class = "minimum-weight",
+	work_class = "critical",
+	operation_class = "tracing",
 	lane = "background",
 	service_class = "best_effort",
-	cost = 256,
+	cost = 32,
 })
 local maximum_cost_item, maximum_cost_status = maximum_cost_drr:TakeNext(false)
 assert(maximum_cost_item ~= nil and maximum_cost_status == "success"
 	and maximum_cost_item.id == "minimum-weight-maximum-cost",
 	"minimum-weight DRR lane did not admit a maximum-cost item at the exact round bound")
 local expected_maximum_cost_lane_key = "20:minimum-weight-owner"
-	.. "14:minimum-weight"
+	.. "8:critical"
 	.. "10:background"
 	.. "11:best_effort"
 assert(maximum_cost_drr.drr_deficit[expected_maximum_cost_lane_key] == 0,
