@@ -673,23 +673,23 @@ Treat these as separate layers:
 
 A successful strict typecheck establishes only the first item for the analyzer's modeled program. It does not prove the other three.
 
-Do not claim that \`--!strict\` makes Luau statically sound in the presence of \`any\`, assertions, dynamically loaded/untyped code, inaccurate external definitions, or unvalidated external data. Strict mode makes the checker more demanding; it does not eliminate every escape from the type system.
+Do not claim that `--!strict` makes Luau statically sound in the presence of `any`, assertions, dynamically loaded/untyped code, inaccurate external definitions, or unvalidated external data. Strict mode makes the checker more demanding; it does not eliminate every escape from the type system.
 
 ### 14.2 Mandatory mode for generated and modified code
 
-**Every new, AI-generated, or substantively modified project-owned \`.luau\` source file must start with \`--!strict\` on its first line.**
+**Every new, AI-generated, or substantively modified project-owned `.luau` source file must start with `--!strict` on its first line.**
 
 This applies to runtime modules, server/client scripts, adapters, tests, type-check fixtures, and new benchmark code. It is not optional based on file size, perceived simplicity, or whether the code is "only a test".
 
 - Put the directive at the top of the file, before executable source.
-- Do not generate \`--!nonstrict\` or \`--!nocheck\`.
-- Do not remove an existing \`--!strict\` directive to make a patch typecheck.
+- Do not generate `--!nonstrict` or `--!nocheck`.
+- Do not remove an existing `--!strict` directive to make a patch typecheck.
 - Do not downgrade a strict file when an inference error appears. Correct the inferred contract, add a narrow annotation, improve the boundary type, or fix the analyzer configuration.
 - If a modified legacy project-owned file is not strict, migrate it as part of the change. Resolve its diagnostics rather than copying the old mode forward.
-- Do not use \`--!nocheck\` for fixtures intended to test a solver issue. An expected-negative fixture must itself be parsed and typechecked in strict mode and fail at the specifically declared diagnostic.
+- Do not use `--!nocheck` for fixtures intended to test a solver issue. An expected-negative fixture must itself be parsed and typechecked in strict mode and fail at the specifically declared diagnostic.
 - Type directives control static analysis; they do not change runtime validation, permission checks, or error handling.
 
-The current CI guard is narrower than this policy: the typecheck workflow explicitly asserts \`--!strict\` only for the consolidated \`RecordStore.luau\` file, then analyzes the other included source modules using their declared modes. \`src/AlyaNum/*\` is excluded as pinned upstream source due to annotations unsupported by the pinned analyzer. This policy must not be reported as an already-enforced repository-wide CI invariant. A future CI change may extend the first-line strict guard to all project-owned Luau files, but do not silently edit CI as part of an unrelated source change.
+The current CI guard is narrower than this policy: the typecheck workflow explicitly asserts `--!strict` only for the consolidated `RecordStore.luau` file, then analyzes the other included source modules using their declared modes. `src/AlyaNum/*` is excluded as pinned upstream source due to annotations unsupported by the pinned analyzer. This policy must not be reported as an already-enforced repository-wide CI invariant. A future CI change may extend the first-line strict guard to all project-owned Luau files, but do not silently edit CI as part of an unrelated source change.
 
 Existing vendored or intentionally imported third-party source may retain its upstream mode only when:
 - it is clearly isolated from project-owned code;
@@ -701,40 +701,40 @@ Existing vendored or intentionally imported third-party source may retain its up
 
 Luau has three per-file inference modes:
 
-- \`--!strict\`: performs the most demanding inference/checking mode. It tracks assignments and uses inferred and explicitly annotated types to reject incompatible operations.
-- \`--!nonstrict\`: performs type analysis but is more permissive. When it cannot establish a type for some variables, it may infer \`any\`, allowing otherwise unchecked operations.
-- \`--!nocheck\`: disables type inference/type diagnostics for that file. The program can still fail at runtime.
+- `--!strict`: performs the most demanding inference/checking mode. It tracks assignments and uses inferred and explicitly annotated types to reject incompatible operations.
+- `--!nonstrict`: performs type analysis but is more permissive. When it cannot establish a type for some variables, it may infer `any`, allowing otherwise unchecked operations.
+- `--!nocheck`: disables type inference/type diagnostics for that file. The program can still fail at runtime.
 
-The default mode is nonstrict unless the host/editor/project default is changed. In Roblox Studio, \`Workspace.LuauTypeCheckMode\` sets the default for scripts; the file directive overrides the default. Tooling may also use project or \`.luaurc\` configuration. Therefore, inspecting only a Studio setting or only the file is not sufficient: inspect the directive and the actual analyzer invocation.
+The default mode is nonstrict unless the host/editor/project default is changed. In Roblox Studio, `Workspace.LuauTypeCheckMode` sets the default for scripts; the file directive overrides the default. Tooling may also use project or `.luaurc` configuration. Therefore, inspecting only a Studio setting or only the file is not sufficient: inspect the directive and the actual analyzer invocation.
 
-Do not describe nonstrict as "types only apply to annotated variables" in a way that implies all inferred values are safe. Underconstrained values may become \`any\`, and \`any\` permits unchecked use. Do not describe nocheck as a weaker form of strict; it removes the type feedback this policy requires.
+Do not describe nonstrict as "types only apply to annotated variables" in a way that implies all inferred values are safe. Underconstrained values may become `any`, and `any` permits unchecked use. Do not describe nocheck as a weaker form of strict; it removes the type feedback this policy requires.
 
-### 14.4 \`any\`, \`unknown\`, \`never\`, and type escapes
+### 14.4 `any`, `unknown`, `never`, and type escapes
 
 These types have materially different meanings:
 
-- \`any\` is an escape hatch. It can be used as any type and can flow into typed values without the checker enforcing the relationship. It is the largest source of avoidable type unsafety in an otherwise strict file.
-- \`unknown\` can hold any runtime value, but cannot be used as a more specific value until it is narrowed or validated. It is the correct default for data whose shape is not yet established.
-- \`never\` is the bottom type: no value inhabits it. It can represent an impossible branch or a function path that does not return normally.
+- `any` is an escape hatch. It can be used as any type and can flow into typed values without the checker enforcing the relationship. It is the largest source of avoidable type unsafety in an otherwise strict file.
+- `unknown` can hold any runtime value, but cannot be used as a more specific value until it is narrowed or validated. It is the correct default for data whose shape is not yet established.
+- `never` is the bottom type: no value inhabits it. It can represent an impossible branch or a function path that does not return normally.
 
 Rules:
 
-- Use \`unknown\` for decoded JSON, DataStore envelopes, remote arguments, generic external responses, optional service results, and values from a deliberately dynamic boundary.
-- Narrow with \`type\`, \`typeof\`, equality checks, discriminants, \`IsA\`, table-key/value validation, or a dedicated schema parser before using a narrower type.
-- Never replace \`unknown\` with \`any\` just to silence a diagnostic.
-- Do not declare public callbacks as \`(...any) -> any\` when a generic function or explicit argument/return pack can preserve the actual contract.
-- Do not use \`{[string]: any}\` as the default type for application records, service options, configuration, queue items, or protocol envelopes. Use a named structural type, typed indexer, discriminated union, or validated unknown input.
-- Keep legacy \`any\` escapes visible. Do not expand their scope or let them escape into unrelated public APIs.
+- Use `unknown` for decoded JSON, DataStore envelopes, remote arguments, generic external responses, optional service results, and values from a deliberately dynamic boundary.
+- Narrow with `type`, `typeof`, equality checks, discriminants, `IsA`, table-key/value validation, or a dedicated schema parser before using a narrower type.
+- Never replace `unknown` with `any` just to silence a diagnostic.
+- Do not declare public callbacks as `(...any) -> any` when a generic function or explicit argument/return pack can preserve the actual contract.
+- Do not use `{[string]: any}` as the default type for application records, service options, configuration, queue items, or protocol envelopes. Use a named structural type, typed indexer, discriminated union, or validated unknown input.
+- Keep legacy `any` escapes visible. Do not expand their scope or let them escape into unrelated public APIs.
 
 ### 14.5 Type assertions are not runtime casts or validators
 
-The \`::\` operator is a static type assertion/coercion understood by the checker. It does not convert the runtime value, validate its shape, clone it, sanitize it, or make it safe.
+The `::` operator is a static type assertion/coercion understood by the checker. It does not convert the runtime value, validate its shape, clone it, sanitize it, or make it safe.
 
-Luau checks whether an assertion is permitted by its static type relationship; an assertion to \`any\` is an especially broad escape. A type assertion that compiles is not proof that the runtime value satisfies the asserted type.
+Luau checks whether an assertion is permitted by its static type relationship; an assertion to `any` is an especially broad escape. A type assertion that compiles is not proof that the runtime value satisfies the asserted type.
 
 Allowed pattern:
 
-1. Receive an \`unknown\` value.
+1. Receive an `unknown` value.
 2. Check its runtime primitive/class/shape and every required field.
 3. Check semantic constraints, bounds, and cross-field invariants.
 4. Only then construct a typed value, or use a narrow assertion at the exact point where the checker cannot express the established invariant.
@@ -742,8 +742,8 @@ Allowed pattern:
 
 Disallowed pattern:
 
-- \`value :: SomeType\` because the analyzer reports an error;
-- \`value :: any :: SomeType\` to bypass a failed conversion;
+- `value :: SomeType` because the analyzer reports an error;
+- `value :: any :: SomeType` to bypass a failed conversion;
 - asserting an unvalidated network or persisted table to the application profile type;
 - asserting a function, class, metatable, or callback to an unrelated type;
 - broad casts around a whole module/API when only one field or function needs adaptation.
@@ -756,7 +756,7 @@ Every module boundary is an independent contract. Strictness inside one file doe
 
 For a project-owned public ModuleScript:
 
-- Export public type aliases using \`export type\`; keep implementation-only aliases private.
+- Export public type aliases using `export type`; keep implementation-only aliases private.
 - Exported functions and methods must have explicit parameter types and explicit return types. Include all return values, including status/result codes and optional error strings.
 - Public callback types must specify argument types, return types, optionality, and whether multiple returns are part of the contract.
 - Public configuration and options tables must have named field types, required/optional distinctions, and precise string unions for finite choices.
@@ -764,7 +764,7 @@ For a project-owned public ModuleScript:
 - Make ownership and mutation rules visible in the type/API shape where possible: read-only input contracts, separate mutable output values, callback ownership, and whether tables are copied or retained.
 - Keep internal implementation details private. Do not export a type merely because a consumer could use it; export the stable interface only.
 - Consumer modules should import the exported type from the actual module and use it rather than re-declaring a structurally similar local copy.
-- If a shared type creates a module cycle, move it to a low-dependency contract module or invert the dependency. Do not normalize \`require(... ) :: any\` as a module-cycle solution.
+- If a shared type creates a module cycle, move it to a low-dependency contract module or invert the dependency. Do not normalize `require(... ) :: any` as a module-cycle solution.
 - A module's runtime return table and its exported types must agree. Type aliases are not runtime exports and do not add values to the returned table.
 
 Example contract shape:
@@ -794,31 +794,31 @@ Add annotations when:
 - a recursive function needs its return type established before recursive use;
 - an empty table needs a specific element/indexer type;
 - a heterogeneous or optional result needs an explicit union;
-- inference has widened to \`any\` or an overly broad table shape;
-- a method's \`self\` type is not inferred precisely;
+- inference has widened to `any` or an overly broad table shape;
+- a method's `self` type is not inferred precisely;
 - a generic relationship should be preserved across input and output;
 - a solver-sensitive expression otherwise loses a type fact.
 
 Do not:
-- annotate a value with \`any\` merely to make a generic reusable;
-- erase literal states into \`string\` when only a finite set is valid;
+- annotate a value with `any` merely to make a generic reusable;
+- erase literal states into `string` when only a finite set is valid;
 - type a function parameter more broadly than the function actually supports;
 - claim a return type that the implementation does not establish on every path;
 - hide a missing return path with an assertion;
 - replace a precise inferred generic with an unnecessarily monomorphic type.
 
-For object-style modules, use a named data type, a metatable/class type, and an explicit \`self\` annotation on methods where required by the checker. The established pattern is \`typeof(setmetatable(...))\`; the new type solver also supports the \`setmetatable<Data, typeof(Class)>\` type function. Use the form accepted by the repository's pinned analyzer and fixture it before applying the pattern broadly.
+For object-style modules, use a named data type, a metatable/class type, and an explicit `self` annotation on methods where required by the checker. The established pattern is `typeof(setmetatable(...))`; the new type solver also supports the `setmetatable<Data, typeof(Class)>` type function. Use the form accepted by the repository's pinned analyzer and fixture it before applying the pattern broadly.
 
 ### 14.8 Generics and type packs
 
 Use generics to preserve a relationship, not merely to avoid writing a type.
 
-- A generic function such as \`identity<T>(value: T): T\` preserves the input type as the output type.
+- A generic function such as `identity<T>(value: T): T` preserves the input type as the output type.
 - A generic container can preserve the element type through creation, insertion, lookup, and iteration.
-- Explicit generic instantiation (\`functionName<<SomeType>>(arguments)\`) is available when an argument does not give the checker enough information to infer a type parameter, such as constructing an empty typed collection.
-- A variadic type pack \`...T\` represents zero or more arguments/returns of the same type \`T\`.
-- A generic type pack \`U...\` represents a sequence of zero or more types that may be heterogeneous. Use it when forwarding callbacks or preserving arbitrary argument/return tuples.
-- Do not approximate a known callback with \`(...any) -> any\`. Use a concrete function type or a generic pack.
+- Explicit generic instantiation (`functionName<<SomeType>>(arguments)`) is available when an argument does not give the checker enough information to infer a type parameter, such as constructing an empty typed collection.
+- A variadic type pack `...T` represents zero or more arguments/returns of the same type `T`.
+- A generic type pack `U...` represents a sequence of zero or more types that may be heterogeneous. Use it when forwarding callbacks or preserving arbitrary argument/return tuples.
+- Do not approximate a known callback with `(...any) -> any`. Use a concrete function type or a generic pack.
 - Avoid needless generic parameters that do not connect inputs, stored state, callbacks, and outputs.
 - Add fixtures for the exact generic relationship a public API promises; test both correct instantiation and deliberately invalid argument/return types.
 
@@ -826,12 +826,12 @@ Use generics to preserve a relationship, not merely to avoid writing a type.
 
 Model runtime alternatives explicitly:
 
-- Use \`T?\` for \`T | nil\` when nil is the only additional state.
+- Use `T?` for `T | nil` when nil is the only additional state.
 - Use literal/discriminated unions for state machines and tagged results rather than a loosely related set of optional fields.
 - Check a discriminant before reading fields specific to a variant.
-- Use impossible branches and exhaustive handling deliberately; \`never\` can help expose a newly added unhandled variant.
-- Use \`type(value)\` for Luau primitive categories and \`typeof(value)\` for Roblox datatypes and runtime Roblox values.
-- Use \`IsA\` or other documented engine predicates to validate Instance class expectations before using a class-specific operation.
+- Use impossible branches and exhaustive handling deliberately; `never` can help expose a newly added unhandled variant.
+- Use `type(value)` for Luau primitive categories and `typeof(value)` for Roblox datatypes and runtime Roblox values.
+- Use `IsA` or other documented engine predicates to validate Instance class expectations before using a class-specific operation.
 - Prefer early returns for invalid/nil cases. Current Luau refinement behavior preserves many facts after an early-return or throwing guard; do not keep obsolete assertions solely because an older checker once lost the refinement.
 - A check on a table property can refine that property, but do not assume a mutable property or captured variable remains unchanged after an arbitrary function call, callback, yield, or mutation.
 - When a captured upvalue or a value changed in a loop causes a refinement diagnostic, first inspect the exact control flow and analyzer version. Copy a validated value into a new local when that gives it a stable, explicit lifetime; do not cast the old variable without proof.
@@ -850,28 +850,28 @@ Luau tracks table types in different states:
 
 Rules:
 
-- Type empty collections at creation when the element or indexer type is known, e.g. \`local pending: {WorkItem} = {}\`.
-- Use \`{T}\` for a numeric array of T, and \`{[KeyType]: ValueType}\` for a dictionary/indexer. Add named properties explicitly when a table is a record with both indexer and fixed fields.
-- Use optional properties (\`field: T?\`) only when absence is a real state. Do not use optional fields to conceal incomplete initialization.
+- Type empty collections at creation when the element or indexer type is known, e.g. `local pending: {WorkItem} = {}`.
+- Use `{T}` for a numeric array of T, and `{[KeyType]: ValueType}` for a dictionary/indexer. Add named properties explicitly when a table is a record with both indexer and fixed fields.
+- Use optional properties (`field: T?`) only when absence is a real state. Do not use optional fields to conceal incomplete initialization.
 - Keep records structurally stable and include required fields in all construction paths.
-- Do not confuse the checker’s sealed/unsealed shape with runtime immutability. A sealed type does not freeze a table. \`table.freeze\` is a runtime API; a local binding declared \`const\` is a binding rule, not proof that the referenced object is deeply immutable.
-- \`table.clone\` does not make nested tables deeply detached. Type annotations do not change aliasing or ownership.
+- Do not confuse the checker’s sealed/unsealed shape with runtime immutability. A sealed type does not freeze a table. `table.freeze` is a runtime API; a local binding declared `const` is a binding rule, not proof that the referenced object is deeply immutable.
+- `table.clone` does not make nested tables deeply detached. Type annotations do not change aliasing or ownership.
 - Do not use overly broad indexers when the application knows a finite schema; use a named record type.
 - A table's inferred shape must be tested at the consumer boundary, not only at the construction site.
 
 ### 14.11 Module imports, exported types, and dependency cycles
 
-- Luau type aliases are file-local unless explicitly declared with \`export type\`.
-- A consumer can refer to an imported exported type through the module value, e.g. \`local StoreModule = require(...)\` then \`StoreModule.Store\`.
-- A type-only export does not create a runtime member. Keep the runtime table and \`export type\` declarations intentionally aligned.
+- Luau type aliases are file-local unless explicitly declared with `export type`.
+- A consumer can refer to an imported exported type through the module value, e.g. `local StoreModule = require(...)` then `StoreModule.Store`.
+- A type-only export does not create a runtime member. Keep the runtime table and `export type` declarations intentionally aligned.
 - Prefer acyclic module dependencies for both runtime and type resolution. Move shared contracts to a low-level module that does not depend on the modules consuming it.
 - Avoid requiring modules through dynamic expressions when static module resolution is available.
-- Avoid \`require(module) :: any\` as a workaround for unresolved imports. First inspect the Rojo project mapping/sourcemap, require path, circular dependency, and analyzer settings. If a narrow bridge remains necessary, isolate it in one adapter and keep a public typed facade.
+- Avoid `require(module) :: any` as a workaround for unresolved imports. First inspect the Rojo project mapping/sourcemap, require path, circular dependency, and analyzer settings. If a narrow bridge remains necessary, isolate it in one adapter and keep a public typed facade.
 - Test both the defining module and at least one consumer module. A module can typecheck in isolation while its exported API fails when imported or instantiated by a consumer.
 
 ### 14.12 Type functions and metatable type functions
 
-Luau supports analysis-time type functions. They execute in the type-analysis environment and operate on types; they are not ordinary runtime functions and do not validate runtime values. The type library can inspect and construct types. Built-in type-level \`setmetatable\` and \`getmetatable\` facilities are part of the newer type solver.
+Luau supports analysis-time type functions. They execute in the type-analysis environment and operate on types; they are not ordinary runtime functions and do not validate runtime values. The type library can inspect and construct types. Built-in type-level `setmetatable` and `getmetatable` facilities are part of the newer type solver.
 
 Use type functions only when a simpler named alias, generic, union, or explicit structural contract is insufficient.
 
@@ -888,17 +888,17 @@ Static results are only as accurate as the environment model loaded into the ana
 
 For Roblox project code, use the Roblox platform mode and the same API definitions and DataModel mapping the project actually uses:
 
-- \`luau-lsp analyze --platform=roblox\` loads Roblox platform support and engine API types.
-- \`--definitions=...\` loads additional definitions into the global environment. Definition files are part of the trusted analyzer input: stale or over-broad definitions can create false acceptance or false errors.
-- \`--sourcemap=...\` maps filesystem modules to Roblox DataModel paths so instance-based requires and children can resolve.
+- `luau-lsp analyze --platform=roblox` loads Roblox platform support and engine API types.
+- `--definitions=...` loads additional definitions into the global environment. Definition files are part of the trusted analyzer input: stale or over-broad definitions can create false acceptance or false errors.
+- `--sourcemap=...` maps filesystem modules to Roblox DataModel paths so instance-based requires and children can resolve.
 - A missing or stale sourcemap can make a valid module path appear invalid or resolve a different instance. Rebuild it after changing Rojo project mappings, filenames, ModuleScript paths, or folder structure.
 - Use the analyzer version pinned by the repository workflow, not an unpinned globally installed version.
-- Inspect \`--settings\`, \`.luaurc\`, \`--base-luaurc\`, per-file directives, and any \`--ignore\` configuration when results differ between Studio and CI.
+- Inspect `--settings`, `.luaurc`, `--base-luaurc`, per-file directives, and any `--ignore` configuration when results differ between Studio and CI.
 - Keep analyzer diagnostics, autocomplete/hover, and Studio's own Script Analysis conceptually separate; they may not have identical configuration or DataModel knowledge.
 
-**Current Luau LSP DataModel limitation:** the language-server diagnostics checker has historically resolved DataModel Instance values to \`any\` by default to reduce false positives, even when autocomplete/hover can resolve the instance. The \`luau-lsp.diagnostics.strictDatamodelTypes\` setting enables stricter DataModel diagnostics and is off by default in the language-server configuration checked for this handbook. The repository's current main source-analysis command uses \`--platform=roblox\`, a global definitions file, and a Rojo sourcemap, but does not pass the strict-DataModel settings file to that broad source-analysis invocation. Its dedicated DataModel fixtures do use settings with strict DataModel diagnostics enabled. Therefore, a green broad analyzer run is **not** proof that every DataModel path and child Instance is strictly typed.
+**Current Luau LSP DataModel limitation:** the language-server diagnostics checker has historically resolved DataModel Instance values to `any` by default to reduce false positives, even when autocomplete/hover can resolve the instance. The `luau-lsp.diagnostics.strictDatamodelTypes` setting enables stricter DataModel diagnostics and is off by default in the language-server configuration checked for this handbook. The repository's current main source-analysis command uses `--platform=roblox`, a global definitions file, and a Rojo sourcemap, but does not pass the strict-DataModel settings file to that broad source-analysis invocation. Its dedicated DataModel fixtures do use settings with strict DataModel diagnostics enabled. Therefore, a green broad analyzer run is **not** proof that every DataModel path and child Instance is strictly typed.
 
-When a change depends on DataModel child resolution or class-specific members, run a fixture/analyzer invocation with a current Rojo sourcemap and strict DataModel diagnostics enabled. Validate with Studio where engine-specific inference or runtime behavior matters. Do not paper over missing DataModel types with \`any\`.
+When a change depends on DataModel child resolution or class-specific members, run a fixture/analyzer invocation with a current Rojo sourcemap and strict DataModel diagnostics enabled. Validate with Studio where engine-specific inference or runtime behavior matters. Do not paper over missing DataModel types with `any`.
 
 ### 14.14 Runtime validation at trust boundaries
 
@@ -911,7 +911,7 @@ Static annotations do not validate external values. Runtime validation is mandat
 
 At these boundaries:
 
-1. Accept as \`unknown\` or the narrowest honest raw type.
+1. Accept as `unknown` or the narrowest honest raw type.
 2. Validate primitive/class identity and table shape.
 3. Validate required and optional keys separately; reject unexpected types instead of silently coercing.
 4. Validate finite numeric values, allowed ranges, lengths, depth/node budgets, and cross-field invariants.
@@ -919,7 +919,7 @@ At these boundaries:
 6. Convert to a fresh typed internal value when caller mutation or external aliasing is possible.
 7. Return an explicit error/result type and keep failure paths observable and fail-closed.
 
-For Roblox remotes, do not annotate an incoming value as \`Vector3\` and then assume the client supplied a valid Vector3. Check \`typeof\`, reject NaN/infinite or out-of-range components as appropriate, validate permissions and rate limits, and only then use it. For persisted profile data, decode into \`unknown\`, validate the envelope and schema before converting to the current internal type. Preserve the RecordStore rule that malformed, future, or unsupported persisted data must not silently become defaults.
+For Roblox remotes, do not annotate an incoming value as `Vector3` and then assume the client supplied a valid Vector3. Check `typeof`, reject NaN/infinite or out-of-range components as appropriate, validate permissions and rate limits, and only then use it. For persisted profile data, decode into `unknown`, validate the envelope and schema before converting to the current internal type. Preserve the RecordStore rule that malformed, future, or unsupported persisted data must not silently become defaults.
 
 ### 14.15 Analyzer diagnostics and type error correction loop
 
@@ -937,21 +937,21 @@ When the analyzer reports an error:
 
 Never:
 - change a strict file to nonstrict/nocheck;
-- add \`any\` or \`:: any\` broadly;
-- add \`--!nolint\`, broad lint suppressions, or \`--ignore\` globs to bury a type error;
-- weaken a public return type to \`any\`;
+- add `any` or `:: any` broadly;
+- add `--!nolint`, broad lint suppressions, or `--ignore` globs to bury a type error;
+- weaken a public return type to `any`;
 - change an expected-negative fixture to pass without explaining the runtime contract;
 - mark a known bug as XFAIL without a pinned upstream issue and exact diagnostic expectation;
 - report "typechecked" if only syntax parsing, editor hover, or a partial folder run was performed.
 
 ### 14.16 Type-check regression fixtures
 
-Use the existing \`typecheck/fixtures\` harness as the canonical pattern.
+Use the existing `typecheck/fixtures` harness as the canonical pattern.
 
 - Every fixture source is strict unless it intentionally tests a language directive or mode.
 - A positive fixture must produce no analyzer diagnostics.
 - A negative fixture must produce the expected diagnostic category at the declared source line. Do not depend on fragile full diagnostic wording unless that exact wording is the behavior being tested.
-- A known solver bug must be an explicit \`known-type-error\`/XFAIL with an upstream issue URL, pinned analyzer version, expected line, and an expiry condition. An XPASS is a signal to re-evaluate and remove or update the stale expectation; it should not be auto-accepted.
+- A known solver bug must be an explicit `known-type-error`/XFAIL with an upstream issue URL, pinned analyzer version, expected line, and an expiry condition. An XPASS is a signal to re-evaluate and remove or update the stale expectation; it should not be auto-accepted.
 - A negative fixture that fails to parse is not evidence of a type error.
 - A fixture that reports errors only because definitions or a sourcemap are missing is invalid calibration.
 - Test both the definition site and a realistic consumer/import site for exported module types.
@@ -964,12 +964,12 @@ Do not edit the fixture runner, manifest, settings, or expected failure lines me
 
 Before accepting generated or AI-written Luau, verify all applicable items:
 
-- [ ] The file begins with \`--!strict\` on its first line.
-- [ ] No new \`--!nonstrict\` or \`--!nocheck\` directive exists.
-- [ ] No new unreviewed \`any\`, \`:: any\`, broad cast, or diagnostic suppression exists.
+- [ ] The file begins with `--!strict` on its first line.
+- [ ] No new `--!nonstrict` or `--!nocheck` directive exists.
+- [ ] No new unreviewed `any`, `:: any`, broad cast, or diagnostic suppression exists.
 - [ ] Public module functions, callbacks, option tables, results, and exported types are explicit and agree with the runtime implementation.
 - [ ] Empty tables and heterogeneous/optional states have intentional types.
-- [ ] Generic inputs/outputs preserve their relationships; type packs are used instead of \`any\` where appropriate.
+- [ ] Generic inputs/outputs preserve their relationships; type packs are used instead of `any` where appropriate.
 - [ ] All type assertions are justified by a preceding runtime check or a documented internal invariant.
 - [ ] External, remote, and persisted values are runtime-validated before entering typed internal state.
 - [ ] The correct Roblox definitions, platform mode, Rojo sourcemap, analyzer settings, and pinned analyzer version were used.
@@ -985,15 +985,15 @@ The following describes the repository as inspected on 2026-11-28; it is a snaps
 
 | Check | Current behavior | What a pass establishes |
 | --- | --- | --- |
-| RecordStore strict guard | Python asserts the consolidated \`src/PlayerDataInitializer/RecordStore.luau\` file starts with \`--!strict\` | That file has the required directive |
-| Source analyzer | \`luau-lsp analyze --platform=roblox\` with pinned Roblox definitions and Rojo sourcemap analyzes \`src/**/*.luau\` except \`src/AlyaNum/*\` using each file's declared mode | Included files have no analyzer diagnostics under their current declared modes and current analyzer environment |
-| AlyaNum exclusion | \`src/AlyaNum/*\` is excluded because its pinned upstream generic metatable annotations are unsupported by the pinned LSP version | Nothing about static type correctness of those excluded files |
+| RecordStore strict guard | Python asserts the consolidated `src/PlayerDataInitializer/RecordStore.luau` file starts with `--!strict` | That file has the required directive |
+| Source analyzer | `luau-lsp analyze --platform=roblox` with pinned Roblox definitions and Rojo sourcemap analyzes `src/**/*.luau` except `src/AlyaNum/*` using each file's declared mode | Included files have no analyzer diagnostics under their current declared modes and current analyzer environment |
+| AlyaNum exclusion | `src/AlyaNum/*` is excluded because its pinned upstream generic metatable annotations are unsupported by the pinned LSP version | Nothing about static type correctness of those excluded files |
 | Strict DataModel fixtures | Dedicated fixtures use a sourcemap and settings enabling strict DataModel diagnostics | The tested DataModel paths/classes typecheck or fail as expected |
-| Broad DataModel source diagnostics | The broad source analyzer command does not pass the strict DataModel settings file | A green broad run does not prove all DataModel values avoid \`any\` |
+| Broad DataModel source diagnostics | The broad source analyzer command does not pass the strict DataModel settings file | A green broad run does not prove all DataModel values avoid `any` |
 | Type fixtures | Positive, negative, and known solver-regression cases are matched by diagnostic category and source location | The pinned analyzer behaves as expected for those fixtures |
 | Roblox runtime | Lune/mock workflows do not execute in the Roblox engine | No Studio or live-engine guarantee |
 
-Do not change this table by assumption. Re-read \`.github/workflows/luau-typecheck.yml\`, the fixture manifest, and analyzer configuration before claiming a CI change has closed one of these gaps.
+Do not change this table by assumption. Re-read `.github/workflows/luau-typecheck.yml`, the fixture manifest, and analyzer configuration before claiming a CI change has closed one of these gaps.
 
 ### 14.19 Type-system and code-generation acceptance gate
 
