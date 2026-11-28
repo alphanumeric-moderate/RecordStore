@@ -85,9 +85,11 @@ benchmarks:
     exec: lune run bench/acceleration_event_dedup.bench.luau
 
   # Keep the complete 4-algorithm x 6-scenario x 4-depth (up to 8,192) matrix
-  # in the uninstrumented Bencher diagnostics step. The CodSpeed CPU simulator
-  # exceeded its action window instrumenting this diagnostic matrix; the 128-item
-  # per-policy microbenchmarks above retain the scheduler coverage for CodSpeed.
+  # in the uninstrumented Bencher diagnostics step. This six-case FIFO/DRR subset
+  # tracks first-selection scaling at 512, 2,048 and 8,192 without instrumenting
+  # the blocked-owner/dependency matrix that exceeded the CodSpeed action window.
+  - name: "scheduler first-selection scaling (512 to 8192 items; FIFO and DRR)"
+    exec: lune run bench/scheduler_first_selection_scaling_codspeed.bench.luau
 
   - name: "RecordStore Update copy and validation (large profile, 32 updates)"
     exec: lune run bench/update_validation_pipeline.bench.luau
