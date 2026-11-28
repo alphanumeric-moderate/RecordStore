@@ -1089,6 +1089,9 @@ lune run bench/run_drr_missing_cursor_regression.luau
 # run the tracked high-depth scheduler scaling subset
 lune run bench/scheduler_first_selection_scaling_codspeed.bench.luau
 
+# measure Durable Streams scan/index break-even on Lune
+lune run bench/durable_streams_index_break_even.bench.luau
+
 # run every benchmark from codspeed.yml with the CodSpeed CLI
 codspeed run --mode simulation
 ```
@@ -1098,6 +1101,8 @@ codspeed run --mode simulation
 Bencher runs alongside CodSpeed and tracks the same Lune workload benchmarks through Hyperfine. It reports median process wall time from the `ubuntu-24.04` GitHub-hosted runner; these timings include Lune startup and are not directly comparable to CodSpeed's simulated measurements.
 
 The full 4-algorithm, 6-scenario, 4-depth scheduler matrix remains an uninstrumented Bencher diagnostic. CodSpeed also tracks a bounded first-selection scaling subset for FIFO and DRR at 512, 2,048 and 8,192 queued items so high-depth regressions remain visible without instrumenting the full diagnostic matrix.
+
+Bencher also runs a Durable Streams lookup break-even matrix. It compares the source-equivalent linear event/producer scans with index construction plus indexed lookups, across segment sizes 16–64, batches 4–32, and new-event, duplicate, producer-retry, and mixed workloads. The direct diagnostic step prints per-case medians; Hyperfine records the five-process aggregate sweep. This measures the pure Luau lookup/index cost, not DataStore latency or Roblox production allocation behavior.
 
 To enable it:
 
