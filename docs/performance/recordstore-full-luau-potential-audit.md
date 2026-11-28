@@ -447,7 +447,7 @@ Robin Review was intentionally not run during the Phase A–C implementation wor
 
 The first corrected run still failed before the model returned a first response. Robin attempted five agent requests, then five diff-only fallback requests; all failed with `OpenRouter stall: no first response`. The workflow and repository-snapshot stages therefore ran, but no review was produced. This error is not evidence that the required source reads failed: the log shows failure before the first agent tool turn could complete.
 
-Manual `/robin` commands are evaluated using the default-branch workflow. PR #83 updates that workflow and adds a PR-#82-specific full-module instruction file; it must be merged before a manual command on PR #82 uses the new agent-mode configuration. A successful provider response and complete file-coverage ledger are still required before counting Robin as a full-module review.
+Manual `/robin` commands are evaluated using the default-branch workflow. PR #83 has since been merged into `main`, and this audit branch includes its PR-#82-specific full-module instruction file. The previous provider failures still produced no review; a successful response and complete file-coverage ledger are required before counting Robin as a full-module review.
 
 Implementation verification remains based on strict Luau type-check and targeted/full regression workflows. This is distinct from an independent source review and from Roblox Studio/MicroProfiler acceptance. No live Roblox performance claim is made here.
 
@@ -491,7 +491,7 @@ The following items have now been implemented on this audit branch. The original
 - Reused the existing `lease_renewal_advice` benchmark, which repeatedly queries the same latency sample windows, to exercise P95 cache reuse.
 - Reused the existing `durable_stream_publish_batch` workload with 64-message segments and 16-message batches to exercise segment lookup at increasing occupancy.
 - Added focused regression coverage for exact P95 behavior after the 256-entry sample ring wraps, DRR cursor movement, and large mixed-producer stream batches.
-- CI runs the new tests on the PR branch. At this report update, no paired Bencher timings were available: the repository workflow requires both `vars.BENCHER_PROJECT` and `secrets.BENCHER_API_KEY`, and the current attempt had not published results. No measured speedup is claimed.
+- CI runs the new tests on the PR branch. The Bencher report for commit `30e0244df8b112d328b9b00e7688735c08b4b949` has now published. Existing paired workloads include scheduler, lease-renewal and large-profile comparisons; the new Update/Patch validation workloads have measurements but no baseline samples yet. The precise results and limits are recorded in Section 13.
 
 ### Phase B — scheduler hot paths
 
@@ -509,11 +509,64 @@ The following items have now been implemented on this audit branch. The original
 
 ### Explicitly unchanged
 
-No DataStore key, persisted envelope/segment/sidecar format, public API, lease/fencing contract, UpdateAsync replay rule, or durable idempotency rule was intentionally changed. The embedded scheduler and Mailbox V2 remain embedded as required by the repository design. Phases D–F remain on the roadmap and were not implemented as part of this first tranche.
+No DataStore key, persisted envelope/segment/sidecar format, public API, lease/fencing contract, UpdateAsync replay rule, or durable idempotency rule was intentionally changed. The embedded scheduler and Mailbox V2 remain embedded as required by the repository design. The subsequent Phase D–F findings and evidence-gated implementation decisions are recorded in Section 13.
 
-## 13. Acceptance criteria
+## 13. Phase D–F continuation findings and implementation decisions (2026-11-28)
 
-This audit is complete as a roadmap only when:
+**Continuation revision:** `30e0244df8b112d328b9b00e7688735c08b4b949` (before the audit-document and benchmark-workflow update in this continuation). The current source was re-read at 26,318 lines. This section records decisions from the source, regression, benchmark, and workflow evidence available on this revision.
+
+### Phase D — copy/validation and mutation pipeline
+
+**Decision: retain the existing ownership-aware pipeline; do not add another prepared-value cache or duplicate traversal in this PR.**
+
+- `copy_value` already performs detachment and records node count, depth, string-limit and non-finite facts when supplied a `ShapeValidation`. `Record:Update` uses that single copy/shape traversal and calls `validate_value` with `shape_already_validated = true` and the known non-finite flag. The second shape walk is therefore skipped, but the exact JSON encoding/byte-limit check and isolated custom-validator call remain authoritative.
+- `Patch` already uses copy-on-write for changed ancestors and payloads. Its weak-key subtree summaries are restricted to private table subtrees, and the final output still passes through validation/serialization. No caller-owned mutable table is promoted into a persistent prepared-value cache.
+- Reconciliation already has a no-op inspection path that can avoid cloning the current profile when no defaults need to be inserted. Replacing it with a generic pipeline would add complexity without a demonstrated reduction in traversal or allocation.
+- Non-finite sidecar restoration still validates marker shape and path semantics before a value can be published. A separate validated-marker trie/descriptor is not added: the extra representation and allocation have no paired profile evidence yet, and malformed/overlapping paths must continue to fail closed.
+- Canonicalization and digest material remain byte-compatible. No persistent digest cache or shared canonical representation is introduced for mutable payloads.
+
+**Current performance observations (Bencher, Ubuntu 24.04, Hyperfine median, five runs):**
+
+| Workload | PR result | Reported baseline | Interpretation |
+|---|---:|---:|---|
+| Large profile update/save | 210.04 ms | 249.72 ms | 15.89% lower in this report; not a Roblox DataStore latency claim |
+| Update copy/validation pipeline | 335.10 ms | No baseline sample | Measurement exists; no before/after claim |
+| Patch copy/validation pipeline | 239.57 ms | No baseline sample | Measurement exists; no before/after claim |
+| Reconcile pipeline | 676.55 ms | No baseline sample | Measurement exists; no before/after claim |
+| Legacy migration/history | 123.82 ms | 114.58 ms | 8.07% higher in this report; monitor, do not attribute from one run |
+
+The paired report is [Bencher report `01a22034-9b5b-76e1-bf7c-ad0c900c78ee](https://bencher.dev/perf/alphanumeric-moderate-s-project/reports/01a22034-9b5b-76e1-bf7c-ad0c900c78ee). The separate CodSpeed Update WallTime run returned 1.5 s optimized and 6.3 s historical, but CodSpeed marked those measurements unreliable because they ran outside Macro Runners. They are not accepted as a speedup claim.
+
+### Phase E — narrow typing and module boundaries
+
+**Decision: preserve strict typing and current module boundaries; do not perform a mechanical `any` sweep or split the core module without a verified seam.**
+
+- The current consolidated file is still `--!strict` and `--!optimize 2`. Its core records include named types such as `ShapeValidation`, `Message`, `Segment`, `Head`, and `SegmentIndexes`; the latter gives the new temporary event/producer indexes explicit value shapes.
+- A source scan found 285 textual `any` occurrences in the current module. They are not one homogeneous issue: several sit at deliberately dynamic Roblox/API, adapter, test/mock, and embedded scheduler boundaries. Replacing them mechanically would increase assertion and conversion surface without proving narrower runtime states. The next type work should target one internal state transition at a time with a regression and strict type-check.
+- The consolidated `RecordStore.luau` contains no `require(...)` calls. A Durable Streams/diagnostics lazy split would therefore introduce a new child-module/require graph and change compile-time, cold-require and first-use behavior. This audit does not have a matched RecordStore-specific cold-load, bytecode-memory, first-use or live Studio/Rojo hierarchy comparison to justify that boundary. Keep the scheduler and Mailbox V2 embedded as required by the existing architecture contract.
+- Existing eager/lazy PlayerData startup benchmarks do not prove that splitting RecordStore itself is beneficial. A future module-boundary proposal must compare the same RecordStore API and workload, test multiple factory instances for shared mutable state, and build/run in Roblox Studio with the actual Rojo hierarchy.
+
+### Phase F — native compilation and removal decisions
+
+**Decision: add no `@native` annotations and remove no feature in this PR.**
+
+- The 26,318-line RecordStore module has no `@native` or `--!native` directive. There is no Roblox Script Profiler/MicroProfiler evidence identifying a pure compute kernel as a dominant cost. Hosted Lune/CPU simulation is not a substitute for Roblox VM native-code evidence. Any later native experiment must annotate the smallest measured function, test nested helper functions separately, and compare live Roblox results against the same workload.
+- No downstream installation usage inventory, API-consumer evidence, persisted queue/mailbox/receipt/stream inventory, rollback horizon, or migration-completion evidence was available for the removal candidates in Section 6. No compatibility path, algorithm, diagnostic API, transaction/receipt surface, stream service, mock adapter or public wrapper is approved for deletion.
+- Removal remains conditional on an exact caller/export inventory plus live data and rollback evidence. If isolation is sufficient, prefer a separately reviewed lazy boundary before deleting a supported API.
+
+### Benchmark workflow correction and current verification limits
+
+The CodSpeed CPU-simulation job on this revision timed out inside the full scheduler-backlog matrix while instrumenting the 8,192-item dependency-heavy case. The log shows the benchmark action reaching its approximately 16-minute internal execution limit; this was an instrumentation/workload timeout, not a regression assertion failure. The same matrix remains in the Bencher workflow's dedicated uninstrumented diagnostic step, which completed successfully. The CodSpeed configuration is being narrowed to retain the 128-item per-policy workloads and the Update/Patch/Reconcile benchmarks without instrumenting that large diagnostic matrix.
+
+On the pre-continuation head, the Luau regression workflow, Luau strict type-check, RecordStore Update Latency workflow, and Bencher report completed successfully. The CPU-simulation workflow timed out as described. The Update/Patch validation results above still lack historical paired baseline samples. Roblox Studio multi-server/DataStore acceptance and Roblox Script Profiler/MicroProfiler measurements have not been performed.
+
+### Phase D–F disposition
+
+The remaining audit candidates now have explicit keep/defer decisions and the evidence required to revisit them. Phase D does not justify another runtime rewrite on the available data; Phase E's broad typing and module-split candidates remain scoped follow-up work; Phase F is correctly blocked on live profiling and consumer/persisted-data evidence. No public API, persisted format, lease/fencing, or UpdateAsync transform behavior is changed by these decisions.
+
+## 14. Acceptance criteria
+
+The source-grounded opportunity inventory and Phase D–F audit dispositions are recorded above. Runtime implementation acceptance remains phase-specific and requires:
 - every major source area above has an explicit optimization, redesign, keep or conditional-removal decision;
 - every high-priority candidate has a location, rationale, invariant, test plan and benchmark plan;
 - no performance claim is made without paired measurements;
@@ -521,7 +574,7 @@ This audit is complete as a roadmap only when:
 - Review tooling remains optional; CI evidence and verification claims stand independently, and no Robin result is required or counted for this implementation tranche;
 - subsequent implementation PRs keep strict type-check, relevant regressions, full CI and required Roblox acceptance evidence.
 
-## 14. References
+## 15. References
 
 - Existing performance program: docs/performance/recordstore-optimization-program.md
 - Repository engineering contract: AGENTS.md
