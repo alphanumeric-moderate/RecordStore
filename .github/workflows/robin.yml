@@ -18,7 +18,7 @@ jobs:
     with:
       # Agent mode is limited to the full-module audit PR and explicit /robin commands on PR #82.
       agent-mode: ${{ ((github.event_name == 'pull_request' && github.event.pull_request.head.ref == 'audit/recordstore-full-luau-potential-2026-11-27') || (github.event_name == 'issue_comment' && github.event.issue.number == 82 && (startsWith(github.event.comment.body, '/robin') || startsWith(github.event.comment.body, '/review'))) ) && 'auto' || 'off' }}
-      reasoning-effort: "low"
+      reasoning-effort: "off"
       max-output-tokens: "8192"
       agent-max-turns: "60"
       # Robin itself filters issue_comment to authorized slash commands.
