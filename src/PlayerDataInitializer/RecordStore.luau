@@ -12925,7 +12925,7 @@ local function quarantine_profile_writes_internal(
 		then
 			return nil, nil, nil
 		end
-		local next_raw = copy_value(raw)
+		local next_raw = prepared_envelope_cache._copy_value_with_depth(raw, prepared_envelope_cache._max_value_depth + 1)
 		if type(next_raw) ~= "table" then return nil, nil, nil end
 		local mutable: any = next_raw
 		local next_generation = math.max(1, envelope.fencing_generation + 1)
@@ -12952,7 +12952,7 @@ local function quarantine_profile_writes_internal(
 		mutable.write_id = fence_write_id
 		mutable.session = nil
 		mutable[QUARANTINE_FENCE_FIELD] = marker
-		local size_ok = prepared_envelope_cache._validate_serialized_size(mutable)
+		local size_ok = prepared_envelope_cache._validate_serialized_size(mutable, nil, prepared_envelope_cache._max_value_depth + 1)
 		if not size_ok then return nil, nil, nil end
 		local user_ids, metadata = preserve_update_metadata(info)
 		return mutable, user_ids, metadata
@@ -13022,7 +13022,7 @@ local function mark_quarantine_release_pending_internal(
 			if marker.resolution_id ~= resolution_id then return nil, nil, nil end
 			return nil, nil, nil
 		end
-		local next_raw = copy_value(raw)
+		local next_raw = prepared_envelope_cache._copy_value_with_depth(raw, prepared_envelope_cache._max_value_depth + 1)
 		if type(next_raw) ~= "table" then return nil, nil, nil end
 		local mutable: any = next_raw
 		local next_marker: any = table.clone(marker)
@@ -13035,7 +13035,7 @@ local function mark_quarantine_release_pending_internal(
 		mutable[QUARANTINE_FENCE_FIELD] = next_marker
 		mutable.updated_at = now
 		mutable.write_id = release_pending_write_id
-		local size_ok = prepared_envelope_cache._validate_serialized_size(mutable)
+		local size_ok = prepared_envelope_cache._validate_serialized_size(mutable, nil, prepared_envelope_cache._max_value_depth + 1)
 		if not size_ok then return nil, nil, nil end
 		local user_ids, metadata = preserve_update_metadata(info)
 		return mutable, user_ids, metadata
@@ -13080,7 +13080,7 @@ local function release_quarantine_fence_internal(
 		if not present or marker == nil or marker.quarantine_id ~= quarantine_id
 			or marker.phase ~= "release_pending" or marker.resolution_id ~= resolution_id
 		then return nil, nil, nil end
-		local next_raw = copy_value(raw)
+		local next_raw = prepared_envelope_cache._copy_value_with_depth(raw, prepared_envelope_cache._max_value_depth + 1)
 		if type(next_raw) ~= "table" then return nil, nil, nil end
 		local mutable: any = next_raw
 		mutable.implementation_version = marker.source_implementation_version
@@ -13092,7 +13092,7 @@ local function release_quarantine_fence_internal(
 		mutable[QUARANTINE_FENCE_FIELD] = nil
 		local restored_envelope, _, is_current = parse_envelope(mutable)
 		if not is_current or restored_envelope == nil then return nil, nil, nil end
-		local size_ok = prepared_envelope_cache._validate_serialized_size(mutable)
+		local size_ok = prepared_envelope_cache._validate_serialized_size(mutable, nil, prepared_envelope_cache._max_value_depth + 1)
 		if not size_ok then return nil, nil, nil end
 		local user_ids, metadata = preserve_update_metadata(info)
 		return mutable, user_ids, metadata
@@ -20024,10 +20024,10 @@ prepared_envelope_cache._outbox_engine = (function()
 
 			local sidecars_valid = protocol.validate(sidecars)
 			if not sidecars_valid then return nil, nil, nil end
-			local raw_value = copy_value(raw)
+			local raw_value = prepared_envelope_cache._copy_value_with_depth(raw, prepared_envelope_cache._max_value_depth + 1)
 			if type(raw_value) ~= "table" then return nil, nil, nil end
 			(raw_value :: { [string]: any }).sidecars = sidecars
-			local raw_valid = prepared_envelope_cache._validate_serialized_size(raw_value)
+			local raw_valid = prepared_envelope_cache._validate_serialized_size(raw_value, nil, prepared_envelope_cache._max_value_depth + 1)
 			if not raw_valid then return nil, nil, nil end
 			return {
 				[prepared_envelope_cache] = true,
@@ -20216,10 +20216,10 @@ prepared_envelope_cache._outbox_engine = (function()
 			if not removed_any then return nil, nil, nil end
 			local sidecars_valid = protocol.validate(sidecars)
 			if not sidecars_valid then return nil, nil, nil end
-			local raw_value = copy_value(raw)
+			local raw_value = prepared_envelope_cache._copy_value_with_depth(raw, prepared_envelope_cache._max_value_depth + 1)
 			if type(raw_value) ~= "table" then return nil, nil, nil end
 			(raw_value :: { [string]: any }).sidecars = sidecars
-			local raw_valid = prepared_envelope_cache._validate_serialized_size(raw_value)
+			local raw_valid = prepared_envelope_cache._validate_serialized_size(raw_value, nil, prepared_envelope_cache._max_value_depth + 1)
 			if not raw_valid then return nil, nil, nil end
 			return {
 				[prepared_envelope_cache] = true,
