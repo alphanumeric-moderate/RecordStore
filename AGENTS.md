@@ -13,6 +13,23 @@ Use the strongest, most deterministic layer that can prevent a defect:
 
 Do not compensate for a recurring architectural defect by merely adding another paragraph to an agent prompt. Prefer removing the defect class at its source. This file is the repository-wide operating contract and includes the required Luau and Roblox performance handbook. Keep agent-critical rules here; implementation documents may retain design history and deeper rationale, but no required engineering or performance instruction may depend on an agent discovering a separate document.
 
+## Mandatory pre-generation gate
+
+**No repository code may be generated, proposed as an implementation, or modified until the current applicable `AGENTS.md` instructions have been read for that task. This gate applies to every human or AI contributor, including ChatGPT.**
+
+Before producing any RecordStore code, including a code block in a chat response, a patch, a diff, a new file, a test, a fixture, generated source, or a shell command/script intended to create or modify source:
+
+1. Identify the target repository, branch, and file path(s).
+2. Fetch and read the complete, current root `AGENTS.md` from the target branch. Do not rely on model memory, a prior conversation, a summary, a cached excerpt, or an older commit.
+3. Find and read every nested `AGENTS.md` that applies to the target path. More-specific instructions add to or refine this repository-wide contract; do not ignore them.
+4. Read the relevant project API, design, source, tests, and CI instructions required by this file.
+5. Apply the instructions while designing and generating the code. Check generated code against the applicable requirements before presenting or committing it.
+6. Before completion, verify the resulting diff against the same instructions and run the required checks that are available. Report unavailable checks honestly.
+
+**Stop condition:** If the target repository or branch is unclear, ask for the missing target. If the applicable `AGENTS.md` cannot be fetched or read completely, do not generate or modify repository code; report the blocker and request access or the current file. Do not substitute remembered rules or guess what the file says.
+
+This is a per-task prerequisite, not a one-time onboarding step. Re-read the current instructions at the start of each new code-generation task and whenever the target branch or applicable instruction files may have changed. Documentation-only edits to `AGENTS.md` itself may be made to establish or correct this gate, but code changes must still obey the complete contract.
+
 ## Before changing anything
 
 - Read this file, the relevant sections of [README.md](README.md), the affected source and tests, and any applicable design specification or implementation plan under `docs/`.
