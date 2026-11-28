@@ -348,7 +348,7 @@ Do not remove a supported API simply because it is not called by the default Pla
 
 Replace broad dynamic scheduler records and loosely typed result tables at narrow internal boundaries with named records/tagged result unions. Prioritize scheduler policy/item, mailbox locator/reservation/claim, backend result, prepared envelope and durable stream head/cursor/segment.
 
-Do not attempt a 285-occurrence mechanical any removal. Some dynamic API/Roblox/adapter boundaries legitimately start as unknown and require runtime validation. Keep casts narrow and validate at the boundary.
+Do not attempt a 364-occurrence mechanical any removal. Some dynamic API/Roblox/adapter boundaries legitimately start as unknown and require runtime validation. Keep casts narrow and validate at the boundary.
 
 ### R7. Canonical codec and digest ownership
 
@@ -381,7 +381,7 @@ A removal must include exact symbol/caller inventory, evidence that no supported
 ## 7. Type-check and static-analysis opportunities
 
 1. Preserve --!strict and --!optimize 2; do not disable solver-sensitive types to force a pass.
-2. Audit approximately 285 textual any occurrences by trust boundary and call frequency. Replace internal state shapes first; keep unknown at untrusted API/Roblox boundaries and validate before narrowing.
+2. Audit 364 textual any occurrences by trust boundary and call frequency. Replace internal state shapes first; keep unknown at untrusted API/Roblox boundaries and validate before narrowing.
 3. Introduce tagged result unions for high-risk state transitions (backend result, save reconciliation, lease operation, mailbox claim/reservation, durable stream consume) where it eliminates ambiguous combinations of booleans and optional fields.
 4. Type the internal scheduler item, policy and metrics structures rather than routing the governor through a string-keyed dynamic table.
 5. Type Durable Streams head/segment/cursor/registry and publisher/worker contracts without exposing new mutable internals publicly.
@@ -390,7 +390,7 @@ A removal must include exact symbol/caller inventory, evidence that no supported
 
 ## 8. Bug, correctness and security review matrix
 
-Robin and independent review should explicitly inspect these invariants while examining the entire source, not merely comment on style.
+Cubic and independent review should explicitly inspect these invariants while examining the entire source, not merely comment on style.
 
 | Area | Required checks |
 |---|---|
@@ -443,13 +443,9 @@ Lune, local mocks and hosted CPU simulations do not prove Roblox VM native compi
 
 ## 10. Review process and implementation verification
 
-Robin Review was intentionally not run during the Phase A–C implementation work, as requested. The workflow configuration has since been corrected: synchronize events on this audit branch now invoke agent mode, and the workflow log confirms that the repository snapshot was extracted successfully.
+Cubic AI Review is the independent reviewer for this PR. Request a review after each material implementation round and again on the final PR head. A review counts only when Cubic has completed on the current head and every valid finding has been fixed or explicitly dispositioned; provider failures and stale-head reviews are not clean evidence.
 
-The first corrected run still failed before the model returned a first response. Robin attempted five agent requests, then five diff-only fallback requests; all failed with `OpenRouter stall: no first response`. The workflow and repository-snapshot stages therefore ran, but no review was produced. This error is not evidence that the required source reads failed: the log shows failure before the first agent tool turn could complete.
-
-Manual `/robin` commands are evaluated using the default-branch workflow. PR #83 has since been merged into `main`, and this audit branch includes its PR-#82-specific full-module instruction file. The previous provider failures still produced no review; a successful response and complete file-coverage ledger are required before counting Robin as a full-module review.
-
-Implementation verification remains based on strict Luau type-check and targeted/full regression workflows. This is distinct from an independent source review and from Roblox Studio/MicroProfiler acceptance. No live Roblox performance claim is made here.
+Implementation verification remains based on strict Luau type-check and targeted/full regression workflows. This is distinct from independent source review and Roblox Studio/MicroProfiler acceptance. No live Roblox performance claim is made here.
 
 ## 11. Ordered implementation roadmap
 
@@ -525,6 +521,8 @@ No DataStore key, persisted envelope/segment/sidecar format, public API, lease/f
 - Non-finite sidecar restoration still validates marker shape and path semantics before a value can be published. A separate validated-marker trie/descriptor is not added: the extra representation and allocation have no paired profile evidence yet, and malformed/overlapping paths must continue to fail closed.
 - Canonicalization and digest material remain byte-compatible. No persistent digest cache or shared canonical representation is introduced for mutable payloads.
 
+**Envelope wrapper-depth correction (implemented in this continuation).** The three quarantine-fence transitions and two outbox sidecar transitions now copy raw envelopes with `_copy_value_with_depth(raw, _max_value_depth + 1)` and validate each changed envelope with the same additional wrapper depth. The profile-data limit remains 64 edges, exact JSON size validation remains authoritative, and the persisted envelope/sidecar format is unchanged. The new strict regression exercises install, release-pending, release, outbox state update, and outbox prune using exactly 64-edge profile data.
+
 **Current performance observations (Bencher, Ubuntu 24.04, Hyperfine median, five runs):**
 
 | Workload | PR result | Reported baseline | Interpretation |
@@ -542,7 +540,7 @@ The paired report is [Bencher report `01a22034-9b5b-76e1-bf7c-ad0c900c78ee`](htt
 **Decision: preserve strict typing and current module boundaries; do not perform a mechanical `any` sweep or split the core module without a verified seam.**
 
 - The current consolidated file is still `--!strict` and `--!optimize 2`. Its core records include named types such as `ShapeValidation`, `Message`, `Segment`, `Head`, and `SegmentIndexes`; the latter gives the new temporary event/producer indexes explicit value shapes.
-- A source scan found 285 textual `any` occurrences in the current module. They are not one homogeneous issue: several sit at deliberately dynamic Roblox/API, adapter, test/mock, and embedded scheduler boundaries. Replacing them mechanically would increase assertion and conversion surface without proving narrower runtime states. The next type work should target one internal state transition at a time with a regression and strict type-check.
+- A source scan found 364 textual `any` occurrences in the current module. They are not one homogeneous issue: several sit at deliberately dynamic Roblox/API, adapter, test/mock, and embedded scheduler boundaries. Replacing them mechanically would increase assertion and conversion surface without proving narrower runtime states. The next type work should target one internal state transition at a time with a regression and strict type-check.
 - The consolidated `RecordStore.luau` contains no `require(...)` calls. A Durable Streams/diagnostics lazy split would therefore introduce a new child-module/require graph and change compile-time, cold-require and first-use behavior. This audit does not have a matched RecordStore-specific cold-load, bytecode-memory, first-use or live Studio/Rojo hierarchy comparison to justify that boundary. Keep the scheduler and Mailbox V2 embedded as required by the existing architecture contract.
 - Existing eager/lazy PlayerData startup benchmarks do not prove that splitting RecordStore itself is beneficial. A future module-boundary proposal must compare the same RecordStore API and workload, test multiple factory instances for shared mutable state, and build/run in Roblox Studio with the actual Rojo hierarchy.
 
@@ -556,7 +554,7 @@ The paired report is [Bencher report `01a22034-9b5b-76e1-bf7c-ad0c900c78ee`](htt
 
 ### Benchmark workflow correction and current verification limits
 
-The CodSpeed CPU-simulation job on this revision timed out inside the full scheduler-backlog matrix while instrumenting the 8,192-item dependency-heavy case. The log shows the benchmark action reaching its approximately 16-minute internal execution limit; this was an instrumentation/workload timeout, not a regression assertion failure. The same matrix remains in the Bencher workflow's dedicated uninstrumented diagnostic step, which completed successfully. This continuation removes the large diagnostic matrix from CodSpeed instrumentation while retaining the 128-item per-policy workloads and the Update/Patch/Reconcile benchmarks; the full matrix remains in Bencher's uninstrumented diagnostic step.
+The CodSpeed CPU-simulation job on the earlier head timed out while instrumenting the 8,192-item dependency-heavy case in the full 4-algorithm x 6-scenario x 4-depth scheduler matrix. The full matrix remains in Bencher's uninstrumented diagnostic step. This continuation adds a bounded, tracked CodSpeed first-selection scaling subset for FIFO and DRR at 512, 2,048 and 8,192 items, while retaining the 128-item policy microbenchmarks and Update/Patch/Reconcile workloads. The subset restores historical high-depth scheduler coverage without instrumenting the full diagnostic matrix.
 
 On the pre-continuation head, the Luau regression workflow, Luau strict type-check, RecordStore Update Latency workflow, and Bencher report completed successfully. The CPU-simulation workflow timed out as described. The Update/Patch validation results above still lack historical paired baseline samples. Roblox Studio multi-server/DataStore acceptance and Roblox Script Profiler/MicroProfiler measurements have not been performed.
 
@@ -571,7 +569,7 @@ The source-grounded opportunity inventory and Phase D–F audit dispositions are
 - every high-priority candidate has a location, rationale, invariant, test plan and benchmark plan;
 - no performance claim is made without paired measurements;
 - no removal is unconditional without usage and persisted-data evidence;
-- Robin is requested only after the final branch/PR update; it is counted as a full-module review only if it returns a valid review with complete source coverage. A provider failure is not a clean review;
+- Cubic is requested after material implementation rounds and on the final PR head; it counts only when the review is completed on the current head and every valid finding is resolved. A provider failure or stale-head review is not clean evidence;
 - subsequent implementation PRs keep strict type-check, relevant regressions, full CI and required Roblox acceptance evidence.
 
 ## 15. References
@@ -582,5 +580,4 @@ The source-grounded opportunity inventory and Phase D–F audit dispositions are
 - Luau function attributes: https://luau.org/syntax/
 - Luau native code generation: https://luau.org/native-code-gen/
 - Roblox MicroProfiler: https://create.roblox.com/docs/performance-optimization/microprofiler
-- Robin agent review guide: https://github.com/antongulin/robin/blob/main/docs/ADVANCED.md
-- Robin reusable workflow: https://github.com/antongulin/robin/blob/main/.github/workflows/review.yml
+- Cubic AI PR review: recorded in the review timeline and inline threads on this pull request.
