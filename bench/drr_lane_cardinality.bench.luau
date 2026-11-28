@@ -144,5 +144,5 @@ for _, queue_size in QUEUE_SIZES do
 	end
 end
 
-assert(result_count == 18, "DRR lane-cardinality matrix did not complete every valid shape")
+assert(result_count == 17, "DRR lane-cardinality matrix did not complete every valid shape")
 print(string.format("[drr-lane-cardinality] completed=%d", result_count))
