@@ -1,4 +1,4 @@
---!nocheck
+--!strict
 -- Regression tests for RecordStore non-finite number persistence.
 -- Uses RecordStore.Mock only; this never reads or writes live DataStore records.
 
@@ -130,6 +130,71 @@ assert_opened(scalar_reload, scalar_reload_message, "loaded")
 assert(scalar:Get() == -math.huge, "root-level negative infinity failed the persistence round trip")
 local scalar_close_2, scalar_close_message_2 = scalar:Close()
 assert_opened(scalar_close_2, scalar_close_message_2, "closed")
+
+-- The documented depth limit is 64 edges from the profile root. Copying,
+-- encoding, and restoring a non-finite value at that exact boundary must agree.
+local function make_nested_value(child_tables: number, value: number)
+	local root = {}
+	local cursor = root
+	for _ = 1, child_tables do
+		local child = {}
+		cursor.child = child
+		cursor = child
+	end
+	cursor.value = value
+	return root
+end
+
+local function read_nested_value(root, child_tables: number)
+	local cursor = root
+	for _ = 1, child_tables do
+		cursor = cursor.child
+	end
+	return cursor.value
+end
+
+local boundary_key = "depth-boundary"
+local boundary = RecordStore.Mock.new(store_name, scope, boundary_key, { schema_version = 1 })
+local boundary_open, boundary_open_message = boundary:Open({})
+assert_opened(boundary_open, boundary_open_message, "created")
+local boundary_update, boundary_update_message = boundary:Update(function(current)
+	current.boundary = make_nested_value(62, math.huge)
+	return current
+end)
+assert_opened(boundary_update, boundary_update_message, "success")
+local boundary_close, boundary_close_message = boundary:Close()
+assert_opened(boundary_close, boundary_close_message, "closed")
+
+local boundary_raw = RecordStore.Mock.get_record_raw(store_name, scope, boundary_key)
+assert(type(boundary_raw) == "table" and type(boundary_raw.non_finite_numbers) == "table",
+	"depth-boundary save did not write its non-finite sidecar")
+local maximum_depth_marker_found = false
+for _, marker in ipairs(boundary_raw.non_finite_numbers) do
+	if marker.kind == "positive_infinity" and #marker.path == 64
+		and marker.path[1].kind == "string" and marker.path[1].key == "boundary"
+		and marker.path[64].kind == "string" and marker.path[64].key == "value"
+	then
+		maximum_depth_marker_found = true
+		break
+	end
+end
+assert(maximum_depth_marker_found, "the maximum supported depth did not preserve its 64-segment sidecar path")
+
+local boundary_reload, boundary_reload_message = boundary:Open({})
+assert_opened(boundary_reload, boundary_reload_message, "loaded")
+assert(read_nested_value(boundary.Data.boundary, 62) == math.huge,
+	"non-finite value at the maximum supported depth did not round-trip")
+
+local over_depth_update, over_depth_message = boundary:Update(function(current)
+	current.over_depth = make_nested_value(63, math.huge)
+	return current
+end)
+assert(over_depth_update == "validation" and string.find(over_depth_message or "", "invalid data", 1, true) ~= nil,
+	"a value one level beyond the depth limit was not rejected")
+assert(boundary.Data.over_depth == nil and read_nested_value(boundary.Data.boundary, 62) == math.huge,
+	"rejecting an over-depth mutation changed the existing profile")
+local boundary_close_again, boundary_close_again_message = boundary:Close()
+assert_opened(boundary_close_again, boundary_close_again_message, "closed")
 
 -- Invalid sidecar paths must fail closed instead of silently corrupting the payload.
 local bad_seed, bad_seed_message = RecordStore.Mock.seed_record_raw(store_name, scope, "bad-sidecar", {

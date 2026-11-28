@@ -1,4 +1,4 @@
---!nocheck
+--!strict
 local FakeDataStore = require("./FakeDataStore")
 local initializer = game:GetService("ServerScriptService"):WaitForChild("PlayerDataInitializer")
 local RecordStore = require(initializer:WaitForChild("RecordStore"))
@@ -349,6 +349,87 @@ local conflicting_batch = batch_stream:PublishBatchAsync("tenant-b", {
 	{ event_id = "batch-3", payload = { value = 3 } },
 })
 assert(conflicting_batch.code == "conflict", "batch event identity conflict was not rejected")
+
+local lookup_client, lookup_client_error = DurableStreams.new(store, {
+	max_segment_messages = 64,
+	max_segment_bytes = 262144,
+	max_payload_bytes = 1024,
+	max_batch_messages = 32,
+	now = function()
+		return now
+	end,
+})
+assert(lookup_client ~= nil, lookup_client_error)
+local lookup_stream, lookup_stream_error = lookup_client:OpenStreamAsync("application.lookup-index.events", 1)
+assert(lookup_stream ~= nil, lookup_stream_error)
+
+local function make_lookup_batch(first_event: number, count: number, first_producer_sequence: number)
+	local events = table.create(count)
+	local producer_offset = 0
+	for offset = 0, count - 1 do
+		local event_number = first_event + offset
+		local event = {
+			event_id = "lookup-index-event-" .. tostring(event_number),
+			payload = { kind = "lookup-index", value = event_number },
+		}
+		if offset % 2 == 0 then
+			producer_offset += 1
+			event.producer_id = "lookup-index-producer"
+			event.producer_sequence = first_producer_sequence + producer_offset - 1
+		end
+		events[offset + 1] = event
+	end
+	return events
+end
+
+local lookup_first_batch = make_lookup_batch(1, 32, 1)
+local lookup_first_append = lookup_stream:PublishBatchAsync("lookup-index-route", lookup_first_batch)
+assert(lookup_first_append.code == "committed" and lookup_first_append.count == 32,
+	"large-segment first batch did not append")
+
+local lookup_second_batch = make_lookup_batch(33, 16, 17)
+fake.control:fail_next_update("commit_then_error")
+local lookup_reconciled = lookup_stream:PublishBatchAsync("lookup-index-route", lookup_second_batch)
+assert(lookup_reconciled.code == "committed" and lookup_reconciled.reconciled == true
+	and lookup_reconciled.count == 16,
+	"large mixed-producer batch was not reconciled after commit-then-error")
+
+local lookup_duplicate = lookup_stream:PublishBatchAsync("lookup-index-route", lookup_second_batch)
+assert(lookup_duplicate.code == "committed" and lookup_duplicate.duplicate == true,
+	"large mixed-producer batch retry was not recognized as a duplicate")
+
+local lookup_event_conflict = table.create(16)
+lookup_event_conflict[1] = {
+	event_id = "lookup-index-event-33",
+	payload = { kind = "lookup-index", value = -33 },
+}
+for index = 2, 16 do
+	lookup_event_conflict[index] = {
+		event_id = "lookup-index-new-event-conflict-" .. tostring(index),
+		payload = { kind = "lookup-index-conflict", value = index },
+	}
+end
+local lookup_event_conflict_result = lookup_stream:PublishBatchAsync("lookup-index-route", lookup_event_conflict)
+assert(lookup_event_conflict_result.code == "conflict",
+	"large-segment event-ID lookup did not reject changed payload content")
+
+local lookup_producer_conflict = table.create(16)
+lookup_producer_conflict[1] = {
+	event_id = "lookup-index-wrong-producer-event",
+	producer_id = "lookup-index-producer",
+	producer_sequence = 17,
+	payload = { kind = "lookup-index", value = 33 },
+}
+for index = 2, 16 do
+	lookup_producer_conflict[index] = {
+		event_id = "lookup-index-new-producer-conflict-" .. tostring(index),
+		payload = { kind = "lookup-index-conflict", value = index },
+	}
+end
+local lookup_producer_conflict_result = lookup_stream:PublishBatchAsync("lookup-index-route", lookup_producer_conflict)
+assert(lookup_producer_conflict_result.code == "conflict",
+	"large-segment producer-sequence lookup did not reject a changed event identity")
+
 
 
 local idempotency_client, idempotency_client_error = DurableStreams.new(store, {

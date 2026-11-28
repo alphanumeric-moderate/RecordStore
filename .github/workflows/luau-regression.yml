@@ -57,6 +57,14 @@ jobs:
         timeout-minutes: 2
         run: timeout --signal=TERM --kill-after=5s 60s lune run bench/run_playerdata_reset_on_join_regression.luau
 
+      - name: Regression - 64-edge raw-envelope mutation boundary
+        timeout-minutes: 2
+        run: timeout --signal=TERM --kill-after=5s 60s lune run bench/run_raw_envelope_depth_regression.luau
+
+      - name: Regression - DRR stale cursor first-live-lane fallback
+        timeout-minutes: 2
+        run: timeout --signal=TERM --kill-after=5s 60s lune run bench/run_drr_missing_cursor_regression.luau
+
       - name: Regression - Advanced scheduler
         timeout-minutes: 2
         run: timeout --signal=TERM --kill-after=5s 60s lune run bench/run_advanced_scheduler_regression.luau

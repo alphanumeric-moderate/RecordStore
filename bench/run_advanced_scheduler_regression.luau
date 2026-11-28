@@ -1,4 +1,4 @@
---!nocheck
+--!strict
 -- PR #33 advanced-scheduler public behavior regression suite.
 local Scheduler = require("./RobloxShim").load_scheduler()
 local task = require("@lune/task")
@@ -158,6 +158,89 @@ enqueue(drr_high_burst, {
 })
 take(drr_high_burst, "drr-high-first")
 take(drr_high_burst, "drr-normal-after-burst")
+
+-- The minimum DRR weight must still admit a maximum-cost item at the exact
+-- mathematical bound ceil(max_item_cost / drr_quantum).
+local maximum_cost_drr = new_scheduler()
+local maximum_cost_policy = maximum_cost_drr:Stats().policy
+assert(maximum_cost_drr:SetPolicy({
+	revision = maximum_cost_policy.revision + 1,
+	algorithm = "drr",
+	drr_quantum = 1,
+	max_item_cost = 32,
+}), "maximum-cost DRR policy was rejected")
+enqueue(maximum_cost_drr, {
+	id = "minimum-weight-maximum-cost",
+	owner_id = "minimum-weight-owner",
+	work_class = "critical",
+	operation_class = "tracing",
+	lane = "background",
+	service_class = "best_effort",
+	cost = 32,
+})
+local maximum_cost_item, maximum_cost_status = maximum_cost_drr:TakeNext(false)
+assert(maximum_cost_item ~= nil and maximum_cost_status == "success"
+	and maximum_cost_item.id == "minimum-weight-maximum-cost",
+	"minimum-weight DRR lane did not admit a maximum-cost item at the exact round bound")
+local expected_maximum_cost_lane_key = "20:minimum-weight-owner"
+	.. "8:critical"
+	.. "10:background"
+	.. "11:best_effort"
+assert(maximum_cost_drr.drr_deficit[expected_maximum_cost_lane_key] == 0,
+	"maximum-cost DRR selection did not consume the exact accumulated deficit")
+assert(maximum_cost_drr:MarkCompleted(maximum_cost_item.id, "committed"),
+	"maximum-cost DRR item did not complete")
+
+-- A cursor in the middle of the sorted lane list must rotate after its exact lane,
+-- even when earlier lane keys are inserted after the previous selection.
+local cursor_search = new_scheduler()
+for owner_index = 8, 17 do
+	local owner_id = ("cursor-%02d"):format(owner_index)
+	for item_index = 1, 2 do
+		enqueue(cursor_search, {
+			id = ("cursor-search-%02d-%d"):format(owner_index, item_index),
+			owner_id = owner_id,
+			lane = "normal",
+			work_class = "cursor-search",
+			service_class = "normal",
+			operation_class = "read",
+		})
+	end
+end
+take(cursor_search, "cursor-search-08-1")
+for owner_index = 0, 7 do
+	local owner_id = ("cursor-%02d"):format(owner_index)
+	for item_index = 1, 2 do
+		enqueue(cursor_search, {
+			id = ("cursor-search-%02d-%d"):format(owner_index, item_index),
+			owner_id = owner_id,
+			lane = "normal",
+			work_class = "cursor-search",
+			service_class = "normal",
+			operation_class = "read",
+		})
+	end
+end
+take(cursor_search, "cursor-search-09-1")
+
+-- When the previous cursor lane has drained, selection starts at the first live lane.
+local missing_cursor = new_scheduler()
+enqueue(missing_cursor, {
+	id = "missing-cursor-a",
+	owner_id = "missing-cursor-a",
+	lane = "normal",
+	work_class = "missing-cursor",
+	service_class = "normal",
+})
+enqueue(missing_cursor, {
+	id = "missing-cursor-b",
+	owner_id = "missing-cursor-b",
+	lane = "normal",
+	work_class = "missing-cursor",
+	service_class = "normal",
+})
+take(missing_cursor, "missing-cursor-a")
+take(missing_cursor, "missing-cursor-b")
 
 -- DRR shares service across equally weighted owner/work-class lanes.
 local fair = new_scheduler()

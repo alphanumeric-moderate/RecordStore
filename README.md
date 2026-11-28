@@ -1082,6 +1082,19 @@ lune run bench/session_lifecycle.bench.luau
 # run the regression tests outside Studio
 lune run bench/run_regression_tests.luau
 
+# run focused depth and DRR cursor regressions
+lune run bench/run_raw_envelope_depth_regression.luau
+lune run bench/run_drr_missing_cursor_regression.luau
+
+# run the tracked high-depth scheduler scaling subset
+lune run bench/scheduler_first_selection_scaling_codspeed.bench.luau
+
+# measure DRR selection across queue depth and distinct lane cardinality
+lune run bench/drr_lane_cardinality.bench.luau
+
+# measure Durable Streams scan/index break-even on Lune
+lune run bench/durable_streams_index_break_even.bench.luau
+
 # run every benchmark from codspeed.yml with the CodSpeed CLI
 codspeed run --mode simulation
 ```
@@ -1089,6 +1102,10 @@ codspeed run --mode simulation
 ### Bencher.dev
 
 Bencher runs alongside CodSpeed and tracks the same Lune workload benchmarks through Hyperfine. It reports median process wall time from the `ubuntu-24.04` GitHub-hosted runner; these timings include Lune startup and are not directly comparable to CodSpeed's simulated measurements.
+
+The full 4-algorithm, 6-scenario, 4-depth scheduler matrix remains an uninstrumented Bencher diagnostic. A separate DRR first-selection diagnostic varies queue depth (128–8,192) and distinct owner/work-class lane cardinality (1–2,048) independently, with queue construction outside the timed selection. CodSpeed also tracks a bounded first-selection scaling subset for FIFO and DRR at 512, 2,048 and 8,192 queued items so high-depth regressions remain visible without instrumenting the full diagnostic matrix.
+
+Bencher also runs a Durable Streams lookup break-even matrix. It compares the source-equivalent linear event/producer scans with index construction plus indexed lookups, across segment sizes 16–64, batches 4–32, new events, tail duplicates, same-event-ID producer retries, producer-sequence conflicts and mixed duplicate/conflict workloads. The direct diagnostic step prints per-case medians; Hyperfine records the five-process aggregate sweep. This measures the pure Luau lookup/index cost, not DataStore latency or Roblox production allocation behavior.
 
 To enable it:
 
