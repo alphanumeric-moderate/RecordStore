@@ -12955,7 +12955,10 @@ local function quarantine_profile_writes_internal(
 		local size_ok = prepared_envelope_cache._validate_serialized_size(mutable, nil, prepared_envelope_cache._max_value_depth + 1)
 		if not size_ok then return nil, nil, nil end
 		local user_ids, metadata = preserve_update_metadata(info)
-		return mutable, user_ids, metadata
+		return {
+			[prepared_envelope_cache] = true,
+			raw_value = mutable,
+		}, user_ids, metadata
 	end, deadline, nil)
 	local observed, status_code, status_message = get_quarantine_fence_status_internal(
 		name, scope, key, deadline - now_local(), mock
@@ -13038,7 +13041,10 @@ local function mark_quarantine_release_pending_internal(
 		local size_ok = prepared_envelope_cache._validate_serialized_size(mutable, nil, prepared_envelope_cache._max_value_depth + 1)
 		if not size_ok then return nil, nil, nil end
 		local user_ids, metadata = preserve_update_metadata(info)
-		return mutable, user_ids, metadata
+		return {
+			[prepared_envelope_cache] = true,
+			raw_value = mutable,
+		}, user_ids, metadata
 	end, deadline, nil)
 	local observed, status_code, status_message = get_quarantine_fence_status_internal(
 		name, scope, key, deadline - now_local(), mock
