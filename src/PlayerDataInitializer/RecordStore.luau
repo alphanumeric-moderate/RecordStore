@@ -8945,9 +8945,9 @@ local function encode_backend_update_value(value: unknown): unknown
 	return value
 end
 
-local function validate_serialized_size(value: unknown, shape_already_validated: boolean?): (boolean, string?)
+local function validate_serialized_size(value: unknown, shape_already_validated: boolean?, max_depth: number?): (boolean, string?)
 	if shape_already_validated ~= true then
-		local shape_ok, shape_message = validate_value_shape(value)
+		local shape_ok, shape_message = validate_value_shape(value, max_depth)
 		if not shape_ok then
 			return false, shape_message
 		end
@@ -10243,7 +10243,7 @@ local function validate_envelope(envelope: Envelope): (boolean, string?)
 		return false, "version 3 envelope is missing transaction sidecars"
 	end
 	local prepared = encode_envelope_for_storage(envelope)
-	local valid, message = validate_serialized_size(prepared)
+	local valid, message = validate_serialized_size(prepared, false, MAX_VALUE_DEPTH + 1)
 	if valid then
 		prepared_envelope_cache[envelope] = prepared
 	end
