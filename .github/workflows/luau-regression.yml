@@ -49,6 +49,10 @@ jobs:
         timeout-minutes: 2
         run: timeout --signal=TERM --kill-after=5s 60s lune run bench/run_regression_tests.luau
 
+      - name: Regression - Durable Streams idempotency and producer conflicts
+        timeout-minutes: 2
+        run: timeout --signal=TERM --kill-after=5s 60s lune run bench/run_durable_streams_regression.luau
+
       - name: Regression - PlayerData.Set
         timeout-minutes: 2
         run: timeout --signal=TERM --kill-after=5s 60s lune run bench/run_playerdata_set_regression_tests.luau

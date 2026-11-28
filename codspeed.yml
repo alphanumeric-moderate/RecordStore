@@ -100,8 +100,6 @@ benchmarks:
   - name: "RecordStore Reconcile no-op and default insertion"
     exec: lune run bench/reconcile_pipeline.bench.luau
 
-  - name: "PlayerData.Set path lookup"
-    exec: lune run bench/playerdata_set_paths.bench.luau
 
   - name: "V2 process-local trace ring (40,000 events)"
     exec: lune run bench/v2_trace_ring.bench.luau

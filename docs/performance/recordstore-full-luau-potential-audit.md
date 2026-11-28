@@ -498,9 +498,9 @@ The following items have now been implemented on this audit branch. The original
 
 ### Phase C — Mailbox V2 and Durable Streams
 
-- **Implemented, threshold under measurement:** Durable Streams builds temporary event-ID and producer-sequence maps when `segment.messages * prepared_batch_size >= 256`; smaller combinations retain linear scans. This `256` cutoff was originally a workload heuristic, not a measured break-even point. The new strict Lune benchmark compares the source-equivalent scans against index construction plus indexed lookups over segment sizes 16–64, batch sizes 4–32, and new-event, duplicate, producer-retry, and mixed workloads. The Bencher workflow prints the per-case matrix and tracks the total five-process sweep. The final cutoff decision is deferred until those measurements complete.
-- **Implemented:** the transient maps preserve first-match behavior and the existing distinction between event-ID conflicts and producer-sequence conflicts. The tests cover a 48-message segment, mixed producer/non-producer batches, commit-then-error reconciliation, duplicate retry, changed event payload and changed producer event identity.
-- **Threshold measurement:** `bench/durable_streams_index_break_even.bench.luau` is the new scan/index break-even sweep. It includes index construction in the indexed path and alternates sample order. Measurements are from Lune and are not Roblox VM or live DataStore evidence.
+- **Implemented, measured conservatively:** Durable Streams builds temporary event-ID and producer-sequence maps only when `segment.messages * prepared_batch_size >= 1536`; smaller combinations retain linear scans. The initial 64-case scan/index sweep included index construction in each indexed repetition. At the old product-256 boundary, indexing won only 1 of 12 shape/workload cases; all below-boundary cases favored scanning. At products 1536 and 2048, all eight then-measured cases favored indexing. The cutoff was raised to 1536, the smallest tested product where the original matrix consistently favored indexes. The revised 80-case sweep separates real producer retries (reusing the stored event ID and producer sequence) from producer-sequence conflicts (fresh event ID, existing producer sequence), and retains a mixed duplicate/conflict workload. This remains a provisional Lune-derived threshold, not a Roblox VM or production DataStore performance guarantee.
+- **Implemented:** the transient maps preserve first-match behavior and the existing distinction between event-ID conflicts and producer-sequence conflicts. Regression coverage exercises a 48-message segment, mixed producer/non-producer batches, commit-then-error reconciliation, same-event-ID retries, changed event payload and producer-sequence identity conflicts.
+- **Threshold measurement:** `bench/durable_streams_index_break_even.bench.luau` compares linear scans with index construction plus indexed lookups; build cost is included and sample order alternates. The current matrix spans five scenarios, segment sizes 16–64, batch sizes 4–32, seven samples and 24 repetitions per sample. Its corrected 80-case results are collected by the current Bencher workflow. Measurements are from Lune and are not Roblox VM or live DataStore evidence.
 - **Implemented:** Mailbox V2 uses one module-local priority-rank table instead of allocating a rank table per queue read/process call, and preallocates the bounded queue snapshot array from the observed index-row count. Age-based priority promotion, high-priority burst limiting, FIFO tie-breaks, claims and recovery order are unchanged.
 - **Deferred:** persistent Mailbox route/segment/order indexes and changes to candidate sorting. Queue order is dependent on age, high-priority burst state and durable claims; no persisted index is introduced without a separate ordering and recovery proof.
 
@@ -510,7 +510,7 @@ No DataStore key, persisted envelope/segment/sidecar format, public API, lease/f
 
 ## 13. Phase D–F continuation findings and implementation decisions (2026-11-28)
 
-**Continuation revision:** `30e0244df8b112d328b9b00e7688735c08b4b949` (before the audit-document and benchmark-workflow update in this continuation). The current source was re-read at 26,318 lines. This section records decisions from the source, regression, benchmark, and workflow evidence available on this revision.
+**Review input revision:** `6586b2083f3c57621afdcea4b05b8f007e07bad0`. The current source was re-read at 26,324 lines. The follow-up implementation and its verification are recorded in the subsequent PR commits and current CI runs.
 
 ### Phase D — copy/validation and mutation pipeline
 
@@ -519,22 +519,23 @@ No DataStore key, persisted envelope/segment/sidecar format, public API, lease/f
 - `copy_value` already performs detachment and records node count, depth, string-limit and non-finite facts when supplied a `ShapeValidation`. `Record:Update` uses that single copy/shape traversal and calls `validate_value` with `shape_already_validated = true` and the known non-finite flag. The second shape walk is therefore skipped, but the exact JSON encoding/byte-limit check and isolated custom-validator call remain authoritative.
 - `Patch` already uses copy-on-write for changed ancestors and payloads. Its weak-key subtree summaries are restricted to private table subtrees, and the final output still passes through validation/serialization. No caller-owned mutable table is promoted into a persistent prepared-value cache.
 - Reconciliation already has a no-op inspection path that can avoid cloning the current profile when no defaults need to be inserted. Replacing it with a generic pipeline would add complexity without a demonstrated reduction in traversal or allocation.
+- The depth limit for recursive value copying is resolved once per copy invocation rather than recomputed from the shared envelope namespace for every node. Static node and string limits are module-local constants; the accepted profile depth and raw-envelope wrapper-depth behavior are unchanged.
 - Non-finite sidecar restoration still validates marker shape and path semantics before a value can be published. A separate validated-marker trie/descriptor is not added: the extra representation and allocation have no paired profile evidence yet, and malformed/overlapping paths must continue to fail closed.
 - Canonicalization and digest material remain byte-compatible. No persistent digest cache or shared canonical representation is introduced for mutable payloads.
 
 **Envelope wrapper-depth correction (implemented in this continuation).** The three quarantine-fence transitions and two outbox sidecar transitions now copy raw envelopes with `_copy_value_with_depth(raw, _max_value_depth + 1)` and validate each changed envelope with the same additional wrapper depth. The profile-data limit remains 64 edges, exact JSON size validation remains authoritative, and the persisted envelope/sidecar format is unchanged. The new strict regression exercises install, release-pending, release, outbox state update, and outbox prune using exactly 64-edge profile data.
 
-**Current performance observations (Bencher, Ubuntu 24.04, Hyperfine median, five runs):**
+**Paired same-runner measurements before the recursive-limit hoist (Bencher, Ubuntu 24.04, Hyperfine median, five runs; main baseline vs PR head `6586b208`):**
 
-| Workload | PR result | Reported baseline | Interpretation |
-|---|---:|---:|---|
-| Large profile update/save | 210.04 ms | 249.72 ms | 15.89% lower in this report; not a Roblox DataStore latency claim |
-| Update copy/validation pipeline | 335.10 ms | No baseline sample | Measurement exists; no before/after claim |
-| Patch copy/validation pipeline | 239.57 ms | No baseline sample | Measurement exists; no before/after claim |
-| Reconcile pipeline | 676.55 ms | No baseline sample | Measurement exists; no before/after claim |
-| Legacy migration/history | 123.82 ms | 114.58 ms | 8.07% higher in this report; monitor, do not attribute from one run |
+| Workload | Main median | PR median | Change |
+|---|---:|---:|---:|
+| Large profile update/save | 208.716 ms | 214.890 ms | +2.96% |
+| Update copy/validation pipeline | 334.530 ms | 342.546 ms | +2.40% |
+| Patch copy/validation pipeline | 243.146 ms | 245.620 ms | +1.02% |
+| Reconcile pipeline | 672.550 ms | 685.976 ms | +2.00% |
+| Legacy migration/history | 127.523 ms | 127.113 ms | -0.32% |
 
-The paired report is [Bencher report `01a22034-9b5b-76e1-bf7c-ad0c900c78ee`](https://bencher.dev/perf/alphanumeric-moderate-s-project/reports/01a22034-9b5b-76e1-bf7c-ad0c900c78ee). The separate CodSpeed Update WallTime run returned 1.5 s optimized and 6.3 s historical, but CodSpeed marked those measurements unreliable because they ran outside Macro Runners. They are not accepted as a speedup claim.
+All five Hyperfine samples completed with zero command exit codes. The PR Bencher gate nevertheless reported two statistically detected alerts, for Reconcile and Update validation. These are observed same-runner differences; they are not attributed to a specific code change from this comparison alone. The recursive-limit hoist is intended to remove avoidable per-node work and is being remeasured on the next head. These hosted Lune results are not Roblox DataStore latency claims. The earlier isolated CodSpeed WallTime run was marked unreliable outside Macro Runners and is not used as performance evidence.
 
 ### Phase E — narrow typing and module boundaries
 
@@ -555,9 +556,9 @@ The paired report is [Bencher report `01a22034-9b5b-76e1-bf7c-ad0c900c78ee`](htt
 
 ### Benchmark workflow correction and current verification limits
 
-The CodSpeed CPU-simulation job on the earlier head timed out during `RecordStore Reconcile no-op and default insertion`, after the Update and Patch validation benchmarks had run. The GitHub Actions log shows the benchmark action timing out after approximately 971 seconds; no benchmark assertion failure was reported. The timeout was in Reconcile, not in the scheduler-backlog matrix. The complete 4-algorithm x 6-scenario x 4-depth scheduler matrix remains in Bencher's uninstrumented diagnostic step, which completed successfully. This continuation adds new tracked CodSpeed first-selection coverage for FIFO and DRR at 512, 2,048 and 8,192 items, alongside the existing 128-item policy microbenchmarks and Update/Patch/Reconcile workloads. The six-case subset has no historical CodSpeed series yet; it provides new high-depth coverage for future comparisons.
+The CodSpeed CPU-simulation action hit its explicit 16-minute step timeout (about 971 seconds) on both the base-branch run and the PR head; the PR-head log had reached the Patch copy/validation benchmark when it timed out. No benchmark assertion failure was reported. This is a workflow time cap that also affects the base branch, not a PR-only regression. The action step timeout is now 35 minutes and the job timeout 40 minutes so the complete configured suite can finish; benchmark coverage is retained, and one duplicate PlayerData.Set benchmark entry was removed. The next CI run must confirm whether the longer window is sufficient before CodSpeed can be reported as passing.
 
-On the pre-continuation head, the Luau regression workflow, Luau strict type-check, RecordStore Update Latency workflow, and Bencher report completed successfully. The CPU-simulation workflow timed out as described. The Update/Patch validation results above still lack historical paired baseline samples. Roblox Studio multi-server/DataStore acceptance and Roblox Script Profiler/MicroProfiler measurements have not been performed.
+The complete 4-algorithm x 6-scenario x 4-depth scheduler matrix remains in Bencher's uninstrumented diagnostic step. The tracked CodSpeed first-selection subset covers FIFO and DRR at 512, 2,048 and 8,192 items alongside the existing 128-item policy workloads and Update/Patch/Reconcile. It is new high-depth coverage, not a historical performance series. The paired Update, Patch and Reconcile Hyperfine workloads now have main-branch comparison samples; their current deltas are recorded above. Roblox Studio multi-server/DataStore acceptance and Roblox Script Profiler/MicroProfiler measurements have not been performed.
 
 ### Phase D–F disposition
 

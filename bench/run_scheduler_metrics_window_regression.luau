@@ -1,4 +1,4 @@
---!nocheck
+--!strict
 local Scheduler = require("./RobloxShim").load_scheduler()
 local task = require("@lune/task")
 

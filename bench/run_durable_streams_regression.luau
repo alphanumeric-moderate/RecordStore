@@ -1,4 +1,4 @@
---!nocheck
+--!strict
 local FakeDataStore = require("./FakeDataStore")
 local initializer = game:GetService("ServerScriptService"):WaitForChild("PlayerDataInitializer")
 local RecordStore = require(initializer:WaitForChild("RecordStore"))

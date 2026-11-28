@@ -1,4 +1,4 @@
---!nocheck
+--!strict
 -- PR #33 advanced-scheduler public behavior regression suite.
 local Scheduler = require("./RobloxShim").load_scheduler()
 local task = require("@lune/task")

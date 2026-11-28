@@ -8184,15 +8184,15 @@ local function validate_metadata(metadata: Metadata, allow_reserved: boolean?): 
 	return true, nil
 end
 
+local MAX_VALUE_DEPTH = 64
+local MAX_VALUE_NODES = 100_000
+local MAX_VALUE_STRING_LENGTH = 4_000_000
 local prepared_envelope_cache: any = setmetatable({}, { __mode = "k" })
-prepared_envelope_cache._max_value_depth = 64
-prepared_envelope_cache._max_value_nodes = 100_000
-prepared_envelope_cache._max_value_string_length = 4_000_000
 
 local function validate_value_shape(value: unknown, max_depth: number?, max_nodes: number?, max_string_length: number?, allow_non_finite_numbers: boolean?): (boolean, string?)
-	local depth_limit = max_depth or prepared_envelope_cache._max_value_depth
-	local node_limit = max_nodes or prepared_envelope_cache._max_value_nodes
-	local string_limit = max_string_length or prepared_envelope_cache._max_value_string_length
+	local depth_limit = max_depth or MAX_VALUE_DEPTH
+	local node_limit = max_nodes or MAX_VALUE_NODES
+	local string_limit = max_string_length or MAX_VALUE_STRING_LENGTH
 	local node_count = 0
 	local active_tables: { [any]: boolean } = {}
 
@@ -8324,6 +8324,7 @@ copy_value = function(
 		return nil
 	end
 
+	local depth_limit = if shape_validation ~= nil then shape_validation.max_depth or MAX_VALUE_DEPTH else MAX_VALUE_DEPTH
 	local active_tables: { [any]: boolean } = {}
 
 	local function clone(current: unknown, depth: number): JsonValue?
@@ -8335,12 +8336,11 @@ copy_value = function(
 				return nil
 			end
 			shape_validation.nodes += 1
-			if shape_validation.nodes > prepared_envelope_cache._max_value_nodes then
+			if shape_validation.nodes > MAX_VALUE_NODES then
 				shape_validation.message = "value exceeds the maximum node count"
 				return nil
 			end
 		end
-		local depth_limit = if shape_validation ~= nil then shape_validation.max_depth or prepared_envelope_cache._max_value_depth else prepared_envelope_cache._max_value_depth
 		if depth > depth_limit then
 			error("value exceeds the maximum nesting depth")
 		end
@@ -8355,7 +8355,7 @@ copy_value = function(
 			return numeric_value
 		elseif current_type == "string" then
 			local string_value = current :: string
-			if shape_validation ~= nil and #string_value > prepared_envelope_cache._max_value_string_length then
+			if shape_validation ~= nil and #string_value > MAX_VALUE_STRING_LENGTH then
 				shape_validation.message = "value contains an overlong string"
 				return nil
 			end
@@ -8470,7 +8470,7 @@ local function encode_non_finite_numbers(
 	local path: { string | number } = {}
 
 	local function encode(current: JsonValue, depth: number): (JsonValue, boolean)
-		if depth > prepared_envelope_cache._max_value_depth then
+		if depth > MAX_VALUE_DEPTH then
 			error("value exceeds the maximum nesting depth")
 		end
 
@@ -8614,7 +8614,7 @@ local function restore_non_finite_numbers(
 			path_count += 1
 			path_maximum = math.max(path_maximum, path_index)
 		end
-		if path_count ~= path_maximum or path_count > prepared_envelope_cache._max_value_depth then
+		if path_count ~= path_maximum or path_count > MAX_VALUE_DEPTH then
 			return nil, "non-finite number marker path is invalid"
 		end
 
@@ -9566,7 +9566,7 @@ local function backend_get(backend: Backend, use_cache: boolean, deadline: numbe
 		if entry == nil then
 			return nil, nil, nil, nil
 		end
-		return prepared_envelope_cache._copy_value_with_depth(entry.Value, prepared_envelope_cache._max_value_depth + 1), {
+		return prepared_envelope_cache._copy_value_with_depth(entry.Value, MAX_VALUE_DEPTH + 1), {
 			Version = entry.Version,
 			CreatedTime = entry.CreatedTime,
 			UpdatedTime = entry.UpdatedTime,
@@ -9650,7 +9650,7 @@ local function backend_update(backend: Backend, transform: UpdateTransform, dead
 		end
 		local store = get_mock_store(backend.name, backend.scope)
 		local entry = store[backend.key]
-		local raw = if entry ~= nil then prepared_envelope_cache._copy_value_with_depth(entry.Value, prepared_envelope_cache._max_value_depth + 1) else nil
+		local raw = if entry ~= nil then prepared_envelope_cache._copy_value_with_depth(entry.Value, MAX_VALUE_DEPTH + 1) else nil
 		local info: BackendInfo? = if entry ~= nil
 			then {
 				Version = entry.Version,
@@ -9691,7 +9691,7 @@ local function backend_update(backend: Backend, transform: UpdateTransform, dead
 		end
 		local stored_new_value = encode_backend_update_value(new_value)
 		local value, copy_error, non_finite_numbers_absent =
-			prepared_envelope_cache._copy_with_shape(stored_new_value, prepared_envelope_cache._max_value_depth + 1)
+			prepared_envelope_cache._copy_with_shape(stored_new_value, MAX_VALUE_DEPTH + 1)
 		if value == nil then
 			return nil, nil, "validation", copy_error or "updated value is invalid"
 		end
@@ -9705,14 +9705,14 @@ local function backend_update(backend: Backend, transform: UpdateTransform, dead
 		if not data_ok then
 			return nil, nil, "validation", data_error
 		end
-		local next_entry = mock_write_version(entry, value, ids, normalized_metadata, false, prepared_envelope_cache._max_value_depth + 1)
+		local next_entry = mock_write_version(entry, value, ids, normalized_metadata, false, MAX_VALUE_DEPTH + 1)
 		store[backend.key] = next_entry
 		if mock_update_commit_then_failure_count > 0 then
 			mock_update_commit_then_failure_count -= 1
 			return nil, nil, "unknown", mock_update_commit_then_failure_message
 				or "injected UpdateAsync response failure after commit"
 		end
-		return prepared_envelope_cache._copy_value_with_depth(next_entry.Value, prepared_envelope_cache._max_value_depth + 1), {
+		return prepared_envelope_cache._copy_value_with_depth(next_entry.Value, MAX_VALUE_DEPTH + 1), {
 			Version = next_entry.Version,
 			CreatedTime = next_entry.CreatedTime,
 			UpdatedTime = next_entry.UpdatedTime,
@@ -10261,7 +10261,7 @@ local function validate_envelope(envelope: Envelope): (boolean, string?)
 		return false, "version 3 envelope is missing transaction sidecars"
 	end
 	local prepared = encode_envelope_for_storage(envelope)
-	local valid, message = prepared_envelope_cache._validate_serialized_size(prepared, false, prepared_envelope_cache._max_value_depth + 1)
+	local valid, message = prepared_envelope_cache._validate_serialized_size(prepared, false, MAX_VALUE_DEPTH + 1)
 	if valid then
 		prepared_envelope_cache[envelope] = prepared
 	end
@@ -12925,7 +12925,7 @@ local function quarantine_profile_writes_internal(
 		then
 			return nil, nil, nil
 		end
-		local next_raw = prepared_envelope_cache._copy_value_with_depth(raw, prepared_envelope_cache._max_value_depth + 1)
+		local next_raw = prepared_envelope_cache._copy_value_with_depth(raw, MAX_VALUE_DEPTH + 1)
 		if type(next_raw) ~= "table" then return nil, nil, nil end
 		local mutable: any = next_raw
 		local next_generation = math.max(1, envelope.fencing_generation + 1)
@@ -12952,7 +12952,7 @@ local function quarantine_profile_writes_internal(
 		mutable.write_id = fence_write_id
 		mutable.session = nil
 		mutable[QUARANTINE_FENCE_FIELD] = marker
-		local size_ok = prepared_envelope_cache._validate_serialized_size(mutable, nil, prepared_envelope_cache._max_value_depth + 1)
+		local size_ok = prepared_envelope_cache._validate_serialized_size(mutable, nil, MAX_VALUE_DEPTH + 1)
 		if not size_ok then return nil, nil, nil end
 		local user_ids, metadata = preserve_update_metadata(info)
 		return {
@@ -13025,7 +13025,7 @@ local function mark_quarantine_release_pending_internal(
 			if marker.resolution_id ~= resolution_id then return nil, nil, nil end
 			return nil, nil, nil
 		end
-		local next_raw = prepared_envelope_cache._copy_value_with_depth(raw, prepared_envelope_cache._max_value_depth + 1)
+		local next_raw = prepared_envelope_cache._copy_value_with_depth(raw, MAX_VALUE_DEPTH + 1)
 		if type(next_raw) ~= "table" then return nil, nil, nil end
 		local mutable: any = next_raw
 		local next_marker: any = table.clone(marker)
@@ -13038,7 +13038,7 @@ local function mark_quarantine_release_pending_internal(
 		mutable[QUARANTINE_FENCE_FIELD] = next_marker
 		mutable.updated_at = now
 		mutable.write_id = release_pending_write_id
-		local size_ok = prepared_envelope_cache._validate_serialized_size(mutable, nil, prepared_envelope_cache._max_value_depth + 1)
+		local size_ok = prepared_envelope_cache._validate_serialized_size(mutable, nil, MAX_VALUE_DEPTH + 1)
 		if not size_ok then return nil, nil, nil end
 		local user_ids, metadata = preserve_update_metadata(info)
 		return {
@@ -13086,7 +13086,7 @@ local function release_quarantine_fence_internal(
 		if not present or marker == nil or marker.quarantine_id ~= quarantine_id
 			or marker.phase ~= "release_pending" or marker.resolution_id ~= resolution_id
 		then return nil, nil, nil end
-		local next_raw = prepared_envelope_cache._copy_value_with_depth(raw, prepared_envelope_cache._max_value_depth + 1)
+		local next_raw = prepared_envelope_cache._copy_value_with_depth(raw, MAX_VALUE_DEPTH + 1)
 		if type(next_raw) ~= "table" then return nil, nil, nil end
 		local mutable: any = next_raw
 		mutable.implementation_version = marker.source_implementation_version
@@ -13098,7 +13098,7 @@ local function release_quarantine_fence_internal(
 		mutable[QUARANTINE_FENCE_FIELD] = nil
 		local restored_envelope, _, is_current = parse_envelope(mutable)
 		if not is_current or restored_envelope == nil then return nil, nil, nil end
-		local size_ok = prepared_envelope_cache._validate_serialized_size(mutable, nil, prepared_envelope_cache._max_value_depth + 1)
+		local size_ok = prepared_envelope_cache._validate_serialized_size(mutable, nil, MAX_VALUE_DEPTH + 1)
 		if not size_ok then return nil, nil, nil end
 		local user_ids, metadata = preserve_update_metadata(info)
 		return mutable, user_ids, metadata
@@ -18546,7 +18546,7 @@ RecordStore._internals.patch = (function()
 			return pack_subtree_summary(1, 1, not math.isfinite(value :: number), 1), nil
 		elseif value_type == "string" then
 			local string_value = value :: string
-			if #string_value > prepared_envelope_cache._max_value_string_length then
+			if #string_value > MAX_VALUE_STRING_LENGTH then
 				return nil, "value contains an overlong string"
 			end
 			return pack_subtree_summary(1, 1, false, minimum_encoded_string_bytes(string_value)), nil
@@ -20030,10 +20030,10 @@ prepared_envelope_cache._outbox_engine = (function()
 
 			local sidecars_valid = protocol.validate(sidecars)
 			if not sidecars_valid then return nil, nil, nil end
-			local raw_value = prepared_envelope_cache._copy_value_with_depth(raw, prepared_envelope_cache._max_value_depth + 1)
+			local raw_value = prepared_envelope_cache._copy_value_with_depth(raw, MAX_VALUE_DEPTH + 1)
 			if type(raw_value) ~= "table" then return nil, nil, nil end
 			(raw_value :: { [string]: any }).sidecars = sidecars
-			local raw_valid = prepared_envelope_cache._validate_serialized_size(raw_value, nil, prepared_envelope_cache._max_value_depth + 1)
+			local raw_valid = prepared_envelope_cache._validate_serialized_size(raw_value, nil, MAX_VALUE_DEPTH + 1)
 			if not raw_valid then return nil, nil, nil end
 			return {
 				[prepared_envelope_cache] = true,
@@ -20222,10 +20222,10 @@ prepared_envelope_cache._outbox_engine = (function()
 			if not removed_any then return nil, nil, nil end
 			local sidecars_valid = protocol.validate(sidecars)
 			if not sidecars_valid then return nil, nil, nil end
-			local raw_value = prepared_envelope_cache._copy_value_with_depth(raw, prepared_envelope_cache._max_value_depth + 1)
+			local raw_value = prepared_envelope_cache._copy_value_with_depth(raw, MAX_VALUE_DEPTH + 1)
 			if type(raw_value) ~= "table" then return nil, nil, nil end
 			(raw_value :: { [string]: any }).sidecars = sidecars
-			local raw_valid = prepared_envelope_cache._validate_serialized_size(raw_value, nil, prepared_envelope_cache._max_value_depth + 1)
+			local raw_valid = prepared_envelope_cache._validate_serialized_size(raw_value, nil, MAX_VALUE_DEPTH + 1)
 			if not raw_valid then return nil, nil, nil end
 			return {
 				[prepared_envelope_cache] = true,
@@ -21761,24 +21761,24 @@ RecordStore.Mock = (function()
 			return "success", nil
 		end
 		local copied_ok, copied_or_error = pcall(function()
-			return prepared_envelope_cache._copy_value_with_depth(value, prepared_envelope_cache._max_value_depth + 1)
+			return prepared_envelope_cache._copy_value_with_depth(value, MAX_VALUE_DEPTH + 1)
 		end)
 		if not copied_ok or copied_or_error == nil then
 			return "validation", "mock record fixture is not valid JSON data"
 		end
 		local copied = copied_or_error :: JsonValue
-		local valid, size_error = prepared_envelope_cache._validate_serialized_size(copied, false, prepared_envelope_cache._max_value_depth + 1)
+		local valid, size_error = prepared_envelope_cache._validate_serialized_size(copied, false, MAX_VALUE_DEPTH + 1)
 		if not valid then
 			return "validation", size_error
 		end
-		store[key] = mock_write_version(store[key], copied, {}, {}, false, prepared_envelope_cache._max_value_depth + 1)
+		store[key] = mock_write_version(store[key], copied, {}, {}, false, MAX_VALUE_DEPTH + 1)
 		return "success", nil
 	end
 
 	local function mock_get_record_raw(name: string, scope: string, key: string): unknown
 		local store = get_mock_store(name, scope)
 		local entry = store[key]
-		return if entry == nil then nil else prepared_envelope_cache._copy_value_with_depth(entry.Value, prepared_envelope_cache._max_value_depth + 1)
+		return if entry == nil then nil else prepared_envelope_cache._copy_value_with_depth(entry.Value, MAX_VALUE_DEPTH + 1)
 	end
 
 
@@ -21849,7 +21849,7 @@ RecordStore.Mock = (function()
 			return nil
 		end
 		local historical = entry.Versions[version]
-		return if historical == nil then nil else prepared_envelope_cache._copy_value_with_depth(historical.Value, prepared_envelope_cache._max_value_depth + 1)
+		return if historical == nil then nil else prepared_envelope_cache._copy_value_with_depth(historical.Value, MAX_VALUE_DEPTH + 1)
 	end
 
 	local function mock_set_test_clock(clock: (() -> number)?)

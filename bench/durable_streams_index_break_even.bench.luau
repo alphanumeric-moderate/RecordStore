@@ -31,7 +31,7 @@ type SegmentIndexes = {
 	by_producer_sequence: { [string]: { [number]: Message } },
 }
 
-type Scenario = "new-events" | "tail-duplicates" | "producer-retries" | "mixed-retries"
+type Scenario = "new-events" | "tail-duplicates" | "producer-retries" | "producer-sequence-conflicts" | "mixed-duplicates-and-conflicts"
 
 type Summary = {
 	scenario: Scenario,
@@ -41,7 +41,7 @@ type Summary = {
 	ratios: { number },
 }
 
-local CURRENT_THRESHOLD = 256
+local CURRENT_THRESHOLD = 1536
 local SAMPLE_COUNT = 7
 local BATCH_REPETITIONS = 24
 local SEGMENT_SIZES = { 16, 32, 48, 64 }
@@ -50,7 +50,8 @@ local SCENARIOS: { Scenario } = {
 	"new-events",
 	"tail-duplicates",
 	"producer-retries",
-	"mixed-retries",
+	"producer-sequence-conflicts",
+	"mixed-duplicates-and-conflicts",
 }
 
 local function expect(condition: boolean, message: string)
@@ -172,19 +173,22 @@ local function create_batch(segment: Segment, batch_size: number, scenario: Scen
 			else
 				append_new_event(batch, "tail-new-event", index)
 			end
-		elseif scenario == "producer-retries" then
+		elseif scenario == "producer-retries" or scenario == "producer-sequence-conflicts" then
 			if index <= matched_count then
 				local message = segment.messages[#segment.messages - matched_count + index]
 				local producer_id = message.producer_id
 				local producer_sequence = message.producer_sequence
 				expect(producer_id ~= nil and producer_sequence ~= nil, "fixture message lacks producer identity")
+				local event_id = if scenario == "producer-retries"
+					then message.event_id
+					else "producer-conflict-event-" .. tostring(index)
 				batch[index] = {
-					event_id = "retry-event-" .. tostring(index),
+					event_id = event_id,
 					producer_id = producer_id,
 					producer_sequence = producer_sequence,
 				}
 			else
-				append_new_event(batch, "producer-new-event", index)
+				append_new_event(batch, if scenario == "producer-retries" then "producer-retry-new-event" else "producer-conflict-new-event", index)
 			end
 		else
 			local kind = (index - 1) % 4

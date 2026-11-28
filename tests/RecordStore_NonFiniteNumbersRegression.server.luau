@@ -1,4 +1,4 @@
---!nocheck
+--!strict
 -- Regression tests for RecordStore non-finite number persistence.
 -- Uses RecordStore.Mock only; this never reads or writes live DataStore records.
 
