@@ -86,6 +86,9 @@ type SampleWindow = {
 	values: { number },
 	head: number,
 	count: number,
+	revision: number,
+	cached_p95_revision: number?,
+	cached_p95: number?,
 }
 local RecordStoreScheduler: EmbeddedSchedulerModule = {} :: EmbeddedSchedulerModule
 do
@@ -109,7 +112,7 @@ do
 	local SAMPLE_WINDOW_CAPACITY = 256
 
 	local function new_sample_window(): SampleWindow
-		return { values = {}, head = 1, count = 0 }
+		return { values = {}, head = 1, count = 0, revision = 0 }
 	end
 
 	local function append_sample(window: SampleWindow, value: number)
@@ -117,10 +120,11 @@ do
 			local index = (window.head - 1 + window.count) % SAMPLE_WINDOW_CAPACITY + 1
 			window.values[index] = value
 			window.count += 1
-			return
+		else
+			window.values[window.head] = value
+			window.head = window.head % SAMPLE_WINDOW_CAPACITY + 1
 		end
-		window.values[window.head] = value
-		window.head = window.head % SAMPLE_WINDOW_CAPACITY + 1
+		window.revision += 1
 	end
 
 	local function sample_window_values(window: SampleWindow): { number }
@@ -130,6 +134,19 @@ do
 			values[index] = window.values[source_index]
 		end
 		return values
+	end
+
+	local function sample_window_p95(window: SampleWindow): number?
+		if window.count == 0 then return nil end
+		if window.cached_p95_revision == window.revision then
+			return window.cached_p95
+		end
+		local ordered = sample_window_values(window)
+		table.sort(ordered)
+		local percentile = ordered[math.ceil(#ordered * 0.95)]
+		window.cached_p95 = percentile
+		window.cached_p95_revision = window.revision
+		return percentile
 	end
 
 	local function key_count(value: any): number
@@ -1161,10 +1178,8 @@ do
 			if cached ~= nil then return cached end
 			local estimate = self.latency_ewma[metric_kind] or 0
 			local samples = self.latency_samples_by_operation[metric_kind]
-			if samples ~= nil and samples.count > 0 then
-				local ordered = sample_window_values(samples)
-				table.sort(ordered)
-				estimate = math.max(estimate, ordered[math.ceil(#ordered * 0.95)] or 0)
+			if samples ~= nil then
+				estimate = math.max(estimate, sample_window_p95(samples) or 0)
 			end
 			cache[metric_kind] = estimate
 			return estimate
@@ -1404,11 +1419,19 @@ do
 				table.sort(lane_keys)
 				local lane_count = #lane_keys
 				local start_index = 1
-				if self.drr_cursor_key ~= nil then
-					for i, key in ipairs(lane_keys) do
-						if key == self.drr_cursor_key then
-							start_index = (i % lane_count) + 1
+				local cursor_key = self.drr_cursor_key
+				if type(cursor_key) == "string" then
+					local low, high = 1, lane_count
+					while low <= high do
+						local middle = math.floor((low + high) / 2)
+						local key = lane_keys[middle]
+						if key == cursor_key then
+							start_index = (middle % lane_count) + 1
 							break
+						elseif key < cursor_key then
+							low = middle + 1
+						else
+							high = middle - 1
 						end
 					end
 				end
@@ -2565,10 +2588,8 @@ do
 		function governor:LeaseRenewalAdvice()
 			local function p95_for(operation: string): number?
 				local source = self.latency_samples_by_operation[operation]
-				if source == nil or source.count == 0 then return nil end
-				local samples = sample_window_values(source)
-				table.sort(samples)
-				return samples[math.clamp(math.ceil(#samples * 0.95), 1, #samples)]
+				if source == nil then return nil end
+				return sample_window_p95(source)
 			end
 			return {
 				lease_renewal_p95_ms = p95_for("lease_renewal"),
@@ -3339,6 +3360,11 @@ do
 	local VERSION = 2
 	local MAX_KEY_LENGTH = 50
 	local DEFAULT_MAX_SEGMENTS = 64
+	local PRIORITY_RANK: { [string]: number } = {
+		high = 1,
+		normal = 2,
+		background = 3,
+	}
 	local DEFAULT_SEGMENT_MAX_MESSAGES = 32
 	local DEFAULT_PREPARATION_SHARDS = 16
 	local DEFAULT_PREPARATION_ENTRIES = 16
@@ -5829,7 +5855,7 @@ do
 		if rows_error ~= nil then
 			return {}, ok(storage_error_code(rows_error), nil, nil, rows_error)
 		end
-		local result: { EmbeddedMailboxDict } = {}
+		local result: { EmbeddedMailboxDict } = table.create(#rows)
 		local seen: { [string]: boolean } = {}
 		for _, row in rows do
 			local route = tostring(row.route)
@@ -5887,13 +5913,12 @@ do
 					return {}, ok("corrupt", route, nil, "ready mailbox message contains malformed priority, counter, time or ordering metadata")
 				end
 				seen[route] = true
-				table.insert(result, self:_record_snapshot(record))
+				result[#result + 1] = self:_record_snapshot(record)
 			end
 		end
-		local rank = { high = 1, normal = 2, background = 3 }
 		table.sort(result, function(left, right)
-			local left_rank = rank[tostring(left.Priority)] :: number
-			local right_rank = rank[tostring(right.Priority)] :: number
+			local left_rank = PRIORITY_RANK[tostring(left.Priority)]
+			local right_rank = PRIORITY_RANK[tostring(right.Priority)]
 			if left_rank ~= right_rank then return left_rank < right_rank end
 			if left.CreatedAt ~= right.CreatedAt then
 				return (left.CreatedAt :: number) < (right.CreatedAt :: number)
@@ -6289,12 +6314,11 @@ do
 			return ok("empty", nil, nil, nil)
 		end
 		local now = self:_now()
-		local rank = { high = 1, normal = 2, background = 3 }
 		table.sort(queue, function(left, right)
 			local left_age = math.max(0, now - (left.CreatedAt :: number))
 			local right_age = math.max(0, now - (right.CreatedAt :: number))
-			local left_rank = rank[tostring(left.Priority)] or 2
-			local right_rank = rank[tostring(right.Priority)] or 2
+			local left_rank = PRIORITY_RANK[tostring(left.Priority)] or 2
+			local right_rank = PRIORITY_RANK[tostring(right.Priority)] or 2
 			if left_age >= (self.options.priority_aging_ms :: number) * 2 then left_rank = 1
 			elseif left_age >= (self.options.priority_aging_ms :: number) then left_rank = math.min(left_rank, 2) end
 			if right_age >= (self.options.priority_aging_ms :: number) * 2 then right_rank = 1
@@ -7026,6 +7050,13 @@ export type JsonValue =
 | buffer
 | { JsonValue }
 | { [string]: JsonValue }
+
+type ShapeValidation = {
+	nodes: number,
+	message: string?,
+	has_non_finite_numbers: boolean,
+	max_depth: number?,
+}
 
 export type SessionState =
 	"closed"
@@ -7916,7 +7947,7 @@ local mock_get_failure_message: string? = nil
 local close_internal: (state: InternalState, shutdown: boolean) -> (ResultCode, string?)
 local complete_deferred_takeover: (state: InternalState) -> ()
 local process_queue_internal: (state: InternalState, max_messages: number) -> (ResultCode, string?)
-local copy_value: (value: unknown, shape_validation: { nodes: number, message: string?, has_non_finite_numbers: boolean }?) -> JsonValue?
+local copy_value: (value: unknown, shape_validation: ShapeValidation?) -> JsonValue?
 local track_external_data_mutation: (state: InternalState) -> ()
 local messaging_enabled: (state: InternalState) -> boolean
 local publish_record_message: (state: InternalState, kind: string, message_type: string?, data: JsonValue?, generation: number?, target_job_id: string?, target_token: string?, request_id: string?, handoff_status: HandoffStatus?, requester_job_id: string?) -> (boolean, string?)
@@ -8153,10 +8184,15 @@ local function validate_metadata(metadata: Metadata, allow_reserved: boolean?): 
 	return true, nil
 end
 
+local prepared_envelope_cache: any = setmetatable({}, { __mode = "k" })
+prepared_envelope_cache._max_value_depth = 64
+prepared_envelope_cache._max_value_nodes = 100_000
+prepared_envelope_cache._max_value_string_length = 4_000_000
+
 local function validate_value_shape(value: unknown, max_depth: number?, max_nodes: number?, max_string_length: number?, allow_non_finite_numbers: boolean?): (boolean, string?)
-	local depth_limit = max_depth or 64
-	local node_limit = max_nodes or 100000
-	local string_limit = max_string_length or 4_000_000
+	local depth_limit = max_depth or prepared_envelope_cache._max_value_depth
+	local node_limit = max_nodes or prepared_envelope_cache._max_value_nodes
+	local string_limit = max_string_length or prepared_envelope_cache._max_value_string_length
 	local node_count = 0
 	local active_tables: { [any]: boolean } = {}
 
@@ -8282,7 +8318,7 @@ end
 
 copy_value = function(
 	value: unknown,
-	shape_validation: { nodes: number, message: string?, has_non_finite_numbers: boolean }?
+	shape_validation: ShapeValidation?
 ): JsonValue?
 	if value == nil then
 		return nil
@@ -8299,12 +8335,13 @@ copy_value = function(
 				return nil
 			end
 			shape_validation.nodes += 1
-			if shape_validation.nodes > 100000 then
+			if shape_validation.nodes > prepared_envelope_cache._max_value_nodes then
 				shape_validation.message = "value exceeds the maximum node count"
 				return nil
 			end
 		end
-		if depth > 64 then
+		local depth_limit = if shape_validation ~= nil then shape_validation.max_depth or prepared_envelope_cache._max_value_depth else prepared_envelope_cache._max_value_depth
+		if depth > depth_limit then
 			error("value exceeds the maximum nesting depth")
 		end
 		local current_type = type(current)
@@ -8318,7 +8355,7 @@ copy_value = function(
 			return numeric_value
 		elseif current_type == "string" then
 			local string_value = current :: string
-			if shape_validation ~= nil and #string_value > 4_000_000 then
+			if shape_validation ~= nil and #string_value > prepared_envelope_cache._max_value_string_length then
 				shape_validation.message = "value contains an overlong string"
 				return nil
 			end
@@ -8408,9 +8445,23 @@ copy_value = function(
 		local empty_result: { JsonValue } = {}
 		return empty_result
 	end
-	return clone(value, 1)
+	return clone(value, 0)
 end
 
+
+prepared_envelope_cache._copy_value_with_depth = function(value: unknown, max_depth: number?): JsonValue?
+	local validation: ShapeValidation = {
+		nodes = 0,
+		message = nil,
+		has_non_finite_numbers = false,
+		max_depth = max_depth,
+	}
+	local copied = copy_value(value, validation)
+	if validation.message ~= nil then
+		error(validation.message)
+	end
+	return copied
+end
 
 local function encode_non_finite_numbers(
 	value: JsonValue
@@ -8419,7 +8470,7 @@ local function encode_non_finite_numbers(
 	local path: { string | number } = {}
 
 	local function encode(current: JsonValue, depth: number): (JsonValue, boolean)
-		if depth > 64 then
+		if depth > prepared_envelope_cache._max_value_depth then
 			error("value exceeds the maximum nesting depth")
 		end
 
@@ -8437,8 +8488,8 @@ local function encode_non_finite_numbers(
 				kind = "negative_infinity"
 			end
 
-			local marker_path: { NonFinitePathSegment } = table.create(depth - 1)
-			for path_index = 1, depth - 1 do
+			local marker_path: { NonFinitePathSegment } = table.create(depth)
+			for path_index = 1, depth do
 				local key = path[path_index]
 				local segment: NonFinitePathSegment
 				if type(key) == "string" then
@@ -8476,9 +8527,9 @@ local function encode_non_finite_numbers(
 				error("value contains mixed table keys")
 			end
 
-			path[depth] = key
+			path[depth + 1] = key
 			local encoded_child, child_changed = encode(child, depth + 1)
-			path[depth] = nil
+			path[depth + 1] = nil
 
 			if child_changed then
 				if result == nil then
@@ -8494,7 +8545,7 @@ local function encode_non_finite_numbers(
 		return result :: JsonValue, true
 	end
 
-	local encoded, _changed = encode(value, 1)
+	local encoded, _changed = encode(value, 0)
 	return encoded, markers
 end
 
@@ -8563,7 +8614,7 @@ local function restore_non_finite_numbers(
 			path_count += 1
 			path_maximum = math.max(path_maximum, path_index)
 		end
-		if path_count ~= path_maximum or path_count > 64 then
+		if path_count ~= path_maximum or path_count > prepared_envelope_cache._max_value_depth then
 			return nil, "non-finite number marker path is invalid"
 		end
 
@@ -8638,7 +8689,7 @@ local function restore_non_finite_numbers(
 	return result, nil
 end
 
-local prepared_envelope_cache: any = setmetatable({}, { __mode = "k" })
+
 
 prepared_envelope_cache._sidecar_protocol = (function()
 	local MAX_READABLE_IMPLEMENTATION_VERSION = 3
@@ -8911,9 +8962,9 @@ local function encode_backend_update_value(value: unknown): unknown
 	return value
 end
 
-local function validate_serialized_size(value: unknown, shape_already_validated: boolean?): (boolean, string?)
+prepared_envelope_cache._validate_serialized_size = function(value: unknown, shape_already_validated: boolean?, max_depth: number?): (boolean, string?)
 	if shape_already_validated ~= true then
-		local shape_ok, shape_message = validate_value_shape(value)
+		local shape_ok, shape_message = validate_value_shape(value, max_depth)
 		if not shape_ok then
 			return false, shape_message
 		end
@@ -8976,15 +9027,16 @@ local function validate_value(
 	return true, nil
 end
 
-prepared_envelope_cache._copy_with_shape = function(value: unknown): (JsonValue?, string?, boolean)
+prepared_envelope_cache._copy_with_shape = function(value: unknown, max_depth: number?): (JsonValue?, string?, boolean)
 	if value == nil then
 		return nil, "record data cannot be nil", false
 	end
 
-	local shape_validation = {
+	local shape_validation: ShapeValidation = {
 		nodes = 0,
 		message = nil,
 		has_non_finite_numbers = false,
+		max_depth = max_depth,
 	}
 	local copy_ok, copied_or_error = pcall(copy_value, value, shape_validation)
 	if shape_validation.message ~= nil then
@@ -8994,7 +9046,7 @@ prepared_envelope_cache._copy_with_shape = function(value: unknown): (JsonValue?
 		local shape_call_ok, shape_ok, shape_message = pcall(
 			validate_value_shape,
 			value,
-			nil,
+			shape_validation.max_depth,
 			nil,
 			nil,
 			true
@@ -9514,7 +9566,7 @@ local function backend_get(backend: Backend, use_cache: boolean, deadline: numbe
 		if entry == nil then
 			return nil, nil, nil, nil
 		end
-		return copy_value(entry.Value), {
+		return prepared_envelope_cache._copy_value_with_depth(entry.Value, prepared_envelope_cache._max_value_depth + 1), {
 			Version = entry.Version,
 			CreatedTime = entry.CreatedTime,
 			UpdatedTime = entry.UpdatedTime,
@@ -9542,7 +9594,7 @@ local function backend_get(backend: Backend, use_cache: boolean, deadline: numbe
 	return raw, backend_info_from_key_info(key_info), nil, nil
 end
 
-local function mock_write_version(entry: MockEntry?, value: JsonValue?, user_ids: { number }, metadata: Metadata, deleted: boolean): MockEntry
+local function mock_write_version(entry: MockEntry?, value: JsonValue?, user_ids: { number }, metadata: Metadata, deleted: boolean, max_depth: number?): MockEntry
 	mock_counter += 1
 	local now = DateTime.now().UnixTimestampMillis
 	local version = ("mock-%d-%s"):format(mock_counter, HttpService:GenerateGUID(false))
@@ -9559,7 +9611,7 @@ local function mock_write_version(entry: MockEntry?, value: JsonValue?, user_ids
 			Versions = {},
 			VersionOrder = {},
 		}
-	next_entry.Value = copy_value(value)
+	next_entry.Value = prepared_envelope_cache._copy_value_with_depth(value, max_depth)
 	next_entry.UserIds = clone_user_ids(user_ids)
 	next_entry.Metadata = clone_metadata(metadata)
 	next_entry.Version = version
@@ -9569,7 +9621,7 @@ local function mock_write_version(entry: MockEntry?, value: JsonValue?, user_ids
 		Version = version,
 		CreatedTime = now,
 		UpdatedTime = now,
-		Value = copy_value(value),
+		Value = prepared_envelope_cache._copy_value_with_depth(value, max_depth),
 		UserIds = clone_user_ids(user_ids),
 		Metadata = clone_metadata(metadata),
 		Deleted = deleted,
@@ -9598,7 +9650,7 @@ local function backend_update(backend: Backend, transform: UpdateTransform, dead
 		end
 		local store = get_mock_store(backend.name, backend.scope)
 		local entry = store[backend.key]
-		local raw = if entry ~= nil then copy_value(entry.Value) else nil
+		local raw = if entry ~= nil then prepared_envelope_cache._copy_value_with_depth(entry.Value, prepared_envelope_cache._max_value_depth + 1) else nil
 		local info: BackendInfo? = if entry ~= nil
 			then {
 				Version = entry.Version,
@@ -9639,7 +9691,7 @@ local function backend_update(backend: Backend, transform: UpdateTransform, dead
 		end
 		local stored_new_value = encode_backend_update_value(new_value)
 		local value, copy_error, non_finite_numbers_absent =
-			prepared_envelope_cache._copy_with_shape(stored_new_value)
+			prepared_envelope_cache._copy_with_shape(stored_new_value, prepared_envelope_cache._max_value_depth + 1)
 		if value == nil then
 			return nil, nil, "validation", copy_error or "updated value is invalid"
 		end
@@ -9649,18 +9701,18 @@ local function backend_update(backend: Backend, transform: UpdateTransform, dead
 		if request_state ~= nil and request_state.retired then
 			return nil, nil, "invalid", "record has been retired"
 		end
-		local data_ok, data_error = validate_serialized_size(value, true)
+		local data_ok, data_error = prepared_envelope_cache._validate_serialized_size(value, true)
 		if not data_ok then
 			return nil, nil, "validation", data_error
 		end
-		local next_entry = mock_write_version(entry, value, ids, normalized_metadata, false)
+		local next_entry = mock_write_version(entry, value, ids, normalized_metadata, false, prepared_envelope_cache._max_value_depth + 1)
 		store[backend.key] = next_entry
 		if mock_update_commit_then_failure_count > 0 then
 			mock_update_commit_then_failure_count -= 1
 			return nil, nil, "unknown", mock_update_commit_then_failure_message
 				or "injected UpdateAsync response failure after commit"
 		end
-		return copy_value(next_entry.Value), {
+		return prepared_envelope_cache._copy_value_with_depth(next_entry.Value, prepared_envelope_cache._max_value_depth + 1), {
 			Version = next_entry.Version,
 			CreatedTime = next_entry.CreatedTime,
 			UpdatedTime = next_entry.UpdatedTime,
@@ -10209,7 +10261,7 @@ local function validate_envelope(envelope: Envelope): (boolean, string?)
 		return false, "version 3 envelope is missing transaction sidecars"
 	end
 	local prepared = encode_envelope_for_storage(envelope)
-	local valid, message = validate_serialized_size(prepared)
+	local valid, message = prepared_envelope_cache._validate_serialized_size(prepared, false, prepared_envelope_cache._max_value_depth + 1)
 	if valid then
 		prepared_envelope_cache[envelope] = prepared
 	end
@@ -10329,7 +10381,7 @@ local function parse_queue_messages(raw: unknown, expected_version: number): ({ 
 		end
 		local data = get_string_field(item, "data")
 		if data ~= nil then
-			local valid, message = validate_serialized_size(data)
+			local valid, message = prepared_envelope_cache._validate_serialized_size(data)
 			if not valid then
 				return nil, message or "durable queue data is invalid"
 			end
@@ -10662,7 +10714,7 @@ local function queue_backend_for_state(state: InternalState): Backend?
 end
 
 local function queue_size_error(queue: QueueEnvelope, max_bytes: number): string?
-	local size_ok, size_message = validate_serialized_size(queue)
+	local size_ok, size_message = prepared_envelope_cache._validate_serialized_size(queue)
 	if not size_ok then
 		return size_message or "durable queue exceeds the DataStore value limit"
 	end
@@ -11244,7 +11296,7 @@ local function enqueue_internal(state: InternalState, message_type: string, data
 			return "validation", "queue data is invalid"
 		end
 		frozen_data = copied_or_error
-		local valid, message = validate_serialized_size(frozen_data)
+		local valid, message = prepared_envelope_cache._validate_serialized_size(frozen_data)
 		if not valid then
 			return "validation", message
 		end
@@ -11798,7 +11850,7 @@ local function handle_message(state: InternalState, message: { Data: unknown, Se
 		return
 	end
 	if payload.data ~= nil then
-		local data_valid = validate_serialized_size(payload.data)
+		local data_valid = prepared_envelope_cache._validate_serialized_size(payload.data)
 		if not data_valid then
 			return
 		end
@@ -12900,7 +12952,7 @@ local function quarantine_profile_writes_internal(
 		mutable.write_id = fence_write_id
 		mutable.session = nil
 		mutable[QUARANTINE_FENCE_FIELD] = marker
-		local size_ok = validate_serialized_size(mutable)
+		local size_ok = prepared_envelope_cache._validate_serialized_size(mutable)
 		if not size_ok then return nil, nil, nil end
 		local user_ids, metadata = preserve_update_metadata(info)
 		return mutable, user_ids, metadata
@@ -12983,7 +13035,7 @@ local function mark_quarantine_release_pending_internal(
 		mutable[QUARANTINE_FENCE_FIELD] = next_marker
 		mutable.updated_at = now
 		mutable.write_id = release_pending_write_id
-		local size_ok = validate_serialized_size(mutable)
+		local size_ok = prepared_envelope_cache._validate_serialized_size(mutable)
 		if not size_ok then return nil, nil, nil end
 		local user_ids, metadata = preserve_update_metadata(info)
 		return mutable, user_ids, metadata
@@ -13040,7 +13092,7 @@ local function release_quarantine_fence_internal(
 		mutable[QUARANTINE_FENCE_FIELD] = nil
 		local restored_envelope, _, is_current = parse_envelope(mutable)
 		if not is_current or restored_envelope == nil then return nil, nil, nil end
-		local size_ok = validate_serialized_size(mutable)
+		local size_ok = prepared_envelope_cache._validate_serialized_size(mutable)
 		if not size_ok then return nil, nil, nil end
 		local user_ids, metadata = preserve_update_metadata(info)
 		return mutable, user_ids, metadata
@@ -13274,7 +13326,7 @@ local function erase_user_data_internal(
 				fence_generation = math.max(1, source_generation + 1),
 			},
 		}
-		local size_ok, size_error = validate_serialized_size(marker_value)
+		local size_ok, size_error = prepared_envelope_cache._validate_serialized_size(marker_value)
 		if not size_ok then
 			decision = "validation"
 			decision_message = size_error or "erasure fence exceeds storage limits"
@@ -13649,7 +13701,7 @@ track_external_data_mutation = function(state: InternalState)
 		state.data = candidate
 		return
 	end
-	local shape_validation = { nodes = 0, message = nil, has_non_finite_numbers = false }
+	local shape_validation: ShapeValidation = { nodes = 0, message = nil, has_non_finite_numbers = false, max_depth = nil }
 	local copied_ok, copied_or_error = pcall(function()
 		return copy_value(candidate, shape_validation)
 	end)
@@ -14322,7 +14374,7 @@ local function update(self: Record, callback: (JsonValue?) -> JsonValue?): (Resu
 	if next_value == nil then
 		return "validation", "update callback returned nil"
 	end
-	local shape_validation = { nodes = 0, message = nil, has_non_finite_numbers = false }
+	local shape_validation: ShapeValidation = { nodes = 0, message = nil, has_non_finite_numbers = false, max_depth = nil }
 	local copy_ok, copied_or_error = pcall(function()
 		return copy_value(next_value, shape_validation)
 	end)
@@ -14623,7 +14675,7 @@ local function message(self: Record, message_type: string, data: JsonValue?): (R
 		return "invalid", "message_type must be 1 to 100 characters"
 	end
 	if data ~= nil then
-		local valid, validation_message = validate_serialized_size(data)
+		local valid, validation_message = prepared_envelope_cache._validate_serialized_size(data)
 		if not valid then
 			return "validation", validation_message
 		end
@@ -14807,7 +14859,7 @@ local function mailbox_store_adapter(self: Record): (any?, ResultCode, string?)
 			then
 				error("V2 mailbox attempted to store a non-JSON value", 2)
 			end
-			local size_ok, size_error = validate_serialized_size(next_value :: JsonValue)
+			local size_ok, size_error = prepared_envelope_cache._validate_serialized_size(next_value :: JsonValue)
 			if not size_ok then error(size_error, 2) end
 			local written = mock_write_version(entry, copy_value(next_value :: JsonValue), normalized_ids, normalized_metadata, false)
 			store[key] = written
@@ -18488,7 +18540,7 @@ RecordStore._internals.patch = (function()
 			return pack_subtree_summary(1, 1, not math.isfinite(value :: number), 1), nil
 		elseif value_type == "string" then
 			local string_value = value :: string
-			if #string_value > 4_000_000 then
+			if #string_value > prepared_envelope_cache._max_value_string_length then
 				return nil, "value contains an overlong string"
 			end
 			return pack_subtree_summary(1, 1, false, minimum_encoded_string_bytes(string_value)), nil
@@ -18974,7 +19026,7 @@ RecordStore._internals.transact = (function()
 			if event.data == nil then return nil, "outbox event data cannot be nil" end
 			local payload = copy_value(event.data)
 			if payload == nil then return nil, "outbox event payload is invalid" end
-			local payload_ok, payload_error = validate_serialized_size(payload)
+			local payload_ok, payload_error = prepared_envelope_cache._validate_serialized_size(payload)
 			if not payload_ok then return nil, "outbox payload is invalid: " .. tostring(payload_error) end
 			if event.target_user_id ~= nil and (type(event.target_user_id) ~= "number"
 				or not math.isfinite(event.target_user_id) or math.floor(event.target_user_id) ~= event.target_user_id
@@ -19125,14 +19177,14 @@ end
 				return nil, "invalid", "inbox message_type must be 1 to 100 characters"
 			end
 			if input_payload == nil then return nil, "invalid", "inbox payload cannot be nil" end
-			local payload_ok, payload_error = validate_serialized_size(input_payload)
+			local payload_ok, payload_error = prepared_envelope_cache._validate_serialized_size(input_payload)
 			if not payload_ok then return nil, "validation", tostring(payload_error) end
 		elseif kind == "outbox" then
 			if type(input_type) ~= "string" or input_type == "" or #input_type > 100 then
 				return nil, "invalid", "outbox command_type must be 1 to 100 characters"
 			end
 			if input_payload == nil then return nil, "invalid", "outbox command payload cannot be nil" end
-			local payload_ok, payload_error = validate_serialized_size(input_payload)
+			local payload_ok, payload_error = prepared_envelope_cache._validate_serialized_size(input_payload)
 			if not payload_ok then return nil, "validation", tostring(payload_error) end
 		end
 
@@ -19346,7 +19398,7 @@ end
 					decision_message = "transaction data could not be copied"
 					return nil, nil, nil
 				end
-				local data_ok, data_message = validate_serialized_size(frozen_data)
+				local data_ok, data_message = prepared_envelope_cache._validate_serialized_size(frozen_data)
 				if not data_ok then
 					decision = "validation"
 					decision_message = data_message
@@ -19361,7 +19413,7 @@ end
 						decision_message = "transaction result is invalid"
 						return nil, nil, nil
 					end
-					local result_ok, result_message = validate_serialized_size(frozen_result)
+					local result_ok, result_message = prepared_envelope_cache._validate_serialized_size(frozen_result)
 					if not result_ok then
 						decision = "validation"
 						decision_message = result_message or "transaction result is invalid"
@@ -19975,7 +20027,7 @@ prepared_envelope_cache._outbox_engine = (function()
 			local raw_value = copy_value(raw)
 			if type(raw_value) ~= "table" then return nil, nil, nil end
 			(raw_value :: { [string]: any }).sidecars = sidecars
-			local raw_valid = validate_serialized_size(raw_value)
+			local raw_valid = prepared_envelope_cache._validate_serialized_size(raw_value)
 			if not raw_valid then return nil, nil, nil end
 			return {
 				[prepared_envelope_cache] = true,
@@ -20167,7 +20219,7 @@ prepared_envelope_cache._outbox_engine = (function()
 			local raw_value = copy_value(raw)
 			if type(raw_value) ~= "table" then return nil, nil, nil end
 			(raw_value :: { [string]: any }).sidecars = sidecars
-			local raw_valid = validate_serialized_size(raw_value)
+			local raw_valid = prepared_envelope_cache._validate_serialized_size(raw_value)
 			if not raw_valid then return nil, nil, nil end
 			return {
 				[prepared_envelope_cache] = true,
@@ -21395,7 +21447,7 @@ local function enqueue_static(name: string, scope: string, key: string, message_
 			return "validation", "queue data is invalid"
 		end
 		frozen_data = copied_or_error
-		local valid, message = validate_serialized_size(frozen_data)
+		local valid, message = prepared_envelope_cache._validate_serialized_size(frozen_data)
 		if not valid then
 			return "validation", message
 		end
@@ -21703,24 +21755,24 @@ RecordStore.Mock = (function()
 			return "success", nil
 		end
 		local copied_ok, copied_or_error = pcall(function()
-			return copy_value(value)
+			return prepared_envelope_cache._copy_value_with_depth(value, prepared_envelope_cache._max_value_depth + 1)
 		end)
 		if not copied_ok or copied_or_error == nil then
 			return "validation", "mock record fixture is not valid JSON data"
 		end
 		local copied = copied_or_error :: JsonValue
-		local valid, size_error = validate_serialized_size(copied)
+		local valid, size_error = prepared_envelope_cache._validate_serialized_size(copied, false, prepared_envelope_cache._max_value_depth + 1)
 		if not valid then
 			return "validation", size_error
 		end
-		store[key] = mock_write_version(store[key], copied, {}, {}, false)
+		store[key] = mock_write_version(store[key], copied, {}, {}, false, prepared_envelope_cache._max_value_depth + 1)
 		return "success", nil
 	end
 
 	local function mock_get_record_raw(name: string, scope: string, key: string): unknown
 		local store = get_mock_store(name, scope)
 		local entry = store[key]
-		return if entry == nil then nil else copy_value(entry.Value)
+		return if entry == nil then nil else prepared_envelope_cache._copy_value_with_depth(entry.Value, prepared_envelope_cache._max_value_depth + 1)
 	end
 
 
@@ -21791,7 +21843,7 @@ RecordStore.Mock = (function()
 			return nil
 		end
 		local historical = entry.Versions[version]
-		return if historical == nil then nil else copy_value(historical.Value)
+		return if historical == nil then nil else prepared_envelope_cache._copy_value_with_depth(historical.Value, prepared_envelope_cache._max_value_depth + 1)
 	end
 
 	local function mock_set_test_clock(clock: (() -> number)?)
@@ -22292,6 +22344,7 @@ local MAX_SEGMENT_MESSAGES = 64
 local MAX_SEGMENT_BYTES = 262144
 local MAX_PAYLOAD_BYTES = 32768
 local MAX_BATCH_MESSAGES = 32
+local SEGMENT_LOOKUP_INDEX_THRESHOLD = 256
 local MIN_LEASE_SECONDS = 5
 local MAX_LEASE_SECONDS = 120
 local MAX_PAYLOAD_DEPTH = 32
@@ -22336,6 +22389,11 @@ type Segment = {
 	integrity: string,
 	messages: { Message },
 	producer_states: ProducerStates,
+}
+
+type SegmentIndexes = {
+	by_event_id: { [string]: Message },
+	by_producer_sequence: { [string]: { [number]: Message } },
 }
 
 type Head = {
@@ -23550,15 +23608,69 @@ local function find_producer_event(segment: Segment, producer_id: string, produc
 	return nil
 end
 
+local function build_segment_indexes(segment: Segment): SegmentIndexes
+	local indexes: SegmentIndexes = {
+		by_event_id = {},
+		by_producer_sequence = {},
+	}
+	for index = 1, #segment.messages do
+		local message = segment.messages[index]
+		if indexes.by_event_id[message.event_id] == nil then
+			indexes.by_event_id[message.event_id] = message
+		end
+		local producer_id = message.producer_id
+		local producer_sequence = message.producer_sequence
+		if producer_id ~= nil and producer_sequence ~= nil then
+			local producer_sequences = indexes.by_producer_sequence[producer_id]
+			if producer_sequences == nil then
+				producer_sequences = {}
+				indexes.by_producer_sequence[producer_id] = producer_sequences
+			end
+			if producer_sequences[producer_sequence] == nil then
+				producer_sequences[producer_sequence] = message
+			end
+		end
+	end
+	return indexes
+end
+
+local function find_segment_event(
+	segment: Segment,
+	event_id: string,
+	producer_id: string?,
+	producer_sequence: number?,
+	indexes: SegmentIndexes?
+): Message?
+	if indexes ~= nil then
+		local existing = indexes.by_event_id[event_id]
+		if existing ~= nil or producer_id == nil or producer_sequence == nil then
+			return existing
+		end
+		local producer_sequences = indexes.by_producer_sequence[producer_id]
+		return if producer_sequences ~= nil then producer_sequences[producer_sequence] else nil
+	end
+	local existing = find_event(segment, event_id)
+	if existing == nil and producer_id ~= nil and producer_sequence ~= nil then
+		existing = find_producer_event(segment, producer_id, producer_sequence)
+	end
+	return existing
+end
+
 local function resolve_batch(segment: Segment, prepared: { any }): (boolean, number, { any }?, string?)
 	local results: { any } = table.create(#prepared)
 	local found_count = 0
 	local producer_states = segment.producer_states
+	local segment_indexes = if #segment.messages * #prepared >= SEGMENT_LOOKUP_INDEX_THRESHOLD
+		then build_segment_indexes(segment)
+		else nil
 	for index, event in ipairs(prepared) do
-		local existing = find_event(segment, event.event_id)
-		if existing == nil and event.producer_id ~= nil then
-			existing = find_producer_event(segment, event.producer_id, event.producer_sequence)
-		end
+		local existing = find_segment_event(
+			segment,
+			event.event_id,
+			event.producer_id,
+			event.producer_sequence,
+			segment_indexes
+		)
 		if existing ~= nil then
 			if existing.payload_digest ~= event.payload_digest
 				or (event.producer_id ~= nil and (
@@ -23687,12 +23799,17 @@ function Stream.PublishBatchAsync(self: StreamType, route_key: string, events: {
 				return nil
 			end
 			local current_producers = current.producer_states
+			local segment_indexes = if #current.messages * #prepared >= SEGMENT_LOOKUP_INDEX_THRESHOLD
+				then build_segment_indexes(current)
+				else nil
 			local missing = table.create(#prepared)
 			local missing_count = 0
 			local missing_bytes = 0
 			local planned_sequences: { [string]: number } = {}
 			for _, event in ipairs(prepared) do
-				local existing = find_event(current, event.event_id)
+				local existing = if segment_indexes ~= nil
+					then segment_indexes.by_event_id[event.event_id]
+					else find_event(current, event.event_id)
 				if existing ~= nil then
 					if existing.payload_digest ~= event.payload_digest
 						or (event.producer_id ~= nil and (
@@ -23703,7 +23820,15 @@ function Stream.PublishBatchAsync(self: StreamType, route_key: string, events: {
 						error("EVENT_ID_CONFLICT", 0)
 					end
 				elseif event.producer_id ~= nil then
-					local producer_existing = find_producer_event(current, event.producer_id, event.producer_sequence)
+					local producer_existing: Message? = nil
+					if segment_indexes ~= nil then
+						local producer_sequences = segment_indexes.by_producer_sequence[event.producer_id]
+						if producer_sequences ~= nil then
+							producer_existing = producer_sequences[event.producer_sequence]
+						end
+					else
+						producer_existing = find_producer_event(current, event.producer_id, event.producer_sequence)
+					end
 					if producer_existing ~= nil then
 						if producer_existing.event_id ~= event.event_id or producer_existing.payload_digest ~= event.payload_digest then
 							error("PRODUCER_SEQUENCE_CONFLICT", 0)
