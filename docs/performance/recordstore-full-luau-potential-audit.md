@@ -559,23 +559,25 @@ All five Hyperfine samples completed with zero command exit codes. The PR Benche
 
 ### Benchmark workflow correction and current verification limits
 
-**Paired benchmark evidence after the recursive-limit hoist (Bencher, Ubuntu 24.04, Hyperfine median, five runs).** The comparison used main baseline SHA `4813492555759ed4ba70c3ec03d9d32be622bc0d` and PR measurement head `35cf9afa15420b7932e23a2ce8b9becca7af1ac2`; see the [Bencher report](https://bencher.dev/perf/alphanumeric-moderate-s-project/reports/01a2228c-47c2-71bb-9f14-e692c457ffaa) and [GitHub Actions run](https://github.com/alphanumeric-moderate/RecordStore/actions/runs/46153929684).
+**Paired benchmark evidence on the current implementation head (Bencher, Ubuntu 24.04, Hyperfine median, five runs).** The comparison used main baseline SHA `4813492555759ed4ba70c3ec03d9d32be622bc0d` and PR head `e8a8b54657d3969c8d71c730e3ed8de3b76bc6b6`; see the [Bencher report](https://bencher.dev/perf/alphanumeric-moderate-s-project/reports/01a2229a-dc8b-70b4-bcfb-6c7d68375d8c) and [GitHub Actions run](https://github.com/alphanumeric-moderate/RecordStore/actions/runs/46156246595).
 
 | Workload | Main baseline | PR result | Change |
 |---|---:|---:|---:|
-| Large profile update/save | 238.77 ms | 200.08 ms | -16.2% |
-| Update validation pipeline | 329.64 ms | 321.41 ms | -2.5% |
-| Patch validation pipeline | 239.52 ms | 231.24 ms | -3.5% |
-| Reconcile pipeline | 666.73 ms | 655.15 ms | -1.7% |
-| Legacy migration/history | 117.26 ms | 117.45 ms | +0.2% |
-| Durable Streams batch publish | 4,839.92 ms | 4,794.91 ms | -0.9% |
-| Durable Streams single publish | 62,250.30 ms | 61,774.75 ms | -0.8% |
+| Large profile update/save | 238.77 ms | 212.22 ms | -11.1% |
+| Update validation pipeline | 329.64 ms | 335.30 ms | +1.7% |
+| Patch validation pipeline | 239.52 ms | 243.90 ms | +1.8% |
+| Reconcile pipeline | 666.73 ms | 679.53 ms | +1.9% |
+| Legacy migration/history | 117.26 ms | 128.62 ms | +9.7% |
+| Durable Streams batch publish | 4,839.92 ms | 4,855.94 ms | +0.3% |
+| Durable Streams single publish | 62,250.30 ms | 62,354.51 ms | +0.2% |
 
-The report completed without Bencher alerts. This supersedes the earlier pre-hoist alert report; these remain hosted Lune/Hyperfine observations, not Roblox DataStore or Script Profiler evidence.
+The report contains no Bencher alerts. The Update/Patch/Reconcile and Durable Streams differences are within their configured limits; legacy migration/history is higher and should remain monitored rather than being attributed to the DRR change. These are hosted Lune/Hyperfine observations, not Roblox DataStore or Script Profiler evidence.
 
-The CodSpeed CPU-simulation action previously hit the explicit 16-minute step timeout (about 971 seconds) on both the base and PR revisions. The step timeout was raised to 35 minutes and the job timeout to 40 minutes, and the duplicate PlayerData.Set benchmark entry was removed. The latest verified pre-follow-up run was still in progress; report it as passing only after the current-head run completes.
+The direct DRR lane-cardinality diagnostic completed all 17 valid queue-depth × lane-count shapes. The workflow also registers a Hyperfine command for it, but the current published report does not contain a separate lane-cardinality benchmark row. Treat its direct results as diagnostic output only; no aggregate time series or threshold claim is made for that metric yet.
 
-The complete 4-algorithm × 6-scenario × 4-depth scheduler matrix remains an uninstrumented Bencher diagnostic. CodSpeed tracks a bounded first-selection scaling subset for FIFO and DRR at 512, 2,048 and 8,192 items alongside its other benchmarks. The DRR lane-cardinality matrix is now included in Bencher diagnostics and the Hyperfine aggregate. Roblox Studio multi-server/DataStore acceptance and Roblox Script Profiler/MicroProfiler measurements have not been performed.
+The CodSpeed CPU-simulation action previously hit the explicit 16-minute step timeout (about 971 seconds) on both the base and PR revisions. The step timeout was raised to 35 minutes and the job timeout to 40 minutes, and the duplicate PlayerData.Set benchmark entry was removed. The current-head simulation remains in progress; do not report it as passing until its workflow run completes.
+
+The complete 4-algorithm × 6-scenario × 4-depth scheduler matrix remains an uninstrumented Bencher diagnostic. CodSpeed tracks a bounded first-selection scaling subset for FIFO and DRR at 512, 2,048 and 8,192 items alongside its other benchmarks. Roblox Studio multi-server/DataStore acceptance and Roblox Script Profiler/MicroProfiler measurements have not been performed.
 ### Phase D–F disposition
 
 The remaining audit candidates now have explicit keep/defer decisions and the evidence required to revisit them. Phase D does not justify another runtime rewrite on the available data; Phase E's broad typing and module-split candidates remain scoped follow-up work; Phase F is correctly blocked on live profiling and consumer/persisted-data evidence. No public API, persisted format, lease/fencing, or UpdateAsync transform behavior is changed by these decisions.
