@@ -15,19 +15,41 @@ local READY_SCENARIOS = {
 local ALGORITHMS = { "fifo", "weighted", "deadline", "drr" }
 -- Keep the complete policy/workload matrix at small queue depths. Larger queues
 -- focus on readiness extremes; 8192-item runs compare FIFO with DRR only.
+local SMALL_QUEUE_MAX = 512
+local MEDIUM_QUEUE_SIZE = 2048
+local LARGE_QUEUE_SIZE = 8192
+local EXTREME_SCENARIO_NAMES = { "all-ready", "none-ready" }
+local LARGE_QUEUE_ALGORITHM_NAMES = { "fifo", "drr" }
 local REPEATS = 1
 
-local function should_benchmark(algorithm: string, scenario: any, queue_size: number): boolean
-	if queue_size <= 512 then
+type SchedulerScenario = {
+	name: string,
+}
+
+local function contains_name(names: { string }, target: string): boolean
+	for _, name in ipairs(names) do
+		if name == target then
+			return true
+		end
+	end
+	return false
+end
+
+local function should_benchmark(
+	algorithm: string,
+	scenario: SchedulerScenario,
+	queue_size: number
+): boolean
+	if queue_size <= SMALL_QUEUE_MAX then
 		return true
 	end
-	if scenario.name ~= "all-ready" and scenario.name ~= "none-ready" then
+	if not contains_name(EXTREME_SCENARIO_NAMES, scenario.name) then
 		return false
 	end
-	if queue_size == 2048 then
+	if queue_size == MEDIUM_QUEUE_SIZE then
 		return true
 	end
-	return queue_size == 8192 and (algorithm == "fifo" or algorithm == "drr")
+	return queue_size == LARGE_QUEUE_SIZE and contains_name(LARGE_QUEUE_ALGORITHM_NAMES, algorithm)
 end
 local NOW_MS = 1_800_000_000_000
 
@@ -146,6 +168,7 @@ local function build_queue(algorithm: string, count: number, scenario: any)
 end
 
 local result_count = 0
+local result_counts_by_queue_size_and_algorithm: { [number]: { [string]: number } } = {}
 for _, algorithm in ipairs(ALGORITHMS) do
 	for _, scenario in ipairs(READY_SCENARIOS) do
 		for _, queue_size in ipairs(QUEUE_SIZES) do
@@ -179,6 +202,12 @@ for _, algorithm in ipairs(ALGORITHMS) do
 					end
 				end
 				result_count += 1
+				local queue_counts = result_counts_by_queue_size_and_algorithm[queue_size]
+				if queue_counts == nil then
+					queue_counts = {}
+					result_counts_by_queue_size_and_algorithm[queue_size] = queue_counts
+				end
+				queue_counts[algorithm] = (queue_counts[algorithm] or 0) + 1
 				print(string.format(
 					"[scheduler-backlog] algorithm=%s scenario=%s queue=%d ready=%d repeats=%d take_next_ms=%.4f",
 					algorithm,
@@ -193,6 +222,28 @@ for _, algorithm in ipairs(ALGORITHMS) do
 	end
 end
 
-assert(result_count == 60,
-	"scheduler backlog matrix did not complete its 60 expected workloads")
+local expected_result_count = 0
+for _, queue_size in ipairs(QUEUE_SIZES) do
+	for _, algorithm in ipairs(ALGORITHMS) do
+		local expected_count = 0
+		if queue_size <= SMALL_QUEUE_MAX then
+			expected_count = #READY_SCENARIOS
+		elseif queue_size == MEDIUM_QUEUE_SIZE then
+			expected_count = #EXTREME_SCENARIO_NAMES
+		elseif queue_size == LARGE_QUEUE_SIZE
+			and contains_name(LARGE_QUEUE_ALGORITHM_NAMES, algorithm)
+		then
+			expected_count = #EXTREME_SCENARIO_NAMES
+		end
+		local queue_counts = result_counts_by_queue_size_and_algorithm[queue_size]
+		local actual_count = if queue_counts ~= nil then queue_counts[algorithm] or 0 else 0
+		assert(actual_count == expected_count,
+			("scheduler backlog matrix coverage mismatch: algorithm=%s queue=%d expected=%d actual=%d")
+				:format(algorithm, queue_size, expected_count, actual_count))
+		expected_result_count += expected_count
+	end
+end
+
+assert(result_count == expected_result_count,
+	("scheduler backlog matrix completed %d workloads; expected %d"):format(result_count, expected_result_count))
 print(string.format("[scheduler-backlog] completed=%d", result_count))
