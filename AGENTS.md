@@ -47,7 +47,10 @@ When a change touches one of these invariants, identify the exact state transiti
 
 ## Static checks and tests
 
-- Preserve the declared Luau type modes. The consolidated `src/PlayerDataInitializer/RecordStore.luau` module is required by CI to start with `--!strict`. Avoid introducing `any`, unchecked casts, or weakened annotations at new boundaries; where an escape is unavoidable, keep it narrow and validate the value at runtime.
+- **Strict generated-code rule:** every new or AI-generated project-owned `.luau` file, including runtime modules, tests, fixtures, and benchmarks, must begin with `--!strict` on its first line. When modifying an existing project-owned Luau file, migrate it to `--!strict` and resolve the resulting diagnostics as part of the change. Never add `--!nonstrict` or `--!nocheck` to make generated code pass, and never remove or weaken a strict directive to hide errors.
+- **Narrow existing exceptions:** the current type-check workflow deliberately excludes the pinned upstream `src/AlyaNum/*` source because its generic metatable annotations are not supported by the pinned analyzer. Preserve that documented vendor boundary; do not copy its mode or type escapes into project-owned code. Intentional negative type fixtures must remain strict and must fail only in the way declared by the fixture manifest. Existing legacy files outside these exceptions are migration debt, not precedent for newly generated code.
+- **Type escape policy:** do not introduce `any`, `:: any`, unchecked casts, broad diagnostic suppressions, or analyzer ignore patterns to make code pass. Prefer `unknown` at untrusted boundaries, refine it with real checks, and keep any unavoidable compatibility escape inside the smallest adapter with a written reason, runtime validation, and a regression test.
+- **Current CI scope must be described accurately:** `.github/workflows/luau-typecheck.yml` pins `luau-lsp` 1.70.1 and Rojo 7.7.1. It explicitly checks that the consolidated `src/PlayerDataInitializer/RecordStore.luau` starts with `--!strict`, then analyzes the other included source modules using their declared modes; it excludes `src/AlyaNum/*`. The workflow does **not** currently assert that every included source file is strict. The repository policy above is stricter than that existing CI guard. Do not claim that CI enforces repository-wide strict mode until the workflow itself is changed and verified.
 - Use the repository's type-check and regression workflows as the canonical check definitions:
   - [Luau Type Check](.github/workflows/luau-typecheck.yml)
   - [Luau Regression Tests](.github/workflows/luau-regression.yml)
@@ -118,7 +121,7 @@ Current Luau specializes these common table iteration patterns:
 - ipairs iteration: for index, value in ipairs(t) do
 - next iteration: for key, value in next, t do
 
-The compiler recognizes them and emits optimized bytecode using internal iterators. Normal table iteration does not ordinarily invoke a Lua iterator function once per element. Generalized iteration, pairs, and ipairs have comparable performance.
+The compiler recognizes them and emits specialized bytecode using internal iterators. Table iteration typically does not invoke a Lua iterator function once per element. Generalized iteration, pairs, and ipairs have comparable per-element performance; generalized iteration also avoids the initial pairs call, which can matter for very short tables.
 
 Rules:
 
@@ -162,7 +165,7 @@ Rules:
 
 ### 3.4 Clearing and capacity retention
 
-table.clear(t) removes entries while retaining capacity. This can help when a scratch table is about to be reused with similar size, but retained capacity consumes memory and large empty tables still cost memory/GC work.
+table.clear(t) removes entries while retaining capacity. This can help when a scratch table is about to be reused with similar size, but the backing capacity still consumes memory. Do not assume clearing releases that capacity.
 
 - Reuse bounded scratch arrays and recurring buffers only when their next use is predictable.
 - Do not retain a very large table indefinitely to avoid a rare allocation.
@@ -227,11 +230,12 @@ Official source: https://create.roblox.com/docs/performance-optimization/improve
 
 ### 5.1 Type information
 
-- Preserve --!strict and explicit types at module and public API boundaries.
-- Use types to express data shapes and invariants. Stable types can also help native compilation reason about values.
-- Do not introduce any, unchecked casts, or broad type escapes to silence analysis.
-- Keep runtime validation at trust boundaries even when a caller has a static type.
-- Add type annotations where they clarify the contract or help a measured specialization; do not annotate every temporary mechanically.
+- Follow the full **Luau type-system and strict code-generation contract** in Section 14. New and modified project-owned source is strict by default; existing CI mode coverage is narrower and must not be misrepresented.
+- Use types to express data shapes, state transitions, public contracts, and ownership invariants. Type annotations are not runtime validation and `--!strict` is not a runtime safety boundary.
+- Type annotations are not a general performance switch. Specific type information can enable selected compiler/native specializations, but strict mode itself does not guarantee faster code. Measure the actual generated/runtime path.
+- Prefer `unknown` over `any` for untrusted or not-yet-understood values. Refine and validate the value before exposing a more specific type.
+- Do not introduce broad casts, type suppressions, or generic escape hatches to silence diagnostics. Keep any unavoidable escape local to a documented adapter and test the runtime boundary.
+- Add explicit annotations where they clarify a module contract, generic relationship, empty table, recursive function, callback, serialization boundary, or solver-sensitive expression. Do not annotate every temporary mechanically when its inferred type is already precise.
 
 ### 5.2 Roblox native code generation
 
@@ -553,36 +557,52 @@ Use the literature as follows:
 
 ### Selected peer-reviewed sources
 
-1. Haoran Xu and Fredrik Kjolstad, “Deegen: A JIT-Capable VM Generator for Dynamic Languages,” OOPSLA 2026, DOI 10.1145/3798246.
-2. Octave Larose, Sophie Kaleba, Humphrey Burchell, and Stefan Marr, “AST vs. Bytecode: Interpreters in the Age of Meta-Compilation,” OOPSLA 2023, DOI 10.1145/3622808.
-3. Olivier Flückiger et al., “Contextual dispatch for function specialization,” OOPSLA 2020, DOI 10.1145/3428275.
-4. Ben L. Titzer, “A Fast In-Place Interpreter for WebAssembly,” OOPSLA 2022, DOI 10.1145/3563311.
-5. Aditya Anand et al., “Optimistic Stack Allocation and Dynamic Heapification for Managed Runtimes,” PLDI 2024, DOI 10.1145/3656389.
-6. Aditya Anand et al., “CoSSJIT: Combining Static Analysis and Speculation in JIT Compilers,” OOPSLA 2025, DOI 10.1145/3763149.
-7. David Lion et al., “Investigating Managed Language Runtime Performance: Why JavaScript and Python are 8x and 29x slower than C++, yet Java and Go can be Faster?,” USENIX ATC 2022.
-8. Stephen M. Blackburn et al., “Rethinking Java Performance Analysis,” ASPLOS 2025, DOI 10.1145/3669940.3707217.
-9. Jaromír Antoch et al., “Experimental Evaluation Methodology for the Era of No Steady Performance,” OOPSLA 2026, DOI 10.1145/3839448.
-10. Christoph Laaber et al., “Dynamically Reconfiguring Software Microbenchmarks: Reducing Execution Time without Sacrificing Result Quality,” FSE 2020, DOI 10.1145/3368089.3409683.
-11. Dmitry Duplyakin et al., “Avoiding the Ordering Trap in Systems Performance Measurement,” USENIX ATC 2023.
-12. Humphrey Burchell and Stefan Marr, “Divining Profiler Accuracy: An Approach to Approximate Profiler Accuracy through Machine Code-Level Slowdown,” OOPSLA 2025.
-13. Mingyu Wu et al., “Platinum: A CPU-Efficient Concurrent Garbage Collector for Tail-Reduction of Interactive Services,” USENIX ATC 2020.
-14. Wenyu Zhao et al., “Advancing Performance via a Systematic Application of Research and Industrial Best Practice,” OOPSLA 2025.
-15. Kaihui Gao et al., “DONS: Fast and Affordable Discrete Event Network Simulation with Automatic Parallelization,” SIGCOMM 2023, DOI 10.1145/3603269.3604844.
-16. Olivier Melançon et al., “Float Self-Tagging,” OOPSLA 2025, DOI 10.1145/3763108.
-17. Patrick Redmond et al., “Exploring the Theory and Practice of Concurrency in the Entity-Component-System Pattern,” OOPSLA 2025, DOI 10.1145/3763050.
-18. Brennan Shacklett et al., “An Extensible, Data-Oriented Architecture for High-Performance, Many-World Simulation,” SIGGRAPH 2023, DOI 10.1145/3592427.
-19. Jaeyoung Jang et al., “A Specialized Architecture for Object Serialization with Applications to Big Data Analytics,” ISCA 2020.
-20. Taranov et al., “Naos: Serialization-free RDMA Networking in Java,” USENIX ATC 2021.
-21. Kolokasis et al., “TeraHeap: Reducing Memory Pressure in Managed Big Data Frameworks,” ASPLOS 2023.
-22. Chris Fallin and Maxwell Bernstein, “Partial Evaluation, Whole-Program Compilation,” PLDI 2025, DOI 10.1145/3729259.
-23. Boyao Ding et al., “MEA2: A Lightweight Field-Sensitive Escape Analysis with Points-to Calculation for Golang,” OOPSLA 2024, DOI 10.1145/3689759.
+This is a cross-runtime research reading list, not a Luau specification or a claim that the measured results transfer to Roblox. Bibliographic identifiers are included only where the retrieved paper record or paper text exposed them directly; omitted DOIs are intentionally not reconstructed from memory.
 
-Verify exact bibliographic metadata against the paper before using it in an external academic publication. Cross-runtime numeric speedups are intentionally not presented as Luau targets.
+1. Haoran Xu and Fredrik Kjolstad, “Deegen: A JIT-Capable VM Generator for Dynamic Languages,” OOPSLA 2026.
+2. Octave Larose et al., “AST vs. Bytecode: Interpreters in the Age of Meta-Compilation,” OOPSLA 2023.
+3. Ben L. Titzer, “A Fast In-Place Interpreter for WebAssembly,” OOPSLA 2022.
+4. Aditya Anand et al., “Optimistic Stack Allocation and Dynamic Heapification for Managed Runtimes,” PLDI 2024.
+5. Stephen M. Blackburn et al., “Rethinking Java Performance Analysis,” ASPLOS 2025.
+6. Jaromír Antoch et al., “Experimental Evaluation Methodology for the Era of No Steady Performance,” OOPSLA 2026.
+7. Christoph Laaber et al., “Dynamically Reconfiguring Software Microbenchmarks: Reducing Execution Time without Sacrificing Result Quality,” FSE 2020.
+8. Wenyu Zhao et al., “Advancing Performance via a Systematic Application of Research and Industrial Best Practice,” OOPSLA 2025.
+9. Kaihui Gao et al., “DONS: Fast and Affordable Discrete Event Network Simulation with Automatic Parallelization,” SIGCOMM 2023, DOI 10.1145/3603269.3604844.
+10. Olivier Melançon et al., “Float Self-Tagging,” OOPSLA 2025.
+11. Patrick Redmond et al., “Exploring the Theory and Practice of Concurrency in the Entity-Component-System Pattern,” OOPSLA 2025.
+12. Brennan Shacklett et al., “An Extensible, Data-Oriented Architecture for High-Performance, Many-World Simulation,” SIGGRAPH 2023.
+
+### Type-system and type-checking research
+
+These papers examine gradual typing, enforcement boundaries, migration tradeoffs, or analyzer implementation in other languages and formal calculi. They motivate strict interfaces, runtime validation, and regression fixtures; they do **not** establish Luau's exact semantics.
+
+1. Dominic Troppmann, Aurore Fass, and Cristian-Alexandru Staicu, “Typed and Confused: Studying the Unexpected Dangers of Gradual Typing,” ASE 2024, DOI 10.1145/3691620.3695549.
+2. Olek Gierczak, Lucy Menon, Christos Dimoulas, and Amal Ahmed, “Gradually Typed Languages Should Be Vigilant!,” OOPSLA 2024, DOI 10.1145/3649842.
+3. Luna Phipps-Costin, Carolyn Jane Anderson, Michael Greenberg, and Arjun Guha, “Solver-based gradual type migration,” OOPSLA 2021, DOI 10.1145/3485488.
+4. André Pacak, Sebastian Erdweg, and Tamás Szabó, “A systematic approach to deriving incremental type checkers,” OOPSLA 2020.
+5. Luca Di Grazia and Michael Pradel, “The evolution of type annotations in Python: an empirical study,” FSE 2022, DOI 10.1145/3540250.3549114.
+6. Cameron Moy, Phuc C. Nguyen, Sam Tobin-Hochstadt, and David Van Horn, “Corpse reviver: sound and efficient gradual typing via contract verification,” POPL 2021, DOI 10.1145/3434334.
+
+The type-system papers support the following transfer-limited lessons: annotation precision, compatibility with untyped callers, and preserving behavior are separate migration goals; static hints can be mistaken for runtime enforcement; type-checker correctness and incremental diagnostic behavior need regression tests; and sound runtime boundary enforcement can have costs in languages that implement it. Luau's actual contract is defined by its own documentation and analyzer, not by these papers.
+
+
 
 ## 12. Official Luau and Roblox references
 
 Use official sources first and re-check them when platform behavior may have changed:
 
+- Luau type overview: https://github.com/luau-lang/site/blob/master/src/content/docs/types/overview.md
+- Luau basic types: https://luau.org/types/basic-types/
+- Luau table types: https://luau.org/types/tables/
+- Luau type refinements: https://github.com/luau-lang/site/blob/master/src/content/docs/types/refinements.md
+- Luau generic types and type packs: https://github.com/luau-lang/site/blob/master/src/content/docs/types/generics.md
+- Luau additional type-system considerations: https://luau.org/types/considerations/
+- Luau type functions: https://luau.org/types/type-functions/
+- Luau object-oriented type patterns: https://luau.org/types/object-oriented-programs/
+- Roblox type checking: https://create.roblox.com/docs/luau/type-checking
+- Roblox client-server boundary validation: https://create.roblox.com/docs/scripting/security/client-server-boundary
+- Luau Language Server: https://github.com/JohnnyMorganz/luau-lsp
+- Luau LSP analyzer CLI source: https://github.com/JohnnyMorganz/luau-lsp/blob/main/src/main.cpp
 - Luau performance guide: https://luau.org/performance/
 - Luau performance guide source: https://github.com/luau-lang/site/blob/master/src/content/docs/guides/performance.md
 - Luau type-informed/native optimization discussion: https://github.com/luau-lang/site/blob/master/src/content/news/2024-07-23-luau-recap-july-2024.md
@@ -599,7 +619,7 @@ Use official sources first and re-check them when platform behavior may have cha
 - GlobalDataStore API reference: https://create.roblox.com/docs/reference/engine/classes/GlobalDataStore
 - MessagingService API reference: https://create.roblox.com/docs/reference/engine/classes/MessagingService
 
-The documentation was checked on 2026-11-28. Native code-generation platform support, API thread-safety tags, service limits, cache behavior, and profiling tools can change. Verify current official documentation before relying on a platform fact.
+The Luau performance, type-system, Roblox Creator, and luau-lsp documentation in this file was checked on 2026-11-28, including the repository's pinned luau-lsp 1.70.1 workflow. Type-checking modes, solver behavior, Roblox API definitions, DataModel diagnostics, native-code-generation platform support, API thread-safety tags, service limits, cache behavior, and profiling tools can change. Verify current official documentation and the pinned CI toolchain before relying on a platform or analyzer fact.
 
 ## 13. Final performance acceptance gate
 
@@ -617,3 +637,359 @@ A performance change is ready only when all applicable statements are true:
 - The change does not create a slower cold path, unbounded cache, hidden queue, starvation risk, or operational cleanup burden.
 
 If a target Roblox environment is unavailable, mark platform-level performance acceptance **unverified**. Do not replace it with a Lune result or a paper's result.
+
+
+## 14. Luau type-system, type-checking, and strict code-generation contract
+
+This section governs every Luau file generated, edited, refactored, or reviewed by an agent. It is deliberately stricter than the current repository CI mode guard. The goal is to make generated Luau statically checkable, accurately typed at module boundaries, and independently safe at runtime trust boundaries.
+
+### 14.1 What the Luau type system guarantees—and what it does not
+
+Luau is gradually typed. It combines type inference with optional annotations; it is structurally typed for ordinary table shapes. The checker provides static diagnostics and editor feedback. It does not insert general runtime validation for annotated values.
+
+Treat these as separate layers:
+
+1. **Static type correctness:** the checker accepts the source under the selected mode, analyzer version, definitions, and module/DataModel mapping.
+2. **Runtime value correctness:** actual values satisfy assumptions after external input, deserialization, dynamic dispatch, casts, untyped modules, engine APIs, and mutable aliases.
+3. **Behavioral correctness:** the program preserves the intended state transitions, error handling, ordering, security, and persistence semantics.
+4. **Generated artifact correctness:** the emitted Luau parses, typechecks, builds into the intended DataModel, and runs the expected behavior.
+
+A successful strict typecheck establishes only the first item for the analyzer's modeled program. It does not prove the other three.
+
+Do not claim that \`--!strict\` makes Luau statically sound in the presence of \`any\`, assertions, dynamically loaded/untyped code, inaccurate external definitions, or unvalidated external data. Strict mode makes the checker more demanding; it does not eliminate every escape from the type system.
+
+### 14.2 Mandatory mode for generated and modified code
+
+**Every new, AI-generated, or substantively modified project-owned \`.luau\` source file must start with \`--!strict\` on its first line.**
+
+This applies to runtime modules, server/client scripts, adapters, tests, type-check fixtures, and new benchmark code. It is not optional based on file size, perceived simplicity, or whether the code is "only a test".
+
+- Put the directive at the top of the file, before executable source.
+- Do not generate \`--!nonstrict\` or \`--!nocheck\`.
+- Do not remove an existing \`--!strict\` directive to make a patch typecheck.
+- Do not downgrade a strict file when an inference error appears. Correct the inferred contract, add a narrow annotation, improve the boundary type, or fix the analyzer configuration.
+- If a modified legacy project-owned file is not strict, migrate it as part of the change. Resolve its diagnostics rather than copying the old mode forward.
+- Do not use \`--!nocheck\` for fixtures intended to test a solver issue. An expected-negative fixture must itself be parsed and typechecked in strict mode and fail at the specifically declared diagnostic.
+- Type directives control static analysis; they do not change runtime validation, permission checks, or error handling.
+
+The current CI guard is narrower than this policy: the typecheck workflow explicitly asserts \`--!strict\` only for the consolidated \`RecordStore.luau\` file, then analyzes the other included source modules using their declared modes. \`src/AlyaNum/*\` is excluded as pinned upstream source due to annotations unsupported by the pinned analyzer. This policy must not be reported as an already-enforced repository-wide CI invariant. A future CI change may extend the first-line strict guard to all project-owned Luau files, but do not silently edit CI as part of an unrelated source change.
+
+Existing vendored or intentionally imported third-party source may retain its upstream mode only when:
+- it is clearly isolated from project-owned code;
+- the exact file/path and analyzer limitation are documented;
+- it is not used as a template for generated project code; and
+- its runtime compatibility is tested separately.
+
+### 14.3 Strict, nonstrict, and nocheck semantics
+
+Luau has three per-file inference modes:
+
+- \`--!strict\`: performs the most demanding inference/checking mode. It tracks assignments and uses inferred and explicitly annotated types to reject incompatible operations.
+- \`--!nonstrict\`: performs type analysis but is more permissive. When it cannot establish a type for some variables, it may infer \`any\`, allowing otherwise unchecked operations.
+- \`--!nocheck\`: disables type inference/type diagnostics for that file. The program can still fail at runtime.
+
+The default mode is nonstrict unless the host/editor/project default is changed. In Roblox Studio, \`Workspace.LuauTypeCheckMode\` sets the default for scripts; the file directive overrides the default. Tooling may also use project or \`.luaurc\` configuration. Therefore, inspecting only a Studio setting or only the file is not sufficient: inspect the directive and the actual analyzer invocation.
+
+Do not describe nonstrict as "types only apply to annotated variables" in a way that implies all inferred values are safe. Underconstrained values may become \`any\`, and \`any\` permits unchecked use. Do not describe nocheck as a weaker form of strict; it removes the type feedback this policy requires.
+
+### 14.4 \`any\`, \`unknown\`, \`never\`, and type escapes
+
+These types have materially different meanings:
+
+- \`any\` is an escape hatch. It can be used as any type and can flow into typed values without the checker enforcing the relationship. It is the largest source of avoidable type unsafety in an otherwise strict file.
+- \`unknown\` can hold any runtime value, but cannot be used as a more specific value until it is narrowed or validated. It is the correct default for data whose shape is not yet established.
+- \`never\` is the bottom type: no value inhabits it. It can represent an impossible branch or a function path that does not return normally.
+
+Rules:
+
+- Use \`unknown\` for decoded JSON, DataStore envelopes, remote arguments, generic external responses, optional service results, and values from a deliberately dynamic boundary.
+- Narrow with \`type\`, \`typeof\`, equality checks, discriminants, \`IsA\`, table-key/value validation, or a dedicated schema parser before using a narrower type.
+- Never replace \`unknown\` with \`any\` just to silence a diagnostic.
+- Do not declare public callbacks as \`(...any) -> any\` when a generic function or explicit argument/return pack can preserve the actual contract.
+- Do not use \`{[string]: any}\` as the default type for application records, service options, configuration, queue items, or protocol envelopes. Use a named structural type, typed indexer, discriminated union, or validated unknown input.
+- Keep legacy \`any\` escapes visible. Do not expand their scope or let them escape into unrelated public APIs.
+
+### 14.5 Type assertions are not runtime casts or validators
+
+The \`::\` operator is a static type assertion/coercion understood by the checker. It does not convert the runtime value, validate its shape, clone it, sanitize it, or make it safe.
+
+Luau checks whether an assertion is permitted by its static type relationship; an assertion to \`any\` is an especially broad escape. A type assertion that compiles is not proof that the runtime value satisfies the asserted type.
+
+Allowed pattern:
+
+1. Receive an \`unknown\` value.
+2. Check its runtime primitive/class/shape and every required field.
+3. Check semantic constraints, bounds, and cross-field invariants.
+4. Only then construct a typed value, or use a narrow assertion at the exact point where the checker cannot express the established invariant.
+5. Test both accepted and rejected runtime inputs.
+
+Disallowed pattern:
+
+- \`value :: SomeType\` because the analyzer reports an error;
+- \`value :: any :: SomeType\` to bypass a failed conversion;
+- asserting an unvalidated network or persisted table to the application profile type;
+- asserting a function, class, metatable, or callback to an unrelated type;
+- broad casts around a whole module/API when only one field or function needs adaptation.
+
+If a cast is necessary because of a known analyzer limitation, name that limitation, narrow the cast to the smallest expression, leave a clear explanation next to it, and add a regression fixture for the intended contract. Do not use a comment as a substitute for runtime validation.
+
+### 14.6 Public APIs and module contracts
+
+Every module boundary is an independent contract. Strictness inside one file does not make every consumer strict or guarantee that a runtime value passed by another module is valid.
+
+For a project-owned public ModuleScript:
+
+- Export public type aliases using \`export type\`; keep implementation-only aliases private.
+- Exported functions and methods must have explicit parameter types and explicit return types. Include all return values, including status/result codes and optional error strings.
+- Public callback types must specify argument types, return types, optionality, and whether multiple returns are part of the contract.
+- Public configuration and options tables must have named field types, required/optional distinctions, and precise string unions for finite choices.
+- Public state/result records should use discriminated unions or literal status fields when the valid fields depend on the state.
+- Make ownership and mutation rules visible in the type/API shape where possible: read-only input contracts, separate mutable output values, callback ownership, and whether tables are copied or retained.
+- Keep internal implementation details private. Do not export a type merely because a consumer could use it; export the stable interface only.
+- Consumer modules should import the exported type from the actual module and use it rather than re-declaring a structurally similar local copy.
+- If a shared type creates a module cycle, move it to a low-dependency contract module or invert the dependency. Do not normalize \`require(... ) :: any\` as a module-cycle solution.
+- A module's runtime return table and its exported types must agree. Type aliases are not runtime exports and do not add values to the returned table.
+
+Example contract shape:
+
+~~~luau
+--!strict
+
+export type SaveResult =
+    { status: "saved", revision: number }
+    | { status: "conflict", current_revision: number }
+    | { status: "failed", error: string }
+
+export type Store = {
+    SaveAsync: (self: Store, key: string, data: unknown) -> SaveResult,
+}
+~~~
+
+The example illustrates the shape of a contract; it is not a substitute for the repository's actual return-code or adapter conventions.
+
+### 14.7 Function inference, annotations, and callbacks
+
+Luau can infer many local types, including contextual parameter types and generic identity relationships in strict mode. Do not add redundant annotations to every local. Do make public and ambiguous boundaries explicit.
+
+Add annotations when:
+- a function is exported or forms a cross-module/public API;
+- a callback's expected parameter or return types are not obvious from context;
+- a recursive function needs its return type established before recursive use;
+- an empty table needs a specific element/indexer type;
+- a heterogeneous or optional result needs an explicit union;
+- inference has widened to \`any\` or an overly broad table shape;
+- a method's \`self\` type is not inferred precisely;
+- a generic relationship should be preserved across input and output;
+- a solver-sensitive expression otherwise loses a type fact.
+
+Do not:
+- annotate a value with \`any\` merely to make a generic reusable;
+- erase literal states into \`string\` when only a finite set is valid;
+- type a function parameter more broadly than the function actually supports;
+- claim a return type that the implementation does not establish on every path;
+- hide a missing return path with an assertion;
+- replace a precise inferred generic with an unnecessarily monomorphic type.
+
+For object-style modules, use a named data type, a metatable/class type, and an explicit \`self\` annotation on methods where required by the checker. The established pattern is \`typeof(setmetatable(...))\`; the new type solver also supports the \`setmetatable<Data, typeof(Class)>\` type function. Use the form accepted by the repository's pinned analyzer and fixture it before applying the pattern broadly.
+
+### 14.8 Generics and type packs
+
+Use generics to preserve a relationship, not merely to avoid writing a type.
+
+- A generic function such as \`identity<T>(value: T): T\` preserves the input type as the output type.
+- A generic container can preserve the element type through creation, insertion, lookup, and iteration.
+- Explicit generic instantiation (\`functionName<<SomeType>>(arguments)\`) is available when an argument does not give the checker enough information to infer a type parameter, such as constructing an empty typed collection.
+- A variadic type pack \`...T\` represents zero or more arguments/returns of the same type \`T\`.
+- A generic type pack \`U...\` represents a sequence of zero or more types that may be heterogeneous. Use it when forwarding callbacks or preserving arbitrary argument/return tuples.
+- Do not approximate a known callback with \`(...any) -> any\`. Use a concrete function type or a generic pack.
+- Avoid needless generic parameters that do not connect inputs, stored state, callbacks, and outputs.
+- Add fixtures for the exact generic relationship a public API promises; test both correct instantiation and deliberately invalid argument/return types.
+
+### 14.9 Unions, optional types, refinement, and control flow
+
+Model runtime alternatives explicitly:
+
+- Use \`T?\` for \`T | nil\` when nil is the only additional state.
+- Use literal/discriminated unions for state machines and tagged results rather than a loosely related set of optional fields.
+- Check a discriminant before reading fields specific to a variant.
+- Use impossible branches and exhaustive handling deliberately; \`never\` can help expose a newly added unhandled variant.
+- Use \`type(value)\` for Luau primitive categories and \`typeof(value)\` for Roblox datatypes and runtime Roblox values.
+- Use \`IsA\` or other documented engine predicates to validate Instance class expectations before using a class-specific operation.
+- Prefer early returns for invalid/nil cases. Current Luau refinement behavior preserves many facts after an early-return or throwing guard; do not keep obsolete assertions solely because an older checker once lost the refinement.
+- A check on a table property can refine that property, but do not assume a mutable property or captured variable remains unchanged after an arbitrary function call, callback, yield, or mutation.
+- When a captured upvalue or a value changed in a loop causes a refinement diagnostic, first inspect the exact control flow and analyzer version. Copy a validated value into a new local when that gives it a stable, explicit lifetime; do not cast the old variable without proof.
+- Avoid guards with hidden side effects. Validate once, store the validated value, and then use that value.
+- Keep a clear distinction between proving that a value is non-nil and proving that it satisfies a larger structural or semantic contract.
+
+Do not treat an optional check as proof of numeric validity. For example, a number may still be NaN, infinite, outside a bound, or inconsistent with related fields.
+
+### 14.10 Table typing: sealed, unsealed, and generic
+
+Luau tracks table types in different states:
+
+- **Unsealed tables** are commonly created by table literals and can gain new properties while their shape is being inferred in the creation scope. They are exact: properties are expected to be named by the inferred shape; missing properties can be treated as nil only where optional.
+- **Sealed tables** commonly result from an explicit table annotation or a function return. They are inexact and support width subtyping: a table with additional fields can satisfy a type that requires fewer fields.
+- **Generic table types** describe a required structural interface when the checker does not have a concrete table shape.
+
+Rules:
+
+- Type empty collections at creation when the element or indexer type is known, e.g. \`local pending: {WorkItem} = {}\`.
+- Use \`{T}\` for a numeric array of T, and \`{[KeyType]: ValueType}\` for a dictionary/indexer. Add named properties explicitly when a table is a record with both indexer and fixed fields.
+- Use optional properties (\`field: T?\`) only when absence is a real state. Do not use optional fields to conceal incomplete initialization.
+- Keep records structurally stable and include required fields in all construction paths.
+- Do not confuse the checker’s sealed/unsealed shape with runtime immutability. A sealed type does not freeze a table. \`table.freeze\` is a runtime API; a local binding declared \`const\` is a binding rule, not proof that the referenced object is deeply immutable.
+- \`table.clone\` does not make nested tables deeply detached. Type annotations do not change aliasing or ownership.
+- Do not use overly broad indexers when the application knows a finite schema; use a named record type.
+- A table's inferred shape must be tested at the consumer boundary, not only at the construction site.
+
+### 14.11 Module imports, exported types, and dependency cycles
+
+- Luau type aliases are file-local unless explicitly declared with \`export type\`.
+- A consumer can refer to an imported exported type through the module value, e.g. \`local StoreModule = require(...)\` then \`StoreModule.Store\`.
+- A type-only export does not create a runtime member. Keep the runtime table and \`export type\` declarations intentionally aligned.
+- Prefer acyclic module dependencies for both runtime and type resolution. Move shared contracts to a low-level module that does not depend on the modules consuming it.
+- Avoid requiring modules through dynamic expressions when static module resolution is available.
+- Avoid \`require(module) :: any\` as a workaround for unresolved imports. First inspect the Rojo project mapping/sourcemap, require path, circular dependency, and analyzer settings. If a narrow bridge remains necessary, isolate it in one adapter and keep a public typed facade.
+- Test both the defining module and at least one consumer module. A module can typecheck in isolation while its exported API fails when imported or instantiated by a consumer.
+
+### 14.12 Type functions and metatable type functions
+
+Luau supports analysis-time type functions. They execute in the type-analysis environment and operate on types; they are not ordinary runtime functions and do not validate runtime values. The type library can inspect and construct types. Built-in type-level \`setmetatable\` and \`getmetatable\` facilities are part of the newer type solver.
+
+Use type functions only when a simpler named alias, generic, union, or explicit structural contract is insufficient.
+
+- Keep type functions deterministic and limited to type construction/transformation.
+- Never rely on a type function to sanitize runtime data or cause a runtime side effect.
+- Keep generated type-level abstractions small enough that consumers can understand the resulting inferred type.
+- Add a positive and negative fixture for every public type-function abstraction.
+- Verify the syntax and behavior against the repository's pinned analyzer version. Do not assume that an example from current upstream docs is supported by an older pinned LSP binary.
+- Do not solve an ordinary API typing problem with a custom type function merely to avoid a clear exported type.
+
+### 14.13 Roblox engine types, sourcemaps, and analyzer environment
+
+Static results are only as accurate as the environment model loaded into the analyzer.
+
+For Roblox project code, use the Roblox platform mode and the same API definitions and DataModel mapping the project actually uses:
+
+- \`luau-lsp analyze --platform=roblox\` loads Roblox platform support and engine API types.
+- \`--definitions=...\` loads additional definitions into the global environment. Definition files are part of the trusted analyzer input: stale or over-broad definitions can create false acceptance or false errors.
+- \`--sourcemap=...\` maps filesystem modules to Roblox DataModel paths so instance-based requires and children can resolve.
+- A missing or stale sourcemap can make a valid module path appear invalid or resolve a different instance. Rebuild it after changing Rojo project mappings, filenames, ModuleScript paths, or folder structure.
+- Use the analyzer version pinned by the repository workflow, not an unpinned globally installed version.
+- Inspect \`--settings\`, \`.luaurc\`, \`--base-luaurc\`, per-file directives, and any \`--ignore\` configuration when results differ between Studio and CI.
+- Keep analyzer diagnostics, autocomplete/hover, and Studio's own Script Analysis conceptually separate; they may not have identical configuration or DataModel knowledge.
+
+**Current Luau LSP DataModel limitation:** the language-server diagnostics checker has historically resolved DataModel Instance values to \`any\` by default to reduce false positives, even when autocomplete/hover can resolve the instance. The \`luau-lsp.diagnostics.strictDatamodelTypes\` setting enables stricter DataModel diagnostics and is off by default in the language-server configuration checked for this handbook. The repository's current main source-analysis command uses \`--platform=roblox\`, a global definitions file, and a Rojo sourcemap, but does not pass the strict-DataModel settings file to that broad source-analysis invocation. Its dedicated DataModel fixtures do use settings with strict DataModel diagnostics enabled. Therefore, a green broad analyzer run is **not** proof that every DataModel path and child Instance is strictly typed.
+
+When a change depends on DataModel child resolution or class-specific members, run a fixture/analyzer invocation with a current Rojo sourcemap and strict DataModel diagnostics enabled. Validate with Studio where engine-specific inference or runtime behavior matters. Do not paper over missing DataModel types with \`any\`.
+
+### 14.14 Runtime validation at trust boundaries
+
+Static annotations do not validate external values. Runtime validation is mandatory for values from:
+
+- RemoteEvents, RemoteFunctions, and any client-controlled request;
+- DataStore, MemoryStore, MessagingService, HTTP, file/config input, and decoded/serialized payloads;
+- third-party modules, dynamic module boundaries, plugin/user-supplied callbacks, and untyped dependencies;
+- Roblox APIs whose return is optional, can be removed, can be streamed out, or depends on external lifecycle.
+
+At these boundaries:
+
+1. Accept as \`unknown\` or the narrowest honest raw type.
+2. Validate primitive/class identity and table shape.
+3. Validate required and optional keys separately; reject unexpected types instead of silently coercing.
+4. Validate finite numeric values, allowed ranges, lengths, depth/node budgets, and cross-field invariants.
+5. Validate authorization, ownership, rate limits, and state transitions independently of type correctness.
+6. Convert to a fresh typed internal value when caller mutation or external aliasing is possible.
+7. Return an explicit error/result type and keep failure paths observable and fail-closed.
+
+For Roblox remotes, do not annotate an incoming value as \`Vector3\` and then assume the client supplied a valid Vector3. Check \`typeof\`, reject NaN/infinite or out-of-range components as appropriate, validate permissions and rate limits, and only then use it. For persisted profile data, decode into \`unknown\`, validate the envelope and schema before converting to the current internal type. Preserve the RecordStore rule that malformed, future, or unsupported persisted data must not silently become defaults.
+
+### 14.15 Analyzer diagnostics and type error correction loop
+
+When the analyzer reports an error:
+
+1. Capture the exact file, line, column, diagnostic category, pinned analyzer version, mode, settings, definitions, and sourcemap.
+2. Determine whether it is a syntax error, type error, unknown global/module, missing DataModel type, lint diagnostic, or analyzer/tool failure.
+3. Read the inferred types around the smallest failing expression. Do not infer the type from the intended runtime design alone.
+4. Trace the type through its origin, assignments, branches, mutations, callbacks, imports, and returns.
+5. Fix the first incorrect or underconstrained boundary rather than casting the final expression.
+6. Add the narrowest explicit annotation or helper that expresses the real invariant.
+7. Run the same analyzer command again, then the fixture corpus and relevant project regressions.
+8. If the diagnostic is caused by a known analyzer limitation, reproduce it in an isolated fixture, pin the tool version/issue, and preserve the narrow workaround. Do not suppress adjacent real errors.
+9. If the analyzer version has changed, re-evaluate known failures and update fixtures only after the new behavior is confirmed.
+
+Never:
+- change a strict file to nonstrict/nocheck;
+- add \`any\` or \`:: any\` broadly;
+- add \`--!nolint\`, broad lint suppressions, or \`--ignore\` globs to bury a type error;
+- weaken a public return type to \`any\`;
+- change an expected-negative fixture to pass without explaining the runtime contract;
+- mark a known bug as XFAIL without a pinned upstream issue and exact diagnostic expectation;
+- report "typechecked" if only syntax parsing, editor hover, or a partial folder run was performed.
+
+### 14.16 Type-check regression fixtures
+
+Use the existing \`typecheck/fixtures\` harness as the canonical pattern.
+
+- Every fixture source is strict unless it intentionally tests a language directive or mode.
+- A positive fixture must produce no analyzer diagnostics.
+- A negative fixture must produce the expected diagnostic category at the declared source line. Do not depend on fragile full diagnostic wording unless that exact wording is the behavior being tested.
+- A known solver bug must be an explicit \`known-type-error\`/XFAIL with an upstream issue URL, pinned analyzer version, expected line, and an expiry condition. An XPASS is a signal to re-evaluate and remove or update the stale expectation; it should not be auto-accepted.
+- A negative fixture that fails to parse is not evidence of a type error.
+- A fixture that reports errors only because definitions or a sourcemap are missing is invalid calibration.
+- Test both the definition site and a realistic consumer/import site for exported module types.
+- Test valid and invalid variants for public generics, tagged unions, optional fields, DataModel child class assumptions, callback packs, and external payload decoders where the feature is relevant.
+- Keep fixture setup deterministic and report analyzer version, command, settings, and exact diagnostic line.
+
+Do not edit the fixture runner, manifest, settings, or expected failure lines merely to make a candidate green. A fixture change requires an explicit explanation of why the test expectation or analyzer baseline changed.
+
+### 14.17 Code-generation acceptance checklist
+
+Before accepting generated or AI-written Luau, verify all applicable items:
+
+- [ ] The file begins with \`--!strict\` on its first line.
+- [ ] No new \`--!nonstrict\` or \`--!nocheck\` directive exists.
+- [ ] No new unreviewed \`any\`, \`:: any\`, broad cast, or diagnostic suppression exists.
+- [ ] Public module functions, callbacks, option tables, results, and exported types are explicit and agree with the runtime implementation.
+- [ ] Empty tables and heterogeneous/optional states have intentional types.
+- [ ] Generic inputs/outputs preserve their relationships; type packs are used instead of \`any\` where appropriate.
+- [ ] All type assertions are justified by a preceding runtime check or a documented internal invariant.
+- [ ] External, remote, and persisted values are runtime-validated before entering typed internal state.
+- [ ] The correct Roblox definitions, platform mode, Rojo sourcemap, analyzer settings, and pinned analyzer version were used.
+- [ ] Positive and negative type fixtures cover new public contracts or solver-sensitive patterns.
+- [ ] The complete source-analysis workflow, focused regressions, appropriate Rojo builds, and relevant integration tests pass.
+- [ ] Any remaining diagnostic is categorized and explicitly reported; it has not been hidden by changing the mode or broadening a type.
+
+A generated patch is **not accepted** merely because it looks plausible, the editor shows autocomplete, the parser accepts it, or a single file typechecks in isolation.
+
+### 14.18 Repository-specific typecheck truth table
+
+The following describes the repository as inspected on 2026-11-28; it is a snapshot, not a promise that future CI versions remain identical:
+
+| Check | Current behavior | What a pass establishes |
+| --- | --- | --- |
+| RecordStore strict guard | Python asserts the consolidated \`src/PlayerDataInitializer/RecordStore.luau\` file starts with \`--!strict\` | That file has the required directive |
+| Source analyzer | \`luau-lsp analyze --platform=roblox\` with pinned Roblox definitions and Rojo sourcemap analyzes \`src/**/*.luau\` except \`src/AlyaNum/*\` using each file's declared mode | Included files have no analyzer diagnostics under their current declared modes and current analyzer environment |
+| AlyaNum exclusion | \`src/AlyaNum/*\` is excluded because its pinned upstream generic metatable annotations are unsupported by the pinned LSP version | Nothing about static type correctness of those excluded files |
+| Strict DataModel fixtures | Dedicated fixtures use a sourcemap and settings enabling strict DataModel diagnostics | The tested DataModel paths/classes typecheck or fail as expected |
+| Broad DataModel source diagnostics | The broad source analyzer command does not pass the strict DataModel settings file | A green broad run does not prove all DataModel values avoid \`any\` |
+| Type fixtures | Positive, negative, and known solver-regression cases are matched by diagnostic category and source location | The pinned analyzer behaves as expected for those fixtures |
+| Roblox runtime | Lune/mock workflows do not execute in the Roblox engine | No Studio or live-engine guarantee |
+
+Do not change this table by assumption. Re-read \`.github/workflows/luau-typecheck.yml\`, the fixture manifest, and analyzer configuration before claiming a CI change has closed one of these gaps.
+
+### 14.19 Type-system and code-generation acceptance gate
+
+A type-sensitive change is complete only when:
+
+- all newly generated or modified project-owned Luau files are strict;
+- no type escape has been introduced without a narrow, tested reason;
+- module contracts are explicit and the consumer agrees with the producer;
+- all external data is validated at runtime;
+- analyzer configuration is complete and accurately described;
+- positive, negative, and relevant regression fixtures behave as intended;
+- the repository's pinned typecheck workflow and relevant broader checks pass;
+- platform-specific behavior has Studio/device evidence where it matters; and
+- unresolved tool limitations, vendor exclusions, or static-analysis gaps are stated rather than hidden.
+
+Type correctness, runtime validation, and behavioral correctness are separate acceptance dimensions. A change must satisfy each dimension relevant to its risk.
