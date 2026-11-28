@@ -948,7 +948,7 @@ Never:
 
 Use the existing `typecheck/fixtures` harness as the canonical pattern.
 
-- Every fixture source is strict unless it intentionally tests a language directive or mode.
+- Every fixture source begins with `--!strict` on its first line, as required by Section 14.2. Do not add a `--!nonstrict` or `--!nocheck` fixture.
 - A positive fixture must produce no analyzer diagnostics.
 - A negative fixture must produce the expected diagnostic category at the declared source line. Do not depend on fragile full diagnostic wording unless that exact wording is the behavior being tested.
 - A known solver bug must be an explicit `known-type-error`/XFAIL with an upstream issue URL, pinned analyzer version, expected line, and an expiry condition. An XPASS is a signal to re-evaluate and remove or update the stale expectation; it should not be auto-accepted.
