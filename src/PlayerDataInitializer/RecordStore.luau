@@ -7055,6 +7055,7 @@ type ShapeValidation = {
 	nodes: number,
 	message: string?,
 	has_non_finite_numbers: boolean,
+	max_depth: number?,
 }
 
 export type SessionState =
@@ -8338,7 +8339,8 @@ copy_value = function(
 				return nil
 			end
 		end
-		if depth > MAX_VALUE_DEPTH then
+		local depth_limit = if shape_validation ~= nil then shape_validation.max_depth or MAX_VALUE_DEPTH else MAX_VALUE_DEPTH
+		if depth > depth_limit then
 			error("value exceeds the maximum nesting depth")
 		end
 		local current_type = type(current)
@@ -8445,6 +8447,20 @@ copy_value = function(
 	return clone(value, 0)
 end
 
+
+local function copy_value_with_depth(value: unknown, max_depth: number?): JsonValue?
+	local validation: ShapeValidation = {
+		nodes = 0,
+		message = nil,
+		has_non_finite_numbers = false,
+		max_depth = max_depth,
+	}
+	local copied = copy_value(value, validation)
+	if validation.message ~= nil then
+		error(validation.message)
+	end
+	return copied
+end
 
 local function encode_non_finite_numbers(
 	value: JsonValue
@@ -9010,7 +9026,7 @@ local function validate_value(
 	return true, nil
 end
 
-prepared_envelope_cache._copy_with_shape = function(value: unknown): (JsonValue?, string?, boolean)
+prepared_envelope_cache._copy_with_shape = function(value: unknown, max_depth: number?): (JsonValue?, string?, boolean)
 	if value == nil then
 		return nil, "record data cannot be nil", false
 	end
@@ -9019,6 +9035,7 @@ prepared_envelope_cache._copy_with_shape = function(value: unknown): (JsonValue?
 		nodes = 0,
 		message = nil,
 		has_non_finite_numbers = false,
+		max_depth = max_depth,
 	}
 	local copy_ok, copied_or_error = pcall(copy_value, value, shape_validation)
 	if shape_validation.message ~= nil then
@@ -9028,7 +9045,7 @@ prepared_envelope_cache._copy_with_shape = function(value: unknown): (JsonValue?
 		local shape_call_ok, shape_ok, shape_message = pcall(
 			validate_value_shape,
 			value,
-			nil,
+			shape_validation.max_depth,
 			nil,
 			nil,
 			true
@@ -9548,7 +9565,7 @@ local function backend_get(backend: Backend, use_cache: boolean, deadline: numbe
 		if entry == nil then
 			return nil, nil, nil, nil
 		end
-		return copy_value(entry.Value), {
+		return copy_value_with_depth(entry.Value, MAX_VALUE_DEPTH + 1), {
 			Version = entry.Version,
 			CreatedTime = entry.CreatedTime,
 			UpdatedTime = entry.UpdatedTime,
@@ -9576,7 +9593,7 @@ local function backend_get(backend: Backend, use_cache: boolean, deadline: numbe
 	return raw, backend_info_from_key_info(key_info), nil, nil
 end
 
-local function mock_write_version(entry: MockEntry?, value: JsonValue?, user_ids: { number }, metadata: Metadata, deleted: boolean): MockEntry
+local function mock_write_version(entry: MockEntry?, value: JsonValue?, user_ids: { number }, metadata: Metadata, deleted: boolean, max_depth: number?): MockEntry
 	mock_counter += 1
 	local now = DateTime.now().UnixTimestampMillis
 	local version = ("mock-%d-%s"):format(mock_counter, HttpService:GenerateGUID(false))
@@ -9593,7 +9610,7 @@ local function mock_write_version(entry: MockEntry?, value: JsonValue?, user_ids
 			Versions = {},
 			VersionOrder = {},
 		}
-	next_entry.Value = copy_value(value)
+	next_entry.Value = copy_value_with_depth(value, max_depth)
 	next_entry.UserIds = clone_user_ids(user_ids)
 	next_entry.Metadata = clone_metadata(metadata)
 	next_entry.Version = version
@@ -9603,7 +9620,7 @@ local function mock_write_version(entry: MockEntry?, value: JsonValue?, user_ids
 		Version = version,
 		CreatedTime = now,
 		UpdatedTime = now,
-		Value = copy_value(value),
+		Value = copy_value_with_depth(value, max_depth),
 		UserIds = clone_user_ids(user_ids),
 		Metadata = clone_metadata(metadata),
 		Deleted = deleted,
@@ -9632,7 +9649,7 @@ local function backend_update(backend: Backend, transform: UpdateTransform, dead
 		end
 		local store = get_mock_store(backend.name, backend.scope)
 		local entry = store[backend.key]
-		local raw = if entry ~= nil then copy_value(entry.Value) else nil
+		local raw = if entry ~= nil then copy_value_with_depth(entry.Value, MAX_VALUE_DEPTH + 1) else nil
 		local info: BackendInfo? = if entry ~= nil
 			then {
 				Version = entry.Version,
@@ -9673,7 +9690,7 @@ local function backend_update(backend: Backend, transform: UpdateTransform, dead
 		end
 		local stored_new_value = encode_backend_update_value(new_value)
 		local value, copy_error, non_finite_numbers_absent =
-			prepared_envelope_cache._copy_with_shape(stored_new_value)
+			prepared_envelope_cache._copy_with_shape(stored_new_value, MAX_VALUE_DEPTH + 1)
 		if value == nil then
 			return nil, nil, "validation", copy_error or "updated value is invalid"
 		end
@@ -9687,14 +9704,14 @@ local function backend_update(backend: Backend, transform: UpdateTransform, dead
 		if not data_ok then
 			return nil, nil, "validation", data_error
 		end
-		local next_entry = mock_write_version(entry, value, ids, normalized_metadata, false)
+		local next_entry = mock_write_version(entry, value, ids, normalized_metadata, false, MAX_VALUE_DEPTH + 1)
 		store[backend.key] = next_entry
 		if mock_update_commit_then_failure_count > 0 then
 			mock_update_commit_then_failure_count -= 1
 			return nil, nil, "unknown", mock_update_commit_then_failure_message
 				or "injected UpdateAsync response failure after commit"
 		end
-		return copy_value(next_entry.Value), {
+		return copy_value_with_depth(next_entry.Value, MAX_VALUE_DEPTH + 1), {
 			Version = next_entry.Version,
 			CreatedTime = next_entry.CreatedTime,
 			UpdatedTime = next_entry.UpdatedTime,
@@ -13683,7 +13700,7 @@ track_external_data_mutation = function(state: InternalState)
 		state.data = candidate
 		return
 	end
-	local shape_validation: ShapeValidation = { nodes = 0, message = nil, has_non_finite_numbers = false }
+	local shape_validation: ShapeValidation = { nodes = 0, message = nil, has_non_finite_numbers = false, max_depth = nil }
 	local copied_ok, copied_or_error = pcall(function()
 		return copy_value(candidate, shape_validation)
 	end)
@@ -14356,7 +14373,7 @@ local function update(self: Record, callback: (JsonValue?) -> JsonValue?): (Resu
 	if next_value == nil then
 		return "validation", "update callback returned nil"
 	end
-	local shape_validation: ShapeValidation = { nodes = 0, message = nil, has_non_finite_numbers = false }
+	local shape_validation: ShapeValidation = { nodes = 0, message = nil, has_non_finite_numbers = false, max_depth = nil }
 	local copy_ok, copied_or_error = pcall(function()
 		return copy_value(next_value, shape_validation)
 	end)
@@ -21737,24 +21754,24 @@ RecordStore.Mock = (function()
 			return "success", nil
 		end
 		local copied_ok, copied_or_error = pcall(function()
-			return copy_value(value)
+			return copy_value_with_depth(value, MAX_VALUE_DEPTH + 1)
 		end)
 		if not copied_ok or copied_or_error == nil then
 			return "validation", "mock record fixture is not valid JSON data"
 		end
 		local copied = copied_or_error :: JsonValue
-		local valid, size_error = validate_serialized_size(copied)
+		local valid, size_error = validate_serialized_size(copied, false, MAX_VALUE_DEPTH + 1)
 		if not valid then
 			return "validation", size_error
 		end
-		store[key] = mock_write_version(store[key], copied, {}, {}, false)
+		store[key] = mock_write_version(store[key], copied, {}, {}, false, MAX_VALUE_DEPTH + 1)
 		return "success", nil
 	end
 
 	local function mock_get_record_raw(name: string, scope: string, key: string): unknown
 		local store = get_mock_store(name, scope)
 		local entry = store[key]
-		return if entry == nil then nil else copy_value(entry.Value)
+		return if entry == nil then nil else copy_value_with_depth(entry.Value, MAX_VALUE_DEPTH + 1)
 	end
 
 
@@ -21825,7 +21842,7 @@ RecordStore.Mock = (function()
 			return nil
 		end
 		local historical = entry.Versions[version]
-		return if historical == nil then nil else copy_value(historical.Value)
+		return if historical == nil then nil else copy_value_with_depth(historical.Value, MAX_VALUE_DEPTH + 1)
 	end
 
 	local function mock_set_test_clock(clock: (() -> number)?)
