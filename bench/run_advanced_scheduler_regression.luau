@@ -159,6 +159,37 @@ enqueue(drr_high_burst, {
 take(drr_high_burst, "drr-high-first")
 take(drr_high_burst, "drr-normal-after-burst")
 
+-- The minimum DRR weight must still admit a maximum-cost item at the exact
+-- mathematical bound ceil(max_item_cost / drr_quantum).
+local maximum_cost_drr = new_scheduler()
+local maximum_cost_policy = maximum_cost_drr:Stats().policy
+assert(maximum_cost_drr:SetPolicy({
+	revision = maximum_cost_policy.revision + 1,
+	algorithm = "drr",
+	drr_quantum = 1,
+	max_item_cost = 256,
+}), "maximum-cost DRR policy was rejected")
+enqueue(maximum_cost_drr, {
+	id = "minimum-weight-maximum-cost",
+	owner_id = "minimum-weight-owner",
+	work_class = "minimum-weight",
+	lane = "background",
+	service_class = "best_effort",
+	cost = 256,
+})
+local maximum_cost_item, maximum_cost_status = maximum_cost_drr:TakeNext(false)
+assert(maximum_cost_item ~= nil and maximum_cost_status == "success"
+	and maximum_cost_item.id == "minimum-weight-maximum-cost",
+	"minimum-weight DRR lane did not admit a maximum-cost item at the exact round bound")
+local expected_maximum_cost_lane_key = "20:minimum-weight-owner"
+	.. "14:minimum-weight"
+	.. "10:background"
+	.. "11:best_effort"
+assert(maximum_cost_drr.drr_deficit[expected_maximum_cost_lane_key] == 0,
+	"maximum-cost DRR selection did not consume the exact accumulated deficit")
+assert(maximum_cost_drr:MarkCompleted(maximum_cost_item.id, "committed"),
+	"maximum-cost DRR item did not complete")
+
 -- A cursor in the middle of the sorted lane list must rotate after its exact lane,
 -- even when earlier lane keys are inserted after the previous selection.
 local cursor_search = new_scheduler()
