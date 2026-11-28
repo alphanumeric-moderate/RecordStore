@@ -1082,6 +1082,13 @@ lune run bench/session_lifecycle.bench.luau
 # run the regression tests outside Studio
 lune run bench/run_regression_tests.luau
 
+# run focused depth and DRR cursor regressions
+lune run bench/run_raw_envelope_depth_regression.luau
+lune run bench/run_drr_missing_cursor_regression.luau
+
+# run the tracked high-depth scheduler scaling subset
+lune run bench/scheduler_first_selection_scaling_codspeed.bench.luau
+
 # run every benchmark from codspeed.yml with the CodSpeed CLI
 codspeed run --mode simulation
 ```
@@ -1089,6 +1096,8 @@ codspeed run --mode simulation
 ### Bencher.dev
 
 Bencher runs alongside CodSpeed and tracks the same Lune workload benchmarks through Hyperfine. It reports median process wall time from the `ubuntu-24.04` GitHub-hosted runner; these timings include Lune startup and are not directly comparable to CodSpeed's simulated measurements.
+
+The full 4-algorithm, 6-scenario, 4-depth scheduler matrix remains an uninstrumented Bencher diagnostic. CodSpeed also tracks a bounded first-selection scaling subset for FIFO and DRR at 512, 2,048 and 8,192 queued items so high-depth regressions remain visible without instrumenting the full diagnostic matrix.
 
 To enable it:
 
