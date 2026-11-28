@@ -7051,6 +7051,12 @@ export type JsonValue =
 | { JsonValue }
 | { [string]: JsonValue }
 
+type ShapeValidation = {
+	nodes: number,
+	message: string?,
+	has_non_finite_numbers: boolean,
+}
+
 export type SessionState =
 	"closed"
 | "acquiring"
@@ -7940,7 +7946,7 @@ local mock_get_failure_message: string? = nil
 local close_internal: (state: InternalState, shutdown: boolean) -> (ResultCode, string?)
 local complete_deferred_takeover: (state: InternalState) -> ()
 local process_queue_internal: (state: InternalState, max_messages: number) -> (ResultCode, string?)
-local copy_value: (value: unknown, shape_validation: { nodes: number, message: string?, has_non_finite_numbers: boolean }?) -> JsonValue?
+local copy_value: (value: unknown, shape_validation: ShapeValidation?) -> JsonValue?
 local track_external_data_mutation: (state: InternalState) -> ()
 local messaging_enabled: (state: InternalState) -> boolean
 local publish_record_message: (state: InternalState, kind: string, message_type: string?, data: JsonValue?, generation: number?, target_job_id: string?, target_token: string?, request_id: string?, handoff_status: HandoffStatus?, requester_job_id: string?) -> (boolean, string?)
@@ -8177,10 +8183,14 @@ local function validate_metadata(metadata: Metadata, allow_reserved: boolean?): 
 	return true, nil
 end
 
+local MAX_VALUE_DEPTH = 64
+local MAX_VALUE_NODES = 100_000
+local MAX_VALUE_STRING_LENGTH = 4_000_000
+
 local function validate_value_shape(value: unknown, max_depth: number?, max_nodes: number?, max_string_length: number?, allow_non_finite_numbers: boolean?): (boolean, string?)
-	local depth_limit = max_depth or 64
-	local node_limit = max_nodes or 100000
-	local string_limit = max_string_length or 4_000_000
+	local depth_limit = max_depth or MAX_VALUE_DEPTH
+	local node_limit = max_nodes or MAX_VALUE_NODES
+	local string_limit = max_string_length or MAX_VALUE_STRING_LENGTH
 	local node_count = 0
 	local active_tables: { [any]: boolean } = {}
 
@@ -8306,7 +8316,7 @@ end
 
 copy_value = function(
 	value: unknown,
-	shape_validation: { nodes: number, message: string?, has_non_finite_numbers: boolean }?
+	shape_validation: ShapeValidation?
 ): JsonValue?
 	if value == nil then
 		return nil
@@ -8323,12 +8333,12 @@ copy_value = function(
 				return nil
 			end
 			shape_validation.nodes += 1
-			if shape_validation.nodes > 100000 then
+			if shape_validation.nodes > MAX_VALUE_NODES then
 				shape_validation.message = "value exceeds the maximum node count"
 				return nil
 			end
 		end
-		if depth > 64 then
+		if depth > MAX_VALUE_DEPTH then
 			error("value exceeds the maximum nesting depth")
 		end
 		local current_type = type(current)
@@ -8342,7 +8352,7 @@ copy_value = function(
 			return numeric_value
 		elseif current_type == "string" then
 			local string_value = current :: string
-			if shape_validation ~= nil and #string_value > 4_000_000 then
+			if shape_validation ~= nil and #string_value > MAX_VALUE_STRING_LENGTH then
 				shape_validation.message = "value contains an overlong string"
 				return nil
 			end
@@ -8432,7 +8442,7 @@ copy_value = function(
 		local empty_result: { JsonValue } = {}
 		return empty_result
 	end
-	return clone(value, 1)
+	return clone(value, 0)
 end
 
 
@@ -8443,7 +8453,7 @@ local function encode_non_finite_numbers(
 	local path: { string | number } = {}
 
 	local function encode(current: JsonValue, depth: number): (JsonValue, boolean)
-		if depth > 64 then
+		if depth > MAX_VALUE_DEPTH then
 			error("value exceeds the maximum nesting depth")
 		end
 
@@ -8461,8 +8471,8 @@ local function encode_non_finite_numbers(
 				kind = "negative_infinity"
 			end
 
-			local marker_path: { NonFinitePathSegment } = table.create(depth - 1)
-			for path_index = 1, depth - 1 do
+			local marker_path: { NonFinitePathSegment } = table.create(depth)
+			for path_index = 1, depth do
 				local key = path[path_index]
 				local segment: NonFinitePathSegment
 				if type(key) == "string" then
@@ -8500,9 +8510,9 @@ local function encode_non_finite_numbers(
 				error("value contains mixed table keys")
 			end
 
-			path[depth] = key
+			path[depth + 1] = key
 			local encoded_child, child_changed = encode(child, depth + 1)
-			path[depth] = nil
+			path[depth + 1] = nil
 
 			if child_changed then
 				if result == nil then
@@ -8518,7 +8528,7 @@ local function encode_non_finite_numbers(
 		return result :: JsonValue, true
 	end
 
-	local encoded, _changed = encode(value, 1)
+	local encoded, _changed = encode(value, 0)
 	return encoded, markers
 end
 
@@ -8587,7 +8597,7 @@ local function restore_non_finite_numbers(
 			path_count += 1
 			path_maximum = math.max(path_maximum, path_index)
 		end
-		if path_count ~= path_maximum or path_count > 64 then
+		if path_count ~= path_maximum or path_count > MAX_VALUE_DEPTH then
 			return nil, "non-finite number marker path is invalid"
 		end
 
@@ -9005,7 +9015,7 @@ prepared_envelope_cache._copy_with_shape = function(value: unknown): (JsonValue?
 		return nil, "record data cannot be nil", false
 	end
 
-	local shape_validation = {
+	local shape_validation: ShapeValidation = {
 		nodes = 0,
 		message = nil,
 		has_non_finite_numbers = false,
@@ -13673,7 +13683,7 @@ track_external_data_mutation = function(state: InternalState)
 		state.data = candidate
 		return
 	end
-	local shape_validation = { nodes = 0, message = nil, has_non_finite_numbers = false }
+	local shape_validation: ShapeValidation = { nodes = 0, message = nil, has_non_finite_numbers = false }
 	local copied_ok, copied_or_error = pcall(function()
 		return copy_value(candidate, shape_validation)
 	end)
@@ -14346,7 +14356,7 @@ local function update(self: Record, callback: (JsonValue?) -> JsonValue?): (Resu
 	if next_value == nil then
 		return "validation", "update callback returned nil"
 	end
-	local shape_validation = { nodes = 0, message = nil, has_non_finite_numbers = false }
+	local shape_validation: ShapeValidation = { nodes = 0, message = nil, has_non_finite_numbers = false }
 	local copy_ok, copied_or_error = pcall(function()
 		return copy_value(next_value, shape_validation)
 	end)
@@ -18512,7 +18522,7 @@ RecordStore._internals.patch = (function()
 			return pack_subtree_summary(1, 1, not math.isfinite(value :: number), 1), nil
 		elseif value_type == "string" then
 			local string_value = value :: string
-			if #string_value > 4_000_000 then
+			if #string_value > MAX_VALUE_STRING_LENGTH then
 				return nil, "value contains an overlong string"
 			end
 			return pack_subtree_summary(1, 1, false, minimum_encoded_string_bytes(string_value)), nil
