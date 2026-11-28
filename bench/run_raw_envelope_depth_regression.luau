@@ -121,6 +121,7 @@ type MockApi = {
 		resolution_id: string,
 		operation_deadline: number?
 	) -> (QuarantineFenceStatus?, string, string?),
+	get_record_raw: (name: string, scope: string, key: string) -> unknown,
 }
 
 local function expect(condition: boolean, message: string)
@@ -153,6 +154,7 @@ for _, method_name in {
 	"quarantine_profile_writes_async",
 	"mark_quarantine_release_pending_async",
 	"release_quarantine_fence_async",
+	"get_record_raw",
 } do
 	checked_function(mock[method_name], "RecordStore.Mock." .. method_name)
 end
@@ -212,6 +214,15 @@ expect(fence_code == "success" and fence ~= nil,
 local installed_fence = fence :: QuarantineFenceStatus
 expect(installed_fence.Quarantined and installed_fence.Phase == "quarantined",
 	"64-edge quarantine installation did not persist the quarantined phase")
+local raw_fence = checked_table(
+	api.get_record_raw("RawEnvelopeDepthQuarantine", "global", "profile"),
+	"durable quarantined raw envelope"
+)
+local raw_marker = checked_table(raw_fence.__recordstore_quarantine_fence_v1, "durable quarantine marker")
+expect(raw_fence.implementation_version == 2147483646,
+	"quarantine write did not preserve its future implementation sentinel")
+expect(raw_marker.quarantine_id == quarantine_id and raw_marker.phase == "quarantined",
+	"quarantine write did not persist its marker identity and phase")
 expect(type(installed_fence.SourceRevision) == "number",
 	"quarantine status omitted its source revision")
 local source_revision = installed_fence.SourceRevision :: number
