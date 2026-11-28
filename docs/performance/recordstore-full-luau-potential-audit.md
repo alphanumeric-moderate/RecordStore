@@ -91,15 +91,13 @@ When DRR deficits exist, completion rebuilds the active lane-key set by scanning
 
 #### P0: reduce DRR lane-key sorting and cursor lookup
 
-**Location:** choose_index, approximately lines 1,379–1,449; especially lane sorting and cursor search around lines 1,404–1,413.
+**Location:** `choose_index`, approximately lines 1,379–1,449; especially lane grouping, sorting and cursor lookup.
 
-The DRR path groups eligible work by lane, sorts distinct lane keys, then searches the sorted list for the cursor. This preserves deterministic ordering but costs a sort and a cursor lookup per selection.
+**Implemented narrowly:** the effective lane is computed once while the selector checks current eligibility and is passed into `lane_key` for that same selection. The key builder no longer calls `scheduled_lane` a second time for each admitted candidate. This is selection-local only: no lane identity is cached across calls, so inherited-priority expiry is still re-evaluated against the current `now`.
 
-**Candidate:** maintain or derive an ordered distinct-lane set and cursor rank/index, or use an order-preserving lane structure that makes the next-lane start direct.
+**Kept:** lane keys are still sorted lexicographically and the cursor still uses binary search over that same sorted list. This preserves deterministic ordering, cursor rotation, stale-cursor fallback and time-dependent inheritance semantics.
 
-**Required proof:** same lexical lane ordering, same cursor advancement, same behavior when a lane appears/disappears, same high-burst filtering, and no starvation across owners/service classes. Avoid a heap keyed by stale values: readiness, weights, deadline urgency and budget admission change dynamically.
-
-**Measurement:** vary queue depth and distinct-lane cardinality independently. A single-lane queue and a queue with thousands of unique owner/work-class combinations are different workloads.
+**Measured next:** `bench/drr_lane_cardinality.bench.luau` varies queue depth (128–8,192) and distinct lane cardinality (1–2,048) independently. Queue construction is outside the timed selection. A persistent ordered-lane structure remains deferred until these measurements and a mutation/expiry reference model justify its additional lifecycle state.
 
 #### P1: cache service-time P95 rather than sorting samples during candidate scoring
 
@@ -115,23 +113,21 @@ The scoring path obtains sample-window values, sorts them, and selects the P95 e
 
 #### P1: reduce repeated candidate state evaluation only where it can be made current
 
-**Location:** choose_index around lines 1,263–1,371 and TakeNext around lines 1,980–2,128.
+**Location:** `choose_index` around lines 1,263–1,371 and `TakeNext` around lines 1,980–2,128.
 
-The selector evaluates due/available times, expiry, dependencies, admission blocks, owner caps, renewal constraints, request budgets, batch sizes, lane and service class. Several are dynamic and are correctly rechecked before dispatch.
-
-**Candidate:** separate stable enqueue-time facts from dynamic eligibility facts. Keep stable normalized dimensions/cost and identity in the item; keep dynamic time/budget/owner/dependency checks at selection. Cache only values keyed by all invalidation inputs (policy revision, batch count, relevant state generation).
+**Implemented narrowly:** DRR grouping reuses the effective lane already computed for eligibility in the same pass. It does not cache due time, expiry, dependencies, admission, owner caps, renewal constraints, request budgets, or batch sizes. The final admission decision remains authoritative.
 
 **Do not:** replace readiness with a stale heap key, trust preflight after policy or batch changes, or skip the final authoritative admission check.
 
-**Measurement:** first and steady-state selection with changing budgets, policy changes, dependency completion, expiries and owner saturation.
+**Measurement:** first-selection scaling and the new independent queue-depth × lane-cardinality matrix; dynamic budget/policy/dependency/expiry/owner cases remain in the scheduler regressions.
 
 #### P2: bound DRR rounds using an explicit mathematical invariant
 
 **Location:** DRR selection around lines 1,415–1,450.
 
-The number of deficit rounds is derived from maximum item cost and quantum. Consider precomputing the safe round bound when policy changes and proving a tighter bound from maximum cost/weight/quantum.
+**Implemented:** the loop now uses `ceil(max_item_cost / drr_quantum)` rounds instead of adding two unexplained extra rounds. The minimum effective lane weight is 1 and the minimum service weight is 1, so every complete round adds at least one quantum. Admission rejects any selectable item whose cost exceeds `max_item_cost`; the deficit cap is twice that maximum and therefore cannot saturate below the required cost. Existing deficits are nonnegative, so a carried deficit can only reduce the rounds required.
 
-**Required proof:** every candidate with feasible cost still becomes selectable in the same maximum number of rounds; clamp/saturation semantics remain identical. This is a constant-factor candidate, not a reason to weaken DRR fairness.
+**Regression:** `bench/run_advanced_scheduler_regression.luau` covers a minimum-weight background/best-effort lane at quantum 1 and configured maximum cost 32. The work class and tracing operation are chosen so the item reaches DRR rather than being rejected by an unrelated class-admission cap. Fairness and cursor advancement are unchanged.
 
 #### Keep: reverse terminal preflight scan until a replacement proves exact ordering
 
@@ -390,7 +386,7 @@ A removal must include exact symbol/caller inventory, evidence that no supported
 
 ## 8. Bug, correctness and security review matrix
 
-Cubic and independent review should explicitly inspect these invariants while examining the entire source, not merely comment on style.
+These invariants are acceptance requirements for every implementation change; verify them through focused state-transition tests and the repository's required runtime checks, not style-only changes.
 
 | Area | Required checks |
 |---|---|
@@ -441,11 +437,9 @@ For every change:
 
 Lune, local mocks and hosted CPU simulations do not prove Roblox VM native compilation, live DataStore caching/throttling, MemoryStore TTL semantics or MessagingService delivery. Those require Roblox runtime acceptance.
 
-## 10. Review process and implementation verification
+## 10. Implementation verification
 
-Cubic AI Review is the independent reviewer for this PR. Request a review after each material implementation round and again on the final PR head. A review counts only when Cubic has completed on the current head and every valid finding has been fixed or explicitly dispositioned; provider failures and stale-head reviews are not clean evidence.
-
-Implementation verification remains based on strict Luau type-check and targeted/full regression workflows. This is distinct from independent source review and Roblox Studio/MicroProfiler acceptance. No live Roblox performance claim is made here.
+Per the explicit instruction for this continuation, no independent reviewer is being invoked and no review approval is claimed. Implementation verification is based on the repository's strict Luau type-check, focused regressions, the full regression workflow, and paired benchmark runs. These checks are distinct from Roblox Studio/MicroProfiler acceptance. No live Roblox performance claim is made here.
 
 ## 11. Ordered implementation roadmap
 
@@ -493,14 +487,16 @@ The following items have now been implemented on this audit branch. The original
 
 - **Implemented:** exact P95 values are memoized per latency sample-window revision. Every accepted sample append/overwrite advances the revision; repeated service-time scoring and lease-renewal advice reuse the cached value until the window changes. The 256-sample capacity and percentile rank calculation are unchanged.
 - **Implemented:** DRR's cursor lookup uses binary search over the same lexicographically sorted lane-key list. Cursor rotation, missing-cursor fallback and lane sort order remain unchanged.
+- **Implemented:** DRR candidate collection reuses the effective lane already computed for the current eligibility pass; it does not persist a time-sensitive lane key or skip per-selection checks.
+- **Implemented:** the DRR round bound is exactly `ceil(max_item_cost / drr_quantum)`, backed by a maximum-cost/minimum-weight regression.
 - **Deferred:** completion-time active-lane reference counts. Effective lane assignment can change as inherited priority expires, independently of queue membership. A lifecycle-maintained counter is unsafe until time-dependent lane identity can be represented and tested correctly.
-- **Deferred:** replacement of the candidate selector's ordered lane structure and additional round-bound changes. The existing sorted representation remains the reference until broader queue-size × lane-count measurements justify a redesign.
+- **Deferred:** replacing the sorted lane-key structure. The new queue-depth × lane-cardinality diagnostic measures its cost before any more complex ordering structure is considered.
 
 ### Phase C — Mailbox V2 and Durable Streams
 
 - **Implemented, measured conservatively:** Durable Streams builds temporary event-ID and producer-sequence maps only when `segment.messages * prepared_batch_size >= 1536`; smaller combinations retain linear scans. The initial 64-case scan/index sweep included index construction in each indexed repetition. At the old product-256 boundary, indexing won only 1 of 12 shape/workload cases; all below-boundary cases favored scanning. At products 1536 and 2048, all eight then-measured cases favored indexing. The cutoff was raised to 1536, the smallest tested product where the original matrix consistently favored indexes. The revised 80-case sweep separates real producer retries (reusing the stored event ID and producer sequence) from producer-sequence conflicts (fresh event ID, existing producer sequence), and retains a mixed duplicate/conflict workload. This remains a provisional Lune-derived threshold, not a Roblox VM or production DataStore performance guarantee.
 - **Implemented:** the transient maps preserve first-match behavior and the existing distinction between event-ID conflicts and producer-sequence conflicts. Regression coverage exercises a 48-message segment, mixed producer/non-producer batches, commit-then-error reconciliation, same-event-ID retries, changed event payload and producer-sequence identity conflicts.
-- **Threshold measurement:** `bench/durable_streams_index_break_even.bench.luau` compares linear scans with index construction plus indexed lookups; build cost is included and sample order alternates. The current matrix spans five scenarios, segment sizes 16–64, batch sizes 4–32, seven samples and 24 repetitions per sample. Its corrected 80-case results are collected by the current Bencher workflow. Measurements are from Lune and are not Roblox VM or live DataStore evidence.
+- **Threshold measurement:** `bench/durable_streams_index_break_even.bench.luau` compares linear scans with index construction plus indexed lookups; build cost is included and sample order alternates. The corrected 80-case Lune run found 13 indexed wins in the 70 cases below product 1536, while all five scenarios favored indexing at product 1536 and all five favored it at product 2048. The 1536 cutoff is therefore the lowest tested product with an across-scenario win; it remains evidence for this Lune workload, not a Roblox VM or live DataStore guarantee.
 - **Implemented:** Mailbox V2 uses one module-local priority-rank table instead of allocating a rank table per queue read/process call, and preallocates the bounded queue snapshot array from the observed index-row count. Age-based priority promotion, high-priority burst limiting, FIFO tie-breaks, claims and recovery order are unchanged.
 - **Deferred:** persistent Mailbox route/segment/order indexes and changes to candidate sorting. Queue order is dependent on age, high-priority burst state and durable claims; no persisted index is introduced without a separate ordering and recovery proof.
 
@@ -510,7 +506,14 @@ No DataStore key, persisted envelope/segment/sidecar format, public API, lease/f
 
 ## 13. Phase D–F continuation findings and implementation decisions (2026-11-28)
 
-**Review input revision:** `6586b2083f3c57621afdcea4b05b8f007e07bad0`. The current source was re-read at 26,324 lines. The follow-up implementation and its verification are recorded in the subsequent PR commits and current CI runs.
+**Implementation input revision:** `6586b2083f3c57621afdcea4b05b8f007e07bad0`. The consolidated source was re-read at 26,324 lines. The follow-up implementation, tests and evidence are recorded in subsequent PR commits and CI runs. Independent review was not requested for this continuation.
+
+### Phase B follow-up — selection-local work and DRR progress bound
+
+- The DRR selector now passes the effective lane derived at the start of the current selection into the lane-key builder. This removes a duplicate `scheduled_lane` evaluation per admitted candidate without caching across selections; inherited priority is still recalculated against the current selection time.
+- DRR's maximum-round loop is bounded by `ceil(max_item_cost / drr_quantum)`. The minimum lane/service weight is 1, admission limits every selectable cost to `max_item_cost`, and the 2× deficit cap is above that threshold.
+- The strict advanced-scheduler regression exercises a background/best-effort lane, quantum 1 and configured maximum cost 32. It deliberately uses a critical work class and tracing operation so the item reaches DRR despite the separate work-class admission limit.
+- `bench/drr_lane_cardinality.bench.luau` and the Bencher workflow measure first-selection cost over queue sizes 128–8,192 and distinct lane counts 1–2,048, with queue construction outside the timed operation. This supplies the evidence needed before replacing lexical lane sorting or adding a persistent lane index.
 
 ### Phase D — copy/validation and mutation pipeline
 
@@ -556,10 +559,23 @@ All five Hyperfine samples completed with zero command exit codes. The PR Benche
 
 ### Benchmark workflow correction and current verification limits
 
-The CodSpeed CPU-simulation action hit its explicit 16-minute step timeout (about 971 seconds) on both the base-branch run and the PR head; the PR-head log had reached the Patch copy/validation benchmark when it timed out. No benchmark assertion failure was reported. This is a workflow time cap that also affects the base branch, not a PR-only regression. The action step timeout is now 35 minutes and the job timeout 40 minutes so the complete configured suite can finish; benchmark coverage is retained, and one duplicate PlayerData.Set benchmark entry was removed. The next CI run must confirm whether the longer window is sufficient before CodSpeed can be reported as passing.
+**Paired benchmark evidence after the recursive-limit hoist (Bencher, Ubuntu 24.04, Hyperfine median, five runs).** The comparison used main baseline SHA `4813492555759ed4ba70c3ec03d9d32be622bc0d` and PR measurement head `35cf9afa15420b7932e23a2ce8b9becca7af1ac2`; see the [Bencher report](https://bencher.dev/perf/alphanumeric-moderate-s-project/reports/01a2228c-47c2-71bb-9f14-e692c457ffaa) and [GitHub Actions run](https://github.com/alphanumeric-moderate/RecordStore/actions/runs/46153929684).
 
-The complete 4-algorithm x 6-scenario x 4-depth scheduler matrix remains in Bencher's uninstrumented diagnostic step. The tracked CodSpeed first-selection subset covers FIFO and DRR at 512, 2,048 and 8,192 items alongside the existing 128-item policy workloads and Update/Patch/Reconcile. It is new high-depth coverage, not a historical performance series. The paired Update, Patch and Reconcile Hyperfine workloads now have main-branch comparison samples; their current deltas are recorded above. Roblox Studio multi-server/DataStore acceptance and Roblox Script Profiler/MicroProfiler measurements have not been performed.
+| Workload | Main baseline | PR result | Change |
+|---|---:|---:|---:|
+| Large profile update/save | 238.77 ms | 200.08 ms | -16.2% |
+| Update validation pipeline | 329.64 ms | 321.41 ms | -2.5% |
+| Patch validation pipeline | 239.52 ms | 231.24 ms | -3.5% |
+| Reconcile pipeline | 666.73 ms | 655.15 ms | -1.7% |
+| Legacy migration/history | 117.26 ms | 117.45 ms | +0.2% |
+| Durable Streams batch publish | 4,839.92 ms | 4,794.91 ms | -0.9% |
+| Durable Streams single publish | 62,250.30 ms | 61,774.75 ms | -0.8% |
 
+The report completed without Bencher alerts. This supersedes the earlier pre-hoist alert report; these remain hosted Lune/Hyperfine observations, not Roblox DataStore or Script Profiler evidence.
+
+The CodSpeed CPU-simulation action previously hit the explicit 16-minute step timeout (about 971 seconds) on both the base and PR revisions. The step timeout was raised to 35 minutes and the job timeout to 40 minutes, and the duplicate PlayerData.Set benchmark entry was removed. The latest verified pre-follow-up run was still in progress; report it as passing only after the current-head run completes.
+
+The complete 4-algorithm × 6-scenario × 4-depth scheduler matrix remains an uninstrumented Bencher diagnostic. CodSpeed tracks a bounded first-selection scaling subset for FIFO and DRR at 512, 2,048 and 8,192 items alongside its other benchmarks. The DRR lane-cardinality matrix is now included in Bencher diagnostics and the Hyperfine aggregate. Roblox Studio multi-server/DataStore acceptance and Roblox Script Profiler/MicroProfiler measurements have not been performed.
 ### Phase D–F disposition
 
 The remaining audit candidates now have explicit keep/defer decisions and the evidence required to revisit them. Phase D does not justify another runtime rewrite on the available data; Phase E's broad typing and module-split candidates remain scoped follow-up work; Phase F is correctly blocked on live profiling and consumer/persisted-data evidence. No public API, persisted format, lease/fencing, or UpdateAsync transform behavior is changed by these decisions.
@@ -571,7 +587,7 @@ The source-grounded opportunity inventory and Phase D–F audit dispositions are
 - every high-priority candidate has a location, rationale, invariant, test plan and benchmark plan;
 - no performance claim is made without paired measurements;
 - no removal is unconditional without usage and persisted-data evidence;
-- Cubic is requested after material implementation rounds and on the final PR head; it counts only when the review is completed on the current head and every valid finding is resolved. A provider failure or stale-head review is not clean evidence;
+- No independent review is requested or performed for this continuation, by explicit user direction; no review approval is claimed;
 - subsequent implementation PRs keep strict type-check, relevant regressions, full CI and required Roblox acceptance evidence.
 
 ## 15. References
@@ -582,4 +598,4 @@ The source-grounded opportunity inventory and Phase D–F audit dispositions are
 - Luau function attributes: https://luau.org/syntax/
 - Luau native code generation: https://luau.org/native-code-gen/
 - Roblox MicroProfiler: https://create.roblox.com/docs/performance-optimization/microprofiler
-- Cubic AI PR review: recorded in the review timeline and inline threads on this pull request.
+- Independent review: not requested or performed for this continuation, by explicit user direction.

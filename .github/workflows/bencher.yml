@@ -57,6 +57,11 @@ jobs:
         timeout-minutes: 10
         run: lune run bench/scheduler_backlog_scaling.bench.luau
 
+      - name: Run DRR lane-cardinality diagnostics
+        if: ${{ env.BENCHER_API_KEY != '' }}
+        timeout-minutes: 5
+        run: lune run bench/drr_lane_cardinality.bench.luau
+
       - name: Run Durable Streams index break-even diagnostics
         if: ${{ env.BENCHER_API_KEY != '' }}
         timeout-minutes: 5
@@ -116,6 +121,7 @@ jobs:
             --command-name scheduler-weighted-128 "lune run bench/advanced_scheduler_weighted.bench.luau" \
             --command-name scheduler-deadline-128 "lune run bench/advanced_scheduler_deadline.bench.luau" \
             --command-name scheduler-drr-128 "lune run bench/advanced_scheduler_drr.bench.luau" \
+            --command-name scheduler-drr-lane-cardinality "lune run bench/drr_lane_cardinality.bench.luau" \
             --command-name durable-stream-single-publish "lune run bench/durable_stream_publish_single.bench.luau" \
             --command-name durable-stream-batch-publish "lune run bench/durable_stream_publish_batch.bench.luau" \
             --command-name durable-stream-index-break-even "lune run bench/durable_streams_index_break_even.bench.luau" \

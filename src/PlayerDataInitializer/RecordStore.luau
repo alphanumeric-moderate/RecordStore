@@ -1204,15 +1204,20 @@ do
 			if finite(item.requested_cost) then estimated = math.max(estimated, math.floor(item.requested_cost)) end
 			return math.clamp(math.ceil(estimated), 1, 256)
 		end
-		local function lane_key(item: EmbeddedSchedulerDynamicRecord, now: number): string
+		local function lane_key(
+			item: EmbeddedSchedulerDynamicRecord,
+			now: number,
+			effective_lane: string?
+		): string
 			local instant = now or now_ms()
+			local local_lane = if effective_lane ~= nil then effective_lane else scheduled_lane(item, instant)
 			local function component(value: unknown): string
 				local text = tostring(value or "default")
 				return tostring(#text) .. ":" .. text
 			end
 			return component(item.owner_id)
 				.. component(item.work_class or "default")
-				.. component(scheduled_lane(item, instant))
+				.. component(local_lane)
 				.. component(item.service_class or "best_effort")
 		end
 		local function choose_index(
@@ -1337,7 +1342,7 @@ do
 								if effective_lane ~= "high" and effective_lane ~= "lease_renewal" then
 									eligible_has_non_high = true
 								end
-								local key = lane_key(item, now)
+								local key = lane_key(item, now, effective_lane)
 								local row = lane_rows[key]
 								if row == nil then
 									local pool_count = #lane_row_pool
@@ -1435,7 +1440,11 @@ do
 						end
 					end
 				end
-				local rounds = math.ceil(self.policy.max_item_cost / self.policy.drr_quantum) + 2
+				-- Every lane has weight >= 1, so each round adds at least one quantum.
+				-- Admission bounds every selectable item by max_item_cost; the 2x deficit
+				-- cap cannot bind below that cost. This is the exact worst-case round count
+				-- from a zero deficit; carried deficit only reduces the rounds needed.
+				local rounds = math.ceil(self.policy.max_item_cost / self.policy.drr_quantum)
 				for _ = 1, rounds do
 					for offset = 0, lane_count - 1 do
 						local lane_index = ((start_index + offset - 1) % lane_count) + 1
