@@ -535,7 +535,7 @@ No DataStore key, persisted envelope/segment/sidecar format, public API, lease/f
 | Reconcile pipeline | 676.55 ms | No baseline sample | Measurement exists; no before/after claim |
 | Legacy migration/history | 123.82 ms | 114.58 ms | 8.07% higher in this report; monitor, do not attribute from one run |
 
-The paired report is [Bencher report `01a22034-9b5b-76e1-bf7c-ad0c900c78ee](https://bencher.dev/perf/alphanumeric-moderate-s-project/reports/01a22034-9b5b-76e1-bf7c-ad0c900c78ee). The separate CodSpeed Update WallTime run returned 1.5 s optimized and 6.3 s historical, but CodSpeed marked those measurements unreliable because they ran outside Macro Runners. They are not accepted as a speedup claim.
+The paired report is [Bencher report `01a22034-9b5b-76e1-bf7c-ad0c900c78ee`](https://bencher.dev/perf/alphanumeric-moderate-s-project/reports/01a22034-9b5b-76e1-bf7c-ad0c900c78ee). The separate CodSpeed Update WallTime run returned 1.5 s optimized and 6.3 s historical, but CodSpeed marked those measurements unreliable because they ran outside Macro Runners. They are not accepted as a speedup claim.
 
 ### Phase E — narrow typing and module boundaries
 
@@ -556,7 +556,7 @@ The paired report is [Bencher report `01a22034-9b5b-76e1-bf7c-ad0c900c78ee](http
 
 ### Benchmark workflow correction and current verification limits
 
-The CodSpeed CPU-simulation job on this revision timed out inside the full scheduler-backlog matrix while instrumenting the 8,192-item dependency-heavy case. The log shows the benchmark action reaching its approximately 16-minute internal execution limit; this was an instrumentation/workload timeout, not a regression assertion failure. The same matrix remains in the Bencher workflow's dedicated uninstrumented diagnostic step, which completed successfully. The CodSpeed configuration is being narrowed to retain the 128-item per-policy workloads and the Update/Patch/Reconcile benchmarks without instrumenting that large diagnostic matrix.
+The CodSpeed CPU-simulation job on this revision timed out inside the full scheduler-backlog matrix while instrumenting the 8,192-item dependency-heavy case. The log shows the benchmark action reaching its approximately 16-minute internal execution limit; this was an instrumentation/workload timeout, not a regression assertion failure. The same matrix remains in the Bencher workflow's dedicated uninstrumented diagnostic step, which completed successfully. This continuation removes the large diagnostic matrix from CodSpeed instrumentation while retaining the 128-item per-policy workloads and the Update/Patch/Reconcile benchmarks; the full matrix remains in Bencher's uninstrumented diagnostic step.
 
 On the pre-continuation head, the Luau regression workflow, Luau strict type-check, RecordStore Update Latency workflow, and Bencher report completed successfully. The CPU-simulation workflow timed out as described. The Update/Patch validation results above still lack historical paired baseline samples. Roblox Studio multi-server/DataStore acceptance and Roblox Script Profiler/MicroProfiler measurements have not been performed.
 
@@ -571,7 +571,7 @@ The source-grounded opportunity inventory and Phase D–F audit dispositions are
 - every high-priority candidate has a location, rationale, invariant, test plan and benchmark plan;
 - no performance claim is made without paired measurements;
 - no removal is unconditional without usage and persisted-data evidence;
-- Review tooling remains optional; CI evidence and verification claims stand independently, and no Robin result is required or counted for this implementation tranche;
+- Robin is requested only after the final branch/PR update; it is counted as a full-module review only if it returns a valid review with complete source coverage. A provider failure is not a clean review;
 - subsequent implementation PRs keep strict type-check, relevant regressions, full CI and required Roblox acceptance evidence.
 
 ## 15. References
