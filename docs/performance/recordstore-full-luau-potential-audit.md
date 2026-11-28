@@ -525,17 +525,17 @@ No DataStore key, persisted envelope/segment/sidecar format, public API, lease/f
 
 **Envelope wrapper-depth correction (implemented in this continuation).** The three quarantine-fence transitions and two outbox sidecar transitions now copy raw envelopes with `_copy_value_with_depth(raw, _max_value_depth + 1)` and validate each changed envelope with the same additional wrapper depth. The profile-data limit remains 64 edges, exact JSON size validation remains authoritative, and the persisted envelope/sidecar format is unchanged. The new strict regression exercises install, release-pending, release, outbox state update, and outbox prune using exactly 64-edge profile data.
 
-**Paired same-runner measurements before the recursive-limit hoist (Bencher, Ubuntu 24.04, Hyperfine median, five runs; main baseline vs PR head `6586b208`):**
+**Paired same-runner measurements before the recursive-limit hoist (Bencher, Ubuntu 24.04, Hyperfine median, five runs).** The comparison used main baseline SHA `4813492555759ed4ba70c3ec03d9d32be622bc0d` and PR head `6586b2083f3c57621afdcea4b05b8f007e07bad0`; see the [Bencher report](https://bencher.dev/perf/alphanumeric-moderate-s-project/reports/01a221a3-a0a2-728c-ae39-8b626de6d358) and its [GitHub Actions run](https://github.com/alphanumeric-moderate/RecordStore/actions/runs/46133362345).
 
-| Workload | Main median | PR median | Change |
+| Workload | Main baseline | PR result | Change |
 |---|---:|---:|---:|
-| Large profile update/save | 208.716 ms | 214.890 ms | +2.96% |
-| Update copy/validation pipeline | 334.530 ms | 342.546 ms | +2.40% |
-| Patch copy/validation pipeline | 243.146 ms | 245.620 ms | +1.02% |
-| Reconcile pipeline | 672.550 ms | 685.976 ms | +2.00% |
-| Legacy migration/history | 127.523 ms | 127.113 ms | -0.32% |
+| Large profile update/save | 238.77 ms | 214.89 ms | -10.00% |
+| Update copy/validation pipeline | 329.64 ms | 342.55 ms | +3.92% |
+| Patch copy/validation pipeline | 239.52 ms | 245.62 ms | +2.55% |
+| Reconcile pipeline | 666.73 ms | 685.98 ms | +2.89% |
+| Legacy migration/history | 117.26 ms | 127.11 ms | +8.40% |
 
-All five Hyperfine samples completed with zero command exit codes. The PR Bencher gate nevertheless reported two statistically detected alerts, for Reconcile and Update validation. These are observed same-runner differences; they are not attributed to a specific code change from this comparison alone. The recursive-limit hoist is intended to remove avoidable per-node work and is being remeasured on the next head. These hosted Lune results are not Roblox DataStore latency claims. The earlier isolated CodSpeed WallTime run was marked unreliable outside Macro Runners and is not used as performance evidence.
+All five Hyperfine samples completed with zero command exit codes. The PR Bencher gate reported statistically detected alerts for Reconcile and Update validation. The table records paired observations, not causal attribution to a particular code change. The recursive-limit hoist is intended to remove avoidable per-node work and is being remeasured on the later head. These hosted Lune results are not Roblox DataStore latency claims. The earlier isolated CodSpeed WallTime run was marked unreliable outside Macro Runners and is not used as performance evidence.
 
 ### Phase E — narrow typing and module boundaries
 
@@ -550,7 +550,7 @@ All five Hyperfine samples completed with zero command exit codes. The PR Benche
 
 **Decision: add no `@native` annotations and remove no feature in this PR.**
 
-- The 26,318-line RecordStore module has no `@native` or `--!native` directive. There is no Roblox Script Profiler/MicroProfiler evidence identifying a pure compute kernel as a dominant cost. Hosted Lune/CPU simulation is not a substitute for Roblox VM native-code evidence. Any later native experiment must annotate the smallest measured function, test nested helper functions separately, and compare live Roblox results against the same workload.
+- The 26,324-line RecordStore module has no `@native` or `--!native` directive. There is no Roblox Script Profiler/MicroProfiler evidence identifying a pure compute kernel as a dominant cost. Hosted Lune/CPU simulation is not a substitute for Roblox VM native-code evidence. Any later native experiment must annotate the smallest measured function, test nested helper functions separately, and compare live Roblox results against the same workload.
 - No downstream installation usage inventory, API-consumer evidence, persisted queue/mailbox/receipt/stream inventory, rollback horizon, or migration-completion evidence was available for the removal candidates in Section 6. No compatibility path, algorithm, diagnostic API, transaction/receipt surface, stream service, mock adapter or public wrapper is approved for deletion.
 - Removal remains conditional on an exact caller/export inventory plus live data and rollback evidence. If isolation is sufficient, prefer a separately reviewed lazy boundary before deleting a supported API.
 
