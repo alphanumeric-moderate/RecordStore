@@ -188,7 +188,8 @@ local function open_record(name: string, key: string, transactional: boolean): P
 	end
 	local record = raw_record :: ProfileRecord
 	local opened, message = record:Open(deep_data)
-	expect(opened == "success", name .. " failed to open: " .. tostring(message))
+	expect(opened == "created" or opened == "loaded",
+		name .. " failed to open: status=" .. tostring(opened) .. " message=" .. tostring(message))
 	return record
 end
 
